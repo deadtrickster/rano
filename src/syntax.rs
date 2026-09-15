@@ -45,16 +45,37 @@ impl Lang {
     }
 }
 
-/// Map a file name to its language by extension (scratch buffers get none).
-pub fn detect(name: Option<&Path>) -> Option<Lang> {
-    let ext = name?.extension()?.to_str()?;
-    match ext.to_ascii_lowercase().as_str() {
-        "rs" => Some(Lang::Rust),
-        "go" => Some(Lang::Go),
-        "sh" | "bash" => Some(Lang::Bash),
-        "py" | "pyw" => Some(Lang::Python),
-        "c" | "h" => Some(Lang::C),
-        "json" => Some(Lang::Json),
+/// Map a file to its language: by extension first, then by the shebang on
+/// line one (`#!/bin/sh`, `#!/usr/bin/env python3`) for extension-less
+/// scripts (scratch buffers get none).
+pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
+    if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
+        match ext.to_ascii_lowercase().as_str() {
+            "rs" => return Some(Lang::Rust),
+            "go" => return Some(Lang::Go),
+            "sh" | "bash" => return Some(Lang::Bash),
+            "py" | "pyw" => return Some(Lang::Python),
+            "c" | "h" => return Some(Lang::C),
+            "json" => return Some(Lang::Json),
+            _ => {}
+        }
+    }
+    detect_shebang(first_line?)
+}
+
+/// Language for a `#!` first line. Handles `#!/bin/sh`, `#! /bin/sh` and
+/// `#!/usr/bin/env [-S …] python3` forms; interpreters we have no grammar
+/// for (perl, ruby, …) map to None.
+fn detect_shebang(line: &str) -> Option<Lang> {
+    let rest = line.strip_prefix("#!")?.trim_start();
+    let mut words = rest.split_whitespace();
+    let mut interp = words.next()?.rsplit('/').next()?;
+    if interp == "env" {
+        interp = words.find(|w| !w.starts_with('-'))?.rsplit('/').next()?;
+    }
+    match interp {
+        "sh" | "bash" | "dash" | "ash" | "zsh" | "ksh" => Some(Lang::Bash),
+        "python" | "python2" | "python3" | "pypy" | "pypy3" => Some(Lang::Python),
         _ => None,
     }
 }
@@ -91,6 +112,9 @@ pub struct Highlighter {
     query: Option<Query>,
     query_lang: Option<Lang>,
     line_styles: Vec<Vec<Style>>,
+    /// The last successful parse, kept so syntax errors can be surfaced
+    /// without a language server (see [`Highlighter::syntax_errors`]).
+    tree: Option<Tree>,
 }
 
 impl Highlighter {
@@ -100,20 +124,24 @@ impl Highlighter {
             query: None,
             query_lang: None,
             line_styles: Vec::new(),
+            tree: None,
         }
     }
 
     /// Re-parse the buffer and rebuild the style grid. No-op for scratch
     /// buffers (no file name, no language).
     pub fn refresh(&mut self, buf: &Buffer) {
-        let Some(lang) = detect(buf.name.as_deref()) else {
+        let first_line = buf.lines.first().map(|l| l.iter().collect::<String>());
+        let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
             self.line_styles.clear();
+            self.tree = None;
             return;
         };
 
         let source = buf.text();
         if self.parser.set_language(&lang.language()).is_err() {
             self.line_styles.clear();
+            self.tree = None;
             return;
         }
 
@@ -123,8 +151,10 @@ impl Highlighter {
         // shortened. Full re-parses are fast enough for editor-sized buffers.
         let Some(tree) = self.parser.parse(source.as_bytes(), None) else {
             self.line_styles.clear();
+            self.tree = None;
             return;
         };
+        self.tree = Some(tree);
 
         let need_query = self.query.is_none() || self.query_lang != Some(lang);
         if need_query {
@@ -137,16 +167,19 @@ impl Highlighter {
                     self.query = None;
                     self.query_lang = None;
                     self.line_styles.clear();
+                    self.tree = None;
                     return;
                 }
             }
         }
         let Some(query) = self.query.as_ref() else {
             self.line_styles.clear();
+            self.tree = None;
             return;
         };
 
-        self.line_styles = Self::build_styles(&buf.lines, &source, &tree, query);
+        let tree = self.tree.as_ref().unwrap();
+        self.line_styles = Self::build_styles(&buf.lines, &source, tree, query);
     }
 
     /// Style for the character at `p`, if any capture colors it.
@@ -160,18 +193,155 @@ impl Highlighter {
         }
     }
 
+    /// Syntax classes for raw text that never touches an editor buffer: one
+    /// row per `\n`-split line, one entry per character — the tree-sitter
+    /// capture name that colours it (`"keyword"`, `"function"`, …), or
+    /// `None` where no capture applies.
+    ///
+    /// This is the engine without a palette. The caller owns the mapping
+    /// from capture names to colours, so the language is passed explicitly
+    /// instead of being detected from a buffer name — [`detect`] is still
+    /// the way to get one from a path. The query is cached per language
+    /// exactly as [`Self::refresh`] caches it, and the parse tree is kept
+    /// as the last parse; the editor's own style grid is **not** touched,
+    /// so a `Highlighter` shared between this and a buffer would show stale
+    /// [`Self::style_at`] answers — give the embedder its own instance.
+    ///
+    /// Empty on failure (unknown language, query failed to compile, parse
+    /// failed): the caller reads a missing row as "uncoloured", which is
+    /// the same thing it does with a `None` cell.
+    pub fn classes(&mut self, src: &str, lang: Lang) -> Vec<Vec<Option<String>>> {
+        let Some(tree) = (|| {
+            self.parser.set_language(&lang.language()).ok()?;
+            self.parser.parse(src.as_bytes(), None)
+        })() else {
+            return Vec::new();
+        };
+        let need_query = self.query.is_none() || self.query_lang != Some(lang);
+        if need_query {
+            match Query::new(&lang.language(), lang.query()) {
+                Ok(q) => {
+                    self.query = Some(q);
+                    self.query_lang = Some(lang);
+                }
+                Err(_) => {
+                    self.query = None;
+                    self.query_lang = None;
+                    return Vec::new();
+                }
+            }
+        }
+        let Some(query) = self.query.as_ref() else {
+            return Vec::new();
+        };
+        self.tree = Some(tree);
+        let lines: Vec<Vec<char>> = src.split('\n').map(|l| l.chars().collect()).collect();
+        Self::build_classes(&lines, src, self.tree.as_ref().unwrap(), query)
+    }
+
+    /// Syntax errors from the last parse as `(line, col, end_col, message)`
+    /// in char columns, from `ERROR` nodes and missing nodes. Empty for
+    /// scratch buffers and clean parses.
+    pub fn syntax_errors(&self, lines: &[Vec<char>]) -> Vec<(usize, usize, usize, String)> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Vec::new();
+        };
+        let root = tree.root_node();
+        if !root.has_error() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![(root, false)];
+        while let Some((node, in_error)) = stack.pop() {
+            let is_error = node.is_error() && !in_error;
+            if node.is_missing() {
+                // Missing nodes are zero-width insertion points; the caller
+                // widens them to one visible column.
+                let (l, c) = char_pos(lines, node.start_position());
+                out.push((l, c, c, format!("missing {}", node.kind())));
+                continue;
+            }
+            if is_error {
+                let (l, c) = char_pos(lines, node.start_position());
+                let (el, ec) = char_pos(lines, node.end_position());
+                let end = if el == l { ec } else { c + 1 };
+                out.push((l, c, end.max(c + 1), "syntax error".to_string()));
+            }
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    stack.push((cursor.node(), in_error || is_error));
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn build_styles(
         lines: &[Vec<char>],
         source: &str,
         tree: &Tree,
         query: &Query,
     ) -> Vec<Vec<Style>> {
-        // Style grid mirroring `lines`.
         let mut line_styles: Vec<Vec<Style>> = lines
             .iter()
             .map(|l| vec![Style::default(); l.len()])
             .collect();
+        Self::for_each_capture(lines, source, tree, query, |r, cs, name| {
+            let style = theme(name);
+            if style == Style::default() {
+                return;
+            }
+            for cell in &mut line_styles[r][cs] {
+                *cell = style;
+            }
+        });
+        line_styles
+    }
 
+    /// The capture grid without a palette: one row per line, one entry per
+    /// character — the tree-sitter capture name that covers it, or `None`.
+    ///
+    /// [`Self::build_styles`] is this plus rano's [`theme`]; a caller that
+    /// owns its palette (another crate embedding the engine) wants the
+    /// names instead, because capture → colour is a decision about the
+    /// terminal, not about the grammar.
+    fn build_classes(
+        lines: &[Vec<char>],
+        source: &str,
+        tree: &Tree,
+        query: &Query,
+    ) -> Vec<Vec<Option<String>>> {
+        let mut grid: Vec<Vec<Option<String>>> = lines
+            .iter()
+            .map(|l| vec![None; l.len()])
+            .collect();
+        Self::for_each_capture(lines, source, tree, query, |r, cs, name| {
+            for cell in &mut grid[r][cs] {
+                *cell = Some(name.to_string());
+            }
+        });
+        grid
+    }
+
+    /// Walk every query capture and hand the caller the cells it covers as
+    /// `(row, char_range, capture_name)`. Ranges are half-open and within
+    /// the row. Later captures overwrite earlier ones cell by cell, which
+    /// is the order [`Self::build_styles`] has always had; what a capture
+    /// *means* is the callback's decision, which is why the default-styled
+    /// skip lives in [`Self::build_styles`] and not here.
+    fn for_each_capture(
+        lines: &[Vec<char>],
+        source: &str,
+        tree: &Tree,
+        query: &Query,
+        mut f: impl FnMut(usize, std::ops::Range<usize>, &str),
+    ) {
         // Per-line char-index -> byte-offset maps (char 0 always at 0).
         let char_offsets: Vec<Vec<usize>> = lines
             .iter()
@@ -198,10 +368,6 @@ impl Highlighter {
         while let Some((m, i)) = caps.next() {
             let cap = m.captures()[*i];
             let name = names.get(cap.index as usize).copied().unwrap_or("");
-            let style = theme(name);
-            if style == Style::default() {
-                continue;
-            }
             let (s, e) = (cap.node.start_byte(), cap.node.end_byte());
             let r0 = match line_offsets.partition_point(|&o| o <= s) {
                 0 => 0,
@@ -212,7 +378,7 @@ impl Highlighter {
                 0 => 0,
                 i => i - 1,
             };
-            for r in r0..=r1.min(line_styles.len() - 1) {
+            for r in r0..=r1.min(lines.len() - 1) {
                 let lo = line_offsets[r];
                 let line_byte_len = char_offsets[r].len() - 1;
                 let s_l = s.max(lo);
@@ -224,13 +390,10 @@ impl Highlighter {
                 // Char index containing byte `b` (node ranges are half-open).
                 let ci = |b: usize| offs.partition_point(|&o| o <= b).saturating_sub(1);
                 let cs = ci(s_l - lo);
-                let ce = (ci(e_l - lo - 1) + 1).min(line_styles[r].len());
-                for cell in line_styles[r][cs..ce].iter_mut() {
-                    *cell = style;
-                }
+                let ce = (ci(e_l - lo - 1) + 1).min(lines[r].len());
+                f(r, cs..ce, name);
             }
         }
-        line_styles
     }
 }
 
@@ -238,6 +401,24 @@ impl Default for Highlighter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// tree-sitter reports byte offsets within a row; diagnostics use char
+/// columns, so count the chars that make up the byte prefix.
+fn char_pos(lines: &[Vec<char>], p: tree_sitter::Point) -> (usize, usize) {
+    let Some(line) = lines.get(p.row) else {
+        return (p.row, 0);
+    };
+    let mut bytes = 0usize;
+    let mut col = 0usize;
+    for ch in line {
+        if bytes >= p.column {
+            break;
+        }
+        bytes += ch.len_utf8();
+        col += 1;
+    }
+    (p.row, col)
 }
 
 #[cfg(test)]
@@ -257,16 +438,83 @@ mod tests {
     }
 
     #[test]
+    fn classes_name_the_tokens_of_raw_text_without_a_buffer() {
+        let src = "let done = build(); // tail\n";
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(src, Lang::Rust);
+        assert_eq!(grid.len(), 2, "one row per \\n-split line, trailing piece included");
+        let row = &grid[0];
+        assert_eq!(row.len(), src.lines().next().unwrap().len());
+        // `let` is a keyword, `build` a function call, the comment a comment,
+        // the brackets punctuation. A plain identifier is captured by nothing
+        // in the Rust query and stays `None` — the embedder reads that as
+        // "plain text", which is what it is.
+        let class = |needle: &str| {
+            let at = src.find(needle).unwrap();
+            row[at].clone()
+        };
+        assert_eq!(class("let").as_deref(), Some("keyword"));
+        assert_eq!(class("build").as_deref(), Some("function"));
+        assert_eq!(class("// tail").as_deref(), Some("comment"));
+        assert_eq!(class("(").as_deref(), Some("punctuation.bracket"));
+        assert_eq!(class("done"), None);
+        assert!(grid[1].iter().all(|c| c.is_none()), "empty tail row");
+    }
+
+    #[test]
+    fn classes_of_empty_text_is_one_empty_row_not_a_panic() {
+        let mut hl = Highlighter::new();
+        let grid = hl.classes("", Lang::Rust);
+        assert_eq!(grid.len(), 1, "'' splits to one empty line");
+        assert!(grid[0].is_empty());
+    }
+
+    #[test]
     fn detects_languages() {
-        assert_eq!(detect(Some(Path::new("a/b.rs"))), Some(Lang::Rust));
-        assert_eq!(detect(Some(Path::new("main.go"))), Some(Lang::Go));
-        assert_eq!(detect(Some(Path::new("run.SH"))), Some(Lang::Bash));
-        assert_eq!(detect(Some(Path::new("x.py"))), Some(Lang::Python));
-        assert_eq!(detect(Some(Path::new("x.pyw"))), Some(Lang::Python));
-        assert_eq!(detect(Some(Path::new("x.c"))), Some(Lang::C));
-        assert_eq!(detect(Some(Path::new("x.h"))), Some(Lang::C));
-        assert_eq!(detect(Some(Path::new("x.json"))), Some(Lang::Json));
-        assert_eq!(detect(None), None);
+        assert_eq!(detect(Some(Path::new("a/b.rs")), None), Some(Lang::Rust));
+        assert_eq!(detect(Some(Path::new("main.go")), None), Some(Lang::Go));
+        assert_eq!(detect(Some(Path::new("run.SH")), None), Some(Lang::Bash));
+        assert_eq!(detect(Some(Path::new("x.py")), None), Some(Lang::Python));
+        assert_eq!(detect(Some(Path::new("x.pyw")), None), Some(Lang::Python));
+        assert_eq!(detect(Some(Path::new("x.c")), None), Some(Lang::C));
+        assert_eq!(detect(Some(Path::new("x.h")), None), Some(Lang::C));
+        assert_eq!(detect(Some(Path::new("x.json")), None), Some(Lang::Json));
+        assert_eq!(detect(None, None), None);
+    }
+
+    #[test]
+    fn detects_shebang_languages() {
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/bin/sh")),
+            Some(Lang::Bash)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env bash")),
+            Some(Lang::Bash)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#! /bin/sh")),
+            Some(Lang::Bash)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env python3")),
+            Some(Lang::Python)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env -S python3 -u")),
+            Some(Lang::Python)
+        );
+        // No grammar for the interpreter, or no shebang at all.
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/perl")),
+            None
+        );
+        assert_eq!(detect(Some(Path::new("letibot")), Some("echo hi")), None);
+        // A known extension still wins over the shebang.
+        assert_eq!(
+            detect(Some(Path::new("x.py")), Some("#!/bin/sh")),
+            Some(Lang::Python)
+        );
     }
 
     #[test]
@@ -333,6 +581,16 @@ mod tests {
         assert!(style_at(&hl, 1, 0).is_some()); // echo builtin
     }
 
+    // Extension-less scripts (e.g. ~/bin/letibot) are detected by shebang.
+    #[test]
+    fn highlights_extensionless_shebang_script() {
+        let b = buf_named("letibot", "#!/usr/bin/env bash\necho \"hello\"\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // shebang comment
+        assert!(style_at(&hl, 1, 0).is_some()); // echo builtin
+    }
+
     #[test]
     fn scratch_buffer_has_no_highlighting() {
         let mut b = Buffer::new();
@@ -367,7 +625,5 @@ mod tests {
         }
         // Grow it again to exercise the other direction too.
         b.lines[line].extend("x=1".chars());
-        hl.refresh(&b);
-        // Reaching here without a panic is the assertion.
     }
 }

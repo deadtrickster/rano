@@ -72,7 +72,9 @@ impl Editor {
             syntax::Lang::Go => lsp::find_project_root(&dir, "go.mod"),
             syntax::Lang::Python => lsp::find_project_root(&dir, "pyproject.toml"),
             syntax::Lang::C => lsp::find_project_root(&dir, "compile_commands.json"),
-            syntax::Lang::Bash | syntax::Lang::Json => dir,
+            // CL projects are rooted by their .asd files, whose names vary
+            // with the system, so there is no marker to walk up for.
+            syntax::Lang::Bash | syntax::Lang::Json | syntax::Lang::CommonLisp => dir,
         };
         let text = bs.buf.text();
         // Async handshake: spawn_async returns instantly; lsp_poll adopts

@@ -1,4 +1,5 @@
-//! Tree-sitter syntax highlighting for rust, go, bash, python, c and json.
+//! Tree-sitter syntax highlighting for rust, go, bash, python, c, json and
+//! common lisp.
 //!
 //! The highlighter keeps a per-character style grid (`line_styles`) with the
 //! same shape as `Buffer::lines`, so lookups from the UI are plain index
@@ -19,6 +20,7 @@ pub enum Lang {
     Python,
     C,
     Json,
+    CommonLisp,
 }
 
 impl Lang {
@@ -30,6 +32,7 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::C => tree_sitter_c::LANGUAGE.into(),
             Lang::Json => tree_sitter_json::LANGUAGE.into(),
+            Lang::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
         }
     }
 
@@ -41,9 +44,179 @@ impl Lang {
             Lang::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
             Lang::C => tree_sitter_c::HIGHLIGHT_QUERY,
             Lang::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
+            Lang::CommonLisp => COMMONLISP_HIGHLIGHTS_QUERY,
         }
     }
 }
+
+/// Highlights query for Common Lisp. The grammar crate ships none, so this
+/// is rano's own. Capture names are the standard tree-sitter set — [`theme`]
+/// maps them, dotted ones by prefix — and only predicates the tree-sitter
+/// crate itself evaluates are used (`#eq?`, `#match?`, `#any-of?`); the
+/// neovim-only ones the upstream query leans on (`#lua-match?`, custom
+/// predicates) would be silently ignored here, matching everything.
+const COMMONLISP_HIGHLIGHTS_QUERY: &str = r##"
+; Plain symbols. `theme` has no "variable" entry, so the editor leaves them
+; uncoloured; the more specific patterns below override this one.
+(sym_lit) @variable
+
+(comment) @comment
+(block_comment) @comment
+(dis_expr) @comment
+
+(str_lit) @string
+(format_specifier) @escape
+
+(num_lit) @number
+(array_dimension) @number
+(char_lit) @constant
+(nil_lit) @constant.builtin
+(kwd_lit) @constant
+
+((sym_lit) @constant
+  (#any-of? @constant "t" "T" "nil" "NIL"))
+
+; Earmuffed constants (+pi+) and special variables (*standard-output*).
+; Character classes, not escaped stars: the query parser eats `\*`.
+((sym_lit) @constant
+  (#match? @constant "^[+][^+]+[+]$"))
+((sym_lit) @variable.builtin
+  (#match? @variable.builtin "^[*][^*]+[*]$"))
+
+; Lambda-list markers (&rest, &key, ...).
+((sym_lit) @attribute
+  (#match? @attribute "^[&]"))
+
+; Defining forms: the head keyword and the name being defined.
+(defun_keyword) @keyword
+(defun_header
+  function_name: (_) @function)
+
+; LOOP keywords.
+[
+  (accumulation_verb)
+  (for_clause_word)
+  "always" "and" "as" "do" "else" "finally" "for" "if" "initially"
+  "into" "loop" "never" "repeat" "return" "unless" "until" "when"
+  "while" "with"
+] @keyword
+
+; Reader macros — quote, quasiquote, unquote, function reference — and
+; the #+/#- read conditionals, coloured like preprocessor lines.
+(quoting_lit "'" @escape)
+(syn_quoting_lit "`" @escape)
+(unquoting_lit "," @escape)
+(unquote_splicing_lit ",@" @escape)
+(var_quoting_lit "#'" @escape)
+["#+" "#-"] @preproc
+
+["(" ")" "."] @punctuation.bracket
+
+"=" @operator
+(list_lit
+  .
+  (sym_lit) @operator
+  (#match? @operator "^([+*<>=/-]|<=|>=|/=)$"))
+
+; Call heads: a curated subset of the standard's functions, macros and
+; special operators. The nvim-treesitter query generates the full lists;
+; this covers the everyday ones, lowercase — the convention in Lisp
+; source.
+(list_lit
+  .
+  (sym_lit) @function
+  (#any-of? @function
+    "1+" "1-" "abort" "abs" "acons" "acosh" "adjoin" "alpha-char-p"
+    "alphanumericp" "and" "append" "apply" "apropos" "apropos-list" "aref"
+    "arrayp" "ash" "asin" "asinh" "assert" "assoc" "assoc-if"
+    "assoc-if-not" "atan" "atanh" "atom" "block" "boundp" "break" "butlast"
+    "byte" "car" "cadr" "caar" "cdar" "cddr" "caddr" "cdddr" "cadddr"
+    "caadr" "cdadr" "cddar" "cdaar" "caaar" "cddddr" "case" "ccase"
+    "ceiling" "cerror" "change-class" "char" "char-code" "char-downcase"
+    "char-int" "char-name" "char-upcase" "characterp" "check-type" "cis"
+    "class-name" "class-of" "clear-input" "clear-output" "close" "clrhash"
+    "code-char" "coerce" "compile" "compile-file" "complement" "complex"
+    "complexp" "concatenate" "cond" "conjugate" "cons" "consp" "constantly"
+    "constantp" "continue" "copy-alist" "copy-list" "copy-seq"
+    "copy-symbol" "copy-tree" "cos" "cosh" "count" "count-if"
+    "count-if-not" "ctypecase" "decf" "declaim" "declare" "defclass"
+    "defconstant" "defgeneric" "define-compiler-macro" "define-condition"
+    "define-method-combination" "define-modify-macro"
+    "define-setf-expander" "define-symbol-macro" "defmacro" "defmethod"
+    "defpackage" "defparameter" "defsetf" "defstruct" "deftype" "defun"
+    "defvar" "delete" "delete-duplicates" "delete-file" "delete-if"
+    "delete-if-not" "delete-package" "denominator" "describe"
+    "destructuring-bind" "digit-char" "digit-char-p" "directory" "do"
+    "do*" "do-all-symbols" "do-external-symbols" "do-symbols" "dolist"
+    "documentation" "dotimes" "dpb" "eighth" "elt" "endp" "eq" "eql"
+    "equal" "equalp" "error" "etypecase" "eval" "eval-when" "evenp" "every"
+    "expt" "exp" "export" "fboundp" "fceiling" "ffloor" "fifth" "fill"
+    "find" "find-all-symbols" "find-class" "find-if" "find-if-not"
+    "find-method" "find-package" "find-restart" "find-symbol"
+    "finish-output" "first" "float" "floatp" "floor" "fmakunbound"
+    "force-output" "format" "fourth" "fresh-line" "fround" "ftruncate"
+    "funcall" "function" "functionp" "gcd" "gensym" "gentemp" "get" "getf"
+    "gethash" "get-properties" "get-setf-expansion" "get-universal-time"
+    "get-internal-real-time" "get-internal-run-time" "go" "graphic-char-p"
+    "handler-bind" "handler-case" "hash-table-p" "identity" "if"
+    "ignore-errors" "imagpart" "import" "in-package" "incf"
+    "initialize-instance" "input-stream-p" "inspect" "integerp" "intern"
+    "invoke-debugger" "invoke-restart" "invoke-restart-interactively"
+    "isqrt" "keywordp" "labels" "lambda" "last" "lcm" "ldb" "ldiff"
+    "length" "let" "let*" "list" "list*" "list-all-packages" "list-length"
+    "listp" "load" "load-time-value" "locally" "log" "logand" "logandc1"
+    "logandc2" "logbitp" "logcount" "logeqv" "logior" "lognand" "lognor"
+    "lognot" "logorc1" "logorc2" "logtest" "logxor" "loop" "loop-finish"
+    "lower-case-p" "macroexpand" "macroexpand-1" "macrolet" "make-array"
+    "make-condition" "make-hash-table" "make-instance" "make-list"
+    "make-package" "make-pathname" "make-string" "make-string-input-stream"
+    "make-string-output-stream" "make-symbol" "makunbound" "map" "mapc"
+    "mapcan" "mapcar" "mapcon" "maphash" "map-into" "maplist" "max"
+    "member" "member-if" "member-if-not" "merge" "merge-pathnames" "min"
+    "minusp" "mismatch" "mod" "muffle-warning" "multiple-value-bind"
+    "multiple-value-call" "multiple-value-list" "multiple-value-prog1"
+    "multiple-value-setq" "nbutlast" "nconc" "next-method-p"
+    "call-next-method" "nintersection" "ninth" "not" "notany" "notevery"
+    "nreconc" "nreverse" "nset-difference" "nset-exclusive-or" "nsublis"
+    "nsubst" "nsubstitute" "nsubstitute-if" "nsubstitute-if-not" "nth"
+    "nthcdr" "nth-value" "null" "numberp" "numerator" "nunion" "oddp"
+    "open" "or" "package-name" "packagep" "pairlis" "parse-integer"
+    "parse-namestring" "pathname" "pathnamep" "peek-char" "phase" "plusp"
+    "pop" "position" "position-if" "position-if-not" "prin1"
+    "prin1-to-string" "princ" "princ-to-string" "print" "probe-file"
+    "proclaim" "prog" "prog*" "prog1" "prog2" "progn" "progv" "provide"
+    "psetf" "psetq" "push" "pushnew" "quote" "random" "rassoc" "rassoc-if"
+    "rassoc-if-not" "rational" "rationalize" "rationalp" "read"
+    "read-byte" "read-char" "read-char-no-hang" "read-delimited-list"
+    "read-from-string" "read-line" "read-preserving-whitespace"
+    "read-sequence" "realpart" "reduce" "reinitialize-instance" "rem"
+    "remf" "remhash" "remove" "remove-duplicates" "remove-if"
+    "remove-if-not" "remprop" "rename-file" "replace" "require" "rest"
+    "restart-bind" "restart-case" "restart-name" "revappend" "reverse"
+    "room" "rotatef" "round" "rplaca" "rplacd" "schar" "search" "second"
+    "set" "set-difference" "set-exclusive-or" "setf" "setq" "seventh"
+    "shadow" "shared-initialize" "shiftf" "signum" "signal" "sin" "sinh"
+    "sixth" "sleep" "slot-boundp" "slot-exists-p" "slot-makunbound"
+    "slot-value" "some" "sort" "special-operator-p" "sqrt" "stable-sort"
+    "step" "store-value" "string" "string-capitalize" "string-downcase"
+    "stringp" "string-left-trim" "string-right-trim" "string-trim"
+    "string-upcase" "streamp" "sublis" "subseq" "subsetp" "subst"
+    "substitute" "substitute-if" "substitute-if-not" "subtypep" "svref"
+    "sxhash" "symbol-function" "symbol-macrolet" "symbol-name"
+    "symbol-package" "symbol-plist" "symbol-value" "symbolp" "tagbody"
+    "tan" "tanh" "tenth" "terpri" "the" "third" "throw" "time" "trace"
+    "tree-equal" "truename" "truncate" "typecase" "type-of" "typep"
+    "unexport" "unintern" "union" "unless" "unread-char" "unuse-package"
+    "untrace" "unwind-protect" "upper-case-p" "use-package" "use-value"
+    "values" "values-list" "vector" "vectorp" "vector-pop" "vector-push"
+    "vector-push-extend" "warn" "wild-pathname-p" "with-accessors"
+    "with-compilation-unit" "with-condition-restarts"
+    "with-hash-table-iterator" "with-input-from-string" "with-open-file"
+    "with-open-stream" "with-output-to-string" "with-package-iterator"
+    "with-simple-restart" "with-slots" "with-standard-io-syntax" "write"
+    "write-byte" "write-char" "write-line" "write-sequence"
+    "write-string" "write-to-string" "yes-or-no-p" "y-or-n-p" "zerop"))
+"##;
 
 /// Map a file to its language: by extension first, then by the shebang on
 /// line one (`#!/bin/sh`, `#!/usr/bin/env python3`) for extension-less
@@ -57,6 +230,8 @@ pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
             "py" | "pyw" => return Some(Lang::Python),
             "c" | "h" => return Some(Lang::C),
             "json" => return Some(Lang::Json),
+            // .asd is an ASDF system definition, also Common Lisp.
+            "lisp" | "cl" | "lsp" | "asd" => return Some(Lang::CommonLisp),
             _ => {}
         }
     }
@@ -76,6 +251,8 @@ fn detect_shebang(line: &str) -> Option<Lang> {
     match interp {
         "sh" | "bash" | "dash" | "ash" | "zsh" | "ksh" => Some(Lang::Bash),
         "python" | "python2" | "python3" | "pypy" | "pypy3" => Some(Lang::Python),
+        // Common Lisp scripts, usually `#!/usr/bin/sbcl --script`.
+        "sbcl" | "ccl" | "clisp" | "ecl" | "abcl" | "gcl" => Some(Lang::CommonLisp),
         _ => None,
     }
 }
@@ -317,10 +494,8 @@ impl Highlighter {
         tree: &Tree,
         query: &Query,
     ) -> Vec<Vec<Option<String>>> {
-        let mut grid: Vec<Vec<Option<String>>> = lines
-            .iter()
-            .map(|l| vec![None; l.len()])
-            .collect();
+        let mut grid: Vec<Vec<Option<String>>> =
+            lines.iter().map(|l| vec![None; l.len()]).collect();
         Self::for_each_capture(lines, source, tree, query, |r, cs, name| {
             for cell in &mut grid[r][cs] {
                 *cell = Some(name.to_string());
@@ -448,7 +623,11 @@ mod tests {
         let src = "let done = build(); // tail\n";
         let mut hl = Highlighter::new();
         let grid = hl.classes(src, Lang::Rust);
-        assert_eq!(grid.len(), 2, "one row per \\n-split line, trailing piece included");
+        assert_eq!(
+            grid.len(),
+            2,
+            "one row per \\n-split line, trailing piece included"
+        );
         let row = &grid[0];
         assert_eq!(row.len(), src.lines().next().unwrap().len());
         // `let` is a keyword, `build` a function call, the comment a comment,
@@ -538,6 +717,22 @@ mod tests {
         assert_eq!(detect(Some(Path::new("x.c")), None), Some(Lang::C));
         assert_eq!(detect(Some(Path::new("x.h")), None), Some(Lang::C));
         assert_eq!(detect(Some(Path::new("x.json")), None), Some(Lang::Json));
+        assert_eq!(
+            detect(Some(Path::new("x.lisp")), None),
+            Some(Lang::CommonLisp)
+        );
+        assert_eq!(
+            detect(Some(Path::new("x.cl")), None),
+            Some(Lang::CommonLisp)
+        );
+        assert_eq!(
+            detect(Some(Path::new("x.lsp")), None),
+            Some(Lang::CommonLisp)
+        );
+        assert_eq!(
+            detect(Some(Path::new("sys.asd")), None),
+            Some(Lang::CommonLisp)
+        );
         assert_eq!(detect(None, None), None);
     }
 
@@ -560,8 +755,19 @@ mod tests {
             Some(Lang::Python)
         );
         assert_eq!(
-            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env -S python3 -u")),
+            detect(
+                Some(Path::new("letibot")),
+                Some("#!/usr/bin/env -S python3 -u")
+            ),
             Some(Lang::Python)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/sbcl --script")),
+            Some(Lang::CommonLisp)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env clisp")),
+            Some(Lang::CommonLisp)
         );
         // No grammar for the interpreter, or no shebang at all.
         assert_eq!(
@@ -629,6 +835,48 @@ mod tests {
         hl.refresh(&b);
         assert!(style_at(&hl, 0, 1).is_some()); // "k" property
         assert!(style_at(&hl, 0, 6).is_some()); // 1 number
+    }
+
+    #[test]
+    fn highlights_commonlisp() {
+        let b = buf_named(
+            "t.lisp",
+            ";; greet\n(defun greet (name)\n  (format t \"Hello, ~a!\" name))\n",
+        );
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // comment
+        assert!(style_at(&hl, 1, 1).is_some()); // defun keyword
+        assert!(style_at(&hl, 1, 7).is_some()); // greet, the defined function
+        assert!(style_at(&hl, 1, 14).is_none()); // plain parameter
+        let line2: String = b.lines[2].iter().collect();
+        assert!(style_at(&hl, 2, line2.find("format").unwrap()).is_some()); // call head
+        assert!(style_at(&hl, 2, line2.find(" t ").unwrap() + 1).is_some()); // t constant
+        assert!(style_at(&hl, 2, line2.find('~').unwrap()).is_some()); // ~a directive
+        assert!(style_at(&hl, 2, line2.find("name").unwrap()).is_none()); // plain argument
+    }
+
+    // The query must speak the capture vocabulary `theme` maps: a name it
+    // does not know renders uncoloured.
+    #[test]
+    fn commonlisp_classes_use_the_shared_vocabulary() {
+        let src = "(defun greet (x) :hello)\n";
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(src, Lang::CommonLisp);
+        let row = &grid[0];
+        assert_eq!(row[src.find("defun").unwrap()].as_deref(), Some("keyword"));
+        assert_eq!(row[src.find("greet").unwrap()].as_deref(), Some("function"));
+        assert_eq!(
+            row[src.find(":hello").unwrap()].as_deref(),
+            Some("constant")
+        );
+        // Plain symbols are captured as "variable" for embedders; `theme`
+        // has no entry for it, so the editor renders them uncoloured (see
+        // highlights_commonlisp).
+        assert_eq!(
+            row[src.find("(x)").unwrap() + 1].as_deref(),
+            Some("variable")
+        );
     }
 
     #[test]

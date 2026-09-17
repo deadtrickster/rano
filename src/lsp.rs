@@ -119,6 +119,10 @@ fn command_for(lang: Lang) -> (String, Vec<String>) {
         Lang::Python => ("pylsp", &[]),
         Lang::C => ("clangd", &[]),
         Lang::Json => ("vscode-json-language-server", &["--stdio"]),
+        // cl-lsp (roswell-installable) is the closest thing to a standard
+        // Common Lisp server; when it's absent the spawn fails and the
+        // buffer simply runs without LSP.
+        Lang::CommonLisp => ("cl-lsp", &[]),
     };
     (find_bin(name), args.iter().map(|s| s.to_string()).collect())
 }
@@ -131,6 +135,7 @@ fn language_id(lang: Lang) -> &'static str {
         Lang::Python => "python",
         Lang::C => "c",
         Lang::Json => "json",
+        Lang::CommonLisp => "lisp",
     }
 }
 

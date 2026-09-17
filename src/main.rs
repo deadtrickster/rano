@@ -243,6 +243,13 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
         if dirty {
+            // Hide the physical cursor while the frame paints: the backend
+            // moves it across the cells it writes, and on a fast scroll that
+            // sweep shows as a ghost cursor blinking at painted cells (often
+            // a line start, column 0, mid-screen). draw() re-shows it at the
+            // positioned spot, or leaves it hidden when ui::draw skips
+            // positioning (edit point outside the viewport).
+            terminal.hide_cursor()?;
             terminal.draw(|f| ui::draw(f, &ed))?;
             dirty = false;
         }

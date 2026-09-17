@@ -354,12 +354,15 @@ impl Highlighter {
             })
             .collect();
 
-        // Byte offset of each line start within `source`.
+        // Byte offset of each line start within `source`. The line's
+        // contribution is its BYTE length — the last entry of its char-offset
+        // map — plus the '\n'; counting chars here made every line after a
+        // multi-byte one start bytes early in tree-sitter's coordinates.
         let mut line_offsets = Vec::with_capacity(lines.len());
         let mut off = 0usize;
         for co in char_offsets.iter() {
             line_offsets.push(off);
-            off += co.len() - 1 + 1; // line bytes + '\n'
+            off += co[co.len() - 1] + 1; // line bytes + '\n'
         }
 
         let names = query.capture_names();
@@ -380,7 +383,10 @@ impl Highlighter {
             };
             for r in r0..=r1.min(lines.len() - 1) {
                 let lo = line_offsets[r];
-                let line_byte_len = char_offsets[r].len() - 1;
+                // The line's BYTE length — the last entry of its char-offset
+                // map — not its char count: the clamp is against bytes, and
+                // counting chars cut captures short on multi-byte lines.
+                let line_byte_len = char_offsets[r][char_offsets[r].len() - 1];
                 let s_l = s.max(lo);
                 let e_l = e.min(lo + line_byte_len);
                 if s_l >= e_l {
@@ -467,6 +473,59 @@ mod tests {
         let grid = hl.classes("", Lang::Rust);
         assert_eq!(grid.len(), 1, "'' splits to one empty line");
         assert!(grid[0].is_empty());
+    }
+
+    /// **A multi-byte character shifts nothing but its own cell.**
+    ///
+    /// The em-dash is three bytes and one char, and two places in
+    /// `for_each_capture` counted the one where the other was meant:
+    /// `line_offsets` advanced by the char count, so every line after a
+    /// multi-byte line started bytes early in tree-sitter's coordinates and
+    /// its classes landed cells to the right; and the per-line clamp used
+    /// the char count as the byte length, so a capture ending near the end
+    /// of the multi-byte line itself lost its last cells. Seen from the
+    /// head that consumes this grid as `tail o[0mff` — a reset sequence
+    /// landing mid-word, because a class run ended two columns before the
+    /// token did.
+    #[test]
+    fn a_multibyte_character_shifts_nothing_but_its_own_cell() {
+        let src = "let s = \"a—b\"; // dash\nlet done = build(); // tail\n";
+        // Char column of the first char of `needle` — `find` answers bytes,
+        // and the grid is one cell per char.
+        let col_of = |line: &str, needle: &str| {
+            let b = line.find(needle).unwrap();
+            line[..b].chars().count()
+        };
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(src, Lang::Rust);
+        assert_eq!(grid.len(), 3, "one row per \\n-split line, tail included");
+
+        // The line WITH the dash. The clamp bug lived here: the string
+        // capture's byte end was clamped to the char count, so the closing
+        // quote fell out of the capture and rendered plain.
+        let l0 = src.split('\n').next().unwrap();
+        assert_eq!(grid[0][col_of(l0, "let")].as_deref(), Some("keyword"));
+        assert_eq!(
+            grid[0][col_of(l0, "—")].as_deref(),
+            Some("string"),
+            "the dash itself is inside the string literal"
+        );
+        let close = col_of(l0, "b\"") + 1;
+        assert_eq!(
+            grid[0][close].as_deref(),
+            Some("string"),
+            "the closing quote is still inside the capture"
+        );
+        assert_eq!(grid[0][col_of(l0, "// dash")].as_deref(), Some("comment"));
+
+        // The line AFTER it. The line-offset bug lived here: this line's
+        // byte start was short by the dash's two extra bytes, so every
+        // class landed two cells to the right.
+        let l1 = src.split('\n').nth(1).unwrap();
+        assert_eq!(grid[1][col_of(l1, "let")].as_deref(), Some("keyword"));
+        assert_eq!(grid[1][col_of(l1, "build")].as_deref(), Some("function"));
+        assert_eq!(grid[1][col_of(l1, "// tail")].as_deref(), Some("comment"));
+        assert!(grid[2].iter().all(|c| c.is_none()), "empty tail row");
     }
 
     #[test]

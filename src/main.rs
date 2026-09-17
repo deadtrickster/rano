@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 
 use buffer::Buffer;
 use buffer::Pos;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -40,6 +43,9 @@ pub struct BufferState {
     pub hl: syntax::Highlighter,
     pub lsp: Option<lsp::LspClient>,
     pub lsp_diags: Vec<lsp::Diagnostic>,
+    /// Syntax errors from the tree-sitter parse (recomputed per edit), so
+    /// deliberate mistakes are visible even without a language server.
+    pub syntax_diags: Vec<lsp::Diagnostic>,
     /// didChange pending since the last flush (D4 debounce).
     pub lsp_dirty: bool,
     pub lsp_last_send: Instant,
@@ -75,6 +81,7 @@ impl BufferState {
             hl: syntax::Highlighter::new(),
             lsp: None,
             lsp_diags: Vec::new(),
+            syntax_diags: Vec::new(),
             lsp_dirty: false,
             lsp_last_send: Instant::now(),
             lsp_starting: None,
@@ -95,6 +102,7 @@ impl BufferState {
             last_kind: None,
         };
         bs.hl.refresh(&bs.buf);
+        editor::refresh_syntax_diags(&mut bs);
         bs
     }
 }
@@ -204,11 +212,11 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         prev(info);
     }));
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     execute!(io::stdout(), EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -252,17 +260,23 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
                     dirty = true;
                 }
                 Event::Resize(..) => dirty = true,
+                Event::Mouse(m) => dirty |= ed.handle_mouse(m),
                 _ => {}
             }
         }
         dirty |= ed.tick_status();
         dirty |= ed.lsp_poll();
         dirty |= ed.lsp_flush(Instant::now());
+        ed.completion_retry_poll();
         dirty |= ed.exec_poll();
     };
     disable_raw_mode()?;
-    execute!(io::stdout(), DisableBracketedPaste)?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     result
 }
 
@@ -273,7 +287,9 @@ mod ed_tests {
     use crate::buffer::Pos;
     use crate::editor::Flash;
     use crate::prompt::{PromptKind, complete_path, expand_tilde};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::style::{Color, Modifier, Style};
     use std::fs;
     use std::path::PathBuf;
@@ -293,6 +309,15 @@ mod ed_tests {
 
     fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) {
         ed.handle_key(KeyEvent::new(code, mods));
+    }
+
+    fn me(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     fn lines(ed: &Editor) -> Vec<String> {
@@ -714,6 +739,316 @@ mod ed_tests {
     // E5 — diagnostics are underlined in severity color under the cursor;
     // search matches and the selection still win.
 
+    // ---------- completion (LSP) ----------
+
+    use crate::editor::{CompletionPopup, completion_prefix};
+
+    fn citem(label: &str, kind: u64) -> lsp::CompletionItem {
+        lsp::CompletionItem {
+            label: label.to_string(),
+            kind,
+            insert: label.to_string(),
+            sort: label.to_string(),
+            filter: label.to_string(),
+        }
+    }
+
+    fn popup(items: Vec<lsp::CompletionItem>, row: usize, col: usize) -> CompletionPopup {
+        CompletionPopup {
+            items,
+            sel: 0,
+            row,
+            col,
+        }
+    }
+
+    #[test]
+    fn completion_prefix_word_dot_and_colons() {
+        let l: Vec<Vec<char>> = vec![
+            "foo.bar".chars().collect(),
+            "x::".chars().collect(),
+            " a ".chars().collect(),
+        ];
+        assert_eq!(completion_prefix(&l, 0, 7), Some(("bar".to_string(), 4)));
+        assert_eq!(completion_prefix(&l, 0, 4), Some((String::new(), 4)));
+        assert_eq!(completion_prefix(&l, 1, 3), Some((String::new(), 3)));
+        assert_eq!(completion_prefix(&l, 2, 2), Some(("a".to_string(), 1)));
+        assert_eq!(completion_prefix(&l, 2, 3), None);
+        assert_eq!(completion_prefix(&l, 2, 0), None);
+    }
+
+    #[test]
+    fn completion_response_prefix_first_then_fuzzy() {
+        // Exact prefix matches keep the server's order and come first;
+        // subsequence matches follow; non-matches are dropped.
+        let mut ed = test_ed("x\nis\n");
+        ed.bs_mut().cursor = Pos { row: 1, col: 2 };
+        ed.completion_q.push_back((1, "is".to_string()));
+        ed.completion = Some(popup(Vec::new(), 1, 0));
+        // sortText carries the server's ranking: exact matches first here.
+        let it = |label: &str, sort: &str| {
+            let mut c = citem(label, 6);
+            c.sort = sort.to_string();
+            c
+        };
+        ed.complete_response(vec![
+            it("into_raw_parts", "3"),
+            it("is_empty", "1"),
+            it("__is_long", "4"),
+            it("as_bytes", "5"),
+            it("is_ascii", "2"),
+        ]);
+        let p = ed.completion.as_ref().unwrap();
+        let labels: Vec<_> = p.items.iter().map(|i| i.label.as_str()).collect();
+        // "into_raw_parts" survives as a subsequence match (i…s), but only
+        // after the exact-prefix items; "as_bytes" has no `i` and is dropped.
+        assert_eq!(
+            labels,
+            vec!["is_empty", "is_ascii", "into_raw_parts", "__is_long"]
+        );
+        assert_eq!(p.sel, 0);
+        assert!(ed.completion_q.is_empty(), "queue entry consumed");
+        // Empty prefix (right after `.`): the server's list is kept as-is.
+        let mut ed2 = test_ed("x.\n");
+        ed2.bs_mut().cursor = Pos { row: 0, col: 2 };
+        ed2.completion_q.push_back((0, String::new()));
+        ed2.completion = Some(popup(Vec::new(), 0, 0));
+        ed2.complete_response(vec![citem("into_raw_parts", 6), citem("zz", 6)]);
+        assert_eq!(ed2.completion.as_ref().unwrap().items.len(), 2);
+    }
+
+    #[test]
+    fn completion_fallback_junk_parks_popup_and_retries() {
+        // A `.`-context answered with path-fallback items (rust-analyzer
+        // still scanning a freshly opened crate) is not applied: the popup
+        // stays empty and a re-request is scheduled. The same items in a
+        // word context ("cra") are legitimate and applied as-is.
+        let mut ed = test_ed("text.\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 5 };
+        ed.completion_q.push_back((0, String::new()));
+        ed.completion = Some(popup(Vec::new(), 0, 5));
+        ed.complete_response(vec![citem("crate::", 0), citem("text", 6)]);
+        assert!(
+            ed.completion.as_ref().unwrap().items.is_empty(),
+            "fallback junk parked"
+        );
+        assert!(ed.completion_retry.is_some(), "re-request scheduled");
+        assert_eq!(ed.completion_retries, 1);
+        // Timer elapsed: the poll consumes it and keeps the popup open
+        // (no LSP attached here, so the re-request itself is a no-op).
+        ed.completion_retry = Some(Instant::now() - Duration::from_millis(1));
+        ed.completion_retry_poll();
+        assert!(ed.completion.is_some());
+        assert!(ed.completion_retry.is_none(), "timer consumed");
+        // Word context: path items are legitimate.
+        let mut ed2 = test_ed("cra\n");
+        ed2.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed2.completion_q.push_back((0, "cra".to_string()));
+        ed2.completion = Some(popup(Vec::new(), 0, 0));
+        ed2.complete_response(vec![citem("crate::", 0)]);
+        assert_eq!(ed2.completion.as_ref().unwrap().items.len(), 1);
+        // A good dot-context response resets the retry state.
+        let mut ed3 = test_ed("text.\n");
+        ed3.bs_mut().cursor = Pos { row: 0, col: 5 };
+        ed3.completion_q.push_back((0, String::new()));
+        ed3.completion = Some(popup(Vec::new(), 0, 5));
+        ed3.completion_retries = 3;
+        ed3.complete_response(vec![citem("is_empty", 1)]);
+        assert_eq!(ed3.completion.as_ref().unwrap().items.len(), 1);
+        assert!(ed3.completion_retry.is_none());
+        assert_eq!(ed3.completion_retries, 0);
+    }
+
+    #[test]
+    fn completion_response_stale_or_missing_popup() {
+        // Response answering an older keystroke (different prefix): dropped,
+        // popup untouched.
+        let mut ed = test_ed("ab\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 2 };
+        ed.completion_q.push_back((0, "a".to_string()));
+        ed.completion = Some(popup(vec![citem("ab", 6)], 0, 0));
+        ed.complete_response(vec![citem("abc", 6)]);
+        let p = ed.completion.as_ref().unwrap();
+        assert_eq!(p.items.len(), 1, "stale response must not replace items");
+        // Response for a different row than the cursor: popup closed.
+        let mut ed2 = test_ed("ab\n");
+        ed2.completion_q.push_back((0, "ab".to_string()));
+        ed2.completion = Some(popup(Vec::new(), 5, 0));
+        ed2.complete_response(vec![citem("ab", 6)]);
+        assert!(ed2.completion.is_none());
+        // Matched context but no popup open at all: ignored, queue cleared.
+        let mut ed3 = test_ed("ab\n");
+        ed3.bs_mut().cursor = Pos { row: 0, col: 2 };
+        ed3.completion_q.push_back((0, "ab".to_string()));
+        ed3.complete_response(vec![citem("ab", 6)]);
+        assert!(ed3.completion.is_none());
+        assert!(ed3.completion_q.is_empty());
+        // No request in flight: response ignored.
+        let mut ed4 = test_ed("ab\n");
+        ed4.completion = Some(popup(Vec::new(), 0, 0));
+        ed4.complete_response(vec![citem("ab", 6)]);
+        assert!(ed4.completion_q.is_empty());
+    }
+
+    #[test]
+    fn completion_response_no_matches_closes() {
+        let mut ed = test_ed("zz\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 2 };
+        ed.completion_q.push_back((0, "zz".to_string()));
+        ed.completion = Some(popup(Vec::new(), 0, 0));
+        ed.complete_response(vec![]);
+        assert!(ed.completion.is_none());
+    }
+
+    #[test]
+    fn completion_accept_inserts_remainder() {
+        let mut ed = test_ed("pri\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed.completion = Some(popup(vec![citem("println!", 3)], 0, 0));
+        ed.completion_accept();
+        assert_eq!(lines(&ed), vec!["println!"]);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 8 });
+        assert!(ed.completion.is_none());
+    }
+
+    #[test]
+    fn completion_accept_replaces_divergent_prefix() {
+        let mut ed = test_ed("pri\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed.completion = Some(popup(vec![citem("puts", 6)], 0, 0));
+        ed.completion_accept();
+        assert_eq!(lines(&ed), vec!["puts"]);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 4 });
+    }
+
+    #[test]
+    fn completion_nav_wraps_and_esc_closes() {
+        let mut ed = test_ed("pri\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed.completion = Some(popup(vec![citem("print!", 3), citem("println!", 3)], 0, 0));
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(ed.completion.as_ref().unwrap().sel, 1);
+        assert_eq!(ed.bs().cursor.col, 3, "cursor must not move");
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.completion.as_ref().unwrap().sel, 0);
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(ed.completion.as_ref().unwrap().sel, 1);
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(ed.completion.is_none());
+    }
+
+    #[test]
+    fn completion_enter_accepts_not_newline() {
+        let mut ed = test_ed("pri\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed.completion = Some(popup(vec![citem("print!", 3)], 0, 0));
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["print!"]);
+        assert_eq!(ed.bs().cursor.col, 6);
+    }
+
+    #[test]
+    fn completion_typing_backspace_and_space_lifecycle() {
+        // No LSP attached: the popup can't (re)open, but typing inside the
+        // word and backspacing keep it alive; leaving the word closes it.
+        let mut ed = test_ed("pr x\n");
+        ed.bs_mut().cursor = Pos { row: 0, col: 2 };
+        ed.completion = Some(popup(vec![citem("pr", 6)], 0, 0));
+        press_text(&mut ed, "i");
+        assert!(ed.completion.is_some(), "identifier char keeps popup");
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(ed.completion.is_some(), "backspace inside word keeps popup");
+        press(&mut ed, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(ed.completion.is_none(), "space closes popup");
+    }
+
+    // ---------- jump to definition (M-. / M-,) ----------
+
+    fn named_ed(text: &str, path: &str) -> Editor {
+        let mut ed = test_ed(text);
+        ed.bs_mut().buf.name = Some(std::path::PathBuf::from(path));
+        ed
+    }
+
+    #[test]
+    fn jump_definition_without_lsp_flashes() {
+        let mut ed = test_ed("fn main() {}\n");
+        press(&mut ed, KeyCode::Char('.'), KeyModifiers::ALT);
+        assert_eq!(ed.status_text(), Some("No LSP server".to_string()));
+        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(ed.status_text(), Some("No jump to return to".to_string()));
+    }
+
+    #[test]
+    fn goto_location_same_file_pushes_stack_and_moves() {
+        let p = "/tmp/rano_jump_same.rs";
+        let mut ed = named_ed("fn a() {}\nfn b() {}\n", p);
+        ed.bs_mut().cursor = Pos { row: 1, col: 3 };
+        let loc = lsp::DefLocation {
+            uri: lsp::path_to_uri(std::path::Path::new(p)),
+            line: 0,
+            character: 3,
+        };
+        ed.goto_location(loc, Pos { row: 1, col: 3 });
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
+        assert_eq!(ed.def_back.len(), 1);
+        assert!(ed.def_back[0].buf.is_none() && ed.def_back[0].idx.is_none());
+        // M-, returns to the origin row.
+        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 3 });
+        assert!(ed.def_back.is_empty());
+    }
+
+    #[test]
+    fn goto_location_cross_file_swaps_and_back() {
+        let target = std::env::temp_dir().join("rano_jump_target.rs");
+        std::fs::write(&target, "fn target_fn() {}\n").unwrap();
+        let mut ed = named_ed("fn a() {}\n", "/tmp/rano_jump_src.rs");
+        ed.bs_mut().cursor = Pos { row: 0, col: 1 };
+        let loc = lsp::DefLocation {
+            uri: lsp::path_to_uri(&target),
+            line: 0,
+            character: 3,
+        };
+        ed.goto_location(loc, Pos { row: 0, col: 1 });
+        assert_eq!(lines(&ed), vec!["fn target_fn() {}"]);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
+        // The origin buffer (with its edits) waits on the stack.
+        let back = ed.def_back.pop().unwrap();
+        let bs = back.buf.expect("single-buffer swap stores the state");
+        assert_eq!(
+            bs.buf
+                .lines
+                .iter()
+                .map(|l| l.iter().collect::<String>())
+                .collect::<Vec<_>>(),
+            vec!["fn a() {}"]
+        );
+        assert_eq!(back.pos, Pos { row: 0, col: 1 });
+        std::fs::remove_file(&target).ok();
+    }
+
+    #[test]
+    fn goto_location_multibuffer_keeps_origin_and_back_switches() {
+        let target = std::env::temp_dir().join("rano_jump_mb.rs");
+        std::fs::write(&target, "fn t() {}\n").unwrap();
+        let mut ed = named_ed("fn a() {}\n", "/tmp/rano_jump_mb_src.rs");
+        ed.config.multibuffer = true;
+        let loc = lsp::DefLocation {
+            uri: lsp::path_to_uri(&target),
+            line: 0,
+            character: 3,
+        };
+        ed.goto_location(loc, Pos { row: 0, col: 6 });
+        assert_eq!(ed.cur, 1, "target opened as a new buffer");
+        assert_eq!(lines(&ed), vec!["fn t() {}"]);
+        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(ed.cur, 0);
+        assert_eq!(lines(&ed), vec!["fn a() {}"]);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 6 });
+        std::fs::remove_file(&target).ok();
+    }
+
     fn diag(line: usize, col: usize, end_col: usize, severity: u64) -> lsp::Diagnostic {
         lsp::Diagnostic {
             line,
@@ -764,6 +1099,92 @@ mod ed_tests {
     }
 
     // E5 — M-D walks the diagnostics top-down, wrapping past the last one.
+
+    // Indentation: Tab follows the buffer's own indent style instead of
+    // always inserting a literal tab char.
+
+    #[test]
+    fn tab_matches_space_indent() {
+        let mut ed = test_ed("    a\n\n");
+        ed.bs_mut().cursor = Pos { row: 1, col: 0 };
+        press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["    a", "    "]);
+        assert_eq!(ed.bs().cursor.col, 4);
+    }
+
+    #[test]
+    fn tab_aligns_to_next_unit_mid_line() {
+        let mut ed = test_ed("    a\n  x");
+        ed.bs_mut().cursor = Pos { row: 1, col: 2 };
+        press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["    a", "    x"]);
+    }
+
+    #[test]
+    fn tab_uses_tab_char_when_file_does() {
+        let mut ed = test_ed("\ta\n\tb\n\n");
+        ed.bs_mut().cursor = Pos { row: 2, col: 0 };
+        press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["\ta", "\tb", "\t"]);
+    }
+
+    #[test]
+    fn backspace_deletes_indent_run() {
+        let mut ed = test_ed("    a\n    x");
+        ed.bs_mut().cursor = Pos { row: 1, col: 4 };
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor.col, 0);
+        assert_eq!(lines(&ed), vec!["    a", "x"]);
+    }
+
+    #[test]
+    fn backspace_mid_text_still_one_char() {
+        let mut ed = test_ed("    ab");
+        ed.bs_mut().cursor = Pos { row: 0, col: 6 };
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["    a"]);
+    }
+
+    // Syntax errors surface without a language server (tree-sitter ERROR
+    // nodes become diagnostics), and zero-width LSP ranges become visible.
+
+    #[test]
+    fn syntax_error_diag_without_lsp() {
+        let mut buf = Buffer::new();
+        buf.name = Some(std::path::PathBuf::from("t.rs"));
+        buf.lines = vec!["fn main() {".chars().collect()];
+        let mut ed = Editor::new(buf, config::Config::default());
+        ed.edit_invalidate();
+        assert!(
+            !ed.bs().syntax_diags.is_empty(),
+            "unclosed fn block must yield a tree-sitter diagnostic"
+        );
+        ed.bs_mut().buf.lines = vec!["fn main() {}".chars().collect()];
+        ed.edit_invalidate();
+        assert!(ed.bs().syntax_diags.is_empty(), "clean parse has no diags");
+    }
+
+    #[test]
+    fn zero_width_diag_widened_to_one_column() {
+        let lines = vec!["abcdefghij".chars().collect::<Vec<char>>()];
+        let mut d = diag(0, 5, 5, 1);
+        editor::widen_zero_width(std::slice::from_mut(&mut d), &lines);
+        assert_eq!((d.col, d.end_col), (5, 6));
+        let mut d = diag(0, 10, 10, 1); // insertion point at EOL
+        editor::widen_zero_width(std::slice::from_mut(&mut d), &lines);
+        assert_eq!((d.col, d.end_col), (9, 10));
+    }
+
+    #[test]
+    fn jump_next_diag_includes_syntax_diags() {
+        let mut buf = Buffer::new();
+        buf.name = Some(std::path::PathBuf::from("t.rs"));
+        buf.lines = vec!["fn broken(".chars().collect()];
+        let mut ed = Editor::new(buf, config::Config::default());
+        ed.edit_invalidate();
+        ed.jump_next_diag();
+        assert_eq!(ed.bs().cursor.row, 0, "jumps to the tree-sitter error");
+    }
 
     #[test]
     fn jump_next_diag_wraps() {
@@ -929,6 +1350,7 @@ mod ed_tests {
     #[test]
     fn scroll_x_follows_cursor() {
         let mut ed = test_ed(&"a".repeat(40));
+        ed.show_line_numbers = false;
         ed.text_w = 10;
         press(&mut ed, KeyCode::End, KeyModifiers::NONE);
         ed.adjust_scroll_x();
@@ -942,6 +1364,7 @@ mod ed_tests {
     fn scroll_x_with_tabs() {
         // cursor col 3 → display col 9; 9 >= 0 + 4 → scroll_x = 9 + 1 - 4
         let mut ed = test_ed("a\tb");
+        ed.show_line_numbers = false;
         ed.text_w = 4;
         press(&mut ed, KeyCode::End, KeyModifiers::NONE);
         ed.adjust_scroll_x();
@@ -953,11 +1376,11 @@ mod ed_tests {
     #[test]
     fn m_n_toggles_line_numbers() {
         let mut ed = test_ed("hi");
+        assert!(ed.show_line_numbers, "line numbers default to on");
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
         assert!(!ed.show_line_numbers);
         press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
         assert!(ed.show_line_numbers);
-        press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
-        assert!(!ed.show_line_numbers);
     }
 
     // D6 — tick_status reports whether it cleared visible state.
@@ -986,6 +1409,7 @@ mod ed_tests {
         };
         let mut ed = Editor::new(buf, cfg);
         assert_eq!(ed.tab_width, 4);
+        ed.show_line_numbers = false;
         ed.text_w = 4;
         ed.bs_mut().cursor = Pos { row: 0, col: 3 };
         ed.adjust_scroll_x();
@@ -1023,12 +1447,89 @@ mod ed_tests {
     }
 
     #[test]
-    fn auto_indent_off_by_default() {
+    fn auto_indent_off_by_config() {
         let mut ed = test_ed("    foo");
+        ed.config.auto_indent = false;
         ed.bs_mut().cursor = Pos { row: 0, col: 7 };
         press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(lines(&ed), vec!["    foo", ""]);
         assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
+    }
+
+    #[test]
+    fn auto_indent_on_by_default_and_electric_after_brace() {
+        // Default config: Enter carries the indent...
+        let mut ed = test_ed("    foo");
+        ed.bs_mut().cursor = Pos { row: 0, col: 7 };
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["    foo", "    "]);
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
+        // ...and an opening brace indents one unit deeper.
+        let mut ed = test_ed("    if x {");
+        ed.bs_mut().cursor = Pos { row: 0, col: 10 };
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["    if x {", "        "]);
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 8 });
+    }
+
+    #[test]
+    fn mouse_click_drag_and_wheel() {
+        let mut ed = test_ed("hello\nworld\n3\n4\n5\n6\n");
+        ed.show_line_numbers = true;
+        ed.text_w = 40;
+        ed.text_h = 10;
+        // Click on "world" (pane row 2, col 2; gutter is 3 wide).
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 5)));
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
+        assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
+        // Drag extends the selection (pane col 4 → disp 1 → char col 1).
+        assert!(ed.handle_mouse(me(MouseEventKind::Drag(MouseButton::Left), 2, 4)));
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
+        assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
+        // Title row and status/bar rows are ignored.
+        assert!(!ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 0, 3)));
+        assert!(!ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 22, 3)));
+    }
+
+    // Wheel — viewport scrolls without moving the edit point; the cursor is
+    // pulled along only when the scroll would push it out of the view.
+    #[test]
+    fn mouse_wheel_scrolls_view_not_cursor() {
+        let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+        let mut ed = test_ed(&text);
+        ed.text_h = 10; // max_scroll = 30 - 10 = 20
+        ed.bs_mut().cursor = Pos { row: 4, col: 1 };
+        // Wheel down: the viewport moves, the edit point stays.
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 3);
+        assert_eq!(ed.bs().cursor.row, 4, "wheel must not move the cursor");
+        // Scrolling past the cursor pins it to the top edge of the view.
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 6);
+        assert_eq!(ed.bs().cursor.row, 6, "cursor pinned to the viewport top");
+        // Wheel up: the viewport moves back, the cursor stays.
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+        assert_eq!(ed.bs().scroll, 3);
+        assert_eq!(ed.bs().cursor.row, 6);
+        // Cursor on the bottom row of the view: scrolling up pins it there.
+        ed.bs_mut().cursor = Pos { row: 12, col: 1 };
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+        assert_eq!(ed.bs().scroll, 0);
+        assert_eq!(
+            ed.bs().cursor.row,
+            9,
+            "cursor pinned to the viewport bottom"
+        );
+        // Clamped at the top of the file.
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+        assert_eq!(ed.bs().scroll, 0);
+        assert_eq!(ed.bs().cursor.row, 9);
+        // Clamped at the end of the file.
+        ed.bs_mut().scroll = 20;
+        ed.bs_mut().cursor = Pos { row: 25, col: 1 };
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 20, "scroll clamped at end of file");
+        assert_eq!(ed.bs().cursor.row, 25);
     }
 
     // E4a — expand_tilde: only a leading ~ (exactly "~" or "~/") expands.

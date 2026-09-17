@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Pos;
 use crate::editor::Editor;
+use crate::editor::widen_zero_width;
 use crate::lsp;
 use crate::syntax;
 
@@ -44,7 +45,8 @@ impl Editor {
             }
             return;
         };
-        let Some(lang) = syntax::detect(Some(&name)) else {
+        let first_line = bs.buf.lines.first().map(|l| l.iter().collect::<String>());
+        let Some(lang) = syntax::detect(Some(&name), first_line.as_deref()) else {
             if bs.lsp.take().is_some() {
                 bs.lsp_diags.clear();
             }
@@ -125,9 +127,19 @@ impl Editor {
             None => Vec::new(),
         };
         for e in events {
-            if let lsp::LspEvent::Diagnostics { diags, .. } = e {
-                self.bs_mut().lsp_diags = diags;
-                dirty = true;
+            match e {
+                lsp::LspEvent::Diagnostics { mut diags, .. } => {
+                    let bs = self.bs_mut();
+                    widen_zero_width(&mut diags, &bs.buf.lines);
+                    bs.lsp_diags = diags;
+                    dirty = true;
+                }
+                lsp::LspEvent::Completion(items) => {
+                    self.complete_response(items);
+                    dirty = true;
+                }
+                // Server requests are answered inside client.poll().
+                lsp::LspEvent::ServerRequest { .. } => {}
             }
         }
         dirty
@@ -194,16 +206,15 @@ impl Editor {
     /// cursor, wrapping to the first one. Diags are sorted by (line, col)
     /// defensively; cols are UTF-16 units and may exceed the char count.
     pub(crate) fn jump_next_diag(&mut self) {
-        if self.bs().lsp_diags.is_empty() {
+        let ds_all = self.all_diags();
+        if ds_all.is_empty() {
             self.flash("No diagnostics");
             return;
         }
-        let mut ds: Vec<&lsp::Diagnostic> = self.bs().lsp_diags.iter().collect();
-        ds.sort_by_key(|d| (d.line, d.col));
-        let next = ds
+        let next = ds_all
             .iter()
             .find(|d| d.line > self.bs().cursor.row)
-            .unwrap_or(&ds[0]);
+            .unwrap_or(&ds_all[0]);
         let target = Pos {
             row: next.line,
             col: next.col,

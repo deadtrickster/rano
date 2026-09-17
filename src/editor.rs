@@ -2,15 +2,18 @@
 //! actions (input, cut/paste, undo/redo, movement, files, buffers,
 //! goto, justify/sort, styling glue).
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{MouseButton, MouseEvent};
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::BufferState;
 use crate::buffer::{Buffer, Pos};
 use crate::config;
+use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
 use crate::search_ctrl::ReplaceState;
 use crate::ui;
@@ -89,6 +92,81 @@ pub struct Editor {
     /// plus the text being edited when cycling started.
     pub hist_idx: Option<usize>,
     pub hist_draft: String,
+    /// Live completion popup (LSP textDocument/completion); None when no
+    /// candidates are showing.
+    pub completion: Option<CompletionPopup>,
+    /// Context each in-flight completion request was made for, in request
+    /// order: (row, typed prefix). A response is applied only when it
+    /// answers the request for the *current* context — servers can lag
+    /// several keystrokes behind, and applying their older answers is what
+    /// made the popup show unrelated items.
+    pub(crate) completion_q: VecDeque<(usize, String)>,
+    /// rust-analyzer answers member completions with a path-completion
+    /// fallback until it has finished scanning a freshly opened crate
+    /// (~15 s on rano itself). Responses carrying that fallback signature
+    /// are dropped and re-requested on this timer instead of flashing junk.
+    pub(crate) completion_retry: Option<Instant>,
+    pub(crate) completion_retries: u8,
+    /// Where M-, returns to, one entry per definition jump (stacked).
+    pub def_back: Vec<DefBack>,
+}
+
+/// Live completion popup state: the filtered candidate list, the selected
+/// row, and the anchor (buffer row + word-start col) used to place the
+/// popup on screen and to reject responses for a stale cursor position.
+pub struct CompletionPopup {
+    pub items: Vec<lsp::CompletionItem>,
+    pub sel: usize,
+    pub row: usize,
+    pub col: usize,
+}
+
+/// Case-insensitive subsequence test: does every char of `needle` appear
+/// in `hay` in order? Used to keep a server's fuzzy matches (e.g. `__is_long`
+/// for `is`) below the exact-prefix ones instead of dropping or promoting
+/// them.
+fn fuzzy_match(hay: &str, needle: &str) -> bool {
+    let mut rest = hay.chars();
+    needle
+        .chars()
+        .all(|n| rest.any(|h| h.eq_ignore_ascii_case(&n)))
+}
+
+/// One entry of the jump-to-definition back stack: where to return to when
+/// M-, unwinds a jump. Cross-file jumps in single-buffer mode swap the whole
+/// buffer state out (edits survive); multibuffer mode remembers the buffer
+/// index; same-file jumps only need the cursor.
+pub struct DefBack {
+    pub buf: Option<BufferState>,
+    pub idx: Option<usize>,
+    pub pos: Pos,
+}
+
+/// The word being completed just before `col` on `row`, plus its start
+/// column. Fires for identifiers (`foo|`) and with an empty prefix after a
+/// member-access trigger (`foo.|`, `foo::|`). None elsewhere (spaces,
+/// punctuation, empty lines) — the caller closes any open popup then.
+pub(crate) fn completion_prefix(
+    lines: &[Vec<char>],
+    row: usize,
+    col: usize,
+) -> Option<(String, usize)> {
+    let line = lines.get(row)?;
+    let col = col.min(line.len());
+    let prev = if col == 0 { None } else { Some(line[col - 1]) };
+    match prev {
+        Some(c) if c.is_alphanumeric() || c == '_' => {
+            let start = line[..col]
+                .iter()
+                .rposition(|c| !(c.is_alphanumeric() || *c == '_'))
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            Some((line[start..col].iter().collect(), start))
+        }
+        Some('.') => Some((String::new(), col)),
+        Some(':') if col >= 2 && line[col - 2] == ':' => Some((String::new(), col)),
+        _ => None,
+    }
 }
 
 impl Editor {
@@ -122,6 +200,11 @@ impl Editor {
             file_hist: Vec::new(),
             hist_idx: None,
             hist_draft: String::new(),
+            completion: None,
+            completion_q: VecDeque::new(),
+            completion_retry: None,
+            completion_retries: 0,
+            def_back: Vec::new(),
         };
         ed.lsp_sync();
         ed
@@ -172,21 +255,13 @@ impl Editor {
         } else {
             0
         };
-        let view_w = self.text_w.saturating_sub(gutter);
-        if view_w == 0 {
-            return;
-        }
+        let view_w = self.text_w.saturating_sub(gutter).max(1);
         let tab_width = self.tab_width;
         let bs = self.bs_mut();
         let row = bs.cursor.row.min(bs.buf.lines.len().saturating_sub(1));
         let line = &bs.buf.lines[row];
         let disp = ui::display_col(line, bs.cursor.col, tab_width);
-        if disp < bs.scroll_x {
-            bs.scroll_x = disp;
-        }
-        if disp >= bs.scroll_x + view_w {
-            bs.scroll_x = disp + 1 - view_w;
-        }
+        bs.scroll_x = bs.scroll_x.min(disp).max((disp + 1).saturating_sub(view_w));
         bs.scroll_x = bs.scroll_x.min(ui::display_width(line, tab_width));
     }
 
@@ -196,7 +271,64 @@ impl Editor {
         bs.search_matches = None;
         bs.search.current = 0;
         bs.hl.refresh(&bs.buf);
+        refresh_syntax_diags(bs);
         bs.lsp_dirty = true;
+    }
+
+    /// The union of tree-sitter and LSP diagnostics, row-major — what the
+    /// underline, the gutter and M-D all work off.
+    pub fn all_diags(&self) -> Vec<lsp::Diagnostic> {
+        let bs = self.bs();
+        let mut out = bs.syntax_diags.clone();
+        out.extend(bs.lsp_diags.iter().cloned());
+        out.sort_by_key(|d| (d.line, d.col, d.end_col));
+        out
+    }
+
+    /// Indentation unit of the current buffer: a tab char if any line
+    /// indents with tabs, otherwise the common leading-space width (the GCD,
+    /// so mixed 4/8 comes out as 4). Falls back to a tab for flat buffers.
+    pub fn indent_unit(&self) -> String {
+        let lines = &self.bs().buf.lines;
+        if lines.iter().any(|l| l.first() == Some(&'\t')) {
+            return "\t".to_string();
+        }
+        let mut counts: Vec<usize> = lines
+            .iter()
+            .filter_map(|l| {
+                let n = l.iter().take_while(|c| **c == ' ').count();
+                (n > 0).then_some(n)
+            })
+            .collect();
+        if counts.is_empty() {
+            return "\t".to_string();
+        }
+        counts.sort();
+        let mut unit = counts[0];
+        for n in &counts {
+            unit = gcd(unit, *n);
+        }
+        if unit == 0 || unit > 8 {
+            return "\t".to_string();
+        }
+        " ".repeat(unit)
+    }
+
+    /// Tab: insert the buffer's indent unit — spaces up to the next unit
+    /// boundary for space-indented files (so rano matches its own 4-space
+    /// source), a literal tab for tab-indented ones.
+    pub fn indent_line(&mut self) {
+        let unit = self.indent_unit();
+        if unit == "\t" {
+            self.insert_char('\t');
+            return;
+        }
+        let col = self.bs().cursor.col;
+        let unit_len = unit.len();
+        let n = unit_len - (col % unit_len);
+        for _ in 0..n {
+            self.insert_char(' ');
+        }
     }
 
     // ---------- undo / redo ----------
@@ -391,6 +523,417 @@ impl Editor {
 
     // ---------- character input ----------
 
+    /// Insert text at the cursor as one undo step, without triggering
+    /// completion (used by completion_accept).
+    fn insert_str_plain(&mut self, s: &str) {
+        let (first, last) = match self.sel_span() {
+            Some((a, b)) => (a, b + 1),
+            None => (self.bs().cursor.row, self.bs().cursor.row + 1),
+        };
+        self.begin_action(ActionKind::Insert, first, last);
+        self.delete_selection_if_any();
+        for ch in s.chars() {
+            let bs = self.bs_mut();
+            bs.buf.insert_char(bs.cursor.row, bs.cursor.col, ch);
+            bs.cursor.col += 1;
+        }
+        self.finish_step();
+        self.edit_invalidate();
+    }
+
+    // ---------- completion (LSP) ----------
+
+    /// Ask the language server for completions at the cursor when the
+    /// context warrants it (an identifier, or after `.` / `::`), and keep
+    /// the popup alive across requests so responses don't flicker it away.
+    /// Closes the popup when the cursor leaves completion context.
+    pub(crate) fn maybe_request_completion(&mut self) {
+        let cur = self.bs().cursor;
+        let Some((prefix, start)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col)
+        else {
+            self.completion = None;
+            self.completion_q.clear();
+            return;
+        };
+        // Push the exact text to the server first: the 300 ms didChange
+        // debounce would otherwise complete against a stale document.
+        let bs = self.bs_mut();
+        let Some(l) = bs.lsp.as_mut() else {
+            return;
+        };
+        if bs.lsp_dirty {
+            l.change(&bs.buf.text());
+            bs.lsp_dirty = false;
+            bs.lsp_last_send = Instant::now();
+        }
+        let uri = l.doc_uri.clone().unwrap_or_default();
+        let line = bs.buf.lines.get(cur.row).cloned().unwrap_or_default();
+        l.request_completion(&uri, cur.row as u64, lsp::utf16_col(&line, cur.col) as u64);
+        self.completion_q.push_back((cur.row, prefix));
+        if self.completion_q.len() > 8 {
+            self.completion_q.drain(0..self.completion_q.len() - 8);
+        }
+        // Keep an existing popup anchored where it first opened: moving it
+        // with every keystroke reads as flicker.
+        match &mut self.completion {
+            Some(p) if p.row == cur.row => {}
+            _ => {
+                self.completion = Some(CompletionPopup {
+                    items: Vec::new(),
+                    sel: 0,
+                    row: cur.row,
+                    col: start,
+                });
+            }
+        }
+    }
+
+    /// Apply a completion response. Servers send their raw ranked list
+    /// (rust-analyzer marks big member lists `isIncomplete` and leaves the
+    /// filtering to the client), so the list is filtered here: items whose
+    /// label starts with the typed prefix first — in server order — then
+    /// fuzzy (subsequence) matches, everything else dropped. An empty
+    /// prefix (right after `.` / `::`) keeps the server's order untouched.
+    /// The response is applied only when it answers the request for the
+    /// current (row, prefix) — answers for older typing are dropped.
+    pub(crate) fn complete_response(&mut self, items: Vec<lsp::CompletionItem>) {
+        let Some((req_row, req_prefix)) = self.completion_q.pop_front() else {
+            return;
+        };
+        let cur = self.bs().cursor;
+        let Some((prefix, _)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col) else {
+            self.completion = None;
+            self.completion_q.clear();
+            return;
+        };
+        if req_row != cur.row || req_prefix != prefix {
+            return;
+        }
+        // A `.` context answered with path items (self:: / crate:: /
+        // super::) means the server has not finished scanning the crate
+        // yet — member lists never contain those. Park the popup and
+        // re-request shortly instead of flashing fallback junk.
+        let dot_ctx = cur.col > 0 && self.bs().buf.lines[cur.row].get(cur.col - 1) == Some(&'.');
+        if dot_ctx
+            && self.completion_retries < 40
+            && items.iter().any(|it| {
+                it.label.starts_with("self::")
+                    || it.label.starts_with("crate::")
+                    || it.label.starts_with("super::")
+            })
+        {
+            self.completion_retry = Some(Instant::now() + Duration::from_millis(700));
+            self.completion_retries += 1;
+            return;
+        }
+        self.completion_retries = 0;
+        self.completion_retry = None;
+        let Some(p) = &mut self.completion else {
+            self.completion_q.clear();
+            return;
+        };
+        if p.row != cur.row {
+            self.completion = None;
+            self.completion_q.clear();
+            return;
+        }
+        // The server's JSON order is not its ranked order: sortText is.
+        let mut items = items;
+        items.sort_by(|a, b| a.sort.cmp(&b.sort));
+        let mut exact = Vec::new();
+        let mut fuzzy = Vec::new();
+        for it in items {
+            if prefix.is_empty() {
+                exact.push(it);
+            } else {
+                let hay = if it.filter.is_empty() {
+                    it.label.as_str()
+                } else {
+                    it.filter.as_str()
+                };
+                if hay.starts_with(&prefix) {
+                    exact.push(it);
+                } else if fuzzy_match(hay, &prefix) {
+                    fuzzy.push(it);
+                }
+            }
+        }
+        if exact.is_empty() && fuzzy.is_empty() {
+            self.completion = None;
+            return;
+        }
+        exact.append(&mut fuzzy);
+        p.items = exact;
+        p.sel = 0;
+    }
+
+    pub(crate) fn completion_up(&mut self) {
+        if let Some(p) = &mut self.completion
+            && !p.items.is_empty()
+        {
+            p.sel = (p.sel + p.items.len() - 1) % p.items.len();
+        }
+    }
+
+    pub(crate) fn completion_down(&mut self) {
+        if let Some(p) = &mut self.completion
+            && !p.items.is_empty()
+        {
+            p.sel = (p.sel + 1) % p.items.len();
+        }
+    }
+
+    pub(crate) fn completion_close(&mut self) {
+        self.completion = None;
+        self.completion_q.clear();
+        self.completion_retry = None;
+        self.completion_retries = 0;
+    }
+
+    /// Fire a scheduled completion re-request once its timer elapses. The
+    /// popup must still be open on the cursor's row with a completable
+    /// prefix, otherwise the wait is dropped.
+    pub(crate) fn completion_retry_poll(&mut self) {
+        let Some(t) = self.completion_retry else {
+            return;
+        };
+        if Instant::now() < t {
+            return;
+        }
+        self.completion_retry = None;
+        let cur = self.bs().cursor;
+        if !matches!(&self.completion, Some(p) if p.row == cur.row) {
+            self.completion_retries = 0;
+            return;
+        }
+        if completion_prefix(&self.bs().buf.lines, cur.row, cur.col).is_none() {
+            self.completion_retries = 0;
+            self.completion = None;
+            return;
+        }
+        self.maybe_request_completion();
+    }
+
+    /// Insert the selected completion: append the part past the typed
+    /// prefix, or replace the prefix when the item's text diverges from it.
+    pub(crate) fn completion_accept(&mut self) {
+        let Some(p) = self.completion.take() else {
+            return;
+        };
+        if p.items.is_empty() {
+            return;
+        }
+        let item = p.items[p.sel].clone();
+        let cur = self.bs().cursor;
+        if cur.row != p.row {
+            return;
+        }
+        let Some((prefix, _)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col) else {
+            return;
+        };
+        match item.insert.strip_prefix(prefix.as_str()) {
+            Some("") => {}
+            Some(rest) => self.insert_str_plain(rest),
+            None => {
+                for _ in 0..prefix.chars().count() {
+                    self.backspace();
+                }
+                self.insert_str_plain(&item.insert);
+            }
+        }
+    }
+
+    // ---------- jump to definition (M-. / M-,) ----------
+
+    /// M-.: ask the language server for the definition of the symbol under
+    /// the cursor and jump there — within the file, or into another file
+    /// (pushing the current position onto the M-, back stack).
+    pub(crate) fn jump_definition(&mut self) {
+        let cur = self.bs().cursor;
+        let bs = self.bs_mut();
+        let Some(l) = bs.lsp.as_mut() else {
+            self.completion_close();
+            self.flash("No LSP server");
+            return;
+        };
+        // The position must match the server's view of the document.
+        if bs.lsp_dirty {
+            l.change(&bs.buf.text());
+            bs.lsp_dirty = false;
+            bs.lsp_last_send = Instant::now();
+        }
+        let uri = l.doc_uri.clone().unwrap_or_default();
+        let line = bs.buf.lines.get(cur.row).cloned().unwrap_or_default();
+        let loc = match l.definition(
+            &uri,
+            cur.row as u64,
+            lsp::utf16_col(&line, cur.col) as u64,
+            Duration::from_secs(3),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                self.flash(&e);
+                return;
+            }
+        };
+        let Some(loc) = loc else {
+            self.flash("No definition found");
+            return;
+        };
+        self.goto_location(loc, cur);
+    }
+
+    /// Move to a definition target, pushing a back-stack entry first.
+    pub(crate) fn goto_location(&mut self, loc: lsp::DefLocation, from: Pos) {
+        let target_path = lsp::uri_to_path(&loc.uri);
+        let cur_name = self.bs().buf.name.clone();
+        let same_file = match &cur_name {
+            Some(p) => lsp::path_to_uri(p) == loc.uri,
+            None => false,
+        };
+        if same_file {
+            self.def_back.push(DefBack {
+                buf: None,
+                idx: None,
+                pos: from,
+            });
+        } else {
+            let buf = match Buffer::from_file(&target_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.flash(&format!("Error: {}", e));
+                    return;
+                }
+            };
+            if self.config.multibuffer {
+                // The origin buffer stays alive in self.buffers.
+                self.def_back.push(DefBack {
+                    buf: None,
+                    idx: Some(self.cur),
+                    pos: from,
+                });
+                self.buffers.push(BufferState::new(buf));
+                self.cur = self.buffers.len() - 1;
+            } else {
+                // Swap the current buffer out whole (edits survive on M-,).
+                let old = std::mem::replace(&mut self.buffers[self.cur], BufferState::new(buf));
+                self.def_back.push(DefBack {
+                    buf: Some(old),
+                    idx: None,
+                    pos: from,
+                });
+            }
+            self.lsp_sync();
+        }
+        let row = loc.line as usize;
+        let line = self.bs().buf.lines.get(row).cloned().unwrap_or_default();
+        let col = lsp::utf16_to_char(&line, loc.character as usize);
+        self.bs_mut().cursor = Pos { row, col };
+        self.completion_close();
+        self.adjust_scroll(self.text_h);
+        self.adjust_scroll_x();
+    }
+
+    /// M-,: unwind one definition jump (stacked — press repeatedly).
+    pub(crate) fn jump_back(&mut self) {
+        let Some(entry) = self.def_back.pop() else {
+            self.flash("No jump to return to");
+            return;
+        };
+        if let Some(bs) = entry.buf {
+            self.buffers[self.cur] = bs;
+            self.lsp_sync();
+        } else if let Some(i) = entry.idx
+            && i < self.buffers.len()
+        {
+            self.cur = i;
+        }
+        let pos = entry.pos;
+        let bs = self.bs_mut();
+        bs.cursor = bs.buf.clamp(pos);
+        self.adjust_scroll(self.text_h);
+        self.adjust_scroll_x();
+    }
+
+    // ---------- mouse ----------
+
+    /// Map a pane cell to a buffer position: only clicks inside the text
+    /// area land; the title, status and function bars are ignored, and a
+    /// click on the gutter or past EOL goes to the line start / line end.
+    fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
+        if self.prompt.is_some() || pane_row == 0 || pane_row as usize > self.text_h {
+            return None;
+        }
+        let bs = self.bs();
+        let row = pane_row as usize - 1 + bs.scroll;
+        if row >= bs.buf.lines.len() {
+            return None;
+        }
+        let g = if self.show_line_numbers {
+            ui::gutter_width(bs.buf.lines.len())
+        } else {
+            0
+        };
+        let x = pane_col as usize;
+        if x < g {
+            return Some(Pos { row, col: 0 });
+        }
+        let disp = x - g + bs.scroll_x;
+        let line = &bs.buf.lines[row];
+        Some(Pos {
+            row,
+            col: ui::char_at_display(line, disp, self.tab_width),
+        })
+    }
+
+    /// Left click: cursor + fresh selection anchor. Left drag: extend.
+    /// Wheel: scroll the viewport a few lines. Everything else is ignored.
+    pub(crate) fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+        use crossterm::event::MouseEventKind as K;
+        match m.kind {
+            K::ScrollUp => self.wheel(-3),
+            K::ScrollDown => self.wheel(3),
+            K::Down(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+                Some(p) => {
+                    let bs = self.bs_mut();
+                    bs.cursor = bs.buf.clamp(p);
+                    bs.mark = Some(bs.cursor);
+                    self.completion_close();
+                    true
+                }
+                None => false,
+            },
+            K::Drag(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+                Some(p) => {
+                    let bs = self.bs_mut();
+                    bs.cursor = bs.buf.clamp(p);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Wheel: scroll the viewport without moving the edit point; the cursor
+    /// is pulled along only when the scroll would push it out of the view
+    /// (nano-style — it pins to the edge it would cross, so it stays on a
+    /// real line and the view follows it from there).
+    fn wheel(&mut self, delta: i64) -> bool {
+        let text_h = self.text_h;
+        let bs = self.bs_mut();
+        let max_scroll = bs.buf.lines.len().saturating_sub(text_h);
+        let scroll = (bs.scroll as i64 + delta).clamp(0, max_scroll as i64) as usize;
+        bs.scroll = scroll;
+        if bs.cursor.row < scroll {
+            bs.cursor.row = scroll;
+        } else if text_h > 0 && bs.cursor.row >= scroll + text_h {
+            bs.cursor.row = scroll + text_h - 1;
+        }
+        bs.cursor = bs.buf.clamp(bs.cursor);
+        true
+    }
+
     pub(crate) fn insert_char(&mut self, ch: char) {
         let (first, last) = match self.sel_span() {
             Some((a, b)) => (a, b + 1),
@@ -403,6 +946,7 @@ impl Editor {
         bs.cursor.col += 1;
         self.finish_step();
         self.edit_invalidate();
+        self.maybe_request_completion();
     }
 
     pub(crate) fn newline(&mut self) {
@@ -415,14 +959,24 @@ impl Editor {
         let row = self.bs().cursor.row;
         let col = self.bs().cursor.col;
         // F3: with auto_indent, carry the current line's leading whitespace
-        // (up to the cursor) onto the new row.
+        // (up to the cursor) onto the new row. Electric: an opening brace at
+        // the end of the line puts the cursor one indent unit deeper.
         let indent: Vec<char> = if self.config.auto_indent {
-            self.bs().buf.lines[row]
+            let mut ind: Vec<char> = self.bs().buf.lines[row]
                 .iter()
                 .take(col)
                 .take_while(|c| c.is_whitespace())
                 .copied()
-                .collect()
+                .collect();
+            let opens = self.bs().buf.lines[row][..col]
+                .iter()
+                .rev()
+                .find(|c| !c.is_whitespace())
+                == Some(&'{');
+            if opens {
+                ind.extend(self.indent_unit().chars());
+            }
+            ind
         } else {
             Vec::new()
         };
@@ -447,7 +1001,11 @@ impl Editor {
     pub(crate) fn backspace(&mut self) {
         let c = self.bs().cursor;
         let sel = self.sel_span();
+        let had_popup = self.completion.is_some();
         if sel.is_none() && !(c.col > 0 || c.row > 0) {
+            if had_popup {
+                self.maybe_request_completion();
+            }
             return;
         }
         let (first, last) = match sel {
@@ -458,12 +1016,34 @@ impl Editor {
         self.begin_action(ActionKind::Backspace, first, last);
         if self.delete_selection_if_any() {
             self.finish_step();
+            if had_popup {
+                self.maybe_request_completion();
+            }
             return;
         }
         if c.col > 0 {
+            // Soft tabs: on leading whitespace, backspace eats a whole
+            // indent unit down to the previous boundary, not one space.
+            let unit = self.indent_unit();
+            let line = self.bs().buf.lines[c.row].clone();
+            let on_indent =
+                unit != "\t" && c.col <= line.len() && line[..c.col].iter().all(|ch| *ch == ' ');
+            let n = if on_indent {
+                ((c.col - 1) % unit.len()) + 1
+            } else {
+                1
+            };
             let bs = self.bs_mut();
-            bs.buf.backspace(c.row, c.col);
-            bs.cursor.col -= 1;
+            for _ in 0..n {
+                // buf.backspace removes a row it empties; stop before the
+                // row index goes stale and let clamp_cursor settle it.
+                if bs.cursor.col == 0 || bs.buf.lines.get(c.row).is_none() {
+                    break;
+                }
+                bs.buf.backspace(c.row, bs.cursor.col);
+                bs.cursor.col -= 1;
+            }
+            self.clamp_cursor();
         } else if c.row > 0 {
             let bs = self.bs_mut();
             let prev_len = bs.buf.line_len(c.row - 1);
@@ -475,6 +1055,9 @@ impl Editor {
         }
         self.finish_step();
         self.edit_invalidate();
+        if had_popup {
+            self.maybe_request_completion();
+        }
     }
 
     pub(crate) fn delete_at(&mut self) {
@@ -967,6 +1550,7 @@ impl Editor {
                     bs.buf.name = Some(path);
                     bs.buf.modified = false;
                     bs.hl.refresh(&bs.buf);
+                    refresh_syntax_diags(bs);
                 }
                 // lsp_sync below may kill the client; send any pending
                 // change while it is still alive.
@@ -1260,7 +1844,8 @@ impl Editor {
         // Diagnostics: underline in severity color. Search match and
         // selection return above, so they still win. LSP cols are UTF-16
         // units and can drift on astral chars (accepted limitation).
-        for d in &self.bs().lsp_diags {
+        let diags = self.all_diags();
+        for d in &diags {
             if d.line == p.row && d.col <= p.col && p.col < d.end_col {
                 let c = match d.severity {
                     1 => Color::Red,
@@ -1284,4 +1869,47 @@ pub(crate) fn normalize(a: Pos, b: Pos) -> (Pos, Pos) {
 
 pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// Rebuild `syntax_diags` from the fresh tree-sitter parse. Called after
+/// every re-highlight (open, read, edit) so mistakes are visible even with
+/// no language server.
+pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
+    bs.syntax_diags = bs
+        .hl
+        .syntax_errors(&bs.buf.lines)
+        .into_iter()
+        .map(|(line, col, end_col, message)| lsp::Diagnostic {
+            line,
+            col,
+            end_col,
+            message,
+            severity: 1,
+        })
+        .collect();
+    widen_zero_width(&mut bs.syntax_diags, &bs.buf.lines);
+}
+
+/// rust-analyzer reports many syntax errors as zero-width insertion points,
+/// which rano's `col <= p.col < end_col` underline can never match. Widen
+/// those to one visible column: the char under the insertion point, or the
+/// last char of the line when the point is at EOL.
+pub(crate) fn widen_zero_width(diags: &mut [lsp::Diagnostic], lines: &[Vec<char>]) {
+    for d in diags {
+        if d.end_col > d.col {
+            continue;
+        }
+        let line_len = lines.get(d.line).map(Vec::len).unwrap_or(0);
+        if d.col >= line_len && line_len > 0 {
+            d.col = line_len - 1;
+        }
+        d.end_col = d.col + 1;
+    }
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }

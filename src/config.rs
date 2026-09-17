@@ -16,8 +16,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tab_width: 8,
-            auto_indent: false,
-            line_numbers: false,
+            auto_indent: true,
+            line_numbers: true,
             multibuffer: false,
         }
     }
@@ -117,7 +117,7 @@ mod tests {
         let cfg = parse_config("tab_width = 4\nauto_indent = true");
         assert_eq!(cfg.tab_width, 4);
         assert!(cfg.auto_indent);
-        assert!(!cfg.line_numbers);
+        assert!(cfg.line_numbers, "line numbers default to on");
         assert!(!cfg.multibuffer);
     }
 
@@ -126,7 +126,7 @@ mod tests {
         let cfg = parse_config("line_numbers = true");
         assert!(cfg.line_numbers);
         assert_eq!(cfg.tab_width, 8);
-        assert!(!cfg.auto_indent);
+        assert!(cfg.auto_indent, "auto-indent defaults to on");
         assert!(!cfg.multibuffer);
     }
 

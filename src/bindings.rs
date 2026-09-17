@@ -12,7 +12,7 @@ pub struct Binding {
 /// five rows are reserved for features whose wiring lands with later items
 /// (diagnostics, line numbers, filter, buffer switching).
 #[rustfmt::skip]
-pub static BAR: [Binding; 29] = [
+    pub static BAR: [Binding; 31] = [
     Binding { key: "^G", label: "Help" },
     Binding { key: "^X", label: "Exit" },
     Binding { key: "^O", label: "Write Out" },
@@ -38,6 +38,8 @@ pub static BAR: [Binding; 29] = [
     Binding { key: "^\u{25c2}", label: "Prev Word" },
     Binding { key: "^\u{25b8}", label: "Next Word" },
     Binding { key: "M-D", label: "Next Diagnostic" },
+    Binding { key: "M-.", label: "Definition" },
+    Binding { key: "M-,", label: "Jump Back" },
     Binding { key: "M-N", label: "Line Numbers" },
     Binding { key: "M-|", label: "Filter" },
     Binding { key: "M-<", label: "Prev Buffer" },
@@ -133,9 +135,9 @@ mod tests {
 
     #[test]
     fn bar_count_and_reserved_rows() {
-        assert_eq!(BAR.len(), 29);
+        assert_eq!(BAR.len(), 31);
         let keys: Vec<&str> = BAR.iter().map(|b| b.key).collect();
-        for k in ["M-D", "M-N", "M-|", "M-<", "M->"] {
+        for k in ["M-D", "M-.", "M-,", "M-N", "M-|", "M-<", "M->"] {
             assert!(keys.contains(&k), "reserved row {} missing", k);
         }
     }

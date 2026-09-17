@@ -11,6 +11,47 @@ impl Editor {
     // ---------- key dispatch ----------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Live completion popup: navigation/accept/cancel first; anything
+        // else closes it and falls through to normal handling (typing and
+        // backspace stay open — they re-request with the new prefix).
+        if self
+            .completion
+            .as_ref()
+            .is_some_and(|c| !c.items.is_empty())
+        {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            let plain = !ctrl && !alt;
+            match key.code {
+                KeyCode::Up if plain => {
+                    self.completion_up();
+                    return;
+                }
+                KeyCode::Down if plain => {
+                    self.completion_down();
+                    return;
+                }
+                KeyCode::Char('p') if ctrl && !alt => {
+                    self.completion_up();
+                    return;
+                }
+                KeyCode::Char('n') if ctrl && !alt => {
+                    self.completion_down();
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.completion_accept();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.completion_close();
+                    return;
+                }
+                KeyCode::Backspace if plain => {}
+                KeyCode::Char(_) if plain => {}
+                _ => self.completion_close(),
+            }
+        }
         if self.help {
             self.help = false;
             return;
@@ -35,6 +76,10 @@ impl Editor {
                 // M-D jumps to the next diagnostic; word motions live on
                 // Alt+Left/Right (Ctrl+Left/Right also work).
                 KeyCode::Char('d') => self.jump_next_diag(),
+                // M-. : jump to the definition under the cursor; M-, unwinds
+                // (stacked).
+                KeyCode::Char('.') => self.jump_definition(),
+                KeyCode::Char(',') => self.jump_back(),
                 // M-| : filter the marked rows through a shell command.
                 KeyCode::Char('|') => self.start_filter(),
                 // M-N: toggle the line-number gutter.
@@ -91,7 +136,7 @@ impl Editor {
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_at(),
             KeyCode::Enter => self.newline(),
-            KeyCode::Tab => self.insert_char('\t'),
+            KeyCode::Tab => self.indent_line(),
             KeyCode::Esc => {
                 if self.bs().mark.is_some() {
                     self.bs_mut().mark = None;

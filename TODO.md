@@ -65,3 +65,65 @@
   `theme()` fallback.
 - [x] lsp: `change()` UTF-16 payload, `poll()` server-request answering.
 - [x] ui: `title_line`, function-bar layout math (pure functions).
+
+## 8. OPEN: completion junk on the repo path (paused 2026-09-08)
+
+Symptom: typing `text.` in rano's own `src/prompt.rs` (~line 86, inside
+`record_history`) pops a *path-fallback* list (`self::`, `crate::`,
+`super::`, locals) instead of `str` members (`is_empty`, …). Same code at
+`/tmp/rano_t` (rsync of the repo, blank line inserted after prompt.rs:88,
+`git init`ed) completes correctly.
+
+Established experimentally (rust-analyzer 1.98.0, 2026-08-18 build):
+- Not edition/let-chains: minimal 2024 files with the same let-chain
+  (prompt.rs:89-93 shape) complete to members.
+- Not the file: full prompt.rs in a scratch crate completes to members.
+- Not Cargo.toml deps: rano's Cargo.toml + minimal src → members.
+- Not `mod ed_tests`, not `.git` (rano_t works with git), not column-0
+  parsing (user's line is indented).
+- Headless `rust-analyzer diagnostics /home/dead/Projects/rano/src/prompt.rs`
+  finishes clean in ~5 s — analysis itself is fine.
+- **Decisive**: two tmux sessions, same rano binary, byte-identical
+  completion requests (position line 88 char 5 in both), 30 s warm-up —
+  `/home/dead/Projects/rano` → junk, `/tmp/rano_t` → members. The junk is
+  server-side and workspace-path-dependent. Raw logs: `/tmp/comp_fail.log`
+  (junk) vs `/tmp/comp_ok.log` (members); rano writes LSP traffic to
+  `$RANO_LSP_RAW` as `[->]`/`[<-]` lines.
+- Earlier "poison line in editor.rs" bisects were confounded by truncation
+  artifacts and timing noise; do not trust them. The timing-race theory
+  (members appear only after ~15-20 s) was also misleading — the real path
+  never flips even after 90 s.
+- RA sends no `$/progress`/`serverStatus` notifications, so readiness can't
+  be observed directly; rano discards RA stderr (lsp.rs:458
+  `Stdio::null()`), so RA logs are currently invisible.
+
+Done this round (uncommitted, gates green: 197 tests + clippy + fmt):
+- `adjust_scroll_x` rewritten with min/max (editor.rs:244) — behaviour
+  equivalent except a degenerate zero-width viewport now clamps to 1.
+- Completion fallback-junk parking + retry: `Editor.completion_retry` /
+  `completion_retries`, dot-context detection (empty prefix after `.`) with
+  `self::`/`crate::`/`super::` label signature, `completion_retry_poll`
+  wired into the main loop (700 ms × 40), test
+  `completion_fallback_junk_parks_popup_and_retries`. Works mechanically
+  (re-requests fire) but cannot fix the repo path while RA answers junk
+  indefinitely there.
+
+Next steps:
+- [ ] Diff the full `[->]` initialize/didOpen streams in comp_fail.log vs
+  comp_ok.log (only completion requests were compared so far) — check
+  `rootUri`, `workspaceFolders`, capabilities.
+- [ ] Capture RA's own logs: point lsp.rs:458 stderr at a file (env is
+  inherited, so `RUST_LOG=info rano …` works once stderr isn't nulled) or
+  drive RA with a small python fake-client script against
+  /home/dead/Projects/rano and watch `RUST_LOG=info`.
+- [ ] Path-isolation tests: copy the repo to /home/dead/Projects/rano2
+  (same parent) and to /home/rano_t2 — does the junk follow the parent
+  dir or the exact path?
+- [ ] Suspect list for the path dependence: flycheck/proc-macro-build
+  contention with the running `target/release/rano` binary inside the
+  analyzed workspace; inotify watch exhaustion on the big target/ dir;
+  RA root/VFS discovery picking up extra roots above /home/dead.
+- [ ] After root cause: keep or retune the retry (cap/interval), decide
+  whether the junk-parking stays as belt-and-braces.
+- [ ] Still pending from earlier rounds: live-verify mouse support
+  (`tmux send-keys -M`); all rounds uncommitted — commit only on request.

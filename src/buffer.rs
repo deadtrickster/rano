@@ -24,7 +24,15 @@ impl Buffer {
             crlf: false,
         }
     }
+}
 
+impl Default for Buffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Buffer {
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
         let text = fs::read_to_string(path)?;
         // detect CRLF before str::lines() strips the \r

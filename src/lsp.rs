@@ -6,7 +6,7 @@
 //! Only the subset rano needs is implemented: initialize/initialized,
 //! didOpen, didChange (full-document sync), publishDiagnostics, shutdown/exit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -30,12 +30,31 @@ pub struct Diagnostic {
     pub severity: u64,
 }
 
+/// One completion choice from `textDocument/completion`. `insert` is the
+/// text to place in the buffer (label, insertText or textEdit.newText, with
+/// snippet placeholders stripped); `kind` is the LSP CompletionItemKind
+/// (0 = unknown), used for the popup's type tag.
+#[derive(Clone, Debug)]
+pub struct CompletionItem {
+    pub label: String,
+    pub kind: u64,
+    pub insert: String,
+    /// Server-defined ranking key (sortText): the popup sorts by it, the
+    /// server's JSON order is not its ranked order.
+    pub sort: String,
+    /// Text the server matched against (filterText): usually the label, but
+    /// can differ (e.g. `self::` items).
+    pub filter: String,
+}
+
 /// Events the reader thread delivers to the editor.
 pub enum LspEvent {
     Diagnostics {
         uri: String,
         diags: Vec<Diagnostic>,
     },
+    /// The result of a `textDocument/completion` request.
+    Completion(Vec<CompletionItem>),
     /// A request the *server* sent us (has a method and an id). The client
     /// must answer it; rano answers with a null result, which is sufficient
     /// for the requests rust-analyzer/gopls/bash-language-server send.
@@ -50,6 +69,12 @@ pub struct LspClient {
     stdin: Box<dyn Write + Send>,
     next_id: u64,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
+    /// ids of in-flight completion requests. Completion is fire-and-forget,
+    /// so the reader needs this set to tell a completion response (or an
+    /// error response) apart from a late answer to a timed-out synchronous
+    /// request — both look "unclaimed", and conflating them desyncs the
+    /// editor's completion queue.
+    completion_ids: Arc<Mutex<HashSet<u64>>>,
     rx: mpsc::Receiver<LspEvent>,
     root_uri: String,
     pub doc_uri: Option<String>,
@@ -123,7 +148,7 @@ pub fn find_project_root(start: &Path, marker: &str) -> PathBuf {
     }
 }
 
-fn path_to_uri(path: &Path) -> String {
+pub(crate) fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     if cfg!(windows) {
         format!("file:///{}", s.replace('\\', "/"))
@@ -197,9 +222,161 @@ fn parse_diagnostics(v: &Value) -> Vec<Diagnostic> {
     out
 }
 
+/// Convert a char column on `line` to LSP's UTF-16 code-unit column.
+pub fn utf16_col(line: &[char], col_chars: usize) -> usize {
+    line.iter().take(col_chars).map(|c| c.len_utf16()).sum()
+}
+
+/// Inverse of `utf16_col`: a UTF-16 code-unit column back to a char column,
+/// clamped to the line length.
+pub fn utf16_to_char(line: &[char], col_utf16: usize) -> usize {
+    let mut u = 0usize;
+    for (i, c) in line.iter().enumerate() {
+        if u >= col_utf16 {
+            return i;
+        }
+        u += c.len_utf16();
+    }
+    line.len()
+}
+
+/// One `textDocument/definition` target: a document URI plus the 0-based
+/// line and UTF-16 column of the definition's start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefLocation {
+    pub uri: String,
+    pub line: u64,
+    pub character: u64,
+}
+
+/// Parse a definition response: a Location, a Location array, a
+/// LocationLink array, or null. Returns the first target.
+fn parse_definition(v: &Value) -> Option<DefLocation> {
+    let candidates: Vec<&Value> = match v {
+        Value::Null => return None,
+        Value::Array(a) => a.iter().collect(),
+        one => vec![one],
+    };
+    for loc in candidates {
+        if let Some(uri) = loc.get("uri").and_then(Value::as_str) {
+            let s = &loc["range"]["start"];
+            return Some(DefLocation {
+                uri: uri.to_string(),
+                line: s["line"].as_u64().unwrap_or(0),
+                character: s["character"].as_u64().unwrap_or(0),
+            });
+        }
+        if let Some(uri) = loc.get("targetUri").and_then(Value::as_str) {
+            let mut s = &loc["targetSelectionRange"]["start"];
+            if s.is_null() {
+                s = &loc["targetRange"]["start"];
+            }
+            return Some(DefLocation {
+                uri: uri.to_string(),
+                line: s["line"].as_u64().unwrap_or(0),
+                character: s["character"].as_u64().unwrap_or(0),
+            });
+        }
+    }
+    None
+}
+
+/// Inverse of `path_to_uri`, which does not percent-encode: a `file://` URI
+/// is just the path with the scheme stripped.
+pub fn uri_to_path(uri: &str) -> PathBuf {
+    let rest = uri.strip_prefix("file://").unwrap_or(uri);
+    let rest = if cfg!(windows) {
+        rest.strip_prefix('/').unwrap_or(rest)
+    } else {
+        rest
+    };
+    PathBuf::from(rest)
+}
+
+/// Flatten an LSP snippet to plain text: `${n:body}` keeps the body, bare
+/// `$n` placeholders vanish, and `\}` / `\$` unescape.
+fn strip_snippet(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => match it.next() {
+                Some(e @ ('}' | '$')) => out.push(e),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '$' => {
+                let rest: String = it.clone().collect();
+                if let Some(rest) = rest.strip_prefix('{') {
+                    if let Some(end) = rest.find('}') {
+                        if let Some((_, inner)) = rest[..end].split_once(':') {
+                            out.push_str(inner);
+                        }
+                        // consume '{' + body + '}'
+                        for _ in 0..end + 2 {
+                            it.next();
+                        }
+                    } else {
+                        out.push('$');
+                    }
+                } else if rest.starts_with(|ch: char| ch.is_ascii_digit()) {
+                    while it.clone().next().is_some_and(|ch| ch.is_ascii_digit()) {
+                        it.next();
+                    }
+                } else {
+                    out.push('$');
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Parse the `result` of a completion request: null, an item array, or a
+/// CompletionList object with an `items` array. `insert` prefers
+/// textEdit.newText, then insertText, then the label; snippets are
+/// flattened to plain text.
+fn parse_completion(v: &Value) -> Vec<CompletionItem> {
+    let arr = match v {
+        Value::Null => return Vec::new(),
+        Value::Array(a) => a.clone(),
+        _ => v["items"].as_array().cloned().unwrap_or_default(),
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for it in arr {
+        let label = it["label"].as_str().unwrap_or("").to_string();
+        if label.is_empty() {
+            continue;
+        }
+        let insert = it["textEdit"]["newText"]
+            .as_str()
+            .or_else(|| it["insertText"].as_str())
+            .unwrap_or(&label)
+            .to_string();
+        let insert = if it["insertTextFormat"].as_u64() == Some(2) {
+            strip_snippet(&insert)
+        } else {
+            insert
+        };
+        out.push(CompletionItem {
+            filter: it["filterText"].as_str().unwrap_or(&label).to_string(),
+            sort: it["sortText"].as_str().unwrap_or(&label).to_string(),
+            label,
+            kind: it["kind"].as_u64().unwrap_or(0),
+            insert,
+        });
+    }
+    out
+}
+
 fn spawn_reader(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
+    completion_ids: Arc<Mutex<HashSet<u64>>>,
     tx: mpsc::Sender<LspEvent>,
 ) {
     std::thread::spawn(move || {
@@ -225,11 +402,21 @@ fn spawn_reader(
                     // Other notifications (logMessage, showMessage, progress)
                     // are not surfaced yet.
                 }
-                // A response to one of our requests (id, no method).
+                // A response to one of our requests (id, no method). Requests
+                // with a pending waiter are synchronous (handshake, shutdown);
+                // everything else rano sends fire-and-forget is completion.
                 (None, Some(i)) => {
-                    if let Some(tx) = pending.lock().ok().and_then(|m| m.get(&i).cloned()) {
+                    let waiter = pending.lock().ok().and_then(|m| m.get(&i).cloned());
+                    if let Some(tx) = waiter {
                         let _ = tx.send(v.get("result").cloned().unwrap_or(Value::Null));
+                    } else if completion_ids.lock().ok().is_some_and(|mut s| s.remove(&i)) {
+                        // A completion answer: a result, null, or an error —
+                        // each consumes exactly one queued request.
+                        let items = v.get("result").map(parse_completion).unwrap_or_default();
+                        let _ = tx.send(LspEvent::Completion(items));
                     }
+                    // Anything else is a late answer to a timed-out
+                    // synchronous request: ignore.
                 }
                 (None, None) => {}
             }
@@ -276,14 +463,16 @@ impl LspClient {
         let stdout: ChildStdout = child.stdout.take().unwrap();
         let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let completion_ids: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
         let (tx, rx) = mpsc::channel();
-        spawn_reader(stdout, pending.clone(), tx);
+        spawn_reader(stdout, pending.clone(), completion_ids.clone(), tx);
 
         let mut client = Self {
             child,
             stdin: Box::new(BufWriter::new(stdin)),
             next_id: 1,
             pending,
+            completion_ids,
             rx,
             root_uri: path_to_uri(root),
             doc_uri: Some(path_to_uri(doc)),
@@ -418,6 +607,51 @@ impl LspClient {
         out
     }
 
+    /// Fire-and-forget `textDocument/completion`. The response arrives as
+    /// `LspEvent::Completion` (the reader routes responses without a pending
+    /// waiter there); completion is rano's only async request kind.
+    pub fn request_completion(&mut self, uri: &str, line: u64, character: u64) {
+        if !self.initialized {
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        if let Ok(mut s) = self.completion_ids.lock() {
+            s.insert(id);
+        }
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }
+        });
+        let _ = write_message(self.stdin.as_mut(), &msg);
+    }
+
+    /// Synchronous `textDocument/definition`. Returns the first location,
+    /// or None when the server answers null / an empty list.
+    pub fn definition(
+        &mut self,
+        uri: &str,
+        line: u64,
+        character: u64,
+        timeout: Duration,
+    ) -> Result<Option<DefLocation>, String> {
+        if !self.initialized {
+            return Ok(None);
+        }
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character }
+        });
+        let (id, rx) = self.request("textDocument/definition", params);
+        let result = self.wait(id, rx, timeout)?;
+        Ok(parse_definition(&result))
+    }
+
     /// Send a JSON-RPC response to a server-initiated request.
     fn respond(&mut self, id: u64, result: Value) {
         let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
@@ -468,6 +702,111 @@ mod tests {
         let root = find_project_root(&deep, "Cargo.toml");
         assert_eq!(root, base);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn parses_completion_variants() {
+        // Plain item array: snippet insertText, bare label, textEdit.
+        let v = json!([
+            { "label": "println!", "kind": 3, "insertTextFormat": 2, "insertText": "println!($0)" },
+            { "label": "x", "kind": 6 },
+            { "label": "y", "textEdit": { "range": {}, "newText": "y()" } }
+        ]);
+        let items = parse_completion(&v);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].insert, "println!()");
+        assert_eq!(items[0].kind, 3);
+        assert_eq!(items[1].insert, "x");
+        assert_eq!(items[2].insert, "y()");
+
+        // CompletionList object.
+        let v = json!({ "isIncomplete": true, "items": [ { "label": "z" } ] });
+        let items = parse_completion(&v);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "z");
+
+        assert!(parse_completion(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn strips_snippets() {
+        assert_eq!(strip_snippet("foo($0)"), "foo()");
+        assert_eq!(strip_snippet("foo(${1:x}, ${2:y})"), "foo(x, y)");
+        assert_eq!(strip_snippet("f($1)"), "f()");
+        assert_eq!(strip_snippet("a\\}b\\$c"), "a}b$c");
+        assert_eq!(
+            strip_snippet("$HOME"),
+            "$HOME",
+            "non-placeholder $ survives"
+        );
+    }
+
+    #[test]
+    fn utf16_cols() {
+        assert_eq!(utf16_col(&['a', 'b'], 2), 2);
+        assert_eq!(utf16_col(&['a', '𝕏', 'b'], 3), 4, "𝕏 is 2 UTF-16 units");
+        assert_eq!(utf16_col(&['a'], 5), 1);
+    }
+
+    #[test]
+    fn utf16_to_char_roundtrip() {
+        let line: Vec<char> = "a𝕏b".chars().collect();
+        assert_eq!(utf16_to_char(&line, 0), 0);
+        assert_eq!(utf16_to_char(&line, 1), 1);
+        assert_eq!(
+            utf16_to_char(&line, 2),
+            2,
+            "utf16 offsets never land mid-char; clamp forward"
+        );
+        assert_eq!(utf16_to_char(&line, 3), 2);
+        assert_eq!(utf16_to_char(&line, 4), 3);
+        assert_eq!(utf16_to_char(&line, 99), 3, "past EOL clamps");
+        assert_eq!(utf16_to_char(&line, utf16_col(&line, 2)), 2);
+    }
+
+    #[test]
+    fn parses_definition_shapes() {
+        // A single Location.
+        let loc = json!({
+            "uri": "file:///x/y.rs",
+            "range": { "start": { "line": 3, "character": 7 }, "end": {} }
+        });
+        assert_eq!(
+            parse_definition(&loc),
+            Some(DefLocation {
+                uri: "file:///x/y.rs".into(),
+                line: 3,
+                character: 7
+            })
+        );
+        // An array picks the first.
+        let arr = json!([loc, {
+            "uri": "file:///other.rs",
+            "range": { "start": { "line": 9, "character": 0 } }
+        }]);
+        assert_eq!(parse_definition(&arr).unwrap().line, 3);
+        // LocationLink uses targetUri + targetSelectionRange.
+        let link = json!([{
+            "targetUri": "file:///z.rs",
+            "targetSelectionRange": { "start": { "line": 1, "character": 4 } }
+        }]);
+        assert_eq!(
+            parse_definition(&link),
+            Some(DefLocation {
+                uri: "file:///z.rs".into(),
+                line: 1,
+                character: 4
+            })
+        );
+        // null and junk.
+        assert_eq!(parse_definition(&json!(null)), None);
+        assert_eq!(parse_definition(&json!("nope")), None);
+    }
+
+    #[test]
+    fn uri_path_roundtrip() {
+        let p = std::path::Path::new("/home/u/my file.rs");
+        assert_eq!(uri_to_path(&path_to_uri(p)), p);
     }
 
     #[test]
@@ -552,6 +891,7 @@ mod tests {
             stdin: Box::new(SharedBuf(buf)),
             next_id: 1,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            completion_ids: Arc::new(Mutex::new(HashSet::new())),
             rx,
             root_uri: "file:///tmp".into(),
             doc_uri: None,

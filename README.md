@@ -46,6 +46,8 @@ prints the version; `--help` / `-h` prints usage.
 | `M-]` | Jump to matching bracket |
 | `^/` / `F11` | Go to line |
 | `M-D` | Jump to next diagnostic (wraps) |
+| `M-.` | Jump to definition (LSP) |
+| `M-,` | Jump back (stacked — one press per jump) |
 | `M-N` | Toggle line-number gutter |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
 | `M-<` / `M->` | Previous / next buffer |
@@ -57,8 +59,15 @@ prints the version; `--help` / `-h` prints usage.
 
 Movement: arrows, `Home`, `End`, `PgUp`, `PgDn`, `^P`/`^N` (line), `^E` (end
 of line), `Alt+Left`/`Alt+Right` or `Ctrl+Left`/`Ctrl+Right` (word), `◂`/`▸`
-for back/forward in prompts. Editing: `Enter`, `Backspace`, `Delete`, `Tab`.
-`Esc` clears an active mark or cancels a prompt (`^G` also cancels prompts).
+for back/forward in prompts. Mouse: left click moves the cursor (and starts
+a selection), left drag extends it, the wheel scrolls the view (the cursor
+stays put unless the scroll would push it out of sight). Editing: `Enter`,
+`Backspace`, `Delete`, `Tab`.
+`Tab` follows the buffer's own indent style: space-indented files get spaces
+up to the next unit boundary (the unit is detected from the file — e.g.
+rano's own 4-space source), tab-indented files get a tab char; `Backspace`
+on leading whitespace eats a whole unit. `Esc` clears an active mark or
+cancels a prompt (`^G` also cancels prompts).
 
 Prompts: `Up`/`Down` cycle history (search, exec, and filename prompts keep
 separate histories), `Tab` completes file names, `~` expands to `$HOME` in
@@ -73,8 +82,8 @@ edit.
 
 ```toml
 tab_width = 8      # 1..=16, tab rendering + horizontal scrolling
-auto_indent = false
-line_numbers = false
+auto_indent = true
+line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
 ```
 
@@ -84,14 +93,30 @@ Unknown keys are ignored; out-of-range values fall back to the defaults.
 
 - The look follows nano's default theme: an inverted title bar (name,
   centered file name + ` *` when modified, `[i/n]` buffer position), an
-  inverted status line (centered messages, right-aligned prompts), and a
-  two-line inverted function bar. The bar, the help overlay, and their key
-  labels are all generated from one binding table, so they cannot drift.
+  inverted status line (centered messages, right-aligned prompts, and the
+  cursor's `Ln X, Col Y` at the right edge when idle), and a two-line
+  inverted function bar. The bar, the help overlay, and their key labels
+  are all generated from one binding table, so they cannot drift.
 - Syntax highlighting via tree-sitter for Rust, Go, Bash, Python, C and JSON,
   detected by file extension. Scratch buffers are not highlighted. Search
   matches, the selection, and diagnostics take priority over highlight
   colors (diagnostics underline the offending range in red/yellow/blue; the
   line-number gutter colors diagnostic rows the same way).
+- Syntax errors are visible without a language server: tree-sitter `ERROR`
+  and missing nodes become red diagnostics on every re-parse. Zero-width
+  LSP diagnostics (rust-analyzer's insertion-point errors) are widened to
+  one visible column. Language servers only fully engage inside a supported
+  project (e.g. a `Cargo.toml` for rust-analyzer); standalone files get
+  tree-sitter feedback only.
+- Live completion (LSP): typing an identifier, or `.` / `::` after one,
+  requests `textDocument/completion` and shows a popup below the word
+  (above it near the bottom). The server's own filtered, relevance-ordered
+  list is shown as-is in an 8-row scrolling window — fuzzy matches keep
+  the server's ranking. `Up`/`Down` or `^P`/`^N` pick, `Enter` or `Tab`
+  insert, `Esc` dismisses; typing and Backspace keep it open. The document
+  is synced to the server before each request, each response is matched to
+  the keystroke that asked for it (late answers for older typing are
+  dropped), and snippet placeholders are flattened to plain text.
 - LSP: when a language server is on `$PATH` (rust-analyzer, gopls,
   bash-language-server, pylsp, clangd, vscode-json-language-server), rano
   starts it in the background, syncs changes with 300 ms debounce, and shows

@@ -51,6 +51,22 @@ fn bar_items() -> Vec<(&'static str, &'static str)> {
 
 /// Gutter columns for a buffer of `rows` lines: right-aligned number plus one
 /// trailing space, minimum two digits.
+/// Short type tag for a completion row, from the LSP CompletionItemKind.
+pub(crate) fn kind_tag(kind: u64) -> &'static str {
+    match kind {
+        2..=4 => "fn",
+        5 | 10 => "fld",
+        6 => "var",
+        7 | 13 | 22 | 25 => "typ",
+        8 => "trt",
+        9 => "mod",
+        12 | 21 => "const",
+        14 => "kw",
+        20 => "enm",
+        _ => "",
+    }
+}
+
 pub(crate) fn gutter_width(rows: usize) -> usize {
     std::cmp::max(2, rows.to_string().len()) + 1
 }
@@ -68,6 +84,22 @@ pub(crate) fn display_width(chars: &[char], tab_width: usize) -> usize {
         }
     }
     w
+}
+
+/// Inverse of `display_col`: the char index whose cell contains display
+/// column `disp`. Clicking past the end of the line lands on the line
+/// length; clicking inside a tab lands on the tab itself.
+pub(crate) fn char_at_display(line: &[char], disp: usize, tab_width: usize) -> usize {
+    let tw = tab_width.max(1);
+    let mut w = 0usize;
+    for (i, &c) in line.iter().enumerate() {
+        let cw = if c == '\t' { tw - (w % tw) } else { 1 };
+        if w + cw > disp {
+            return i;
+        }
+        w += cw;
+    }
+    line.len()
 }
 
 /// Display col of char index `col` within `line` (col clamped to line len).
@@ -191,9 +223,9 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 " ".repeat(g)
             };
             // D6: rows with diagnostics carry their severity's color (the
-            // most severe diagnostic on the line wins).
-            let fg = match bs
-                .lsp_diags
+            // most severe wins; the list merges tree-sitter + LSP diags).
+            let diags = ed.all_diags();
+            let fg = match diags
                 .iter()
                 .filter(|d| d.line == r)
                 .map(|d| d.severity)
@@ -232,6 +264,61 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         Rect::new(g as u16, 1, view_w as u16, text_h as u16),
     );
 
+    // ---- completion popup (LSP) ----
+    // A small unadorned block below the word being completed (above it when
+    // near the bottom); the selected row is reversed, nano-style.
+    if let Some(p) = &ed.completion
+        && !p.items.is_empty()
+    {
+        let vis = p.items.len().min(8);
+        let label_w = p
+            .items
+            .iter()
+            .map(|it| it.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(40);
+        let w = (label_w + 6).clamp(10, (width as usize).min(60));
+        let drow = p.row as i64 - bs.scroll as i64;
+        let vis_i = vis as i64;
+        // Text rows start at pane row 1 (title offset): the word sits on
+        // pane row drow+1, the popup goes just below it (or above when the
+        // bottom would clip).
+        let word_pane = drow + 1;
+        let y0 = if word_pane + vis_i <= text_h as i64 {
+            word_pane + 1
+        } else {
+            word_pane - vis_i
+        };
+        if y0 >= 1 && y0 + vis_i - 1 <= text_h as i64 {
+            let line = bs.buf.lines.get(p.row).map(Vec::as_slice).unwrap_or(&[]);
+            let disp = display_col(line, p.col, ed.tab_width);
+            let x = (g + disp.saturating_sub(bs.scroll_x)) as u16;
+            let x = x.min(width.saturating_sub(w as u16));
+            // Keep the selected row inside an 8-row window.
+            let start = if p.items.len() > vis {
+                (p.sel + 1).saturating_sub(vis).min(p.items.len() - vis)
+            } else {
+                0
+            };
+            for i in 0..vis {
+                let it = &p.items[start + i];
+                let label: String = it.label.chars().take(label_w).collect();
+                let pad = w - 2 - label.chars().count() - kind_tag(it.kind).len();
+                let style = if i + start == p.sel {
+                    rev()
+                } else {
+                    Style::default()
+                };
+                let text = format!(" {label}{}{}", " ".repeat(pad), kind_tag(it.kind));
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(text, style))),
+                    Rect::new(x, y0 as u16 + i as u16, w as u16, 1),
+                );
+            }
+        }
+    }
+
     // ---- status line (row height-3) ----
     // nano (winio.c:statusline): the prompt bar is a full reverse strip with
     // the label and answer left-aligned at column 0; a plain message sits
@@ -248,22 +335,36 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             ))),
             Rect::new(0, status_row, width, 1),
         );
-    } else if let Some(msg) = ed.status_text() {
-        // nano centers the message and wraps it in "[ ... ]" when it fits
-        // with room to spare (start_col > 1); only the text is reversed.
-        let len = msg.chars().count();
-        let start = (width as usize).saturating_sub(len) / 2;
-        let (text, pos) = if start > 1 {
-            (format!("[ {} ]", msg), start - 2)
-        } else {
-            (msg.clone(), start)
-        };
+    } else {
+        // Outside prompts the cursor position sits at the right edge of the
+        // status row (1-based); transient messages and the LSP summary are
+        // centered in the space left of it. nano centers the message and
+        // wraps it in "[ ... ]" when it fits with room to spare (start_col
+        // > 1); only the text is reversed.
+        let cur = &ed.bs().cursor;
+        let pos_txt = format!("Ln {}, Col {}", cur.row + 1, cur.col + 1);
+        let pos_w = pos_txt.chars().count();
+        if let Some(msg) = ed.status_text() {
+            let avail = (width as usize).saturating_sub(pos_w + 1);
+            let len = msg.chars().count();
+            let start = avail.saturating_sub(len) / 2;
+            let (text, pos) = if start > 1 {
+                (format!("[ {msg} ]"), start - 2)
+            } else {
+                (msg.clone(), start)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(" ".repeat(pos)),
+                    Span::styled(text, rev()),
+                ])),
+                Rect::new(0, status_row, (avail as u16).max(1), 1),
+            );
+        }
+        let x = (width as usize).saturating_sub(pos_w);
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(" ".repeat(pos)),
-                Span::styled(text, rev()),
-            ])),
-            Rect::new(0, status_row, width, 1),
+            Paragraph::new(Line::from(Span::raw(pos_txt))),
+            Rect::new(x as u16, status_row, pos_w as u16, 1),
         );
     }
 
@@ -570,6 +671,80 @@ mod tests {
     }
 
     #[test]
+    fn completion_popup_draws_with_selection() {
+        let mut e = ed("pri\n");
+        e.completion = Some(crate::editor::CompletionPopup {
+            items: vec![
+                crate::lsp::CompletionItem {
+                    label: "print!".into(),
+                    kind: 3,
+                    insert: "print!".into(),
+                    sort: "print!".into(),
+                    filter: "print!".into(),
+                },
+                crate::lsp::CompletionItem {
+                    label: "println!".into(),
+                    kind: 3,
+                    insert: "println!".into(),
+                    sort: "println!".into(),
+                    filter: "println!".into(),
+                },
+            ],
+            sel: 1,
+            row: 0,
+            col: 0,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .collect()
+        };
+        // The popup sits below the word's row (text starts at pane row 1):
+        // item 0 at y=2, item 1 at y=3.
+        assert!(row(2).contains("print!"));
+        assert!(row(3).contains("println!"));
+        // The selected row carries reverse video (popup starts at x = gutter).
+        let cell = buf.cell((3, 3)).unwrap();
+        assert!(
+            cell.style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        // The fn kind tag renders at the row's right edge.
+        assert!(row(2).contains("fn"));
+    }
+
+    #[test]
+    fn idle_status_row_shows_cursor_position() {
+        let mut e = ed("hello\nworld\n");
+        e.bs_mut().cursor = Pos { row: 1, col: 3 };
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .collect()
+        };
+        // Status row = height-3 = 21: "Ln 2, Col 4" right-aligned.
+        assert!(row(21).ends_with("Ln 2, Col 4"), "row21={:?}", row(21));
+        // A transient message centers left of it; both are visible.
+        e.flash("saved");
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .collect()
+        };
+        assert!(row(21).contains("saved"));
+        assert!(row(21).ends_with("Ln 2, Col 4"), "row21={:?}", row(21));
+    }
+
+    #[test]
     fn function_bar_layout_at_width_80() {
         // nano's algorithm: total = min(29, ((80+40)/20)*2) = 12 items,
         // per_row 6, itemw 13, column-major (item 1 lands bottom-left).
@@ -657,7 +832,8 @@ mod tests {
 
     #[test]
     fn draw_no_gutter_text_at_x0() {
-        let e = ed("aa\nbb");
+        let mut e = ed("aa\nbb");
+        e.show_line_numbers = false;
         let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
         terminal.draw(|f| draw(f, &e)).unwrap();
         let buf = terminal.backend().buffer();

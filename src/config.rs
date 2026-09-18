@@ -10,6 +10,7 @@ pub struct Config {
     pub auto_indent: bool,
     pub line_numbers: bool,
     pub multibuffer: bool,
+    pub wrap: bool,
 }
 
 impl Default for Config {
@@ -19,6 +20,7 @@ impl Default for Config {
             auto_indent: true,
             line_numbers: true,
             multibuffer: false,
+            wrap: true,
         }
     }
 }
@@ -88,6 +90,11 @@ fn parse_config(text: &str) -> Config {
                     cfg.multibuffer = b;
                 }
             }
+            "wrap" => {
+                if let Some(b) = parse_bool(value) {
+                    cfg.wrap = b;
+                }
+            }
             _ => {}
         }
     }
@@ -134,6 +141,17 @@ mod tests {
     fn invalid_values_keep_defaults() {
         let cfg = parse_config("tab_width = abc\nauto_indent = yes\nline_numbers = 1");
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn wrap_defaults_on_and_parses() {
+        assert!(Config::default().wrap, "soft wrap defaults to on (nano)");
+        assert!(!parse_config("wrap = false").wrap);
+        assert!(parse_config("wrap = true").wrap);
+        assert!(
+            parse_config("wrap = bogus").wrap,
+            "bad value keeps the default"
+        );
     }
 
     #[test]

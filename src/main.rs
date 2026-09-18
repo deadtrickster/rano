@@ -63,7 +63,16 @@ pub struct BufferState {
     /// Single active async ^T job (D7): spawn, poll, insert stdout.
     pub exec_job: Option<exec::ExecJob>,
     /// Horizontal scroll of the text window, in DISPLAY cols (E3/F2).
+    /// Always 0 while soft wrap is on (lines wrap instead of scrolling).
     pub scroll_x: usize,
+    /// Soft-wrap visual-row table (M-\): `wrap_prefix[r]` is the visual row
+    /// where buffer row `r` begins (len = lines.len() + 1, strictly
+    /// increasing — every row occupies at least one visual row). Valid only
+    /// while `wrap_key` matches the buffer's (edit_gen, view_w).
+    pub wrap_prefix: Vec<usize>,
+    pub(crate) wrap_key: (u64, usize),
+    /// Bumped on every edit; part of the wrap_prefix freshness key.
+    pub(crate) edit_gen: u64,
     pub(crate) undo: VecDeque<UndoStep>,
     redo: VecDeque<UndoStep>,
     pending: Option<UndoStep>,
@@ -96,6 +105,9 @@ impl BufferState {
             search_matches: None,
             exec_job: None,
             scroll_x: 0,
+            wrap_prefix: Vec::new(),
+            wrap_key: (0, 0),
+            edit_gen: 0,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             pending: None,
@@ -1362,6 +1374,7 @@ mod ed_tests {
     #[test]
     fn scroll_x_follows_cursor() {
         let mut ed = test_ed(&"a".repeat(40));
+        ed.wrap = false; // horizontal scrolling needs wrap off
         ed.show_line_numbers = false;
         ed.text_w = 10;
         press(&mut ed, KeyCode::End, KeyModifiers::NONE);
@@ -1376,6 +1389,7 @@ mod ed_tests {
     fn scroll_x_with_tabs() {
         // cursor col 3 → display col 9; 9 >= 0 + 4 → scroll_x = 9 + 1 - 4
         let mut ed = test_ed("a\tb");
+        ed.wrap = false; // horizontal scrolling needs wrap off
         ed.show_line_numbers = false;
         ed.text_w = 4;
         press(&mut ed, KeyCode::End, KeyModifiers::NONE);
@@ -1393,6 +1407,202 @@ mod ed_tests {
         assert!(!ed.show_line_numbers);
         press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
         assert!(ed.show_line_numbers);
+    }
+
+    // M-\ — soft line wrap: scroll, motion and mouse work in VISUAL rows.
+
+    #[test]
+    fn m_backslash_toggles_wrap() {
+        let mut ed = test_ed("hi");
+        assert!(ed.wrap, "soft wrap defaults to on (nano)");
+        press(&mut ed, KeyCode::Char('\\'), KeyModifiers::ALT);
+        assert!(!ed.wrap);
+        press(&mut ed, KeyCode::Char('\\'), KeyModifiers::ALT);
+        assert!(ed.wrap);
+    }
+
+    #[test]
+    fn wrap_prefix_counts_visual_rows() {
+        // view_w 10: row 0 (25 cols) → 3 visual rows, row 1 (5) → 1,
+        // row 2 (15) → 2.
+        let mut ed = test_ed(&format!(
+            "{}\n{}\n{}",
+            "a".repeat(25),
+            "b".repeat(5),
+            "c".repeat(15)
+        ));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.ensure_wrap_prefix();
+        assert_eq!(ed.bs().wrap_prefix, vec![0, 3, 4, 6]);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 0 }), 0);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 9 }), 0);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 10 }), 1);
+        assert_eq!(ed.visual_pos(Pos { row: 2, col: 14 }), 5);
+        assert_eq!(ed.buf_row_of_visual(2), (0, 2));
+        assert_eq!(ed.buf_row_of_visual(3), (1, 0));
+        assert_eq!(ed.buf_row_of_visual(5), (2, 1));
+        assert_eq!(
+            ed.buf_row_of_visual(99),
+            (2, 1),
+            "clamped to the last visual row"
+        );
+    }
+
+    #[test]
+    fn wrap_prefix_rebuilds_on_edit() {
+        let mut ed = test_ed("aaaa");
+        ed.show_line_numbers = false;
+        ed.text_w = 5;
+        ed.ensure_wrap_prefix();
+        assert_eq!(ed.bs().wrap_prefix, vec![0, 1]);
+        ed.bs_mut().cursor = Pos { row: 0, col: 4 };
+        ed.insert_char('b'); // "aaaab" — 5 cols, still one visual row
+        ed.insert_char('c'); // "aaaabc" — 6 cols, two visual rows
+        ed.ensure_wrap_prefix();
+        assert_eq!(ed.bs().wrap_prefix, vec![0, 2]);
+    }
+
+    #[test]
+    fn wrap_disables_horizontal_scroll() {
+        let mut ed = test_ed(&"a".repeat(40));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.bs_mut().cursor = Pos { row: 0, col: 40 };
+        ed.adjust_scroll_x();
+        assert_eq!(
+            ed.bs().scroll_x,
+            0,
+            "wrap on: lines wrap, no sideways scroll"
+        );
+        ed.wrap = false;
+        ed.adjust_scroll_x();
+        assert_eq!(ed.bs().scroll_x, 31);
+    }
+
+    #[test]
+    fn adjust_scroll_keeps_cursor_visible_with_wrap() {
+        // 10 rows × 30 cols, view 10 wide → 3 visual rows per row, 30 total.
+        let text: String = (0..10)
+            .map(|i| format!("{}{}\n", i, "a".repeat(29)))
+            .collect();
+        let mut ed = test_ed(&text);
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.text_h = 6;
+        ed.bs_mut().cursor = Pos { row: 5, col: 29 }; // visual row 5*3 + 2 = 17
+        ed.adjust_scroll(ed.text_h);
+        // max_scroll = 30 - 6 = 24; scroll = 17 - 6 + 1 = 12
+        assert_eq!(ed.bs().scroll, 12);
+    }
+
+    #[test]
+    fn wheel_scrolls_visual_rows_with_wrap() {
+        let text: String = (0..10)
+            .map(|i| format!("{}{}\n", i, "a".repeat(29)))
+            .collect();
+        let mut ed = test_ed(&text);
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.text_h = 6;
+        // 30 visual rows; the cursor (visual 0) is pinned to the top edge.
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 3);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 1, col: 0 },
+            "pinned to the viewport top"
+        );
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 6);
+        assert_eq!(ed.bs().cursor, Pos { row: 2, col: 0 });
+    }
+
+    #[test]
+    fn move_up_down_cross_wrap_segments() {
+        let mut ed = test_ed(&format!("{}\n{}", "a".repeat(25), "b".repeat(5)));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        // row 0 occupies visual rows 0..3; the cursor starts on row 1 (visual 3).
+        ed.bs_mut().cursor = Pos { row: 1, col: 2 };
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 0, col: 22 },
+            "up: same col on the visual row above"
+        );
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 12 });
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 0, col: 2 },
+            "top of the buffer: no move"
+        );
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 12 });
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 22 });
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 1, col: 2 },
+            "down: crosses into the next buffer row"
+        );
+    }
+
+    #[test]
+    fn home_end_use_visual_rows_with_wrap() {
+        let mut ed = test_ed(&"a".repeat(25));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.bs_mut().cursor = Pos { row: 0, col: 15 }; // visual row 1
+        press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 0, col: 10 },
+            "Home = start of the visual row"
+        );
+        press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 0, col: 20 },
+            "End = end of the visual row"
+        );
+    }
+
+    #[test]
+    fn page_keys_move_visual_rows_with_wrap() {
+        let text: String = (0..10)
+            .map(|i| format!("{}{}\n", i, "a".repeat(29)))
+            .collect();
+        let mut ed = test_ed(&text);
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.text_h = 6;
+        ed.bs_mut().cursor = Pos { row: 5, col: 0 }; // visual row 15
+        press(&mut ed, KeyCode::PageUp, KeyModifiers::NONE);
+        // step 5 → visual row 10 = row 3, segment 1, col 0 → char col 10
+        assert_eq!(ed.bs().cursor, Pos { row: 3, col: 10 });
+        press(&mut ed, KeyCode::PageDown, KeyModifiers::NONE);
+        // back to visual row 15 = row 5, segment 0
+        assert_eq!(ed.bs().cursor, Pos { row: 5, col: 0 });
+    }
+
+    #[test]
+    fn mouse_pos_maps_visual_rows_with_wrap() {
+        let mut ed = test_ed(&format!("{}\n{}", "a".repeat(25), "b".repeat(5)));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.text_h = 10;
+        // pane row 2 = visual row 1 = row 0, segment 1; col 3 → display col 13.
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 3)));
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 13 });
+        // pane row 4 = visual row 3 = row 1, segment 0.
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 4, 2)));
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
     }
 
     // D6 — tick_status reports whether it cleared visible state.
@@ -1421,6 +1631,7 @@ mod ed_tests {
         };
         let mut ed = Editor::new(buf, cfg);
         assert_eq!(ed.tab_width, 4);
+        ed.wrap = false; // horizontal scrolling needs wrap off
         ed.show_line_numbers = false;
         ed.text_w = 4;
         ed.bs_mut().cursor = Pos { row: 0, col: 3 };

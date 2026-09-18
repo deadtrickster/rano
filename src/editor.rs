@@ -79,9 +79,13 @@ pub struct Editor {
     pub tab_width: usize,
     /// Line-number gutter toggle (M-N; seeded from config, F1).
     pub show_line_numbers: bool,
-    /// Startup config (F1). tab_width/show_line_numbers seed from it; the
-    /// M-N toggle stays runtime-only (no config write-back). `multibuffer`
-    /// is unused until F8.
+    /// Soft line wrap toggle (M-\; seeded from config, F1). When on, long
+    /// lines wrap at the viewport edge, `bs.scroll` counts VISUAL rows, and
+    /// horizontal scrolling is disabled (scroll_x stays 0).
+    pub wrap: bool,
+    /// Startup config (F1). tab_width/show_line_numbers/wrap seed from it;
+    /// the M-N / M-\ toggles stay runtime-only (no config write-back).
+    /// `multibuffer` is unused until F8.
     pub config: config::Config,
     /// Prompt history per kind (E4b). Session-global: survives buffer
     /// switches and prompt close/reopen.
@@ -173,6 +177,7 @@ impl Editor {
     pub(crate) fn new(buf: Buffer, config: config::Config) -> Self {
         let tab_width = config.tab_width;
         let show_line_numbers = config.line_numbers;
+        let wrap = config.wrap;
         let mut ed = Self {
             buffers: vec![BufferState::new(buf)],
             cur: 0,
@@ -194,6 +199,7 @@ impl Editor {
             text_h: 24,
             tab_width,
             show_line_numbers,
+            wrap,
             config,
             search_hist: Vec::new(),
             exec_hist: Vec::new(),
@@ -235,6 +241,24 @@ impl Editor {
         if text_h == 0 {
             return;
         }
+        if self.wrap {
+            // M-\: scroll counts VISUAL rows; the cursor's visual row must
+            // stay inside [scroll, scroll + text_h).
+            self.ensure_wrap_prefix();
+            let bs = self.bs();
+            let total = bs.wrap_prefix.last().copied().unwrap_or(0);
+            let max_scroll = total.saturating_sub(text_h);
+            let cv = self.visual_pos(bs.cursor);
+            let mut scroll = bs.scroll.min(max_scroll);
+            if cv < scroll {
+                scroll = cv;
+            }
+            if cv >= scroll + text_h {
+                scroll = cv - text_h + 1;
+            }
+            self.bs_mut().scroll = scroll.min(max_scroll);
+            return;
+        }
         let bs = self.bs_mut();
         if bs.cursor.row < bs.scroll {
             bs.scroll = bs.cursor.row;
@@ -249,7 +273,12 @@ impl Editor {
     /// E3: keep the cursor's display column inside the horizontal window.
     /// scroll_x and the viewport width are both in display cols; the
     /// viewport excludes the gutter when line numbers are shown (F4).
+    /// M-\: with soft wrap on, lines wrap instead of scrolling sideways.
     pub(crate) fn adjust_scroll_x(&mut self) {
+        if self.wrap {
+            self.bs_mut().scroll_x = 0;
+            return;
+        }
         let gutter = if self.show_line_numbers {
             ui::gutter_width(self.bs().buf.lines.len())
         } else {
@@ -265,6 +294,78 @@ impl Editor {
         bs.scroll_x = bs.scroll_x.min(ui::display_width(line, tab_width));
     }
 
+    // ---------- soft wrap (M-\) ----------
+
+    /// Width of the text viewport in display cols (gutter excluded).
+    pub(crate) fn view_w(&self) -> usize {
+        let g = if self.show_line_numbers {
+            ui::gutter_width(self.bs().buf.lines.len())
+        } else {
+            0
+        };
+        self.text_w.saturating_sub(g).max(1)
+    }
+
+    /// Rebuild the visual-row prefix table when the buffer or the wrap
+    /// width changed since the last build. No-op when wrap is off.
+    pub(crate) fn ensure_wrap_prefix(&mut self) {
+        if !self.wrap {
+            return;
+        }
+        let vw = self.view_w();
+        let key = (self.bs().edit_gen, vw);
+        let fresh = self.bs().wrap_key == key
+            && self.bs().wrap_prefix.len() == self.bs().buf.lines.len() + 1;
+        if fresh {
+            return;
+        }
+        let mut prefix = Vec::with_capacity(self.bs().buf.lines.len() + 1);
+        prefix.push(0);
+        for line in &self.bs().buf.lines {
+            // A tab's width depends on the ABSOLUTE display col, which does
+            // not reset at wrap boundaries, so the full-line width is
+            // exactly the sum of the segment widths.
+            let w = ui::display_width(line, self.tab_width);
+            prefix.push(*prefix.last().unwrap() + w.div_ceil(vw).max(1));
+        }
+        let bs = self.bs_mut();
+        bs.wrap_prefix = prefix;
+        bs.wrap_key = key;
+    }
+
+    /// Visual row containing position `p` (wrap on only).
+    pub(crate) fn visual_pos(&self, p: Pos) -> usize {
+        let bs = self.bs();
+        let r = p.row.min(bs.buf.lines.len().saturating_sub(1));
+        let line = &bs.buf.lines[r];
+        let vw = self.view_w();
+        bs.wrap_prefix.get(r).copied().unwrap_or(0)
+            + ui::display_col(line, p.col, self.tab_width) / vw
+    }
+
+    /// (buffer row, wrap segment) of visual row `v`, clamped to the buffer
+    /// (wrap on only).
+    pub(crate) fn buf_row_of_visual(&self, v: usize) -> (usize, usize) {
+        let bs = self.bs();
+        if bs.wrap_prefix.is_empty() {
+            return (0, 0);
+        }
+        let total = bs.wrap_prefix.last().copied().unwrap_or(0);
+        let v = v.min(total.saturating_sub(1));
+        // wrap_prefix is strictly increasing, so the search is exact.
+        let r = match bs.wrap_prefix.binary_search(&v) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let r = r.min(bs.buf.lines.len().saturating_sub(1));
+        (r, v - bs.wrap_prefix[r])
+    }
+
+    /// Char col of display col `d` on buffer row `r` (clamped to EOL).
+    fn col_at_disp(&self, r: usize, d: usize) -> usize {
+        ui::char_at_display(&self.bs().buf.lines[r], d, self.tab_width)
+    }
+
     pub(crate) fn edit_invalidate(&mut self) {
         let bs = self.bs_mut();
         bs.buf.modified = true;
@@ -273,6 +374,9 @@ impl Editor {
         bs.hl.refresh(&bs.buf);
         refresh_syntax_diags(bs);
         bs.lsp_dirty = true;
+        // Every edit path funnels through here, so this one bump is enough
+        // to invalidate the soft-wrap visual-row table (M-\).
+        bs.edit_gen = bs.edit_gen.wrapping_add(1);
     }
 
     /// The union of tree-sitter and LSP diagnostics, row-major — what the
@@ -865,7 +969,18 @@ impl Editor {
             return None;
         }
         let bs = self.bs();
-        let row = pane_row as usize - 1 + bs.scroll;
+        // M-\: the pane row is a VISUAL row; map it to (buffer row, wrap
+        // segment). With wrap off, seg is 0 and this is the old arithmetic.
+        let (row, seg) = if self.wrap {
+            let v = pane_row as usize - 1 + bs.scroll;
+            let total = bs.wrap_prefix.last().copied().unwrap_or(0);
+            if v >= total {
+                return None;
+            }
+            self.buf_row_of_visual(v)
+        } else {
+            (pane_row as usize - 1 + bs.scroll, 0)
+        };
         if row >= bs.buf.lines.len() {
             return None;
         }
@@ -878,7 +993,7 @@ impl Editor {
         if x < g {
             return Some(Pos { row, col: 0 });
         }
-        let disp = x - g + bs.scroll_x;
+        let disp = x - g + seg * self.view_w() + bs.scroll_x;
         let line = &bs.buf.lines[row];
         Some(Pos {
             row,
@@ -889,6 +1004,7 @@ impl Editor {
     /// Left click: cursor + fresh selection anchor. Left drag: extend.
     /// Wheel: scroll the viewport a few lines. Everything else is ignored.
     pub(crate) fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+        self.ensure_wrap_prefix();
         use crossterm::event::MouseEventKind as K;
         match m.kind {
             K::ScrollUp => self.wheel(-3),
@@ -921,6 +1037,37 @@ impl Editor {
     /// real line and the view follows it from there).
     fn wheel(&mut self, delta: i64) -> bool {
         let text_h = self.text_h;
+        if self.wrap {
+            // M-\: scroll in visual rows; the cursor is pinned to the edge
+            // it would cross, at the start/end of that edge's visual row.
+            self.ensure_wrap_prefix();
+            let total = self.bs().wrap_prefix.last().copied().unwrap_or(0);
+            let max_scroll = total.saturating_sub(text_h);
+            let scroll = (self.bs().scroll as i64 + delta).clamp(0, max_scroll as i64) as usize;
+            let cv = self.visual_pos(self.bs().cursor);
+            let vw = self.view_w();
+            let pin = if cv < scroll {
+                let (r, seg) = self.buf_row_of_visual(scroll);
+                Some(Pos {
+                    row: r,
+                    col: self.col_at_disp(r, seg * vw),
+                })
+            } else if text_h > 0 && cv >= scroll + text_h {
+                let (r, seg) = self.buf_row_of_visual(scroll + text_h - 1);
+                Some(Pos {
+                    row: r,
+                    col: self.col_at_disp(r, (seg + 1) * vw),
+                })
+            } else {
+                None
+            };
+            let bs = self.bs_mut();
+            bs.scroll = scroll;
+            if let Some(p) = pin {
+                bs.cursor = bs.buf.clamp(p);
+            }
+            return true;
+        }
         let bs = self.bs_mut();
         let max_scroll = bs.buf.lines.len().saturating_sub(text_h);
         let scroll = (bs.scroll as i64 + delta).clamp(0, max_scroll as i64) as usize;
@@ -1289,7 +1436,27 @@ impl Editor {
         }
     }
 
+    /// Move the cursor to visual row `v`, keeping the current column WITHIN
+    /// the visual row (clamped to the target row's length). Wrap on only.
+    fn goto_visual_row(&mut self, v: usize) {
+        let c = self.bs().cursor;
+        let disp = ui::display_col(&self.bs().buf.lines[c.row], c.col, self.tab_width);
+        let vw = self.view_w();
+        let (r, seg) = self.buf_row_of_visual(v);
+        let col = self.col_at_disp(r, seg * vw + disp % vw);
+        self.bs_mut().cursor = Pos { row: r, col };
+    }
+
     pub(crate) fn move_up(&mut self) {
+        if self.wrap {
+            // One VISUAL row up: a wrapped line is traversed segment by
+            // segment before the cursor reaches the previous buffer row.
+            let cv = self.visual_pos(self.bs().cursor);
+            if cv > 0 {
+                self.goto_visual_row(cv - 1);
+            }
+            return;
+        }
         if self.bs().cursor.row > 0 {
             let bs = self.bs_mut();
             bs.cursor.row -= 1;
@@ -1298,6 +1465,15 @@ impl Editor {
     }
 
     pub(crate) fn move_down(&mut self) {
+        if self.wrap {
+            let bs = self.bs();
+            let total = bs.wrap_prefix.last().copied().unwrap_or(0);
+            let cv = self.visual_pos(bs.cursor);
+            if cv + 1 < total {
+                self.goto_visual_row(cv + 1);
+            }
+            return;
+        }
         if self.bs().cursor.row + 1 < self.bs().buf.lines.len() {
             let bs = self.bs_mut();
             bs.cursor.row += 1;
@@ -1306,16 +1482,35 @@ impl Editor {
     }
 
     pub(crate) fn move_home(&mut self) {
+        if self.wrap {
+            // Start of the VISUAL row, not of the buffer row.
+            let cv = self.visual_pos(self.bs().cursor);
+            let (r, seg) = self.buf_row_of_visual(cv);
+            self.bs_mut().cursor.col = self.col_at_disp(r, seg * self.view_w());
+            return;
+        }
         self.bs_mut().cursor.col = 0;
     }
 
     pub(crate) fn move_end(&mut self) {
+        if self.wrap {
+            // End of the VISUAL row, not of the buffer row.
+            let cv = self.visual_pos(self.bs().cursor);
+            let (r, seg) = self.buf_row_of_visual(cv);
+            self.bs_mut().cursor.col = self.col_at_disp(r, (seg + 1) * self.view_w());
+            return;
+        }
         let bs = self.bs_mut();
         bs.cursor.col = bs.buf.line_len(bs.cursor.row);
     }
 
     pub(crate) fn page_up(&mut self, text_h: usize) {
         let step = text_h.saturating_sub(1).max(1);
+        if self.wrap {
+            let cv = self.visual_pos(self.bs().cursor);
+            self.goto_visual_row(cv.saturating_sub(step));
+            return;
+        }
         let bs = self.bs_mut();
         bs.cursor.row = bs.cursor.row.saturating_sub(step);
         bs.cursor.col = bs.cursor.col.min(bs.buf.line_len(bs.cursor.row));
@@ -1323,6 +1518,12 @@ impl Editor {
 
     pub(crate) fn page_down(&mut self, text_h: usize) {
         let step = text_h.saturating_sub(1).max(1);
+        if self.wrap {
+            let total = self.bs().wrap_prefix.last().copied().unwrap_or(0);
+            let cv = self.visual_pos(self.bs().cursor);
+            self.goto_visual_row((cv + step).min(total.saturating_sub(1)));
+            return;
+        }
         let bs = self.bs_mut();
         bs.cursor.row = (bs.cursor.row + step).min(bs.buf.lines.len().saturating_sub(1));
         bs.cursor.col = bs.cursor.col.min(bs.buf.line_len(bs.cursor.row));

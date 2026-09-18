@@ -217,6 +217,36 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // count (measured: ~65 ms/frame at 500 diags, ~26 µs at zero).
     let diags = ed.all_diags();
 
+    // (buffer row, wrap segment) of each visible VISUAL row. With wrap off,
+    // a visual row IS a buffer row and seg is 0, so this is the old
+    // `bs.scroll..bs.scroll + text_h` range.
+    let vis: Vec<(usize, usize)> = if ed.wrap {
+        let mut out = Vec::with_capacity(text_h);
+        let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
+        while out.len() < text_h && r < bs.buf.lines.len() {
+            let count = display_width(&bs.buf.lines[r], ed.tab_width)
+                .div_ceil(view_w.max(1))
+                .max(1);
+            for _ in 0..count {
+                if out.len() == text_h {
+                    break;
+                }
+                out.push((r, seg));
+                seg += 1;
+            }
+            r += 1;
+            seg = 0;
+        }
+        // Pad past the end of the buffer so both loops below always emit
+        // exactly text_h rows (a short buffer must not leave stale cells).
+        while out.len() < text_h {
+            out.push((usize::MAX, 0));
+        }
+        out
+    } else {
+        (bs.scroll..bs.scroll + text_h).map(|r| (r, 0)).collect()
+    };
+
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
     let flags = if bs.mark.is_some() { "M" } else { "" };
@@ -231,17 +261,20 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
     if g > 0 {
         let mut nums: Vec<Line> = Vec::with_capacity(text_h);
-        for r in bs.scroll..bs.scroll + text_h {
-            let s = if r < bs.buf.lines.len() {
+        for (r, seg) in &vis {
+            // The number sits on the first wrap segment of a row only;
+            // continuation rows stay blank (nano).
+            let s = if *r < bs.buf.lines.len() && *seg == 0 {
                 format!("{:>w$} ", r + 1, w = g - 1)
             } else {
                 " ".repeat(g)
             };
             // D6: rows with diagnostics carry their severity's color (the
             // most severe wins; the list merges tree-sitter + LSP diags).
+            // Every wrap segment of such a row is colored.
             let fg = match diags
                 .iter()
-                .filter(|d| d.line == r)
+                .filter(|d| d.line == *r)
                 .map(|d| d.severity)
                 .min()
             {
@@ -259,13 +292,16 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     }
 
     // ---- text area (rows 1..text_h) ----
+    // A wrap segment is just the text window at scroll_x = seg * view_w:
+    // text_window's display-col math is absolute, so tabs straddling a wrap
+    // boundary clip correctly.
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
-    for r in bs.scroll..bs.scroll + text_h {
-        match bs.buf.lines.get(r) {
+    for (r, seg) in &vis {
+        match bs.buf.lines.get(*r) {
             Some(chars) => lines.push(line_to_spans(
                 chars,
-                r,
-                bs.scroll_x,
+                *r,
+                if ed.wrap { seg * view_w } else { bs.scroll_x },
                 view_w,
                 ed.tab_width,
                 ed,
@@ -294,7 +330,16 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             .unwrap_or(0)
             .min(40);
         let w = (label_w + 6).clamp(10, (width as usize).min(60));
-        let drow = p.row as i64 - bs.scroll as i64;
+        // M-\: anchor to the word's VISUAL row, not its buffer row.
+        let drow = if ed.wrap {
+            ed.visual_pos(Pos {
+                row: p.row,
+                col: p.col,
+            }) as i64
+                - bs.scroll as i64
+        } else {
+            p.row as i64 - bs.scroll as i64
+        };
         let vis_i = vis as i64;
         // Text rows start at pane row 1 (title offset): the word sits on
         // pane row drow+1, the popup goes just below it (or above when the
@@ -308,7 +353,11 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         if y0 >= 1 && y0 + vis_i - 1 <= text_h as i64 {
             let line = bs.buf.lines.get(p.row).map(Vec::as_slice).unwrap_or(&[]);
             let disp = display_col(line, p.col, ed.tab_width);
-            let x = (g + disp.saturating_sub(bs.scroll_x)) as u16;
+            let x = if ed.wrap {
+                (g + disp % view_w.max(1)) as u16
+            } else {
+                (g + disp.saturating_sub(bs.scroll_x)) as u16
+            };
             let x = x.min(width.saturating_sub(w as u16));
             // Keep the selected row inside an 8-row window.
             let start = if p.items.len() > vis {
@@ -440,9 +489,15 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             let (_, col) = prompt_text(p, width as usize);
             f.set_cursor_position(((col as u16).min(width.saturating_sub(1)), status_row));
         } else {
-            let cy = bs.cursor.row as i64 - bs.scroll as i64;
+            // M-\: the cursor's pane row is its VISUAL row.
+            let cy = if ed.wrap {
+                ed.visual_pos(bs.cursor) as i64 - bs.scroll as i64
+            } else {
+                bs.cursor.row as i64 - bs.scroll as i64
+            };
             if cy >= 0 && (cy as u16) < text_h as u16 {
-                // char col → display col → minus scroll_x → plus gutter
+                // char col → display col → minus scroll_x (or the wrap
+                // segment's offset) → plus gutter
                 let line = bs
                     .buf
                     .lines
@@ -450,7 +505,11 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 let disp = display_col(line, bs.cursor.col, ed.tab_width);
-                let cx = (g + disp.saturating_sub(bs.scroll_x)) as u16;
+                let cx = if ed.wrap {
+                    (g + disp % view_w.max(1)) as u16
+                } else {
+                    (g + disp.saturating_sub(bs.scroll_x)) as u16
+                };
                 f.set_cursor_position((cx.min(width.saturating_sub(1)), cy as u16 + 1));
             }
         }
@@ -530,7 +589,11 @@ mod tests {
         if !text.is_empty() {
             buf.lines = text.lines().map(|l| l.chars().collect()).collect();
         }
-        Editor::new(buf, crate::config::Config::default())
+        let mut ed = Editor::new(buf, crate::config::Config::default());
+        // draw() assumes the run loop has kept the soft-wrap table fresh
+        // (it calls adjust_scroll, which rebuilds it, before every frame).
+        ed.ensure_wrap_prefix();
+        ed
     }
 
     fn chars(s: &str) -> Vec<char> {
@@ -878,6 +941,36 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(Position::new(4, 3)); // g + disp(1) - 0
+    }
+
+    #[test]
+    fn draw_wraps_long_lines() {
+        let mut e = ed(&format!("{}\nshort", "a".repeat(50)));
+        e.show_line_numbers = true;
+        e.text_w = 40; // match the backend; the run loop keeps these in sync
+        e.ensure_wrap_prefix();
+        e.bs_mut().cursor = Pos { row: 0, col: 40 };
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        // view_w = 40 - 3 = 37: pane row 1 renders 37 a's, pane row 2 the
+        // remaining 13.
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((39, 1)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((3, 2)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((15, 2)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((16, 2)).unwrap().symbol(), " ");
+        // Gutter: the number sits on the first wrap segment only.
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1");
+        assert_eq!(buf.cell((1, 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((1, 3)).unwrap().symbol(), "2");
+        // Rows past the end of the buffer stay blank (no stale cells).
+        assert_eq!(buf.cell((3, 5)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((1, 5)).unwrap().symbol(), " ");
+        // Cursor at (0, 40): visual row 1, display col 40 → x = 3 + 40 % 37.
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(6, 2));
     }
 
     #[test]

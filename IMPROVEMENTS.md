@@ -276,6 +276,14 @@ Gates to keep green while working: `cargo test`, `cargo clippy --all-targets -- 
   display-only today; dispatch is a separate hardcoded match in `keys.rs`, so
   "one binding table" (`README.md:98`) is only half true. Making the table the
   dispatch source also enables the drift test below.
+- [x] Togglable soft line wrap (M-\, `wrap` config key, default on like
+  nano): long lines wrap at the viewport edge instead of being clipped.
+  `bs.scroll` counts VISUAL rows; a lazily-rebuilt `wrap_prefix` table
+  (keyed on buffer edit generation + view width) maps buffer rows ↔ visual
+  rows, and scroll, wheel, arrows/Home/End/PgUp/PgDn, mouse and the cursor
+  all go through it. Horizontal scrolling is disabled while wrap is on
+  (`scroll_x` stays 0); with wrap off the old behaviour is byte-identical.
+  The gutter numbers only the first segment of a wrapped line.
 
 ## 6. P5 — code health, tests, repo
 

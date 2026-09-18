@@ -11,6 +11,9 @@ impl Editor {
     // ---------- key dispatch ----------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Keep the soft-wrap visual-row table fresh (M-\): a resize or the
+        // M-\ toggle itself may have changed the wrap width.
+        self.ensure_wrap_prefix();
         // Live completion popup: navigation/accept/cancel first; anything
         // else closes it and falls through to normal handling (typing and
         // backspace stay open — they re-request with the new prefix).
@@ -84,6 +87,8 @@ impl Editor {
                 KeyCode::Char('|') => self.start_filter(),
                 // M-N: toggle the line-number gutter.
                 KeyCode::Char('n') => self.show_line_numbers = !self.show_line_numbers,
+                // M-\ : toggle soft line wrap (nano).
+                KeyCode::Char('\\') => self.wrap = !self.wrap,
                 // M-< / M-> : previous / next buffer (wraps).
                 KeyCode::Char('<') => self.switch_buffer(-1),
                 KeyCode::Char('>') => self.switch_buffer(1),

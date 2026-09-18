@@ -49,6 +49,7 @@ prints the version; `--help` / `-h` prints usage.
 | `M-.` | Jump to definition (LSP) |
 | `M-,` | Jump back (stacked — one press per jump) |
 | `M-N` | Toggle line-number gutter |
+| `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
 | `M-<` / `M->` | Previous / next buffer |
 | `F9` | Sort lines (whole buffer, or marked region) |
@@ -85,6 +86,7 @@ tab_width = 8      # 1..=16, tab rendering + horizontal scrolling
 auto_indent = true
 line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
+wrap = true         # soft line wrap (M-\ toggles at runtime)
 ```
 
 Unknown keys are ignored; out-of-range values fall back to the defaults.
@@ -140,7 +142,11 @@ Unknown keys are ignored; out-of-range values fall back to the defaults.
 - Executed commands run asynchronously; their stdout is inserted below the
   cursor when they finish, with one undo step. Failing commands insert
   nothing and show the exit code.
-- Long lines scroll horizontally (display-column aware, so tabs behave).
+- Long lines wrap at the viewport edge by default (nano-style; `M-\` toggles,
+  `wrap` in the config). Scrolling, arrow/Home/End/PgUp/PgDn motion, the
+  mouse and the cursor all work in visual rows, and the line-number gutter
+  numbers only the first segment of a wrapped line. With wrap off, long lines
+  scroll horizontally instead (display-column aware, so tabs behave).
 
 ## Development
 

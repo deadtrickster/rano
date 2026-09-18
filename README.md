@@ -97,8 +97,12 @@ Unknown keys are ignored; out-of-range values fall back to the defaults.
   cursor's `Ln X, Col Y` at the right edge when idle), and a two-line
   inverted function bar. The bar, the help overlay, and their key labels
   are all generated from one binding table, so they cannot drift.
-- Syntax highlighting via tree-sitter for Rust, Go, Bash, Python, C, JSON and
-  Common Lisp, detected by file extension (plus shebangs for scripts).
+- Syntax highlighting via tree-sitter for Rust, Go, Bash, Python, C, JSON,
+  Common Lisp, JavaScript, TypeScript (+TSX), Markdown, TOML, YAML, HTML,
+  CSS, Lua, Ruby, PHP, Java, Make, Dockerfile, INI-style configs, diffs,
+  Elisp, Scheme, SQL and Clojure — detected by file extension, by
+  conventional file names (`Makefile`, `Dockerfile`, `.gitconfig`), and by
+  shebangs for extension-less scripts.
   Scratch buffers are not highlighted. Search
   matches, the selection, and diagnostics take priority over highlight
   colors (diagnostics underline the offending range in red/yellow/blue; the
@@ -119,10 +123,15 @@ Unknown keys are ignored; out-of-range values fall back to the defaults.
   the keystroke that asked for it (late answers for older typing are
   dropped), and snippet placeholders are flattened to plain text.
 - LSP: when a language server is on `$PATH` (rust-analyzer, gopls,
-  bash-language-server, pylsp, clangd, vscode-json-language-server, cl-lsp),
+  bash-language-server, pylsp, clangd, vscode-json-language-server, cl-lsp,
+  typescript-language-server, marksman, taplo, yaml-language-server,
+  vscode-html-language-server, vscode-css-language-server,
+  lua-language-server, ruby-lsp, intelephense, jdtls, sqls, clojure-lsp),
   rano
   starts it in the background, syncs changes with 300 ms debounce, and shows
-  publishDiagnostics. The handshake never blocks the UI.
+  publishDiagnostics. The handshake never blocks the UI. Languages rano has
+  no server for (Make, Dockerfile, INI, diff, Elisp, Scheme) run with
+  tree-sitter feedback only, without a spawn attempt.
 - Undo keeps up to 500 steps as region-based edits; runs of the same action
   (typed words, backspace runs, repeated `^K`, replace-all) coalesce into a
   single step. Redo is exact (each undo step is its own inverse).

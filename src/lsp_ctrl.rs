@@ -63,6 +63,12 @@ impl Editor {
             old.shutdown();
         }
         bs.lsp_diags.clear();
+        // Languages rano has no server for run highlighting-only: shut any
+        // old client down (above) but don't spawn, and don't flash an error
+        // for a server that was never supposed to exist.
+        if lsp::command_for(lang).is_none() {
+            return;
+        }
         let dir = name
             .parent()
             .map(|p| p.to_path_buf())
@@ -72,9 +78,19 @@ impl Editor {
             syntax::Lang::Go => lsp::find_project_root(&dir, "go.mod"),
             syntax::Lang::Python => lsp::find_project_root(&dir, "pyproject.toml"),
             syntax::Lang::C => lsp::find_project_root(&dir, "compile_commands.json"),
+            // JS/TS projects are rooted by package.json, PHP by composer.json,
+            // Ruby by the Gemfile.
+            syntax::Lang::JavaScript | syntax::Lang::TypeScript | syntax::Lang::Tsx => {
+                lsp::find_project_root(&dir, "package.json")
+            }
+            syntax::Lang::Php => lsp::find_project_root(&dir, "composer.json"),
+            syntax::Lang::Ruby => lsp::find_project_root(&dir, "Gemfile"),
             // CL projects are rooted by their .asd files, whose names vary
             // with the system, so there is no marker to walk up for.
             syntax::Lang::Bash | syntax::Lang::Json | syntax::Lang::CommonLisp => dir,
+            // The rest have no reliable single marker (or no server at all);
+            // the file's own directory is the root.
+            _ => dir,
         };
         let text = bs.buf.text();
         // Async handshake: spawn_async returns instantly; lsp_poll adopts

@@ -1,5 +1,7 @@
-//! Tree-sitter syntax highlighting for rust, go, bash, python, c, json and
-//! common lisp.
+//! Tree-sitter syntax highlighting for rust, go, bash, python, c, json,
+//! common lisp, javascript, typescript, markdown, toml, yaml, html, css,
+//! lua, ruby, php, java, make, dockerfile, ini, diff, elisp, scheme, sql
+//! and clojure.
 //!
 //! The highlighter keeps a per-character style grid (`line_styles`) with the
 //! same shape as `Buffer::lines`, so lookups from the UI are plain index
@@ -8,9 +10,21 @@
 
 use ratatui::style::{Color, Style};
 use std::path::Path;
+use std::sync::LazyLock;
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter_language::LanguageFn;
 
 use crate::buffer::{Buffer, Pos};
+
+// tree-sitter-dockerfile is vendored (see `vendor/`) and compiled by
+// `build.rs`: the crate binds tree-sitter 0.20, whose `language()` returns a
+// type foreign to the 0.27 runtime rano uses, and referencing the crate
+// drags the 0.20 C runtime into the link, colliding with 0.27's. The
+// grammar itself is ABI-14, inside 0.27's supported range, so the C symbol
+// is declared here directly.
+unsafe extern "C" {
+    fn tree_sitter_dockerfile() -> *const ();
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -21,6 +35,26 @@ pub enum Lang {
     C,
     Json,
     CommonLisp,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Markdown,
+    Toml,
+    Yaml,
+    Html,
+    Css,
+    Lua,
+    Ruby,
+    Php,
+    Java,
+    Make,
+    Dockerfile,
+    Ini,
+    Diff,
+    Elisp,
+    Scheme,
+    Sql,
+    Clojure,
 }
 
 impl Lang {
@@ -33,6 +67,28 @@ impl Lang {
             Lang::C => tree_sitter_c::LANGUAGE.into(),
             Lang::Json => tree_sitter_json::LANGUAGE.into(),
             Lang::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
+            Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
+            Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Lang::Html => tree_sitter_html::LANGUAGE.into(),
+            Lang::Css => tree_sitter_css::LANGUAGE.into(),
+            Lang::Lua => tree_sitter_lua::LANGUAGE.into(),
+            Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
+            Lang::Make => tree_sitter_make::LANGUAGE.into(),
+            Lang::Dockerfile => unsafe {
+                Language::new(LanguageFn::from_raw(tree_sitter_dockerfile))
+            },
+            Lang::Ini => tree_sitter_ini::LANGUAGE.into(),
+            Lang::Diff => tree_sitter_diff::LANGUAGE.into(),
+            Lang::Elisp => tree_sitter_elisp::LANGUAGE.into(),
+            Lang::Scheme => tree_sitter_scheme::LANGUAGE.into(),
+            Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            Lang::Clojure => tree_sitter_clojure_orchard::LANGUAGE.into(),
         }
     }
 
@@ -45,9 +101,199 @@ impl Lang {
             Lang::C => tree_sitter_c::HIGHLIGHT_QUERY,
             Lang::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
             Lang::CommonLisp => COMMONLISP_HIGHLIGHTS_QUERY,
+            Lang::JavaScript => JS_HIGHLIGHTS_QUERY.as_str(),
+            Lang::TypeScript | Lang::Tsx => TS_HIGHLIGHTS_QUERY.as_str(),
+            Lang::Markdown => MARKDOWN_HIGHLIGHTS_QUERY,
+            Lang::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
+            Lang::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+            Lang::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
+            Lang::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
+            Lang::Php => tree_sitter_php::HIGHLIGHTS_QUERY,
+            Lang::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
+            Lang::Make => tree_sitter_make::HIGHLIGHTS_QUERY,
+            Lang::Dockerfile => DOCKERFILE_HIGHLIGHTS_QUERY,
+            Lang::Ini => tree_sitter_ini::HIGHLIGHTS_QUERY,
+            Lang::Diff => tree_sitter_diff::HIGHLIGHTS_QUERY,
+            Lang::Elisp => tree_sitter_elisp::HIGHLIGHTS_QUERY,
+            Lang::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
+            Lang::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
+            Lang::Clojure => CLOJURE_HIGHLIGHTS_QUERY.as_str(),
         }
     }
 }
+
+/// JavaScript = the crate's main query plus its JSX addendum; the crate
+/// exports both but no combined one.
+static JS_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+    )
+});
+
+/// TypeScript and TSX = the JavaScript query (whose node names the TS/TSX
+/// grammars are supersets of — it supplies the common keywords the
+/// TypeScript crate's query assumes are already applied) plus the
+/// TypeScript query with the TS-specific nodes.
+static TS_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_typescript::HIGHLIGHTS_QUERY
+    )
+});
+
+/// Clojure = the crate's query (literals, comments, reader macros) plus
+/// rano's own supplement: the crate ships nothing for symbols, so call
+/// heads and collection brackets would render uncoloured.
+static CLOJURE_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
+        r##"
+; Plain symbols. `theme` has no "variable" entry, so the editor leaves
+; them uncoloured; the more specific patterns below override this one.
+(sym_lit) @variable
+
+; The head of a list names the call. Defining and flow-control heads are
+; keywords; any other head is a function. The anchor makes the pattern
+; match the first child only, so arguments stay plain.
+(list_lit . (sym_lit) @function)
+((list_lit . (sym_lit) @keyword)
+ (#any-of? @keyword
+  "def" "defn" "defn-" "defmacro" "defonce" "defmulti" "defmethod"
+  "defprotocol" "defrecord" "deftype" "definterface" "defstruct" "ns"
+  "fn" "let" "letfn" "loop" "recur" "if" "if-let" "if-not" "if-some"
+  "when" "when-let" "when-not" "when-first" "cond" "condp" "case" "do"
+  "doto" "try" "catch" "finally" "throw" "quote" "var" "new" "set!"
+  "binding" "with-open" "with-redefs" "doseq" "dotimes" "while"
+  "declare" "require" "import" "use" "refer" "as->" "comment"))
+
+; The name a function-ish definition binds: the symbol immediately after
+; the head (defn name …). Anchored, so a docstring or the body is not
+; swept in.
+((list_lit . (sym_lit) @keyword . (sym_lit) @function)
+ (#any-of? @keyword
+  "defn" "defn-" "defmacro" "defonce" "defmulti" "defmethod"
+  "defprotocol" "defrecord" "deftype" "definterface"))
+
+; Collection brackets. The parens are left to the reader-macro captures
+; above; quoting forms (` @ # etc.) are operators there.
+["[" "]" "{" "}"] @punctuation.bracket
+"##
+    )
+});
+
+/// Dockerfile highlights, vendored verbatim from the grammar crate (it
+/// ships the file but exports no const for it).
+const DOCKERFILE_HIGHLIGHTS_QUERY: &str = r##"
+[
+	"FROM"
+	"AS"
+	"RUN"
+	"CMD"
+	"LABEL"
+	"EXPOSE"
+	"ENV"
+	"ADD"
+	"COPY"
+	"ENTRYPOINT"
+	"VOLUME"
+	"USER"
+	"WORKDIR"
+	"ARG"
+	"ONBUILD"
+	"STOPSIGNAL"
+	"HEALTHCHECK"
+	"SHELL"
+	"MAINTAINER"
+	"CROSS_BUILD"
+	(heredoc_marker)
+	(heredoc_end)
+] @keyword
+
+[
+	":"
+	"@"
+] @operator
+
+(comment) @comment
+
+
+(image_spec
+	(image_tag
+		":" @punctuation.special)
+	(image_digest
+		"@" @punctuation.special))
+
+[
+	(double_quoted_string)
+	(single_quoted_string)
+	(json_string)
+	(heredoc_line)
+] @string
+
+(expansion
+  [
+	"$"
+	"{"
+	"}"
+  ] @punctuation.special
+) @none
+
+((variable) @constant
+ (#match? @constant "^[A-Z][A-Z_0-9]*$"))
+"##;
+
+/// Highlights query for Markdown, rano's own — the grammar crate's query
+/// uses nvim-treesitter capture names (`@text.title`, …) that [`theme`]
+/// does not map, and its inline grammar is a separate tree meant for
+/// injections, which rano's engine does not run. Block structure only;
+/// inline text stays plain. Capture names are the shared vocabulary.
+const MARKDOWN_HIGHLIGHTS_QUERY: &str = r##"
+; Headings: markers purple, text yellow.
+(atx_h1_marker) @keyword
+(atx_h2_marker) @keyword
+(atx_h3_marker) @keyword
+(atx_h4_marker) @keyword
+(atx_h5_marker) @keyword
+(atx_h6_marker) @keyword
+(setext_h1_underline) @keyword
+(setext_h2_underline) @keyword
+(atx_heading (inline) @type)
+(setext_heading (paragraph) @type)
+
+(thematic_break) @comment
+
+; Structure markers: fences, quotes, tables, lists.
+(fenced_code_block_delimiter) @punctuation.bracket
+(block_quote_marker) @punctuation.bracket
+(block_continuation) @punctuation.bracket
+(pipe_table_delimiter_row) @punctuation.bracket
+(list_marker_plus) @punctuation.bracket
+(list_marker_minus) @punctuation.bracket
+(list_marker_star) @punctuation.bracket
+(list_marker_dot) @punctuation.bracket
+(list_marker_parenthesis) @punctuation.bracket
+(task_list_marker_checked) @punctuation.bracket
+(task_list_marker_unchecked) @punctuation.bracket
+
+; Fenced-code info string (```yaml and friends).
+(info_string) @attribute
+
+; Link reference definitions.
+(link_destination) @property
+(link_title) @string
+(link_label) @string
+
+; Escapes.
+(entity_reference) @escape
+(numeric_character_reference) @escape
+(backslash_escape) @escape
+"##;
 
 /// Highlights query for Common Lisp. The grammar crate ships none, so this
 /// is rano's own. Capture names are the standard tree-sitter set — [`theme`]
@@ -218,9 +464,10 @@ const COMMONLISP_HIGHLIGHTS_QUERY: &str = r##"
     "write-string" "write-to-string" "yes-or-no-p" "y-or-n-p" "zerop"))
 "##;
 
-/// Map a file to its language: by extension first, then by the shebang on
-/// line one (`#!/bin/sh`, `#!/usr/bin/env python3`) for extension-less
-/// scripts (scratch buffers get none).
+/// Map a file to its language: by extension first, then by the file name
+/// (`Makefile`, `Dockerfile`, `.gitconfig` — extension-less conventions),
+/// then by the shebang on line one (`#!/bin/sh`, `#!/usr/bin/env python3`)
+/// for extension-less scripts (scratch buffers get none).
 pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
     if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
@@ -232,15 +479,56 @@ pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
             "json" => return Some(Lang::Json),
             // .asd is an ASDF system definition, also Common Lisp.
             "lisp" | "cl" | "lsp" | "asd" => return Some(Lang::CommonLisp),
+            "js" | "jsx" | "mjs" | "cjs" => return Some(Lang::JavaScript),
+            "ts" | "mts" | "cts" => return Some(Lang::TypeScript),
+            "tsx" => return Some(Lang::Tsx),
+            "md" | "markdown" => return Some(Lang::Markdown),
+            "toml" => return Some(Lang::Toml),
+            "yaml" | "yml" => return Some(Lang::Yaml),
+            "html" | "htm" | "xhtml" => return Some(Lang::Html),
+            "css" => return Some(Lang::Css),
+            "lua" => return Some(Lang::Lua),
+            "rb" | "rake" => return Some(Lang::Ruby),
+            "php" | "phtml" => return Some(Lang::Php),
+            "java" => return Some(Lang::Java),
+            "mk" => return Some(Lang::Make),
+            "dockerfile" => return Some(Lang::Dockerfile),
+            "ini" | "cfg" | "conf" | "properties" => return Some(Lang::Ini),
+            "diff" | "patch" => return Some(Lang::Diff),
+            "el" => return Some(Lang::Elisp),
+            "scm" | "ss" => return Some(Lang::Scheme),
+            "sql" => return Some(Lang::Sql),
+            "clj" | "cljs" | "cljc" | "edn" => return Some(Lang::Clojure),
             _ => {}
         }
     }
-    detect_shebang(first_line?)
+    detect_filename(name).or_else(|| detect_shebang(first_line?))
+}
+
+/// Language for files known by NAME, not extension: `Makefile` (and
+/// `Makefile.dev`, `GNUmakefile`), `Dockerfile` (and `Dockerfile.prod`),
+/// and the dotfiles that are ini. Case-insensitive, the way these tools
+/// accept them.
+fn detect_filename(name: Option<&Path>) -> Option<Lang> {
+    let file = name?.file_name()?.to_str()?.to_ascii_lowercase();
+    if file == "makefile" || file == "gnumakefile" || file.starts_with("makefile.") {
+        return Some(Lang::Make);
+    }
+    if file == "dockerfile" || file.starts_with("dockerfile.") {
+        return Some(Lang::Dockerfile);
+    }
+    if matches!(
+        file.as_str(),
+        ".editorconfig" | ".gitconfig" | ".gitmodules"
+    ) {
+        return Some(Lang::Ini);
+    }
+    None
 }
 
 /// Language for a `#!` first line. Handles `#!/bin/sh`, `#! /bin/sh` and
 /// `#!/usr/bin/env [-S …] python3` forms; interpreters we have no grammar
-/// for (perl, ruby, …) map to None.
+/// for (perl, awk, …) map to None.
 fn detect_shebang(line: &str) -> Option<Lang> {
     let rest = line.strip_prefix("#!")?.trim_start();
     let mut words = rest.split_whitespace();
@@ -253,6 +541,11 @@ fn detect_shebang(line: &str) -> Option<Lang> {
         "python" | "python2" | "python3" | "pypy" | "pypy3" => Some(Lang::Python),
         // Common Lisp scripts, usually `#!/usr/bin/sbcl --script`.
         "sbcl" | "ccl" | "clisp" | "ecl" | "abcl" | "gcl" => Some(Lang::CommonLisp),
+        "node" | "nodejs" => Some(Lang::JavaScript),
+        "ruby" | "rake" => Some(Lang::Ruby),
+        "php" => Some(Lang::Php),
+        // Version-suffixed Lua interpreters: lua, lua5.4, luajit, …
+        w if w.starts_with("lua") => Some(Lang::Lua),
         _ => None,
     }
 }
@@ -266,15 +559,22 @@ fn theme(name: &str) -> Style {
     match name {
         "comment" => Style::default().fg(rgb(0x7f, 0x84, 0x8e)),
         "string" => Style::default().fg(rgb(0x98, 0xc3, 0x79)),
-        "escape" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "number" | "constant" => Style::default().fg(rgb(0xd1, 0x9a, 0x66)),
-        "type" | "constructor" | "label" => Style::default().fg(rgb(0xe5, 0xc0, 0x7b)),
+        "string.escape" | "escape" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
+        "number" | "constant" | "boolean" | "float" | "field" => {
+            Style::default().fg(rgb(0xd1, 0x9a, 0x66))
+        }
+        "type" | "constructor" | "label" | "module" | "namespace" => {
+            Style::default().fg(rgb(0xe5, 0xc0, 0x7b))
+        }
         "attribute" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "keyword" | "include" | "preproc" => Style::default().fg(rgb(0xc6, 0x78, 0xdd)),
+        "keyword" | "include" | "preproc" | "conditional" | "repeat" | "exception"
+        | "storageclass" | "media" | "supports" | "keyframes" | "charset" | "import" => {
+            Style::default().fg(rgb(0xc6, 0x78, 0xdd))
+        }
         "operator" | "punctuation" => Style::default().fg(rgb(0xab, 0xbb, 0xbf)),
         "property" => Style::default().fg(rgb(0xd1, 0x9a, 0x66)),
-        "function" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
-        "variable.builtin" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
+        "function" | "method" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
+        "variable.builtin" | "tag" | "error" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
         // Dotted names we didn't match exactly fall back to their prefix
         // (e.g. "type.builtin" -> "type", "punctuation.bracket" -> "punctuation").
         _ => match name.split_once('.') {
@@ -733,7 +1033,76 @@ mod tests {
             detect(Some(Path::new("sys.asd")), None),
             Some(Lang::CommonLisp)
         );
+        assert_eq!(
+            detect(Some(Path::new("a.js")), None),
+            Some(Lang::JavaScript)
+        );
+        assert_eq!(
+            detect(Some(Path::new("a.mjs")), None),
+            Some(Lang::JavaScript)
+        );
+        assert_eq!(
+            detect(Some(Path::new("a.ts")), None),
+            Some(Lang::TypeScript)
+        );
+        assert_eq!(detect(Some(Path::new("a.tsx")), None), Some(Lang::Tsx));
+        assert_eq!(detect(Some(Path::new("a.md")), None), Some(Lang::Markdown));
+        assert_eq!(detect(Some(Path::new("a.toml")), None), Some(Lang::Toml));
+        assert_eq!(detect(Some(Path::new("a.yaml")), None), Some(Lang::Yaml));
+        assert_eq!(detect(Some(Path::new("a.yml")), None), Some(Lang::Yaml));
+        assert_eq!(detect(Some(Path::new("a.html")), None), Some(Lang::Html));
+        assert_eq!(detect(Some(Path::new("a.htm")), None), Some(Lang::Html));
+        assert_eq!(detect(Some(Path::new("a.css")), None), Some(Lang::Css));
+        assert_eq!(detect(Some(Path::new("a.lua")), None), Some(Lang::Lua));
+        assert_eq!(detect(Some(Path::new("a.rb")), None), Some(Lang::Ruby));
+        assert_eq!(detect(Some(Path::new("a.php")), None), Some(Lang::Php));
+        assert_eq!(detect(Some(Path::new("A.java")), None), Some(Lang::Java));
+        assert_eq!(detect(Some(Path::new("build.mk")), None), Some(Lang::Make));
+        assert_eq!(
+            detect(Some(Path::new("x.dockerfile")), None),
+            Some(Lang::Dockerfile)
+        );
+        assert_eq!(detect(Some(Path::new("a.ini")), None), Some(Lang::Ini));
+        assert_eq!(detect(Some(Path::new("a.cfg")), None), Some(Lang::Ini));
+        assert_eq!(detect(Some(Path::new("a.diff")), None), Some(Lang::Diff));
+        assert_eq!(detect(Some(Path::new("a.patch")), None), Some(Lang::Diff));
+        assert_eq!(detect(Some(Path::new("a.el")), None), Some(Lang::Elisp));
+        assert_eq!(detect(Some(Path::new("a.scm")), None), Some(Lang::Scheme));
+        assert_eq!(detect(Some(Path::new("a.sql")), None), Some(Lang::Sql));
+        assert_eq!(detect(Some(Path::new("a.clj")), None), Some(Lang::Clojure));
+        assert_eq!(detect(Some(Path::new("a.edn")), None), Some(Lang::Clojure));
         assert_eq!(detect(None, None), None);
+    }
+
+    // Files known by name, not extension.
+    #[test]
+    fn detects_filenames() {
+        assert_eq!(detect(Some(Path::new("Makefile")), None), Some(Lang::Make));
+        assert_eq!(detect(Some(Path::new("makefile")), None), Some(Lang::Make));
+        assert_eq!(
+            detect(Some(Path::new("GNUmakefile")), None),
+            Some(Lang::Make)
+        );
+        assert_eq!(
+            detect(Some(Path::new("Makefile.dev")), None),
+            Some(Lang::Make)
+        );
+        assert_eq!(
+            detect(Some(Path::new("Dockerfile")), None),
+            Some(Lang::Dockerfile)
+        );
+        assert_eq!(
+            detect(Some(Path::new("dockerfile.prod")), None),
+            Some(Lang::Dockerfile)
+        );
+        assert_eq!(detect(Some(Path::new(".gitconfig")), None), Some(Lang::Ini));
+        assert_eq!(
+            detect(Some(Path::new(".editorconfig")), None),
+            Some(Lang::Ini)
+        );
+        // A directory component must not count: only the file name is
+        // matched.
+        assert_eq!(detect(Some(Path::new("dockerfile/x.txt")), None), None);
     }
 
     #[test]
@@ -768,6 +1137,22 @@ mod tests {
         assert_eq!(
             detect(Some(Path::new("letibot")), Some("#!/usr/bin/env clisp")),
             Some(Lang::CommonLisp)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/node")),
+            Some(Lang::JavaScript)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/env ruby")),
+            Some(Lang::Ruby)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/php")),
+            Some(Lang::Php)
+        );
+        assert_eq!(
+            detect(Some(Path::new("letibot")), Some("#!/usr/bin/lua5.4")),
+            Some(Lang::Lua)
         );
         // No grammar for the interpreter, or no shebang at all.
         assert_eq!(
@@ -877,6 +1262,199 @@ mod tests {
             row[src.find("(x)").unwrap() + 1].as_deref(),
             Some("variable")
         );
+    }
+
+    #[test]
+    fn highlights_javascript() {
+        let b = buf_named("t.js", "const x = 1;\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // const keyword
+        assert!(style_at(&hl, 0, 10).is_some()); // 1 number
+    }
+
+    #[test]
+    fn highlights_typescript() {
+        let b = buf_named("t.ts", "const x: number = 1;\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // const keyword
+        assert!(style_at(&hl, 0, 9).is_some()); // number builtin type
+    }
+
+    // TSX shares the TypeScript query; the grammar is the TSX one.
+    #[test]
+    fn highlights_tsx() {
+        let b = buf_named("t.tsx", "const x: number = 1;\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // const keyword
+        assert!(style_at(&hl, 0, 9).is_some()); // number builtin type
+    }
+
+    // The markdown query is rano's own; assert the capture names, not just
+    // that something is coloured. Code-fence content stays plain: the block
+    // grammar has no injections, so embedded code is not re-parsed.
+    #[test]
+    fn markdown_classes_name_the_block_structure() {
+        let src = "# Title\n\n- item\n\n```rust\nfn main() {}\n```\n";
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(src, Lang::Markdown);
+        let row0 = &grid[0];
+        assert_eq!(row0[0].as_deref(), Some("keyword")); // `#`
+        assert_eq!(row0[2].as_deref(), Some("type")); // Title
+        assert_eq!(grid[2][0].as_deref(), Some("punctuation.bracket")); // `-`
+        assert_eq!(grid[4][0].as_deref(), Some("punctuation.bracket")); // fence
+        assert_eq!(grid[4][3].as_deref(), Some("attribute")); // rust info string
+        assert_eq!(grid[5][0].as_deref(), None); // fence content is plain
+    }
+
+    #[test]
+    fn highlights_toml() {
+        let b = buf_named("t.toml", "key = \"v\"\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // key property
+        assert!(style_at(&hl, 0, 7).is_some()); // "v" string
+    }
+
+    #[test]
+    fn highlights_yaml() {
+        let b = buf_named("t.yaml", "key: value # note\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // key property
+        assert!(style_at(&hl, 0, 11).is_some()); // comment
+    }
+
+    #[test]
+    fn highlights_html() {
+        let b = buf_named("t.html", "<div class=\"x\">t</div>\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 1).is_some()); // div tag
+        assert!(style_at(&hl, 0, 5).is_some()); // class attribute
+    }
+
+    #[test]
+    fn highlights_css() {
+        let b = buf_named("t.css", "a {\n  color: red;\n}\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // a tag selector
+        assert!(style_at(&hl, 1, 2).is_some()); // color property
+    }
+
+    #[test]
+    fn highlights_lua() {
+        let b = buf_named("t.lua", "local x = 1\nfunction f() end\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // local keyword
+        assert!(style_at(&hl, 1, 9).is_some()); // f function
+    }
+
+    #[test]
+    fn highlights_ruby() {
+        let b = buf_named("t.rb", "def foo\n  1\nend\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // def keyword
+        assert!(style_at(&hl, 0, 4).is_some()); // foo method
+    }
+
+    #[test]
+    fn highlights_php() {
+        let b = buf_named("t.php", "<?php\nfunction f() {}\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 1, 0).is_some()); // function keyword
+        assert!(style_at(&hl, 1, 9).is_some()); // f function
+    }
+
+    #[test]
+    fn highlights_java() {
+        let b = buf_named("A.java", "class A {\n  void m() {}\n}\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // class keyword
+        assert!(style_at(&hl, 1, 2).is_some()); // void type
+        assert!(style_at(&hl, 1, 7).is_some()); // m method
+    }
+
+    #[test]
+    fn highlights_make() {
+        let b = buf_named("Makefile", "all:\n\techo hi\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // all target
+        assert!(style_at(&hl, 0, 3).is_some()); // : rule delimiter
+    }
+
+    #[test]
+    fn highlights_dockerfile() {
+        let b = buf_named("Dockerfile", "FROM alpine:3\nRUN echo hi\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // FROM keyword
+        assert!(style_at(&hl, 1, 0).is_some()); // RUN keyword
+    }
+
+    #[test]
+    fn highlights_ini() {
+        let b = buf_named("t.ini", "[sec]\nk = v\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 1).is_some()); // sec section
+        assert!(style_at(&hl, 1, 0).is_some()); // k setting name
+    }
+
+    #[test]
+    fn highlights_diff() {
+        let b = buf_named("t.diff", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // old_file
+        assert!(style_at(&hl, 1, 0).is_some()); // new_file
+        assert!(style_at(&hl, 2, 0).is_some()); // @@ hunk location
+        assert!(style_at(&hl, 3, 0).is_some()); // -old deletion
+        assert!(style_at(&hl, 4, 0).is_some()); // +new addition
+    }
+
+    #[test]
+    fn highlights_elisp() {
+        let b = buf_named("t.el", "(defun foo (x) x)\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 1).is_some()); // defun keyword
+        assert!(style_at(&hl, 0, 7).is_some()); // foo function
+    }
+
+    #[test]
+    fn highlights_scheme() {
+        let b = buf_named("t.scm", "(define (f x) x)\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 1).is_some()); // define keyword
+        assert!(style_at(&hl, 0, 9).is_some()); // f function
+    }
+
+    #[test]
+    fn highlights_sql() {
+        let b = buf_named("t.sql", "SELECT a FROM t;\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 0).is_some()); // SELECT keyword
+        assert!(style_at(&hl, 0, 9).is_some()); // FROM keyword
+    }
+
+    #[test]
+    fn highlights_clojure() {
+        let b = buf_named("t.clj", "(defn f [x] x)\n");
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        assert!(style_at(&hl, 0, 1).is_some()); // defn keyword
+        assert!(style_at(&hl, 0, 6).is_some()); // f function
     }
 
     #[test]

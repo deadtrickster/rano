@@ -108,7 +108,10 @@ fn find_bin(name: &str) -> String {
     name.to_string()
 }
 
-fn command_for(lang: Lang) -> (String, Vec<String>) {
+/// The server command for `lang`, or `None` when rano knows of no language
+/// server for it — those buffers run highlighting-only, with no spawn
+/// attempt and no error flash.
+pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
     let (name, args): (&str, &[&str]) = match lang {
         // The rustup `rust-analyzer` component speaks LSP over stdio by
         // default (no --stdio flag; that's the standalone release binary).
@@ -123,8 +126,27 @@ fn command_for(lang: Lang) -> (String, Vec<String>) {
         // Common Lisp server; when it's absent the spawn fails and the
         // buffer simply runs without LSP.
         Lang::CommonLisp => ("cl-lsp", &[]),
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+            ("typescript-language-server", &["--stdio"])
+        }
+        Lang::Markdown => ("marksman", &[]),
+        Lang::Toml => ("taplo", &[]),
+        Lang::Yaml => ("yaml-language-server", &["--stdio"]),
+        Lang::Html => ("vscode-html-language-server", &["--stdio"]),
+        Lang::Css => ("vscode-css-language-server", &["--stdio"]),
+        Lang::Lua => ("lua-language-server", &[]),
+        Lang::Ruby => ("ruby-lsp", &[]),
+        Lang::Php => ("intelephense", &["--stdio"]),
+        Lang::Java => ("jdtls", &[]),
+        Lang::Sql => ("sqls", &[]),
+        Lang::Clojure => ("clojure-lsp", &[]),
+        // No standard server worth spawning: make, dockerfiles, ini-style
+        // configs, diffs, and the emacs/scheme lisps all run without LSP.
+        Lang::Make | Lang::Dockerfile | Lang::Ini | Lang::Diff | Lang::Elisp | Lang::Scheme => {
+            return None;
+        }
     };
-    (find_bin(name), args.iter().map(|s| s.to_string()).collect())
+    Some((find_bin(name), args.iter().map(|s| s.to_string()).collect()))
 }
 
 fn language_id(lang: Lang) -> &'static str {
@@ -136,6 +158,26 @@ fn language_id(lang: Lang) -> &'static str {
         Lang::C => "c",
         Lang::Json => "json",
         Lang::CommonLisp => "lisp",
+        Lang::JavaScript => "javascript",
+        Lang::TypeScript => "typescript",
+        Lang::Tsx => "typescriptreact",
+        Lang::Markdown => "markdown",
+        Lang::Toml => "toml",
+        Lang::Yaml => "yaml",
+        Lang::Html => "html",
+        Lang::Css => "css",
+        Lang::Lua => "lua",
+        Lang::Ruby => "ruby",
+        Lang::Php => "php",
+        Lang::Java => "java",
+        Lang::Make => "make",
+        Lang::Dockerfile => "dockerfile",
+        Lang::Ini => "ini",
+        Lang::Diff => "diff",
+        Lang::Elisp => "elisp",
+        Lang::Scheme => "scheme",
+        Lang::Sql => "sql",
+        Lang::Clojure => "clojure",
     }
 }
 
@@ -455,7 +497,9 @@ impl LspClient {
     /// Spawn the server for `lang` rooted at `root`, open `doc` with `text`,
     /// and complete the initialize handshake.
     pub fn spawn(lang: Lang, root: &Path, doc: &Path, text: &str) -> Result<Self, String> {
-        let (bin, args) = command_for(lang);
+        let Some((bin, args)) = command_for(lang) else {
+            return Err(format!("LSP: no language server for {lang:?}"));
+        };
         let mut child = Command::new(&bin)
             .args(&args)
             .stdin(Stdio::piped())

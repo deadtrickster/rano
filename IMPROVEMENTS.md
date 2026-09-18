@@ -263,9 +263,15 @@ Gates to keep green while working: `cargo test`, `cargo clippy --all-targets -- 
   surface the count in the status line.
 - [ ] Session restore: reopen the buffers that were open last quit (a small
   `~/.local/state/rano/session.json`), with a `--no-session` flag.
-- [ ] More languages: tree-sitter grammars for JS/TS, Markdown, TOML, YAML
-  (`syntax.rs:24-60` is the only place to touch, plus `lsp.rs:111-135` for
-  servers).
+- [x] More languages: tree-sitter grammars for JS/TS (+TSX), Markdown, TOML,
+  YAML, HTML, CSS, Lua, Ruby, PHP, Java, Make, Dockerfile, INI, diff,
+  Elisp, Scheme, SQL and Clojure (`syntax.rs` `Lang` is the only place to
+  touch, plus `lsp.rs` `command_for` for servers). Two grammars are not
+  crates: Dockerfile's C sources are vendored under `vendor/` (its crate
+  binds tree-sitter 0.20 and collides at link time), and Markdown uses the
+  maintained `tree-sitter-md` block grammar with a rano-owned query (the
+  inline grammar is a separate tree, which rano's no-injection engine
+  cannot run).
 - [ ] Configurable key bindings — `bindings::BAR` (`bindings.rs:15-47`) is
   display-only today; dispatch is a separate hardcoded match in `keys.rs`, so
   "one binding table" (`README.md:98`) is only half true. Making the table the

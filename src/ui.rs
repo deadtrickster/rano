@@ -1,5 +1,6 @@
 use crate::buffer::Pos;
 use crate::editor::Editor;
+use crate::lsp;
 use crate::prompt::{Prompt, prompt_label};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -157,12 +158,20 @@ fn line_to_spans(
     view_w: usize,
     tab_width: usize,
     ed: &Editor,
+    diags: &[lsp::Diagnostic],
 ) -> Line<'static> {
+    // Only this row's diagnostics can underline it: filter once per row
+    // instead of scanning the whole list per character.
+    let row_diags: Vec<lsp::Diagnostic> = diags
+        .iter()
+        .filter(|d| d.line == abs_row)
+        .cloned()
+        .collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
     for (col, ch) in text_window(chars, scroll_x, view_w, tab_width) {
-        let style = ed.char_style(Pos { row: abs_row, col });
+        let style = ed.char_style_with(Pos { row: abs_row, col }, &row_diags);
         match run_style {
             Some(s) if s == style => run.push(ch),
             Some(s) => {
@@ -202,6 +211,12 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     };
     let view_w = (width as usize).saturating_sub(g);
 
+    // Merged diagnostics, computed ONCE per frame: the per-character style
+    // lookup and the gutter both read it. `all_diags` clones and sorts, so
+    // running it per cell made scrolling cost scale with the diagnostic
+    // count (measured: ~65 ms/frame at 500 diags, ~26 µs at zero).
+    let diags = ed.all_diags();
+
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
     let flags = if bs.mark.is_some() { "M" } else { "" };
@@ -224,7 +239,6 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             };
             // D6: rows with diagnostics carry their severity's color (the
             // most severe wins; the list merges tree-sitter + LSP diags).
-            let diags = ed.all_diags();
             let fg = match diags
                 .iter()
                 .filter(|d| d.line == r)
@@ -255,6 +269,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 view_w,
                 ed.tab_width,
                 ed,
+                &diags,
             )),
             None => lines.push(Line::default()),
         }
@@ -561,7 +576,7 @@ mod tests {
     #[test]
     fn line_to_spans_coalesces_unstyled() {
         let e = ed("abc");
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e);
+        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &[]);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "abc");
     }
@@ -571,7 +586,7 @@ mod tests {
         let mut e = ed("abc");
         e.bs_mut().mark = Some(Pos { row: 0, col: 1 });
         e.bs_mut().cursor = Pos { row: 0, col: 2 };
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e);
+        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &[]);
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "b");
@@ -585,16 +600,51 @@ mod tests {
     #[test]
     fn line_to_spans_empty_line() {
         let e = ed("");
-        let line = line_to_spans(&chars(""), 0, 0, 80, 8, &e);
+        let line = line_to_spans(&chars(""), 0, 0, 80, 8, &e, &[]);
         assert_eq!(line.spans.len(), 0);
     }
 
     #[test]
     fn line_to_spans_clips_to_max_w() {
         let e = ed("abc");
-        let line = line_to_spans(&chars("abc"), 0, 0, 2, 8, &e);
+        let line = line_to_spans(&chars("abc"), 0, 0, 2, 8, &e, &[]);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "ab");
+    }
+
+    // The draw path hands line_to_spans the frame's merged diagnostics; a
+    // diag on the row must underline its range (and only that row's).
+    #[test]
+    fn line_to_spans_underlines_row_diagnostic() {
+        let e = ed("abc");
+        let diags = vec![
+            lsp::Diagnostic {
+                line: 0,
+                col: 1,
+                end_col: 3,
+                message: "m".into(),
+                severity: 1,
+            },
+            // A diag on another row must not leak into this one.
+            lsp::Diagnostic {
+                line: 5,
+                col: 0,
+                end_col: 2,
+                message: "m".into(),
+                severity: 1,
+            },
+        ];
+        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &diags);
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "a");
+        assert_eq!(line.spans[0].style, Style::default());
+        assert_eq!(line.spans[1].content, "bc");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::UNDERLINED)
+        );
     }
 
     // ---------- text_window ----------
@@ -645,7 +695,7 @@ mod tests {
         let mut e = ed("abcdefgh");
         e.bs_mut().mark = Some(Pos { row: 0, col: 6 });
         e.bs_mut().cursor = Pos { row: 0, col: 7 };
-        let line = line_to_spans(&chars("abcdefgh"), 0, 5, 3, 8, &e);
+        let line = line_to_spans(&chars("abcdefgh"), 0, 5, 3, 8, &e, &[]);
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "f");
         assert_eq!(line.spans[1].content, "g");
@@ -799,7 +849,7 @@ mod tests {
         let mut e = ed("a\tb");
         e.bs_mut().mark = Some(Pos { row: 0, col: 1 });
         e.bs_mut().cursor = Pos { row: 0, col: 2 };
-        let line = line_to_spans(&chars("a\tb"), 0, 0, 80, 8, &e);
+        let line = line_to_spans(&chars("a\tb"), 0, 0, 80, 8, &e, &[]);
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "       ");

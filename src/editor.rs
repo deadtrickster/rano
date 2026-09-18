@@ -1824,7 +1824,10 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    pub fn char_style(&self, p: Pos) -> Style {
+    /// Style for the character at `p`, given the frame's merged diagnostics
+    /// (see `ui::draw`, which computes them once per frame — `all_diags`
+    /// clones and sorts, so it must not run per character).
+    pub fn char_style_with(&self, p: Pos, diags: &[lsp::Diagnostic]) -> Style {
         // Current search match: black on yellow (nano's default). Other
         // matches are not highlighted.
         if let Some((a, b)) = self.current_match_range()
@@ -1844,8 +1847,7 @@ impl Editor {
         // Diagnostics: underline in severity color. Search match and
         // selection return above, so they still win. LSP cols are UTF-16
         // units and can drift on astral chars (accepted limitation).
-        let diags = self.all_diags();
-        for d in &diags {
+        for d in diags {
             if d.line == p.row && d.col <= p.col && p.col < d.end_col {
                 let c = match d.severity {
                     1 => Color::Red,

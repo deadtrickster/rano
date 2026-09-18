@@ -1070,19 +1070,24 @@ mod ed_tests {
     fn diag_underline_style() {
         let mut ed = test_ed("fn main() {}\n");
         ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 1)];
-        let s = ed.char_style(Pos { row: 0, col: 0 });
+        let s = ed.char_style_with(Pos { row: 0, col: 0 }, &ed.all_diags());
         assert_eq!(s.fg, Some(Color::Red));
         assert!(s.add_modifier.contains(Modifier::UNDERLINED));
-        let s = ed.char_style(Pos { row: 0, col: 3 });
+        let s = ed.char_style_with(Pos { row: 0, col: 3 }, &ed.all_diags());
         assert_eq!(s.fg, None);
         assert!(!s.add_modifier.contains(Modifier::UNDERLINED));
         ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 2)];
         assert_eq!(
-            ed.char_style(Pos { row: 0, col: 1 }).fg,
+            ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
+                .fg,
             Some(Color::Yellow)
         );
         ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 3)];
-        assert_eq!(ed.char_style(Pos { row: 0, col: 1 }).fg, Some(Color::Blue));
+        assert_eq!(
+            ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
+                .fg,
+            Some(Color::Blue)
+        );
     }
 
     #[test]
@@ -1092,7 +1097,7 @@ mod ed_tests {
         ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
         ed.bs_mut().cursor = Pos { row: 0, col: 3 };
         assert_eq!(
-            ed.char_style(Pos { row: 0, col: 1 }),
+            ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
             Style::default().fg(Color::White).bg(Color::DarkGray)
         );
         ed.bs_mut().mark = None;
@@ -1100,7 +1105,7 @@ mod ed_tests {
         ed.bs_mut().search_matches = Some(vec![(Pos { row: 0, col: 0 }, 2)]);
         ed.bs_mut().search.current = 0;
         assert_eq!(
-            ed.char_style(Pos { row: 0, col: 1 }),
+            ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
             Style::default().fg(Color::Black).bg(Color::Yellow)
         );
     }

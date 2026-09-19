@@ -70,6 +70,12 @@ pub struct BufferState {
     /// increasing — every row occupies at least one visual row). Valid only
     /// while `wrap_key` matches the buffer's (edit_gen, view_w).
     pub wrap_prefix: Vec<usize>,
+    /// First tab char index per row, built in the same pass as
+    /// `wrap_prefix` (same freshness): `Some(t)` = first tab at char `t`,
+    /// `None` = the row has no tabs. A tab-free row maps display col ==
+    /// char index, so the per-frame window/col scans become O(1) lookups
+    /// instead of O(line length).
+    pub(crate) wrap_first_tab: Vec<Option<usize>>,
     pub(crate) wrap_key: (u64, usize),
     /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
@@ -106,6 +112,7 @@ impl BufferState {
             exec_job: None,
             scroll_x: 0,
             wrap_prefix: Vec::new(),
+            wrap_first_tab: Vec::new(),
             wrap_key: (0, 0),
             edit_gen: 0,
             undo: VecDeque::new(),

@@ -92,6 +92,11 @@ pub(crate) fn display_width(chars: &[char], tab_width: usize) -> usize {
 /// length; clicking inside a tab lands on the tab itself.
 pub(crate) fn char_at_display(line: &[char], disp: usize, tab_width: usize) -> usize {
     let tw = tab_width.max(1);
+    // Fast path: no tab in [0, disp) → display col == char index there.
+    let pre = &line[..disp.min(line.len())];
+    if !pre.contains(&'\t') {
+        return disp.min(line.len());
+    }
     let mut w = 0usize;
     for (i, &c) in line.iter().enumerate() {
         let cw = if c == '\t' { tw - (w % tw) } else { 1 };
@@ -105,7 +110,24 @@ pub(crate) fn char_at_display(line: &[char], disp: usize, tab_width: usize) -> u
 
 /// Display col of char index `col` within `line` (col clamped to line len).
 pub(crate) fn display_col(line: &[char], col: usize, tab_width: usize) -> usize {
-    display_width(&line[..col.min(line.len())], tab_width)
+    let col = col.min(line.len());
+    // Fast path: no tab in the prefix → display col == char index.
+    if !line[..col].contains(&'\t') {
+        return col;
+    }
+    display_width(&line[..col], tab_width)
+}
+
+/// The window of a KNOWN tab-free row: display col == char index, so it is
+/// a plain slice — no scan of the chars left of `scroll_x`.
+fn tab_free_window(line: &[char], scroll_x: usize, view_w: usize) -> Vec<(usize, char)> {
+    let end = scroll_x.saturating_add(view_w);
+    let start = scroll_x.min(line.len());
+    line[start..end.min(line.len())]
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (start + i, c))
+        .collect()
 }
 
 /// Visible window of `line` as display cols `[scroll_x, scroll_x + view_w)`:
@@ -120,6 +142,14 @@ fn text_window(
 ) -> Vec<(usize, char)> {
     let tw = tab_width.max(1);
     let end = scroll_x.saturating_add(view_w);
+    // Fast path: no tab in [0, end) → display col == char index there (tabs
+    // only widen), so the window is a plain slice. The check stops at the
+    // first tab, so indented lines pay only their indent. Callers that know
+    // the row is tab-free (fresh wrap table) use tab_free_window directly.
+    let pre = &line[..end.min(line.len())];
+    if !pre.contains(&'\t') {
+        return tab_free_window(line, scroll_x, view_w);
+    }
     let mut out = Vec::new();
     let mut d = 0;
     for (i, &c) in line.iter().enumerate() {
@@ -150,6 +180,8 @@ fn text_window(
 /// `[scroll_x, scroll_x + view_w)` of `chars` (tabs expanded, E3/F2); styles
 /// are resolved at ABSOLUTE positions (abs_row, char col) via `char_style`,
 /// so search/selection/diagnostic lookups never see window-relative coords.
+/// `diags` is THIS row's slice of the frame's merged list — draw walks the
+/// sorted list once per frame (see `diag_range`) — so no per-row filter.
 /// Consecutive equal styles coalesce into a single span.
 fn line_to_spans(
     chars: &[char],
@@ -160,18 +192,17 @@ fn line_to_spans(
     ed: &Editor,
     diags: &[lsp::Diagnostic],
 ) -> Line<'static> {
-    // Only this row's diagnostics can underline it: filter once per row
-    // instead of scanning the whole list per character.
-    let row_diags: Vec<lsp::Diagnostic> = diags
-        .iter()
-        .filter(|d| d.line == abs_row)
-        .cloned()
-        .collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
-    for (col, ch) in text_window(chars, scroll_x, view_w, tab_width) {
-        let style = ed.char_style_with(Pos { row: abs_row, col }, &row_diags);
+    // Known tab-free row (fresh wrap table): skip text_window's scan of the
+    // chars left of scroll_x — O(view_w) instead of O(scroll_x) per frame.
+    let window = match ed.row_first_tab(abs_row) {
+        Some(None) => tab_free_window(chars, scroll_x, view_w),
+        _ => text_window(chars, scroll_x, view_w, tab_width),
+    };
+    for (col, ch) in window {
+        let style = ed.char_style_with(Pos { row: abs_row, col }, diags);
         match run_style {
             Some(s) if s == style => run.push(ch),
             Some(s) => {
@@ -225,9 +256,18 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
         let mut first = true;
         while out.len() < text_h && r < bs.buf.lines.len() {
-            let count = display_width(&bs.buf.lines[r], ed.tab_width)
-                .div_ceil(view_w.max(1))
-                .max(1);
+            // Segment count from the cached wrap table (rebuilt once per
+            // edit/resize by ensure_wrap_prefix) instead of re-scanning the
+            // whole line every frame — a 500k-char line must not cost 500k
+            // steps per frame. The fallback covers a missing table (tests
+            // that draw without the run loop's adjust_scroll).
+            let count = if r + 1 < bs.wrap_prefix.len() {
+                bs.wrap_prefix[r + 1] - bs.wrap_prefix[r]
+            } else {
+                display_width(&bs.buf.lines[r], ed.tab_width)
+                    .div_ceil(view_w.max(1))
+                    .max(1)
+            };
             // The top line may start MID-way (seg > 0): emit only its
             // remaining segments. Emitting all `count` would add `seg`
             // phantom rows past the line's end — blank gaps that collapse
@@ -258,6 +298,29 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         (bs.scroll..bs.scroll + text_h).map(|r| (r, 0)).collect()
     };
 
+    // Per visible row: the row's slice of `diags` (sorted by line) and its
+    // most severe severity for the gutter. One O(diags + rows) walk instead
+    // of filtering the whole list per row (O(rows × diags) per frame).
+    // `vis` rows are non-decreasing, so a single forward cursor suffices.
+    let mut diag_range: Vec<(usize, usize)> = Vec::with_capacity(text_h);
+    let mut diag_sev: Vec<Option<u64>> = Vec::with_capacity(text_h);
+    {
+        let mut it = 0usize;
+        for (r, _) in &vis {
+            while it < diags.len() && diags[it].line < *r {
+                it += 1;
+            }
+            let start = it;
+            let mut sev: Option<u64> = None;
+            while it < diags.len() && diags[it].line == *r {
+                sev = Some(sev.unwrap_or(diags[it].severity).min(diags[it].severity));
+                it += 1;
+            }
+            diag_range.push((start, it));
+            diag_sev.push(sev);
+        }
+    }
+
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
     let flags = if bs.mark.is_some() { "M" } else { "" };
@@ -272,7 +335,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
     if g > 0 {
         let mut nums: Vec<Line> = Vec::with_capacity(text_h);
-        for (r, seg) in &vis {
+        for (i, (r, seg)) in vis.iter().enumerate() {
             // The number sits on the first wrap segment of a row only;
             // continuation rows stay blank (nano).
             let s = if *r < bs.buf.lines.len() && *seg == 0 {
@@ -283,12 +346,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             // D6: rows with diagnostics carry their severity's color (the
             // most severe wins; the list merges tree-sitter + LSP diags).
             // Every wrap segment of such a row is colored.
-            let fg = match diags
-                .iter()
-                .filter(|d| d.line == *r)
-                .map(|d| d.severity)
-                .min()
-            {
+            let fg = match diag_sev[i] {
                 Some(1) => Color::Red,
                 Some(2) => Color::Yellow,
                 Some(_) => Color::Blue,
@@ -307,7 +365,8 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // text_window's display-col math is absolute, so tabs straddling a wrap
     // boundary clip correctly.
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
-    for (r, seg) in &vis {
+    for (i, (r, seg)) in vis.iter().enumerate() {
+        let (a, b) = diag_range[i];
         match bs.buf.lines.get(*r) {
             Some(chars) => lines.push(line_to_spans(
                 chars,
@@ -316,7 +375,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 view_w,
                 ed.tab_width,
                 ed,
-                &diags,
+                &diags[a..b],
             )),
             None => lines.push(Line::default()),
         }
@@ -515,7 +574,10 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                     .get(bs.cursor.row)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let disp = display_col(line, bs.cursor.col, ed.tab_width);
+                let disp = match ed.row_first_tab(bs.cursor.row) {
+                    Some(None) => bs.cursor.col.min(line.len()),
+                    _ => display_col(line, bs.cursor.col, ed.tab_width),
+                };
                 let cx = if ed.wrap {
                     (g + disp % view_w.max(1)) as u16
                 } else {
@@ -686,12 +748,13 @@ mod tests {
         assert_eq!(line.spans[0].content, "ab");
     }
 
-    // The draw path hands line_to_spans the frame's merged diagnostics; a
-    // diag on the row must underline its range (and only that row's).
+    // The draw path hands line_to_spans the row's slice of the frame's
+    // merged diagnostics (its diag_range walk); a diag on the row must
+    // underline its range.
     #[test]
     fn line_to_spans_underlines_row_diagnostic() {
         let e = ed("abc");
-        let diags = vec![
+        let diags = [
             lsp::Diagnostic {
                 line: 0,
                 col: 1,
@@ -699,7 +762,8 @@ mod tests {
                 message: "m".into(),
                 severity: 1,
             },
-            // A diag on another row must not leak into this one.
+            // A diag on another row: draw's per-row walk never hands it to
+            // this row's slice.
             lsp::Diagnostic {
                 line: 5,
                 col: 0,
@@ -708,7 +772,7 @@ mod tests {
                 severity: 1,
             },
         ];
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &diags);
+        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &diags[..1]);
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[0].style, Style::default());
@@ -1013,6 +1077,32 @@ mod tests {
             "next line directly below"
         );
         assert_eq!(buf.cell((4, 9)).unwrap().symbol(), "h");
+    }
+
+    #[test]
+    fn draw_wraps_tabbed_line() {
+        // A tabbed row takes the slow text_window path (the wrap table says
+        // "has tabs"); the tab must still expand to the next multiple of
+        // tab_width and the row must wrap at the segment boundary.
+        let mut e = ed(&format!("\t{}", "a".repeat(40)));
+        e.show_line_numbers = true;
+        e.text_w = 40;
+        e.ensure_wrap_prefix();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        // view_w = 40 - 3 = 37. Row 0: tab = display cols 0..8, then 40 a's
+        // at 8..48 → segment 0 = 8 spaces + 29 a's, segment 1 = 11 a's.
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((10, 1)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((11, 1)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((39, 1)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((3, 2)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((13, 2)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((14, 2)).unwrap().symbol(), " ");
+        // Gutter number on the first segment only.
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1");
+        assert_eq!(buf.cell((1, 2)).unwrap().symbol(), " ");
     }
 
     #[test]

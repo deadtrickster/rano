@@ -286,12 +286,27 @@ impl Editor {
         };
         let view_w = self.text_w.saturating_sub(gutter).max(1);
         let tab_width = self.tab_width;
+        let row = self
+            .bs()
+            .cursor
+            .row
+            .min(self.bs().buf.lines.len().saturating_sub(1));
+        // Tab-free rows (fresh wrap table): display col == char index.
+        let no_tabs = matches!(self.row_first_tab(row), Some(None));
         let bs = self.bs_mut();
-        let row = bs.cursor.row.min(bs.buf.lines.len().saturating_sub(1));
         let line = &bs.buf.lines[row];
-        let disp = ui::display_col(line, bs.cursor.col, tab_width);
+        let disp = if no_tabs {
+            bs.cursor.col.min(line.len())
+        } else {
+            ui::display_col(line, bs.cursor.col, tab_width)
+        };
+        let line_w = if no_tabs {
+            line.len()
+        } else {
+            ui::display_width(line, tab_width)
+        };
         bs.scroll_x = bs.scroll_x.min(disp).max((disp + 1).saturating_sub(view_w));
-        bs.scroll_x = bs.scroll_x.min(ui::display_width(line, tab_width));
+        bs.scroll_x = bs.scroll_x.min(line_w);
     }
 
     // ---------- soft wrap (M-\) ----------
@@ -307,7 +322,9 @@ impl Editor {
     }
 
     /// Rebuild the visual-row prefix table when the buffer or the wrap
-    /// width changed since the last build. No-op when wrap is off.
+    /// width changed since the last build. No-op when wrap is off. Also
+    /// records each row's first tab index (same pass, same freshness) so
+    /// tab-free rows skip the per-frame display-col scans.
     pub(crate) fn ensure_wrap_prefix(&mut self) {
         if !self.wrap {
             return;
@@ -319,18 +336,47 @@ impl Editor {
         if fresh {
             return;
         }
+        let tw = self.tab_width.max(1);
         let mut prefix = Vec::with_capacity(self.bs().buf.lines.len() + 1);
+        let mut first_tab = Vec::with_capacity(self.bs().buf.lines.len());
         prefix.push(0);
         for line in &self.bs().buf.lines {
             // A tab's width depends on the ABSOLUTE display col, which does
             // not reset at wrap boundaries, so the full-line width is
             // exactly the sum of the segment widths.
-            let w = ui::display_width(line, self.tab_width);
+            let mut w = 0;
+            let mut ft: Option<usize> = None;
+            for (i, &c) in line.iter().enumerate() {
+                if c == '\t' {
+                    if ft.is_none() {
+                        ft = Some(i);
+                    }
+                    w += tw - (w % tw);
+                } else {
+                    w += 1;
+                }
+            }
             prefix.push(*prefix.last().unwrap() + w.div_ceil(vw).max(1));
+            first_tab.push(ft);
         }
         let bs = self.bs_mut();
         bs.wrap_prefix = prefix;
+        bs.wrap_first_tab = first_tab;
         bs.wrap_key = key;
+    }
+
+    /// First tab char index of row `r` from the wrap table, when it is
+    /// fresh: `Some(Some(t))` = first tab at char `t`, `Some(None)` = the
+    /// row has no tabs (display col == char index), `None` = unknown
+    /// (table stale or never built — callers fall back to scanning).
+    pub(crate) fn row_first_tab(&self, r: usize) -> Option<Option<usize>> {
+        let bs = self.bs();
+        if bs.wrap_key != (bs.edit_gen, self.view_w())
+            || bs.wrap_first_tab.len() != bs.buf.lines.len()
+        {
+            return None;
+        }
+        bs.wrap_first_tab.get(r).copied()
     }
 
     /// Visual row containing position `p` (wrap on only).
@@ -339,8 +385,11 @@ impl Editor {
         let r = p.row.min(bs.buf.lines.len().saturating_sub(1));
         let line = &bs.buf.lines[r];
         let vw = self.view_w();
-        bs.wrap_prefix.get(r).copied().unwrap_or(0)
-            + ui::display_col(line, p.col, self.tab_width) / vw
+        let disp = match self.row_first_tab(r) {
+            Some(None) => p.col.min(line.len()),
+            _ => ui::display_col(line, p.col, self.tab_width),
+        };
+        bs.wrap_prefix.get(r).copied().unwrap_or(0) + disp / vw
     }
 
     /// (buffer row, wrap segment) of visual row `v`, clamped to the buffer
@@ -363,7 +412,11 @@ impl Editor {
 
     /// Char col of display col `d` on buffer row `r` (clamped to EOL).
     fn col_at_disp(&self, r: usize, d: usize) -> usize {
-        ui::char_at_display(&self.bs().buf.lines[r], d, self.tab_width)
+        let line = &self.bs().buf.lines[r];
+        match self.row_first_tab(r) {
+            Some(None) => d.min(line.len()),
+            _ => ui::char_at_display(line, d, self.tab_width),
+        }
     }
 
     pub(crate) fn edit_invalidate(&mut self) {
@@ -2025,9 +2078,9 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    /// Style for the character at `p`, given the frame's merged diagnostics
-    /// (see `ui::draw`, which computes them once per frame — `all_diags`
-    /// clones and sorts, so it must not run per character).
+    /// Style for the character at `p`, given THIS row's diagnostics (a
+    /// slice of the frame's merged list — `ui::draw` walks the sorted list
+    /// once per frame, so `all_diags` must not run per character).
     pub fn char_style_with(&self, p: Pos, diags: &[lsp::Diagnostic]) -> Style {
         // Current search match: black on yellow (nano's default). Other
         // matches are not highlighted.

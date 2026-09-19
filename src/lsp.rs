@@ -141,8 +141,16 @@ pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
         Lang::Sql => ("sqls", &[]),
         Lang::Clojure => ("clojure-lsp", &[]),
         // No standard server worth spawning: make, dockerfiles, ini-style
-        // configs, diffs, and the emacs/scheme lisps all run without LSP.
-        Lang::Make | Lang::Dockerfile | Lang::Ini | Lang::Diff | Lang::Elisp | Lang::Scheme => {
+        // configs, diffs, the emacs/scheme lisps and the inline half of
+        // markdown (which is never a buffer — a consumer drives it as a
+        // second Stream) all run without LSP.
+        Lang::Make
+        | Lang::Dockerfile
+        | Lang::Ini
+        | Lang::Diff
+        | Lang::Elisp
+        | Lang::Scheme
+        | Lang::MarkdownInline => {
             return None;
         }
     };
@@ -162,6 +170,7 @@ fn language_id(lang: Lang) -> &'static str {
         Lang::TypeScript => "typescript",
         Lang::Tsx => "typescriptreact",
         Lang::Markdown => "markdown",
+        Lang::MarkdownInline => "markdown",
         Lang::Toml => "toml",
         Lang::Yaml => "yaml",
         Lang::Html => "html",

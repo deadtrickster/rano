@@ -7,11 +7,19 @@
 //! same shape as `Buffer::lines`, so lookups from the UI are plain index
 //! accesses. `refresh` re-parses the whole buffer; files are small, so the
 //! cost is a fraction of a millisecond.
+//!
+//! [`Stream`] is the same grammars with the opposite trade: it parses a
+//! document that only ever grows (a streamed reply, a log tail) and keeps the
+//! previous tree, so tree-sitter can reuse the unchanged prefix instead of
+//! reparsing it. How much of the document that actually saves is the
+//! grammar's decision rather than this crate's — see the note on `Stream`.
 
 use ratatui::style::{Color, Style};
 use std::path::Path;
 use std::sync::LazyLock;
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{
+    InputEdit, Language, Parser, Point, Query, QueryCursor, Range, StreamingIterator, Tree,
+};
 use tree_sitter_language::LanguageFn;
 
 use crate::buffer::{Buffer, Pos};
@@ -39,6 +47,12 @@ pub enum Lang {
     TypeScript,
     Tsx,
     Markdown,
+    /// The inline half of markdown, for parsing the byte ranges the block
+    /// grammar marks as inline content — the second half of markdown's
+    /// two-grammar split (`tree-sitter-md`'s "Standalone usage"). Never
+    /// detected from a path: a consumer pairs it with a [`Lang::Markdown`]
+    /// [`Stream`] and feeds it included ranges.
+    MarkdownInline,
     Toml,
     Yaml,
     Html,
@@ -71,6 +85,7 @@ impl Lang {
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Lang::MarkdownInline => tree_sitter_md::INLINE_LANGUAGE.into(),
             Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
             Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(),
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
@@ -104,6 +119,7 @@ impl Lang {
             Lang::JavaScript => JS_HIGHLIGHTS_QUERY.as_str(),
             Lang::TypeScript | Lang::Tsx => TS_HIGHLIGHTS_QUERY.as_str(),
             Lang::Markdown => MARKDOWN_HIGHLIGHTS_QUERY,
+            Lang::MarkdownInline => tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
             Lang::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
             Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
@@ -884,6 +900,366 @@ impl Default for Highlighter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stream: an append-only document, incrementally parsed
+// ---------------------------------------------------------------------------
+//
+// `dead_code` is allowed item by item across this section on purpose. It is
+// the public API of the *library* target (`rano::syntax::Stream`, lib.rs) for
+// other crates to use — the editor binary compiles this module privately and
+// has no use for the engine yet, so the lint would otherwise fire for every
+// type, method and helper here.
+
+/// A node of a [`Stream`]'s tree, as plain data.
+///
+/// The engine's public surface holds no `tree-sitter` types on purpose: a
+/// consumer walks this to build its own layout model, the same way
+/// [`Highlighter::classes`] hands back capture *names* rather than nodes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    /// Grammar node kind: `"atx_heading"`, `"fenced_code_block"`,
+    /// `"strong_emphasis"`, …
+    pub kind: String,
+    /// Byte offsets into [`Stream::src`].
+    pub start: usize,
+    pub end: usize,
+    pub has_error: bool,
+    pub is_missing: bool,
+    /// Tree-sitter's `is_named()`: false for anonymous tokens (punctuation,
+    /// keywords like `fn` or `|`), which are in `children` too. A consumer
+    /// doing a "split this node's range around its named children" walk —
+    /// markdown's block/inline handoff, for one — needs to tell them apart.
+    pub named: bool,
+    pub children: Vec<Node>,
+}
+
+/// One query capture, as plain data.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    /// The capture name as the query writes it (`"keyword"`, `"string"`, …).
+    pub name: String,
+    /// Byte offsets into [`Stream::src`].
+    pub start: usize,
+    pub end: usize,
+}
+
+/// An append-only document, incrementally parsed.
+///
+/// The editor's [`Highlighter`] full-reparses on every edit, deliberately:
+/// reusing a tree across an edit that *shortens* a line leaks byte offsets
+/// from the old source into the new tree (see [`Highlighter::refresh`]).
+/// This type is the other half of that trade. It only ever grows, and a
+/// pure-append edit cannot shorten a line, so handing the previous tree
+/// back to the parser is both sound and cheap: the unchanged prefix is
+/// reused and the per-push cost stays flat as the document grows. Feeding
+/// text through [`Highlighter::refresh`] instead would re-parse the whole
+/// document per push — O(N²) over a stream.
+///
+/// The use is "push, then read": hold one `Stream` per growing document,
+/// [`push`](Self::push) each delta as it arrives, and read
+/// [`root`](Self::root) (and/or [`captures`](Self::captures)) after each
+/// push. For a second grammar over selected parts of the document —
+/// markdown's block + inline split, HTML embedding JavaScript, C embedding
+/// asm — hold another `Stream` and give it the byte ranges to parse with
+/// [`set_included_ranges`](Self::set_included_ranges).
+///
+/// The engine is generic over [`Lang`]: no grammar-specific knowledge
+/// lives here.
+///
+/// # What the reuse is worth, measured
+///
+/// How much tree-sitter can reuse is the grammar's decision, not this
+/// crate's. Measured on this machine (release build, appending a token or two
+/// at a time, 1,000 pushes):
+///
+/// | grammar | a late push | a one-shot parse of the same text |
+/// |---|---|---|
+/// | Rust (88 KB) | ~275 µs | ~8.2 ms |
+/// | Markdown block (103 KB) | ~9.5 ms | ~12.6 ms |
+///
+/// Rust reuses nearly everything: a push costs about 3% of a full parse.
+/// Markdown's block grammar calls its external scanner in almost every block
+/// state, and tree-sitter refuses to reuse a token when the *current* state
+/// admits external tokens (`ts_parser__can_reuse_first_leaf`'s
+/// `external_lex_state == 0` condition, `parser.c`) — so a markdown push
+/// re-lexes essentially the whole document: ~100 ns per document byte, about
+/// what a full parse costs. `Tree::edit` is ~0.3 µs and never the cost.
+///
+/// Either way the per-push cost is linear in the document, so pushing N times
+/// costs O(N²) in total. This engine is a constant-factor win over reparsing,
+/// not an asymptotic one, and it is not a licence to stream a 10 MB document
+/// one token at a time. A consumer that needs better has to keep the settled
+/// prefix out of the parser's way itself (parse only the growing tail with
+/// [`set_included_ranges`](Self::set_included_ranges) and splice).
+///
+/// The measurement lives in this module's tests: `an_incremental_push_beats_a_full_reparse`
+/// runs by default, `per_push_cost_stays_flat` (ignored, slow) states the
+/// flat-cost criterion and fails on it today.
+#[allow(dead_code)]
+pub struct Stream {
+    lang: Lang,
+    parser: Parser,
+    /// The current parse. `None` before the first push, on an inert stream,
+    /// and after a parse that produced nothing (tree-sitter only gives up
+    /// on a timeout or a cancellation flag, neither of which is set here).
+    tree: Option<Tree>,
+    src: String,
+    /// Byte ranges the next parse is restricted to (empty = whole document,
+    /// tree-sitter's convention).
+    ranges: Vec<(usize, usize)>,
+    /// `ranges` changed since the parser last saw them.
+    ranges_dirty: bool,
+    query: Option<Query>,
+    /// `(language, query text)` the cached query was compiled from.
+    query_key: Option<(Lang, String)>,
+    parse_calls: u64,
+    /// End of `src` as a `Point`, kept incrementally: two integer updates
+    /// per push instead of a rescan of the whole document.
+    end_point: Point,
+    /// False when `set_language` failed, which makes the stream inert:
+    /// `push` is a no-op and `root()` is `None`. Every `Lang` has a valid
+    /// grammar, so this is defensive — the same "empty on failure"
+    /// convention [`Highlighter::classes`] uses.
+    live: bool,
+}
+
+#[allow(dead_code)]
+impl Stream {
+    /// A stream for `lang`, with no text yet.
+    ///
+    /// Infallible: every `Lang` has a valid grammar. If `set_language` ever
+    /// failed the stream would be inert — `push` a no-op, `root()` `None`.
+    pub fn new(lang: Lang) -> Self {
+        let mut parser = Parser::new();
+        let live = parser.set_language(&lang.language()).is_ok();
+        Self {
+            lang,
+            parser,
+            tree: None,
+            src: String::new(),
+            ranges: Vec::new(),
+            // Force one `set_included_ranges` before the first parse, so the
+            // parser is known to be in the "whole document" state.
+            ranges_dirty: true,
+            query: None,
+            query_key: None,
+            parse_calls: 0,
+            end_point: Point { row: 0, column: 0 },
+            live,
+        }
+    }
+
+    /// Append `delta` and re-parse.
+    ///
+    /// With a previous tree the tree is edited for the pure-append range and
+    /// handed to the parser, so the unchanged prefix is reused; without one,
+    /// a fresh parse. An empty `delta` on a stream that already has a tree
+    /// for this source is a no-op. On an inert stream this does nothing at
+    /// all.
+    pub fn push(&mut self, delta: &str) {
+        if !self.live || (delta.is_empty() && self.tree.is_some()) {
+            return;
+        }
+        let old_len = self.src.len();
+        let old_end = self.end_point;
+        self.src.push_str(delta);
+        for b in delta.as_bytes() {
+            if *b == b'\n' {
+                self.end_point.row += 1;
+                self.end_point.column = 0;
+            } else {
+                self.end_point.column += 1;
+            }
+        }
+        let new_len = self.src.len();
+
+        // The append is zero-width at the old end: the parser learns the
+        // source grew and where, and re-uses every subtree that does not
+        // touch the tail. `old_end` is the point before the append, so the
+        // edit is `start == old_end == new_start` in both bytes and points.
+        let edit = InputEdit {
+            start_byte: old_len,
+            old_end_byte: old_len,
+            new_end_byte: new_len,
+            start_position: old_end,
+            old_end_position: old_end,
+            new_end_position: self.end_point,
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.edit(&edit);
+        }
+        if self.ranges_dirty {
+            self.apply_ranges();
+        }
+        self.parse_calls += 1;
+        let parsed = self.parser.parse(self.src.as_bytes(), self.tree.as_ref());
+        // A `None` here means the parse produced nothing; drop the tree
+        // rather than hand back one that no longer matches `src`, and let
+        // the next push do a fresh full parse.
+        self.tree = parsed;
+    }
+
+    /// The text pushed so far.
+    pub fn src(&self) -> &str {
+        &self.src
+    }
+
+    /// The current tree as this crate's own type, or `None` before the first
+    /// push, on an inert stream, and after a parse that produced nothing.
+    ///
+    /// Built fresh per call: the consumer reads it once per push and the
+    /// trees are small (a 200 KB markdown document is a few thousand nodes).
+    pub fn root(&self) -> Option<Node> {
+        Some(node_of(self.tree.as_ref()?.root_node()))
+    }
+
+    /// Restrict the next parse to these byte ranges — tree-sitter's
+    /// `set_included_ranges`, and the generic form of "a second grammar over
+    /// selected parts of the document". An empty slice means the whole
+    /// document.
+    ///
+    /// The ranges are sorted and merged here rather than trusting the
+    /// caller, which is what tree-sitter requires (ordered and
+    /// non-overlapping); inverted and empty ranges are dropped. They are
+    /// held until the next [`push`](Self::push), which applies them to the
+    /// parser before parsing — so text pushed after this call is covered by
+    /// the ranges too.
+    pub fn set_included_ranges(&mut self, ranges: &[(usize, usize)]) {
+        let mut sorted: Vec<(usize, usize)> =
+            ranges.iter().copied().filter(|(s, e)| s < e).collect();
+        sorted.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
+        for (s, e) in sorted {
+            match merged.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        self.ranges = merged;
+        self.ranges_dirty = true;
+    }
+
+    /// Run `query` over the current tree: one [`Capture`] per capture, in
+    /// document order.
+    ///
+    /// The query compiles once per `(language, text)` and is cached, the way
+    /// [`Highlighter`] caches per language. Empty on an inert stream, before
+    /// the first push, and for a query that fails to compile.
+    pub fn captures(&mut self, query: &str) -> Vec<Capture> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Vec::new();
+        };
+        let stale = self
+            .query_key
+            .as_ref()
+            .is_none_or(|(l, q)| *l != self.lang || q != query);
+        if stale {
+            match Query::new(&self.lang.language(), query) {
+                Ok(q) => {
+                    self.query = Some(q);
+                    self.query_key = Some((self.lang, query.to_string()));
+                }
+                Err(_) => {
+                    self.query = None;
+                    self.query_key = None;
+                    return Vec::new();
+                }
+            }
+        }
+        let Some(q) = self.query.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let names = q.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut caps = cursor.captures(q, tree.root_node(), self.src.as_bytes());
+        while let Some((m, i)) = caps.next() {
+            let cap = m.captures()[*i];
+            let name = names.get(cap.index as usize).copied().unwrap_or("");
+            out.push(Capture {
+                name: name.to_string(),
+                start: cap.node.start_byte(),
+                end: cap.node.end_byte(),
+            });
+        }
+        out
+    }
+
+    /// How many `parse` calls this stream has made: one per
+    /// [`push`](Self::push) that did any work.
+    ///
+    /// There is deliberately no "bytes re-parsed" counter — tree-sitter does
+    /// not report how much of the prefix it reused, and any proxy for it
+    /// would answer the wrong question. Whether the reuse is keeping the
+    /// cost flat is a question about time, and the test that asks it
+    /// measures it.
+    pub fn parse_calls(&self) -> u64 {
+        self.parse_calls
+    }
+
+    /// Hand the held ranges to the parser. Empty means the whole document.
+    fn apply_ranges(&mut self) {
+        let len = self.src.len();
+        let ranges: Vec<Range> = self
+            .ranges
+            .iter()
+            .map(|&(s, e)| {
+                let (s, e) = (s.min(len), e.min(len));
+                Range {
+                    start_byte: s,
+                    end_byte: e,
+                    start_point: point_of(&self.src, s),
+                    end_point: point_of(&self.src, e),
+                }
+            })
+            .filter(|r| r.start_byte < r.end_byte)
+            .collect();
+        // Ignoring the result is safe: the ranges were sorted and merged
+        // above, so the parser accepts them or they were empty.
+        let _ = self.parser.set_included_ranges(&ranges);
+        self.ranges_dirty = false;
+    }
+}
+
+/// Deep-copy a `tree-sitter` node into this crate's own [`Node`].
+#[allow(dead_code)]
+fn node_of(n: tree_sitter::Node<'_>) -> Node {
+    let mut cursor = n.walk();
+    let children = n.children(&mut cursor).map(node_of).collect();
+    Node {
+        kind: n.kind().to_string(),
+        start: n.start_byte(),
+        end: n.end_byte(),
+        has_error: n.has_error(),
+        is_missing: n.is_missing(),
+        named: n.is_named(),
+        children,
+    }
+}
+
+/// `(row, column)` — both zero-based, the column in BYTES — of byte offset
+/// `off` in `src`, clamped into `src` and onto a char boundary.
+#[allow(dead_code)]
+fn point_of(src: &str, off: usize) -> Point {
+    let mut off = off.min(src.len());
+    while !src.is_char_boundary(off) {
+        off -= 1;
+    }
+    let upto = &src[..off];
+    match upto.rfind('\n') {
+        Some(nl) => Point {
+            row: upto.bytes().filter(|b| *b == b'\n').count(),
+            column: off - nl - 1,
+        },
+        None => Point {
+            row: 0,
+            column: off,
+        },
+    }
+}
+
 /// tree-sitter reports byte offsets within a row; diagnostics use char
 /// columns, so count the chars that make up the byte prefix.
 fn char_pos(lines: &[Vec<char>], p: tree_sitter::Point) -> (usize, usize) {
@@ -1510,5 +1886,755 @@ mod tests {
         }
         // Grow it again to exercise the other direction too.
         b.lines[line].extend("x=1".chars());
+    }
+}
+
+/// Driver tests for [`Stream`], the append-only parse engine.
+///
+/// The measurement in `per_push_cost_stays_flat` is the number the engine
+/// exists for: it prints per-push medians and p95 for the first and last 100
+/// pushes and asserts the cost does not grow with the document.
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use std::time::Instant;
+
+    // ---------- helpers ----------
+
+    /// Deterministic xorshift, so the chunk boundaries are reproducible and
+    /// the suite needs no rng dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// A value in `0..n` (0 when `n` is 0).
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as usize
+            }
+        }
+    }
+
+    /// `i` clamped into `doc` and onto a char boundary. Both documents carry
+    /// multibyte text, so this is what keeps the random cuts valid — and
+    /// makes the pushes exercise the byte-offset side of the incremental
+    /// edit (`Point::column` is in bytes).
+    fn snap(doc: &str, i: usize) -> usize {
+        let mut i = i.min(doc.len());
+        while !doc.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Cut points through `doc` for `n` pieces: char-boundary offsets, with
+    /// a deterministic jitter so the pieces are not all the same size.
+    fn cut_points(doc: &str, n: usize, rng: &mut Rng) -> Vec<usize> {
+        let step = (doc.len() / n.max(1)).max(1);
+        let mut cuts = Vec::with_capacity(n + 1);
+        let mut at = step;
+        while at < doc.len() {
+            cuts.push(snap(doc, at));
+            at += step + rng.below(step);
+        }
+        cuts.push(doc.len());
+        cuts.dedup();
+        cuts
+    }
+
+    /// Push `doc` to `s` in the pieces `cuts` delimits, and say how many
+    /// pushes that took.
+    fn push_in_pieces(s: &mut Stream, doc: &str, cuts: &[usize]) -> usize {
+        let mut at = 0;
+        let mut n = 0;
+        for &cut in cuts {
+            if cut <= at {
+                continue;
+            }
+            s.push(&doc[at..cut]);
+            at = cut;
+            n += 1;
+        }
+        n
+    }
+
+    /// Every node of the tree, the root included.
+    fn count_nodes(n: &Node) -> usize {
+        1 + n.children.iter().map(count_nodes).sum::<usize>()
+    }
+
+    // ---------- documents ----------
+
+    /// A ≥ 2 KB Rust document, with a multibyte char in the header.
+    fn rust_doc() -> String {
+        let mut s = String::from(
+            "//! a module — with an em dash\n\nuse std::fmt;\n\npub struct A { pub x: usize }\n\n",
+        );
+        for i in 0..30 {
+            s.push_str(&format!(
+                "/// step {i} → done\npub fn f{i}(x: usize) -> usize {{\n    let y = x * {i} + 1;\n    if y > 100 {{ y / 2 }} else {{ y + {i} }}\n}}\n\n"
+            ));
+        }
+        s.push_str("fn main() {\n    println!(\"{}\", f0(1));\n}\n");
+        s
+    }
+
+    /// A ≥ 2 KB markdown document with a heading, a paragraph holding
+    /// `**bold**`, `` `code` `` and a link, a fenced block, a list and a pipe
+    /// table.
+    fn md_doc() -> String {
+        let mut s = String::from(MD_HEAD);
+        for i in 0..24 {
+            s.push_str(&format!(
+                "Paragraph {i} with **bold {i}** and `code{i}` and a [link](http://x/{i}) — trailing text.\n\n"
+            ));
+        }
+        s
+    }
+
+    /// The fixed head every markdown document in this module starts with —
+    /// the four constructs the brief's §3.1 names, at stable offsets.
+    const MD_HEAD: &str = "# Streaming\n\nA paragraph with **bold** and `code` and a [link](http://x) — here.\n\n```rust\nfn main() {}\n```\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n## Second\n\n";
+
+    /// A ~100 KB markdown document (the §3.5 workload).
+    fn big_md() -> String {
+        let mut s = String::with_capacity(110_000);
+        for i in 0..1100 {
+            s.push_str(&format!(
+                "Paragraph {i} with **bold {i}** and `code{i}` plus a [link](http://x/{i}) and trailing text.\n\n"
+            ));
+        }
+        s
+    }
+
+    /// A ~100 KB Rust document.
+    fn big_rust() -> String {
+        let mut s = String::with_capacity(100_000);
+        for i in 0..1500 {
+            s.push_str(&format!(
+                "pub fn f{i}(x: usize) -> usize {{ let y = x * {i}; y + 1 }}\n"
+            ));
+        }
+        s
+    }
+
+    // ---------- tree helpers (what a consumer would write) ----------
+
+    /// The inline-content byte ranges of a markdown block tree: every
+    /// `inline` and `pipe_table_cell` node's range, split around its NAMED
+    /// children — those the block grammar already parsed, so the inline
+    /// grammar must not re-parse them. Sorted, which is also what
+    /// [`Stream::set_included_ranges`] wants.
+    ///
+    /// This is the consumer's job, not the engine's: `Stream` is generic and
+    /// knows nothing about markdown.
+    fn inline_ranges(root: &Node) -> Vec<(usize, usize)> {
+        fn walk(n: &Node, out: &mut Vec<(usize, usize)>) {
+            if n.kind == "inline" || n.kind == "pipe_table_cell" {
+                let mut at = n.start;
+                for c in n.children.iter().filter(|c| c.named) {
+                    if c.start > at {
+                        out.push((at, c.start));
+                    }
+                    at = at.max(c.end);
+                }
+                if at < n.end {
+                    out.push((at, n.end));
+                }
+            }
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort_unstable();
+        out
+    }
+
+    /// Every node of `root` below `kind`, depth first.
+    fn nodes_of<'a>(n: &'a Node, kind: &str, out: &mut Vec<&'a Node>) {
+        if n.kind == kind {
+            out.push(n);
+        }
+        for c in &n.children {
+            nodes_of(c, kind, out);
+        }
+    }
+
+    fn find<'a>(n: &'a Node, kind: &str) -> Vec<&'a Node> {
+        let mut out = Vec::new();
+        nodes_of(n, kind, &mut out);
+        out
+    }
+
+    /// Assert every node but the root lies inside one of `ranges` — i.e. the
+    /// parse stayed within the text it was given.
+    fn assert_inside(root: &Node, ranges: &[(usize, usize)], what: &str) {
+        fn check(n: &Node, ranges: &[(usize, usize)], top: bool, what: &str) {
+            if !top {
+                assert!(
+                    ranges.iter().any(|(a, b)| n.start >= *a && n.end <= *b),
+                    "{what}: node {:?} [{}..{}] is outside every included range {ranges:?}",
+                    n.kind,
+                    n.start,
+                    n.end
+                );
+            }
+            for c in &n.children {
+                check(c, ranges, false, what);
+            }
+        }
+        check(root, ranges, true, what);
+    }
+
+    // ---------- §3.1 streaming == one push ----------
+
+    /// The property the consumer's renderer is built on: a document pushed in
+    /// random chunks parses to exactly the tree a single push gives.
+    fn assert_chunked_equals_whole(lang: Lang, doc: &str, seed: u64) {
+        let mut whole = Stream::new(lang);
+        whole.push(doc);
+        let want = whole.root().expect("one-push tree");
+        assert!(
+            count_nodes(&want) >= 20,
+            "document too small to be useful: {} nodes",
+            count_nodes(&want)
+        );
+
+        let mut rng = Rng(seed);
+        let cuts = cut_points(doc, 7, &mut rng);
+        assert!(
+            cuts.len() >= 4,
+            "expected several chunks, got {}",
+            cuts.len()
+        );
+        let mut chunked = Stream::new(lang);
+        let pushes = push_in_pieces(&mut chunked, doc, &cuts);
+        assert_eq!(chunked.src(), doc);
+        assert_eq!(chunked.root().as_ref(), Some(&want));
+        assert_eq!(chunked.parse_calls(), pushes as u64, "one parse per chunk");
+        assert_eq!(whole.parse_calls(), 1);
+    }
+
+    #[test]
+    fn streaming_equals_one_push_for_rust() {
+        assert_chunked_equals_whole(Lang::Rust, &rust_doc(), 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn streaming_equals_one_push_for_markdown() {
+        let doc = md_doc();
+        assert!(doc.len() >= 2048, "{} bytes", doc.len());
+        assert_chunked_equals_whole(Lang::Markdown, &doc, 0x0fed_cba9_8765_4321);
+    }
+
+    // ---------- §3.2 / §3.4 the two passes ----------
+
+    /// Push a markdown document through a block stream and an inline stream
+    /// that is fed the block tree's inline ranges on every push, checking the
+    /// invariant after each step (not just at the end): the inline parse
+    /// never reaches outside the ranges it was given, and the ranges are
+    /// sorted and inside the text pushed so far.
+    fn run_two_passes(doc: &str, chunks: usize, seed: u64) -> (Stream, Stream) {
+        let mut block = Stream::new(Lang::Markdown);
+        let mut inline = Stream::new(Lang::MarkdownInline);
+        let mut rng = Rng(seed);
+        let cuts = cut_points(doc, chunks, &mut rng);
+        let mut at = 0;
+        let mut pushed_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut steps = 0;
+        for &cut in &cuts {
+            if cut <= at {
+                continue;
+            }
+            let delta = &doc[at..cut];
+            block.push(delta);
+
+            // What the previous inline parse produced must sit inside the
+            // ranges it was given, every step, all the way through.
+            if let Some(tree) = inline.root() {
+                assert_inside(&tree, &pushed_ranges, "inline tree between pushes");
+            }
+
+            let ranges = inline_ranges(&block.root().expect("block tree"));
+            for w in ranges.windows(2) {
+                assert!(w[0].1 <= w[1].0, "ranges not sorted/disjoint: {ranges:?}");
+            }
+            for (a, b) in &ranges {
+                assert!(a <= b && *b <= delta.len() + at, "{a}..{b} past {cut}");
+            }
+            inline.set_included_ranges(&ranges);
+            inline.push(delta);
+            pushed_ranges = ranges;
+            at = cut;
+            steps += 1;
+        }
+        assert!(steps >= 2, "the document must really be chunked");
+        (block, inline)
+    }
+
+    #[test]
+    fn two_passes_name_the_inline_constructs() {
+        let doc = "# Title\n\nA para with **bold** and `code` here [link](http://x).\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+        let (block, inline) = run_two_passes(doc, 5, 0xabcd_1234_5678_9f01);
+
+        // The inline stream's ranges come from the block tree, never from a
+        // path or a language guess.
+        let ranges = inline_ranges(&block.root().unwrap());
+        assert!(!ranges.is_empty());
+
+        // Its tree covers exactly the first range's start to the last
+        // range's end — nothing was parsed from outside them.
+        let root = inline.root().expect("inline tree");
+        assert_eq!(root.start, ranges.first().unwrap().0);
+        assert_eq!(root.end, ranges.last().unwrap().1);
+        assert_inside(&root, &ranges, "final inline tree");
+
+        // The inline grammar's own names for the constructs: `strong_emphasis`
+        // (`**bold**`), `code_span` (`` `code` ``) and `inline_link`.
+        for (kind, want) in [
+            ("strong_emphasis", "**bold**"),
+            ("code_span", "`code`"),
+            ("inline_link", "[link](http://x)"),
+        ] {
+            let found = find(&root, kind);
+            let node = found
+                .first()
+                .unwrap_or_else(|| panic!("no {kind} in the inline tree"));
+            assert_eq!(
+                &doc[node.start..node.end],
+                want,
+                "{kind} at {}..{}",
+                node.start,
+                node.end
+            );
+        }
+
+        // The inline stream runs its own grammar: the block kinds are absent.
+        assert!(find(&root, "fenced_code_block").is_empty());
+        assert!(find(&root, "paragraph").is_empty());
+
+        // A second pass re-reads the same stream: the query cache path is
+        // exercised separately below; here the tree must simply be stable.
+        let again = inline.root().unwrap();
+        assert_eq!(again, root);
+    }
+
+    #[test]
+    fn inline_stream_stays_correct_while_ranges_grow() {
+        // §3.4: the range list changes at the tail on every push while the
+        // earlier ranges are untouched. `run_two_passes` asserts the
+        // invariant after every step; this pins the final state too.
+        let doc = md_doc();
+        let (block, inline) = run_two_passes(&doc, 12, 0x5555_aaaa_3333_cccc);
+        let ranges = inline_ranges(&block.root().unwrap());
+        let root = inline.root().expect("inline tree");
+        assert_inside(&root, &ranges, "final inline tree");
+        assert_eq!(root.start, ranges.first().unwrap().0);
+        assert_eq!(root.end, ranges.last().unwrap().1);
+        // The head's constructs are still found at their real offsets.
+        for (kind, want) in [("strong_emphasis", "**bold**"), ("code_span", "`code`")] {
+            let node = find(&root, kind)
+                .first()
+                .copied()
+                .map(|n| &doc[n.start..n.end]);
+            assert_eq!(node, Some(want), "{kind}");
+        }
+    }
+
+    #[test]
+    fn included_ranges_are_sorted_merged_and_clamped() {
+        let doc = "aaa bbb ccc ddd\n";
+        let mut s = Stream::new(Lang::MarkdownInline);
+        // Deliberately unsorted, overlapping, inverted and past the end.
+        s.set_included_ranges(&[(8, 12), (0, 3), (10, 40), (5, 5), (4, 2)]);
+        s.push(doc);
+        let root = s.root().unwrap();
+        // 8..12 and 10..40 merge to 8..len; 0..3 stands alone; the empty and
+        // the inverted range are dropped by the `s < e` filter.
+        assert_eq!(root.start, 0);
+        assert_eq!(root.end, doc.len());
+        assert_inside(&root, &[(0, 3), (8, doc.len())], "merged ranges");
+
+        // An all-empty list is the whole document — tree-sitter's convention,
+        // and the reason a consumer with no inline content should skip the
+        // second pass instead of calling this with an empty list.
+        let mut whole = Stream::new(Lang::MarkdownInline);
+        whole.set_included_ranges(&[(5, 5)]);
+        whole.push(doc);
+        assert_eq!(whole.root().unwrap().end, doc.len());
+    }
+
+    // ---------- §3.3 error recovery ----------
+
+    #[test]
+    fn error_recovery_rust() {
+        let mut s = Stream::new(Lang::Rust);
+        s.push("fn main() { let x = ");
+        let broken = s.root().expect("tree for the broken source");
+        assert!(broken.has_error, "unfinished `let` should error");
+        let err = find(&broken, "ERROR");
+        assert!(!err.is_empty(), "an ERROR node is expected");
+
+        // The header parsed before the error — the part incremental reuse is
+        // supposed to keep.
+        let header: Vec<(String, usize, usize)> = leaves_before(&broken, 11);
+
+        s.push("1; }");
+        let fixed = s.root().expect("tree for the fixed source");
+        assert!(!fixed.has_error, "the finished function should be clean");
+        assert!(find(&fixed, "ERROR").is_empty());
+        assert_eq!(
+            leaves_before(&fixed, 11),
+            header,
+            "the function header must be untouched by the append"
+        );
+        // And it really is one function now, not an error node holding the
+        // pieces.
+        let f = find(&fixed, "function_item");
+        assert_eq!(f.len(), 1);
+        assert_eq!((f[0].start, f[0].end), (0, 24));
+
+        fn leaves_before(n: &Node, byte: usize) -> Vec<(String, usize, usize)> {
+            let mut out = Vec::new();
+            fn walk(n: &Node, byte: usize, out: &mut Vec<(String, usize, usize)>) {
+                if n.end > byte {
+                    return;
+                }
+                if n.children.is_empty() {
+                    out.push((n.kind.clone(), n.start, n.end));
+                }
+                for c in &n.children {
+                    walk(c, byte, out);
+                }
+            }
+            walk(n, byte, &mut out);
+            out
+        }
+    }
+
+    #[test]
+    fn unterminated_markdown_fence_settles_then_completes() {
+        // NOTE: the brief expected an error/missing node here. tree-sitter-md
+        // does not produce one: CommonMark lets a fence be closed by the end
+        // of the document, so the open fence is a *complete* `fenced_code_block`
+        // with no trailing delimiter. What is worth pinning is exactly that —
+        // no error, content running to EOF — and that the closing fence then
+        // arrives as a second delimiter without disturbing the earlier blocks.
+        let mut s = Stream::new(Lang::Markdown);
+        s.push("text\n\n```rust\nfn f() {}\n");
+        let open = s.root().expect("tree");
+        assert!(!open.has_error);
+        let block = find(&open, "fenced_code_block");
+        assert_eq!(block.len(), 1);
+        assert_eq!(
+            find(block[0], "fenced_code_block_delimiter").len(),
+            1,
+            "only the opening delimiter exists yet"
+        );
+        let content = find(block[0], "code_fence_content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].end, 24, "content runs to the end of the text");
+
+        // The earlier paragraph is recorded before the append, so the append
+        // can be shown not to have moved it.
+        let para_before: Vec<(usize, usize)> = find(&open, "paragraph")
+            .iter()
+            .map(|n| (n.start, n.end))
+            .collect();
+
+        s.push("```\n");
+        let closed = s.root().expect("tree after the closing fence");
+        assert!(!closed.has_error);
+        let block = find(&closed, "fenced_code_block");
+        assert_eq!(block.len(), 1);
+        assert_eq!(
+            find(block[0], "fenced_code_block_delimiter").len(),
+            2,
+            "the closing delimiter arrived"
+        );
+        assert_eq!(
+            find(&closed, "paragraph")
+                .iter()
+                .map(|n| (n.start, n.end))
+                .collect::<Vec<_>>(),
+            para_before,
+            "the append must not disturb the blocks before it"
+        );
+    }
+
+    // ---------- the rest of the API ----------
+
+    #[test]
+    fn root_is_none_before_the_first_push() {
+        let mut s = Stream::new(Lang::Rust);
+        assert!(s.root().is_none());
+        assert!(s.captures("(identifier) @id").is_empty());
+        assert_eq!(s.src(), "");
+        assert_eq!(s.parse_calls(), 0);
+
+        s.push("fn main() {}\n");
+        assert!(s.root().is_some());
+        assert_eq!(s.parse_calls(), 1);
+
+        // An empty delta on a stream that already has a tree for this source
+        // is a no-op: no parse, same tree.
+        let before = s.root().unwrap();
+        s.push("");
+        assert_eq!(s.parse_calls(), 1);
+        assert_eq!(s.root().unwrap(), before);
+        assert_eq!(s.src(), "fn main() {}\n");
+    }
+
+    #[test]
+    fn captures_come_back_as_plain_data_in_document_order() {
+        let doc = "fn one() {}\nfn two() {}\n";
+        let mut s = Stream::new(Lang::Rust);
+        s.push(doc);
+        let caps = s.captures("(identifier) @name");
+        let got: Vec<(&str, &str)> = caps
+            .iter()
+            .map(|c| (c.name.as_str(), &doc[c.start..c.end]))
+            .collect();
+        assert_eq!(got, [("name", "one"), ("name", "two")]);
+
+        // Cached: the same query twice is the same answer.
+        assert_eq!(s.captures("(identifier) @name").len(), 2);
+        // A query that does not compile is empty, not a panic.
+        assert!(s.captures("(no_such_node) @x").is_empty());
+        // And the stream still works afterwards (the cache was invalidated,
+        // not poisoned).
+        assert_eq!(s.captures("(identifier) @name").len(), 2);
+    }
+
+    #[test]
+    fn captures_follow_the_growing_tree() {
+        let mut s = Stream::new(Lang::Rust);
+        s.push("fn one() {}\n");
+        assert_eq!(s.captures("(identifier) @name").len(), 1);
+        s.push("fn two() {}\n");
+        let caps = s.captures("(identifier) @name");
+        assert_eq!(caps.len(), 2);
+        assert_eq!(&s.src()[caps[1].start..caps[1].end], "two");
+    }
+
+    // ---------- §3.5 the measurement ----------
+
+    /// Median and p95 of per-push durations, in nanoseconds.
+    fn median_p95(mut ns: Vec<u128>) -> (u128, u128) {
+        ns.sort_unstable();
+        let med = ns[ns.len() / 2];
+        let p95 = ns[(ns.len() * 95 / 100).min(ns.len() - 1)];
+        (med, p95)
+    }
+
+    /// Print one row of the measurement for the first and last 100 pushes and
+    /// return those two `(median, p95)` pairs, in nanoseconds.
+    fn report(label: &str, times: &[u128]) -> ((u128, u128), (u128, u128)) {
+        let first = median_p95(times[..100].to_vec());
+        let last = median_p95(times[times.len() - 100..].to_vec());
+        println!(
+            "{label:<22} pushes={:<5} | first100 med={:>8.1} µs p95={:>8.1} µs | last100 med={:>8.1} µs p95={:>8.1} µs | total={:>8.1} ms",
+            times.len(),
+            first.0 as f64 / 1e3,
+            first.1 as f64 / 1e3,
+            last.0 as f64 / 1e3,
+            last.1 as f64 / 1e3,
+            times.iter().sum::<u128>() as f64 / 1e6,
+        );
+        (first, last)
+    }
+
+    /// Push `doc` into `s` in `n` pieces, timing every push.
+    fn timed_pushes(s: &mut Stream, doc: &str, n: usize, seed: u64) -> Vec<u128> {
+        let cuts = cut_points(doc, n, &mut Rng(seed));
+        let mut times = Vec::with_capacity(cuts.len());
+        let mut at = 0;
+        for &cut in &cuts {
+            if cut <= at {
+                continue;
+            }
+            let t = Instant::now();
+            s.push(&doc[at..cut]);
+            times.push(t.elapsed().as_nanos());
+            at = cut;
+        }
+        assert_eq!(s.src(), doc);
+        assert_eq!(s.parse_calls() as usize, times.len(), "one parse per push");
+        times
+    }
+
+    /// The cost of parsing `doc` from scratch, in nanoseconds.
+    fn one_shot(lang: Lang, doc: &str) -> u128 {
+        let mut s = Stream::new(lang);
+        let t = Instant::now();
+        s.push(doc);
+        t.elapsed().as_nanos()
+    }
+
+    /// The always-on half of the §3.5 measurement: cheap enough for every
+    /// `cargo test`, and it asserts the property a consumer can rely on —
+    /// an incremental push is never worse than parsing the document from
+    /// scratch, and where tree-sitter *can* reuse nodes it is much better.
+    #[test]
+    fn an_incremental_push_beats_a_full_reparse() {
+        // Rust: reuse works, so the last pushes stay far below a full parse.
+        let doc = big_rust();
+        let mut s = Stream::new(Lang::Rust);
+        let times = timed_pushes(&mut s, &doc, 400, 0x1111_2222_3333_4444);
+        let (_, last) = report("rust (block)", &times);
+        let full = one_shot(Lang::Rust, &doc);
+        println!(
+            "rust: one-shot full parse of {} KB = {:.1} µs",
+            doc.len() / 1000,
+            full as f64 / 1e3
+        );
+        assert!(
+            last.1 * 4 < full,
+            "a late push should cost well under a full parse: p95={} ns full={} ns",
+            last.1,
+            full
+        );
+
+        // Markdown: reuse is refused by the platform (see the ignored
+        // `per_push_cost_stays_flat`), so the honest assertion is the weaker
+        // one — an append is not *worse* than re-parsing everything.
+        let doc = md_doc();
+        let mut s = Stream::new(Lang::Markdown);
+        let times = timed_pushes(&mut s, &doc, 200, 0x5555_6666_7777_8888);
+        let (_, last) = report("markdown (block)", &times);
+        let full = one_shot(Lang::Markdown, &doc);
+        println!(
+            "markdown: one-shot full parse of {} KB = {:.1} µs",
+            doc.len() / 1000,
+            full as f64 / 1e3
+        );
+        assert!(
+            last.1 * 2 < full * 3,
+            "an append should not cost more than re-parsing the document: p95={} ns full={} ns",
+            last.1,
+            full
+        );
+    }
+
+    /// Pins the platform behaviour this engine lives with today: the per-push
+    /// cost grows with the document, so a stream of N pushes costs O(N²) in
+    /// total. This is NOT what the brief asked for — the ignored
+    /// `per_push_cost_stays_flat` states the brief's criterion and fails on
+    /// it. The point of asserting it here is that a tree-sitter or grammar
+    /// upgrade which *does* make appends cheap turns this test red, so the
+    /// good news cannot go unnoticed.
+    #[test]
+    fn append_cost_is_currently_linear_in_the_document() {
+        let doc = big_md();
+        let mut per_push = Vec::new();
+        for frac in [10usize, 40] {
+            let n = snap(&doc, doc.len() * frac / 100);
+            let mut s = Stream::new(Lang::Markdown);
+            // Build to size `n` untimed, then time 64-byte appends.
+            s.push(&doc[..n]);
+            let mut times = Vec::new();
+            let mut at = n;
+            while at + 64 <= doc.len() && times.len() < 100 {
+                let t = Instant::now();
+                s.push(&doc[at..at + 64]);
+                times.push(t.elapsed().as_nanos());
+                at += 64;
+            }
+            let med = median_p95(times).0;
+            println!(
+                "markdown doc={n} B: 64 B append med={:.1} µs",
+                med as f64 / 1e3
+            );
+            per_push.push(med);
+        }
+        let (small, big) = (per_push[0], per_push[1]);
+        assert!(
+            big > small + small / 2,
+            "appends are expected to cost more as the document grows ({small} ns at 10%, {big} ns at 40%) — \
+             if this fails, tree-sitter or the grammar got better and the note on `Stream` wants updating"
+        );
+    }
+
+    /// The brief's §3.5 criterion, at the brief's size: a ~100 KB document
+    /// pushed in 1,000 appends, asserting `p95(last 100) < 5 × median(first
+    /// 100)`.
+    ///
+    /// **It fails today, and that is the finding.** Measured (release):
+    /// markdown 829 µs → 9.5 ms per push (~11×, failing the 5× bound), the
+    /// two-pass pipeline 5.4 ms → 88.8 ms (~16×). Per-push cost is linear in
+    /// the document, so a stream's total cost is quadratic — see
+    /// `Stream`'s note and TODO.md §9 for the diagnosis. It is `#[ignore]`d
+    /// only because it takes ~40 s even in release (minutes in debug); run it
+    /// with `cargo test --release --ignored --nocapture per_push_cost`.
+    #[test]
+    #[ignore = "slow (~40 s in release); documented failure, run explicitly"]
+    fn per_push_cost_stays_flat() {
+        for (label, lang, doc) in [
+            ("markdown (block)", Lang::Markdown, big_md()),
+            ("rust (block)", Lang::Rust, big_rust()),
+        ] {
+            assert!(doc.len() >= 90_000, "{label}: {} bytes", doc.len());
+            let mut s = Stream::new(lang);
+            let times = timed_pushes(&mut s, &doc, 1000, 0x9e37_79b9_7f4a_7c15);
+            let (first, last) = report(label, &times);
+            assert!(
+                last.1 < 5 * first.0.max(1),
+                "{label}: per-push cost is not flat — p95(last 100)={} ns >= 5 × median(first 100)={} ns",
+                last.1,
+                first.0
+            );
+        }
+    }
+
+    /// The harder half of §3.5: the secondary stream whose included ranges
+    /// grow with every push — does the reuse stay honest when the range list
+    /// itself keeps changing?
+    #[test]
+    #[ignore = "slow (~30 s in release); documented failure, run explicitly"]
+    fn inline_pass_cost_stays_flat() {
+        let doc = big_md();
+        let mut block = Stream::new(Lang::Markdown);
+        let mut inline = Stream::new(Lang::MarkdownInline);
+        let cuts = cut_points(&doc, 1000, &mut Rng(0x2545_f491_4f6c_dd1d));
+        let mut times = Vec::with_capacity(cuts.len());
+        let mut at = 0;
+        for &cut in &cuts {
+            if cut <= at {
+                continue;
+            }
+            let delta = &doc[at..cut];
+            let t = Instant::now();
+            block.push(delta);
+            let ranges = inline_ranges(&block.root().expect("block tree"));
+            inline.set_included_ranges(&ranges);
+            inline.push(delta);
+            times.push(t.elapsed().as_nanos());
+            at = cut;
+        }
+        let (first, last) = report("two-pass pipeline", &times);
+        assert!(
+            last.1 < 5 * first.0.max(1),
+            "two-pass pipeline: per-push cost is not flat — p95(last 100)={} ns >= 5 × median(first 100)={} ns",
+            last.1,
+            first.0
+        );
+
+        // And the result is still right, not just fast.
+        let ranges = inline_ranges(&block.root().unwrap());
+        let root = inline.root().expect("inline tree");
+        assert_inside(&root, &ranges, "two-pass final tree");
+        assert!(!find(&root, "strong_emphasis").is_empty());
     }
 }

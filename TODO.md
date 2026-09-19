@@ -66,7 +66,62 @@
 - [x] lsp: `change()` UTF-16 payload, `poll()` server-request answering.
 - [x] ui: `title_line`, function-bar layout math (pure functions).
 
-## 8. OPEN: completion junk on the repo path (paused 2026-09-08)
+## 9. streaming parse engine (`syntax::Stream`)
+
+From `plans/S8-streaming-engine.md` (= `../streaming-engine-brief.md`): an
+external consumer (a TUI conversation renderer) streams a growing markdown
+document, tens of pushes per second, and re-renders per push. `Highlighter`
+full-reparses per call, which is O(N²) over such a stream; the engine must be
+**append-only and incremental**, **generic over `Lang`**, and must hand back
+**plain data** (no `tree-sitter` types in the public API). Markdown's block +
+inline two-grammar split is the first consumer, not the shape of the API.
+
+- [x] `Lang::MarkdownInline` → `tree_sitter_md::INLINE_LANGUAGE`, query
+  `HIGHLIGHT_QUERY_INLINE` (a grammar registration, not markdown logic).
+- [x] `pub struct Stream` + `Node` + `Capture` in `src/syntax.rs`:
+  `new(lang)`, `push(delta)`, `src()`, `root() -> Option<Node>`,
+  `set_included_ranges(&[(usize, usize)])`, `captures(query) -> Vec<Capture>`,
+  `parse_calls() -> u64`. (`Node` also carries `named: bool` — tree-sitter's
+  `is_named()`. The brief's field list has no way to tell an anonymous token
+  from a named node, and §2.4's "split around the named children" step is
+  unimplementable without it.)
+- [x] `push` edits the previous tree for the pure-append range (`InputEdit`
+  with byte offsets *and* `Point`s) and re-parses; the source-end `Point` is
+  kept incrementally.
+- [x] `set_included_ranges` stores the ranges and applies them to the parser
+  before the next `parse` (sorted + merged here rather than trusting the
+  caller; empty = whole document).
+- [x] Tests: streaming == full parse (`Node` equality) for Rust + Markdown;
+  the two passes (block stream feeding an inline stream's ranges); error
+  recovery; included ranges changing mid-stream; the measurement.
+- [x] Constraints: additive only, no new dependencies, `tree-sitter-md`'s
+  `parser` feature not enabled. `lsp.rs` gained one match arm per new enum
+  variant (both behaviour-neutral: no server, id `"markdown"`).
+- [ ] **OPEN: incremental reuse is not an asymptotic win — the brief's µs
+  budget misses by 100×.** Measured (release, 1,000 pushes of ~100 bytes):
+  markdown 829 µs → 9.5 ms per push (**11× worse at the end**, so the suite's
+  not-quadratic bound of 5× fails), Rust 42 µs → 305 µs (7×), two-pass
+  pipeline 5.4 ms → 88.8 ms (16×). Per-push cost is linear in the document
+  (~106 ns per document byte for markdown, ~3.5 for Rust), so a stream is
+  O(N²) in total; `Tree::edit` is ~0.3 µs and not the cost. Cause found in
+  tree-sitter's source, not in the driver: `ts_parser__can_reuse_first_leaf`
+  (`parser.c`) refuses to reuse a token when the current parse state admits
+  external tokens, and markdown's block grammar has a 48-state external
+  scanner active in nearly every block state — so a markdown push re-lexes
+  essentially the whole document. Rust's states mostly do not, hence 3% of a
+  full parse. Fixes would be at the consumer or the grammar level: parse only
+  the growing tail via `set_included_ranges` and splice trees, or settle
+  closed blocks out of the parser's input. Numbers and the criterion are
+  pinned in `syntax.rs`'s `stream_tests` (`an_incremental_push_beats_a_full_reparse`
+  by default; `per_push_cost_stays_flat` ignored, and it fails).
+- [ ] Also from the brief, as written vs what the grammars do: §3.3's markdown
+  half ("an unterminated fence carries an error/missing node") is not true of
+  `tree-sitter-md` — CommonMark closes a fence at EOF, so the block is
+  complete and error-free; the test pins that instead. §3.2's construct names
+  are `code_span` and `inline_link` in the inline grammar, not `inline_code`
+  and `link`.
+
+## 10. OPEN: completion junk on the repo path (paused 2026-09-08)
 
 Symptom: typing `text.` in rano's own `src/prompt.rs` (~line 86, inside
 `record_history`) pops a *path-fallback* list (`self::`, `crate::`,

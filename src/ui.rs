@@ -223,17 +223,28 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     let vis: Vec<(usize, usize)> = if ed.wrap {
         let mut out = Vec::with_capacity(text_h);
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
+        let mut first = true;
         while out.len() < text_h && r < bs.buf.lines.len() {
             let count = display_width(&bs.buf.lines[r], ed.tab_width)
                 .div_ceil(view_w.max(1))
                 .max(1);
-            for _ in 0..count {
+            // The top line may start MID-way (seg > 0): emit only its
+            // remaining segments. Emitting all `count` would add `seg`
+            // phantom rows past the line's end — blank gaps that collapse
+            // when the line scrolls off.
+            let emit = if first {
+                count.saturating_sub(seg)
+            } else {
+                count
+            };
+            for _ in 0..emit {
                 if out.len() == text_h {
                     break;
                 }
                 out.push((r, seg));
                 seg += 1;
             }
+            first = false;
             r += 1;
             seg = 0;
         }
@@ -971,6 +982,37 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(Position::new(6, 2));
+    }
+
+    #[test]
+    fn draw_no_gap_when_top_line_partially_scrolled() {
+        // Line 0 is 847 chars = 11 segments at view_w 77. Scrolled to
+        // segment 3, the top of the viewport is MID-line. The next line must
+        // sit directly below the line's last segment — the old code emitted
+        // all 11 segments (3 phantom rows past the end), leaving blank gaps
+        // that collapsed when the line scrolled off.
+        let mut e = ed(&format!("{}\nshort", "a".repeat(847)));
+        e.show_line_numbers = true;
+        e.text_w = 80;
+        e.ensure_wrap_prefix();
+        e.bs_mut().scroll = 3;
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        // view_w = 80 - 3 = 77. At scroll 3 the viewport shows segments
+        // 3..10 (8 rows, y=1..8), then "short" at y=9 — no blank gap.
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "a");
+        assert_eq!(
+            buf.cell((79, 8)).unwrap().symbol(),
+            "a",
+            "last segment row full"
+        );
+        assert_eq!(
+            buf.cell((3, 9)).unwrap().symbol(),
+            "s",
+            "next line directly below"
+        );
+        assert_eq!(buf.cell((4, 9)).unwrap().symbol(), "h");
     }
 
     #[test]

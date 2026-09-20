@@ -18,7 +18,8 @@ use ratatui::style::{Color, Style};
 use std::path::Path;
 use std::sync::LazyLock;
 use tree_sitter::{
-    InputEdit, Language, Parser, Point, Query, QueryCursor, Range, StreamingIterator, Tree,
+    InputEdit, Language, Parser, Point as TsPoint, Query, QueryCursor, Range, StreamingIterator,
+    Tree,
 };
 use tree_sitter_language::LanguageFn;
 
@@ -1014,12 +1015,36 @@ impl Default for Highlighter {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
+    /// A stable identity for this node within its tree, distinct from every other node
+    /// in it — tree-sitter's node id.
+    ///
+    /// What a consumer comparing *positions* cannot do: two nodes can share a byte range
+    /// (a zero-width `MISSING` node and the node it was inserted beside) and a parent and
+    /// child can share a `start`, so "is this the same node I saw a moment ago" needs a
+    /// identity rather than a coordinate. Found missing the day a shell reader asked
+    /// whether a child *was* the body it had already found (2026-09-20).
+    pub id: usize,
     /// Grammar node kind: `"atx_heading"`, `"fenced_code_block"`,
     /// `"strong_emphasis"`, …
     pub kind: String,
     /// Byte offsets into [`Stream::src`].
     pub start: usize,
     pub end: usize,
+    /// The **field** this node was found under in its parent, when it has one:
+    /// `"name"` for a definition's identifier, `"body"` for its block, `"type"` for a
+    /// declarator's type. `None` for a node reached positionally, and for the root.
+    ///
+    /// Tree-sitter hands a field out through a cursor rather than storing it on the
+    /// node, so a consumer walking [`Self::children`] cannot ask for one — and asking by
+    /// *field* is how a grammar-dependent question ("what is this declaration's name")
+    /// stays grammar-dependent instead of being re-derived by matching child kinds in
+    /// the order they happen to appear. Found missing the day an outline and a shell
+    /// reader tried to move off their own parsers (2026-09-20).
+    pub field: Option<String>,
+    /// Position of `start`, zero-based, **column in bytes**.
+    pub start_point: Point,
+    /// Position of `end`.
+    pub end_point: Point,
     pub has_error: bool,
     pub is_missing: bool,
     /// Tree-sitter's `is_named()`: false for anonymous tokens (punctuation,
@@ -1136,7 +1161,7 @@ pub struct Stream {
     parse_calls: u64,
     /// End of `src` as a `Point`, kept incrementally: two integer updates
     /// per push instead of a rescan of the whole document.
-    end_point: Point,
+    end_point: TsPoint,
     /// False when `set_language` failed, which makes the stream inert:
     /// `push` is a no-op and `root()` is `None`. Every `Lang` has a valid
     /// grammar, so this is defensive — the same "empty on failure"
@@ -1166,7 +1191,7 @@ impl Stream {
             query_key: None,
             highlight_query: None,
             parse_calls: 0,
-            end_point: Point { row: 0, column: 0 },
+            end_point: TsPoint { row: 0, column: 0 },
             live,
         }
     }
@@ -1387,8 +1412,8 @@ impl Stream {
                 Range {
                     start_byte: s,
                     end_byte: e,
-                    start_point: point_of(&self.src, s),
-                    end_point: point_of(&self.src, e),
+                    start_point: point_of(&self.src, s).into(),
+                    end_point: point_of(&self.src, e).into(),
                 }
             })
             .filter(|r| r.start_byte < r.end_byte)
@@ -1403,16 +1428,76 @@ impl Stream {
 /// Deep-copy a `tree-sitter` node into this crate's own [`Node`].
 #[allow(dead_code)]
 fn node_of(n: tree_sitter::Node<'_>) -> Node {
-    let mut cursor = n.walk();
-    let children = n.children(&mut cursor).map(node_of).collect();
     Node {
+        id: n.id(),
         kind: n.kind().to_string(),
         start: n.start_byte(),
         end: n.end_byte(),
+        // The root has no parent, so it is under no field.
+        field: None,
+        start_point: n.start_position().into(),
+        end_point: n.end_position().into(),
         has_error: n.has_error(),
         is_missing: n.is_missing(),
         named: n.is_named(),
-        children,
+        children: children_of(n),
+    }
+}
+
+/// A node's children, each labelled with the field it appears under.
+///
+/// Through a cursor rather than `children()`, because the cursor is the only thing that
+/// knows a child's field name.
+fn children_of(n: tree_sitter::Node<'_>) -> Vec<Node> {
+    // Navigation rather than `n.children(&mut cursor)`: the cursor is the only thing that
+    // knows a child's field name, and holding it mutably for the length of a `children()`
+    // iterator is what makes asking for the name a borrow error.
+    let mut cursor = n.walk();
+    let mut pairs: Vec<(Option<String>, tree_sitter::Node<'_>)> = Vec::new();
+    if cursor.goto_first_child() {
+        loop {
+            pairs.push((cursor.field_name().map(str::to_string), cursor.node()));
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(field, child)| {
+            let mut node = node_of(child);
+            node.field = field;
+            node
+        })
+        .collect()
+}
+
+/// A position in a document: line and column, both zero-based, the column in **bytes**.
+///
+/// Rano's own rather than tree-sitter's, for the reason the rest of the public API is:
+/// a consumer of [`Node`] should not have to depend on a parser to read a coordinate.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Point {
+    pub row: usize,
+    pub column: usize,
+}
+
+impl From<TsPoint> for Point {
+    fn from(p: TsPoint) -> Point {
+        Point {
+            row: p.row,
+            column: p.column,
+        }
+    }
+}
+
+impl From<Point> for TsPoint {
+    fn from(p: Point) -> TsPoint {
+        TsPoint {
+            row: p.row,
+            column: p.column,
+        }
     }
 }
 
@@ -3134,5 +3219,86 @@ mod name_tests {
         assert_eq!(Lang::Markdown.name(), "markdown");
         assert_eq!(Lang::MarkdownInline.name(), "markdown-inline");
         assert_eq!(Lang::from_token("markdown-inline"), None);
+    }
+}
+
+#[cfg(test)]
+mod node_shape_tests {
+    use super::*;
+
+    /// **A node carries the field it was found under**, which is how a consumer asks a
+    /// grammar-dependent question ("what is this declaration's name") without
+    /// re-deriving it from child order.
+    #[test]
+    fn a_child_knows_its_field() {
+        let mut stream = Stream::new(Lang::Rust);
+        stream.push("fn main() { let n = 1; }\n");
+        let root = stream.root().unwrap();
+        // `function_item` has a `name` field, and the name is an identifier.
+        fn find<'a>(n: &'a Node, kind: &str) -> Option<&'a Node> {
+            if n.kind == kind {
+                return Some(n);
+            }
+            n.children.iter().find_map(|c| find(c, kind))
+        }
+        let f = find(&root, "function_item").expect("a function_item");
+        let name = f
+            .children
+            .iter()
+            .find(|c| c.field.as_deref() == Some("name"))
+            .expect("a child in the `name` field");
+        assert_eq!(name.kind, "identifier");
+        assert_eq!(name.start, 3, "the name is `main` at byte 3");
+        // And the field is a name, not a kind: the parentheses are children too.
+        assert!(f.children.iter().any(|c| c.field.is_none()), "{:#?}", f.children);
+
+        // The root is under no field.
+        assert_eq!(root.field, None);
+    }
+
+    /// A node's points are its byte offsets as row/column, in bytes, zero-based — and
+    /// rano's own type, so a consumer reads a coordinate without depending on a parser.
+    #[test]
+    fn a_node_carries_its_position() {
+        let mut stream = Stream::new(Lang::Rust);
+        stream.push("fn main() {\n    let n = 1;\n}\n");
+        let root = stream.root().unwrap();
+        fn find<'a>(n: &'a Node, kind: &str) -> Option<&'a Node> {
+            if n.kind == kind {
+                return Some(n);
+            }
+            n.children.iter().find_map(|c| find(c, kind))
+        }
+        let n = find(&root, "integer_literal").expect("the 1");
+        assert_eq!(n.start_point.row, 1, "second line");
+        assert_eq!(n.start_point.column, 12, "byte column, after four spaces of indent");
+        assert_eq!(n.end_point.column, 13);
+        // And rano's Point round-trips into tree-sitter's, which is what a parser needs.
+        let ts: tree_sitter::Point = n.start_point.into();
+        assert_eq!(ts.row, 1);
+    }
+
+    /// The multi-byte case: the column is **bytes**, so it matches the byte offsets
+    /// beside it rather than disagreeing with them.
+    #[test]
+    fn a_column_is_bytes_not_characters() {
+        let mut stream = Stream::new(Lang::Rust);
+        stream.push("// 日本語\nlet n = 1;\n");
+        let root = stream.root().unwrap();
+        fn find<'a>(n: &'a Node, kind: &str) -> Option<&'a Node> {
+            if n.kind == kind {
+                return Some(n);
+            }
+            n.children.iter().find_map(|c| find(c, kind))
+        }
+        let n = find(&root, "integer_literal").expect("the 1");
+        let line_start = "// 日本語\n".len();
+        assert_eq!(
+            n.start,
+            line_start + 8,
+            "the byte offset is the source of truth"
+        );
+        assert_eq!(n.start_point.row, 1);
+        assert_eq!(n.start_point.column, 8, "bytes into the second line");
     }
 }

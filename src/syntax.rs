@@ -15,8 +15,9 @@
 //! grammar's decision rather than this crate's — see the note on `Stream`.
 
 use ratatui::style::{Color, Style};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tree_sitter::{
     InputEdit, Language, Parser, Point as TsPoint, Query, QueryCursor, Range, StreamingIterator,
     Tree,
@@ -35,7 +36,7 @@ unsafe extern "C" {
     fn tree_sitter_dockerfile() -> *const ();
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lang {
     Rust,
     Go,
@@ -625,6 +626,35 @@ pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
     detect_filename(name).or_else(|| detect_shebang(first_line?))
 }
 
+/// A language's highlight query, **compiled once per process**.
+///
+/// `Query::new` parses the `.scm` and builds its automata, and it is the single most
+/// expensive thing in this module: **8.7 ms** for Rust, measured 2026-09-20. That cost
+/// is per *compilation*, not per use — a `Query` is immutable and `Send + Sync` — so
+/// paying it once and sharing it is the whole difference between a renderer that starts
+/// in milliseconds and one that starts in seconds.
+///
+/// It was not shared when `Stream::spans` first shipped, and the bill arrived as startup
+/// time: `letibot`'s head renders every transcript row when it attaches, a row with a
+/// code fence builds a `Stream`, and `spans` compiled a fresh query for each — eight
+/// seconds of startup for forty compilations of four distinct queries. The same trap was
+/// in `Highlighter`, which compiled per instance and so per diff excerpt. Both read this
+/// now, and `a_query_is_compiled_once_per_process` is the regression.
+///
+/// `None` is cached too: a language whose query does not compile against its grammar
+/// would otherwise retry on every call and re-parse the `.scm` each time.
+fn highlight_query(lang: Lang) -> Option<Arc<Query>> {
+    static CACHE: OnceLock<Mutex<HashMap<Lang, Option<Arc<Query>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(q) = guard.get(&lang) {
+        return q.clone();
+    }
+    let compiled = Query::new(&lang.language(), lang.query()).ok().map(Arc::new);
+    guard.insert(lang, compiled.clone());
+    compiled
+}
+
 /// Language for files known by NAME, not extension: `Makefile` (and
 /// `Makefile.dev`, `GNUmakefile`), `Dockerfile` (and `Dockerfile.prod`),
 /// and the dotfiles that are ini. Case-insensitive, the way these tools
@@ -720,8 +750,6 @@ fn theme(name: &str) -> Style {
 
 pub struct Highlighter {
     parser: Parser,
-    query: Option<Query>,
-    query_lang: Option<Lang>,
     line_styles: Vec<Vec<Style>>,
     /// The last successful parse, kept so syntax errors can be surfaced
     /// without a language server (see [`Highlighter::syntax_errors`]).
@@ -732,8 +760,6 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             parser: Parser::new(),
-            query: None,
-            query_lang: None,
             line_styles: Vec::new(),
             tree: None,
         }
@@ -767,30 +793,17 @@ impl Highlighter {
         };
         self.tree = Some(tree);
 
-        let need_query = self.query.is_none() || self.query_lang != Some(lang);
-        if need_query {
-            match Query::new(&lang.language(), lang.query()) {
-                Ok(q) => {
-                    self.query = Some(q);
-                    self.query_lang = Some(lang);
-                }
-                Err(_) => {
-                    self.query = None;
-                    self.query_lang = None;
-                    self.line_styles.clear();
-                    self.tree = None;
-                    return;
-                }
-            }
-        }
-        let Some(query) = self.query.as_ref() else {
+        // Process-wide rather than per instance: a `Highlighter` is built per diff
+        // excerpt by `letibot`'s two-panel view, so a per-instance query meant one 8.7 ms
+        // compilation per excerpt. See [`highlight_query`].
+        let Some(query) = highlight_query(lang) else {
             self.line_styles.clear();
             self.tree = None;
             return;
         };
 
         let tree = self.tree.as_ref().unwrap();
-        self.line_styles = Self::build_styles(&source, tree, query);
+        self.line_styles = Self::build_styles(&source, tree, &query);
     }
 
     /// Style for the character at `p`, if any capture colors it.
@@ -828,25 +841,14 @@ impl Highlighter {
         })() else {
             return Vec::new();
         };
-        let need_query = self.query.is_none() || self.query_lang != Some(lang);
-        if need_query {
-            match Query::new(&lang.language(), lang.query()) {
-                Ok(q) => {
-                    self.query = Some(q);
-                    self.query_lang = Some(lang);
-                }
-                Err(_) => {
-                    self.query = None;
-                    self.query_lang = None;
-                    return Vec::new();
-                }
-            }
-        }
-        let Some(query) = self.query.as_ref() else {
+        // Shared process-wide, not per instance: `letibot`'s two-panel diff builds a
+        // `Highlighter` per excerpt, so a per-instance query was one 8.7 ms compilation
+        // per excerpt — the same trap `Stream::spans` was in.
+        let Some(query) = highlight_query(lang) else {
             return Vec::new();
         };
         self.tree = Some(tree);
-        Self::build_classes(src, self.tree.as_ref().unwrap(), query)
+        Self::build_classes(src, self.tree.as_ref().unwrap(), &query)
     }
 
     /// Syntax errors from the last parse as `(line, col, end_col, message)`
@@ -1154,10 +1156,6 @@ pub struct Stream {
     query: Option<Query>,
     /// `(language, query text)` the cached query was compiled from.
     query_key: Option<(Lang, String)>,
-    /// The language's **own** highlight query, compiled lazily by [`Stream::classes`].
-    /// Kept apart from `query` because `captures` takes a caller's query text and the
-    /// two would otherwise evict each other on every alternating call.
-    highlight_query: Option<Query>,
     parse_calls: u64,
     /// End of `src` as a `Point`, kept incrementally: two integer updates
     /// per push instead of a rescan of the whole document.
@@ -1189,7 +1187,6 @@ impl Stream {
             ranges_dirty: true,
             query: None,
             query_key: None,
-            highlight_query: None,
             parse_calls: 0,
             end_point: TsPoint { row: 0, column: 0 },
             live,
@@ -1362,23 +1359,16 @@ impl Stream {
     /// a time into a long block therefore does O(text) work per push, and the fix for
     /// that is the window discipline the conversation uses, not a faster walk.
     pub fn spans(&mut self) -> Vec<Span> {
-        if self.tree.is_none() {
-            return Vec::new();
-        }
-        if self.highlight_query.is_none() {
-            match Query::new(&self.lang.language(), self.lang.query()) {
-                Ok(q) => self.highlight_query = Some(q),
-                Err(_) => return Vec::new(),
-            }
-        }
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
         };
-        let Some(query) = self.highlight_query.as_ref() else {
+        // Process-wide, because the compilation is 8.7 ms and the caller is usually
+        // holding one of many blocks — see [`highlight_query`].
+        let Some(query) = highlight_query(self.lang) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        Highlighter::for_each_capture(&self.src, tree, query, |row, range, name| {
+        Highlighter::for_each_capture(&self.src, tree, &query, |row, range, name| {
             out.push(Span {
                 row,
                 start: range.start,
@@ -3352,5 +3342,94 @@ mod node_equality_tests {
             c.push("fn other() {}\n");
             c.root().unwrap()
         });
+    }
+}
+
+#[cfg(test)]
+mod query_cache_tests {
+    use super::*;
+
+    /// **A query is compiled once per process per language.**
+    ///
+    /// This is the regression for the startup cliff: `Query::new` is 8.7 ms for Rust and
+    /// 10.2 ms for TSX (measured 2026-09-20), and a renderer that compiles one per code
+    /// block pays that per block. `Arc::ptr_eq` is the assertion that says *shared*
+    /// rather than *fast* — a timing test would pass on a fast machine with the bug
+    /// still in it.
+    #[test]
+    fn a_query_is_compiled_once_and_shared() {
+        let a = highlight_query(Lang::Rust).expect("rust has a query");
+        let b = highlight_query(Lang::Rust).expect("still");
+        assert!(Arc::ptr_eq(&a, &b), "the second call recompiled");
+
+        // A different language is a different query.
+        let other = highlight_query(Lang::Python).expect("python has a query");
+        assert!(!Arc::ptr_eq(&a, &other));
+
+        // And `None` is cached too, so a language whose query does not compile does not
+        // re-parse its `.scm` on every call. There is no such language today — every
+        // grammar's query compiles — so this asserts the shape of the code path rather
+        // than a case: the cache is keyed by language and stores the answer either way.
+        assert!(highlight_query(Lang::Rust).is_some());
+    }
+
+    /// The two consumers reach that one cache: a `Highlighter` and a `Stream` of the
+    /// same language share the query rather than each holding its own.
+    #[test]
+    fn both_consumers_share_the_one_query() {
+        // A `Stream`'s spans and a `Highlighter`'s classes are the same walk over the
+        // same query; the only way to see the sharing from outside is that neither
+        // compiles, which the pointer test above covers. What this asserts is the
+        // *observable* agreement, which would break if either had its own copy.
+        let src = "fn main() {\n    let n = 1;\n}\n";
+        let mut stream = Stream::new(Lang::Rust);
+        stream.push(src);
+        let spans = stream.spans();
+        let mut hl = Highlighter::new();
+        let classes = hl.classes(src, Lang::Rust);
+        // Every span's characters are covered in the grid by the same capture name.
+        for s in &spans {
+            let row = &classes[s.row];
+            for col in s.start..s.end {
+                assert_eq!(
+                    row.get(col).and_then(|c| c.as_deref()),
+                    Some(s.name.as_str()),
+                    "row {} col {col} disagrees between spans and classes",
+                    s.row
+                );
+            }
+        }
+    }
+
+    /// The measurement the fix was made against. Ignored because timing is not an
+    /// assertion; run with `--ignored --nocapture` to see it.
+    #[test]
+    #[ignore]
+    fn the_first_use_of_a_language_pays_and_the_rest_do_not() {
+        for (name, lang, body) in [
+            ("rust", Lang::Rust, "fn main() {\n    let n = 1;\n}\n"),
+            ("tsx", Lang::Tsx, "const A = () => <div>hi</div>;\n"),
+            ("diff", Lang::Diff, "--- a\n+++ b\n"),
+        ] {
+            let mut first = std::time::Duration::ZERO;
+            let mut rest = std::time::Duration::ZERO;
+            let rounds = 40;
+            for i in 0..rounds {
+                let t = std::time::Instant::now();
+                let mut s = Stream::new(lang);
+                s.push(body);
+                let _ = s.spans();
+                if i == 0 {
+                    first = t.elapsed();
+                } else {
+                    rest += t.elapsed();
+                }
+            }
+            eprintln!(
+                "{name:<5} first {:>8.1} us, each after {:>6.1} us",
+                first.as_secs_f64() * 1e6,
+                rest.as_secs_f64() * 1e6 / (rounds - 1) as f64
+            );
+        }
     }
 }

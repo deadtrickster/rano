@@ -153,6 +153,28 @@ inline two-grammar split is the first consumer, not the shape of the API.
   and it is a real piece of work rather than a tweak: the widening is where
   the correctness lives. File it when an editor user complains, or when
   `letibot` streams a fence long enough to matter.
+- [ ] **OPEN: the markdown grammars parse at ~250-400 ns/byte, which is what
+  makes a large transcript slow to open.** Measured 2026-09-20, release, on
+  letibot's own stored transcripts:
+
+      markdown block grammar      133 ns/byte   (555 KB -> 74 ms)
+      markdown inline grammar     250 ns/byte   (450 KB -> 133 ms)
+      Rust, for scale               ~3 ns/byte  (the `Stream` measurement above)
+
+  Both grammars run external scanners (the block one has 48 states — see the
+  reuse note above), and that is where the constant comes from; tree-sitter
+  itself is not the problem. So the markdown half of rano costs ~20x the Rust
+  half per byte, and a 4-6 MB transcript — letibot has sessions that size —
+  takes 1.6-2.7 s to lex, which the operator sees as a head that "does nothing"
+  and then paints its history.
+
+  **Fixed so far**: the query cache (`highlight_query`) removed the part of it
+  that was our bug — 8.7-10.2 ms per `Query::new`, paid per code fence and per
+  diff excerpt before. What is left is the parse itself, and the levers are
+  consumer-side: lex only what is drawn (a bounded viewport rather than the
+  whole transcript), or cache the lexed model across restarts. Neither belongs
+  in this crate — rano parses what it is handed — but the number does, because
+  it bounds what a consumer can afford to hand over.
 
 ## 10. OPEN: completion junk on the repo path (paused 2026-09-08)
 

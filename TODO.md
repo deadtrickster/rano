@@ -120,6 +120,39 @@ inline two-grammar split is the first consumer, not the shape of the API.
   complete and error-free; the test pins that instead. §3.2's construct names
   are `code_span` and `inline_link` in the inline grammar, not `inline_code`
   and `link`.
+- [x] **The hub API**, added 2026-09-20 for the consumer that asked for it
+  (`letibot`'s `TODO.md` R18: *"rely on rano as much as possible"*):
+  - `Lang::from_token` — an info-string token to a `Lang`. `detect` takes a
+    *path*, and a markdown fence hands over `rust`/`tsx`/`sh`, so without this
+    nothing outside rano could be coloured from an info string at all. Its own
+    table, not `detect`'s: `mk` is Make as an extension and not a token, `sh`
+    is bash as a token and `/bin/sh` as a path.
+  - `Lang::name` — the name a reader sees, and every one of them answers
+    `from_token` back (`name_tests::every_name_is_a_token_the_table_knows`
+    holds the pair together).
+  - `Stream::spans` — flat `Span { row, start, end, name }` records, the
+    highlighting answer for a **renderer**. The per-character grid
+    (`Highlighter::classes`, kept for an editor interrogating a cursor) costs
+    one `Vec` per line whatever the caller does with it, and that dominated
+    the walk: measured at ~1.9 µs per line before the refactor, 1.34 ms for
+    7.7 KB in 700 lines against 0.46 ms for 9 KB in one.
+  - `for_each_capture` and `build_styles`/`build_classes` now take `&str`
+    rather than a per-line `Vec<Vec<char>>`, with an ASCII fast path (byte
+    index == char index). 700 lines 1.34 → **0.88 ms**; one 9 KB line
+    0.46 → **0.18 ms**; a Rust fence grown a token at a time, push + walk,
+    584 → **468 µs** per push at the end of 5.4 KB, markdown 396 → 264 µs at
+    8.4 KB. `--ignored` tests print all of these.
+- [ ] **OPEN: the walk is still O(text) per call, so a whole document is
+  quadratic over a stream.** Measured above: ~0.1 µs per byte, ~1.1 µs per
+  line. Fine for a code fence (a frame's budget at fence sizes, which is what
+  letibot needed and why this shipped), not fine for an editor repainting a
+  200 KB file per keystroke. The fix is the range-limited walk an editor
+  wants anyway — `QueryCursor::set_byte_range` over the changed rows, with the
+  range widened back to the start of any node that overlaps it so a construct
+  spanning lines keeps its scope. That is exactly what neovim and helix do,
+  and it is a real piece of work rather than a tweak: the widening is where
+  the correctness lives. File it when an editor user complains, or when
+  `letibot` streams a fence long enough to matter.
 
 ## 10. OPEN: completion junk on the repo path (paused 2026-09-08)
 

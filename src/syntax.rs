@@ -1013,7 +1013,7 @@ impl Default for Highlighter {
 /// consumer walks this to build its own layout model, the same way
 /// [`Highlighter::classes`] hands back capture *names* rather than nodes.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Node {
     /// A stable identity for this node within its tree, distinct from every other node
     /// in it — tree-sitter's node id.
@@ -1424,6 +1424,30 @@ impl Stream {
         self.ranges_dirty = false;
     }
 }
+
+/// **Equality is a node's value, not its identity.** Two parses of the same text are
+/// the same tree, and [`Node::id`] differs between them because it is tree-sitter's
+/// per-tree node pointer — so deriving this would make `parse(a) == parse(a)` false and
+/// take the streaming-equals-one-push property with it. `id` is there for a consumer
+/// asking "is this the node I held a moment ago"; that is a different question from
+/// "is this the same tree", and only the second belongs in `==`.
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        // `children` compares recursively, so `id` is the only field left out.
+        self.kind == other.kind
+            && self.start == other.start
+            && self.end == other.end
+            && self.field == other.field
+            && self.start_point == other.start_point
+            && self.end_point == other.end_point
+            && self.has_error == other.has_error
+            && self.is_missing == other.is_missing
+            && self.named == other.named
+            && self.children == other.children
+    }
+}
+
+impl Eq for Node {}
 
 /// Deep-copy a `tree-sitter` node into this crate's own [`Node`].
 #[allow(dead_code)]
@@ -3300,5 +3324,33 @@ mod node_shape_tests {
         );
         assert_eq!(n.start_point.row, 1);
         assert_eq!(n.start_point.column, 8, "bytes into the second line");
+    }
+}
+
+#[cfg(test)]
+mod node_equality_tests {
+    use super::*;
+
+    /// **Two parses of one text are the same tree**, which is what the streaming
+    /// property rests on. [`Node::id`] differs between them — it is tree-sitter's
+    /// per-tree pointer — so equality deliberately leaves it out, and this is the test
+    /// that says so. It was caught by `streaming_equals_one_push_for_*` the day `id` was
+    /// added with a derived `PartialEq`.
+    #[test]
+    fn equality_is_the_value_and_not_the_identity() {
+        let src = "fn main() {\n    let n = 1;\n}\n";
+        let mut a = Stream::new(Lang::Rust);
+        a.push(src);
+        let mut b = Stream::new(Lang::Rust);
+        b.push(src);
+        let (ta, tb) = (a.root().unwrap(), b.root().unwrap());
+        assert_eq!(ta, tb, "the same text is the same tree");
+        // The identity is still available, and it is *not* the value.
+        assert_ne!(ta.id, tb.id, "two parses have different node ids");
+        assert_ne!(ta, {
+            let mut c = Stream::new(Lang::Rust);
+            c.push("fn other() {}\n");
+            c.root().unwrap()
+        });
     }
 }

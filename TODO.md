@@ -292,3 +292,32 @@ Left alone on purpose:
 - **Inline code inside a heading** now reads as code (cyan) rather than as
   heading text. That is the two passes composing; nano's markdown mode does
   the same, and it is what makes `` `letibot-tui` `` legible inside a heading.
+
+### 11a. The inline pass parses one node at a time (a regression from 11)
+
+Handing the inline grammar every node's ranges in one call is wrong, not just
+slow. tree-sitter reads the ranges it is given as ONE concatenated stream, so
+a backtick that cannot close inside its own node pairs with one in a later
+paragraph. On the 33 KB parity document one stray `` ` ```console ` `` became
+a 12 KB code span and painted everything from line 294 to the end of the file
+cyan — 300-odd rows, no structure left.
+
+Measured: 0 of the document's 440 inline ranges leak when parsed alone; the
+combined parse leaks. Fixed by parsing per node, which is what
+`tree-sitter-md`'s own `MarkdownParser` does and what the brief's §2.4
+described as the reference — read there as a performance question, and it is
+a correctness one. Cost, measured (release, 60 KB): 46 ms → 49–56 ms against
+40 ms for a Rust file of the same size.
+
+- [x] `markdown_inline_node_ranges` (grouped by node) drives the pass;
+  `markdown_inline_ranges` (flattened) stays test-only.
+- [x] Three tests, two of which fail on the combined parse.
+- [ ] **Known rough edge, the grammar's and now confined to one node:** for a
+  paragraph containing `` ` ```console ` `` the inline grammar reads the run
+  more loosely than CommonMark, so a couple of cells in that paragraph take
+  the literal colour (visible around lines 293/294/304 of the parity doc).
+  Before the inline pass the region was plain; nano colours none of it either
+  (its rule needs a backtick-free run). Fixing it means either a range check
+  on the capture or dropping the inline pass for a node whose ranges contain
+  adjacent backtick runs — not worth the complexity for two cells, but it is
+  the one place the two heads' fence story (C4) is visibly inconsistent.

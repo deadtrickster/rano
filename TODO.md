@@ -321,3 +321,69 @@ a correctness one. Cost, measured (release, 60 KB): 46 ms → 49–56 ms against
   on the capture or dropping the inline pass for a node whose ranges contain
   adjacent backtick runs — not worth the complexity for two cells, but it is
   the one place the two heads' fence story (C4) is visibly inconsistent.
+
+## 12. Typing latency on large files (measured 2026-09-22)
+
+The concern was typing on heavy syntaxes, minified JS (one enormous line) and
+200 MB+ files. Measured per keystroke, before → after, on this machine
+(release, 120x40 viewport):
+
+    file                        size    before      after
+    7 MB Rust                   7.0 MiB  1452 ms      1.4 ms
+    30 MB log (no syntax)      29.2 MiB   182 ms      0.57 ms
+    4.8 MB single-line text     4.8 MiB    33 ms       33 ms
+    4 MB minified JS (1 line)   3.9 MiB  1110 ms     1108 ms
+
+- [x] **Capture walk was `#captures × log(#lines)`.** It binary-searched a
+  multi-megabyte line-start array per capture. Captures arrive in document
+  order, so a forward-only cursor replaces both searches. ~2× on its own.
+- [x] **Highlight is per-viewport above 2 MiB** (`syntax::LARGE_BUFFER`):
+  visible rows plus `editor::HIGHLIGHT_MARGIN` (200) either side, parsed as a
+  slice, with the tree and style grid slice-relative. This is the change that
+  took the 7 MB case from 1452 ms to 1.4 ms.
+- [x] **Wrap table is incremental**: an edit that names its row re-measures
+  that row and re-sums arithmetically. `wrap_dirty_row` carries the hint and
+  the row count is re-checked before it is trusted. This took the 30 MB case
+  from 182 ms to 0.57 ms.
+- [x] `rano --export {html,ansi,markdown,text}` — the feature, and the
+  instrument that isolates parse+colorise from draw.
+- [x] `src/bench.rs` — the harness, so the numbers can be re-taken.
+
+### Still slow, and why
+
+- [ ] **A single line of megabytes has no window to hide in.** minified.js is
+  one 4 MB line: the window is per-ROW, so it covers the entire file, and a
+  keystroke still parses and walks all 4 MB (~1.1 s). The fix is a window
+  expressed in (row, col) — the wrap table already knows the visible
+  segment's char range (`seg_chars`), so the parse could start mid-line.
+  That is the next thing to do, and it is the case the operator named first.
+- [ ] **Opening a 200 MB file parses it once, in full.** The first highlight
+  is O(document) by construction; at 200 MB that is minutes. Nothing in this
+  round touches it. Options: parse incrementally from empty (feed the buffer
+  in chunks, keeping the tree), or open with highlighting off above a size
+  nothing sane would highlight, or parse only the first window and mark the
+  rest unhighlighted until scrolled to.
+- [ ] **`buf.text()` per whole-buffer refresh** copies the document (24 ms at
+  30 MB). Only reached for small buffers and the export path now, so it is
+  not on the hot path — but the export path pays it twice (once to parse,
+  once for the markdown inline pass in a loop).
+- [ ] **`rows_text` + `parse` are still per keystroke in the window.** They
+  are proportional to the window, which is what we want, but the parse could
+  in principle be reused incrementally with a correct `InputEdit`. That was
+  not attempted: `editor.rs` mutates `buf.lines` directly in places (the
+  region sort, for one), so tracking a trustworthy edit description needs
+  those paths funnelled through `Buffer` first. A wrong `InputEdit` panics
+  inside tree-sitter, so it is not a change to make halfway.
+
+### Numbers for the record (release, one keystroke, 2026-09-22)
+
+Whole-document highlight vs the pieces, median of 3:
+
+    file           reparse   hl.refresh (full)   highlight_now (window)   wrap tbl   keypress
+    minified.js    488 ms    1079 ms             1076 ms                  25 ms      1109 ms
+    oneline.txt      0       1.9 ms              1.9 ms                   30 ms      33 ms
+    big.log          0       0.1 ms              0.01 ms                  185 ms     0.57 ms
+    big.rs         745 ms    1324 ms             0.83 ms                  43 ms      1.4 ms
+
+(`wrap tbl` and `hl.refresh` are the direct calls; a keystroke uses the
+incremental table and the window, which is why `keypress` is far below them.)

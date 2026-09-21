@@ -4,6 +4,7 @@ mod config;
 mod editor;
 mod exec;
 mod exec_ctrl;
+mod export;
 mod keys;
 mod lsp;
 mod lsp_ctrl;
@@ -14,8 +15,11 @@ mod syntax;
 mod ui;
 mod width;
 
+#[cfg(test)]
+mod bench;
+
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -94,6 +98,16 @@ pub struct BufferState {
     /// more. See [`crate::width`].
     pub(crate) wrap_rows: Vec<RowWrap>,
     pub(crate) wrap_key: (u64, usize),
+    /// Row count `wrap_rows` was built for. A change here means rows were
+    /// inserted or removed, which shifts every entry below — the wrap table's
+    /// cheap update path requires this to be unchanged.
+    pub(crate) wrap_lines: usize,
+    /// The one row whose content changed since the table was built, when an
+    /// edit can name it. `None` means "unknown", and the table rebuilds in
+    /// full — which is correct for every multi-row edit (sort, replace-all,
+    /// a paste of many lines) and costs O(document), so the hot paths (typing)
+    /// name their row and pay O(row) instead.
+    pub(crate) wrap_dirty_row: Option<usize>,
     /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
     pub(crate) undo: VecDeque<UndoStep>,
@@ -131,6 +145,8 @@ impl BufferState {
             wrap_prefix: Vec::new(),
             wrap_rows: Vec::new(),
             wrap_key: (0, 0),
+            wrap_lines: 0,
+            wrap_dirty_row: None,
             edit_gen: 0,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
@@ -208,11 +224,48 @@ impl Editor {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: rano [file]");
+        println!(
+            "usage: rano [file]\n\
+             \n\
+             editing keys are nano's; ^G in the editor lists them.\n\
+             \n\
+             exporting (no terminal needed):\n\
+             \x20 rano --export {} [file]     write it to stdout\n\
+             \x20                              {}",
+            export::Format::NAMES,
+            if export::Format::NAMES.is_empty() {
+                ""
+            } else {
+                "formats: html (colourised document), ansi (SGR for `less -R`),\n\
+                 \x20                              markdown (a fenced block), text (plain)"
+            }
+        );
         return;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("rano {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // `--export FORMAT`: read, colourise, write, exit. No terminal is touched,
+    // which is what makes it usable in a pipe and as a way to measure the
+    // highlighter without the UI in the way.
+    if let Some(i) = args.iter().position(|a| a == "--export") {
+        let Some(name) = args.get(i + 1) else {
+            eprintln!("rano: --export needs a format ({})", export::Format::NAMES);
+            std::process::exit(2);
+        };
+        let Some(fmt) = export::Format::parse(name) else {
+            eprintln!(
+                "rano: unknown export format {name:?} (expected {})",
+                export::Format::NAMES
+            );
+            std::process::exit(2);
+        };
+        let path = args.get(i + 2).cloned();
+        if let Err(e) = export_to_stdout(path, fmt) {
+            eprintln!("rano: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     let file = args.first().cloned();
@@ -241,6 +294,58 @@ fn main() {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
+}
+
+/// Read a file (or stdin), colourise it, and write it out. No terminal is
+/// touched: this is the path that makes the highlighter measurable on its own,
+/// and what `rano --export html big.rs > big.html` uses.
+fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()> {
+    let buf = match &path {
+        Some(p) => match Buffer::from_file(Path::new(p)) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("rano: cannot read {p}: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            // No file: read stdin, which is what a pipe wants.
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text)?;
+            let mut b = Buffer::new();
+            b.lines = text.lines().map(|l| l.chars().collect()).collect();
+            if b.lines.is_empty() {
+                b.lines.push(Vec::new());
+            }
+            b
+        }
+    };
+    // A name is what `detect` works from, and it also supplies the markdown
+    // fence tag and the HTML title, so it is set before highlighting.
+    let mut buf = buf;
+    let title = match &path {
+        Some(p) => p.clone(),
+        None => String::from("<stdin>"),
+    };
+    buf.name = Some(std::path::PathBuf::from(&title));
+    // The whole document, not a window: colouring everything is the point of
+    // an export, and there is no viewport to bound it by.
+    let mut hl = syntax::Highlighter::new();
+    hl.refresh(&buf);
+    let style_of = |p: Pos| hl.style_at(p);
+    let out = export::render(&buf.lines, 8, &title, fmt, &style_of);
+    // Written, not `print!`ed: a closed pipe is the normal end of
+    // `rano --export ansi f.rs | head`, not a panic. `println!` aborts the
+    // process with a broken-pipe message when the reader goes away.
+    let mut stdout = io::stdout().lock();
+    if let Err(e) = stdout.write_all(out.as_bytes()) {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(e);
+    }
+    stdout.flush()?;
+    Ok(())
 }
 
 fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Result<()> {
@@ -1565,6 +1670,62 @@ mod ed_tests {
         ed.insert_char('c'); // "aaaabc" — 6 cols, two visual rows
         ed.ensure_wrap_prefix();
         assert_eq!(ed.bs().wrap_prefix, vec![0, 2]);
+    }
+
+    #[test]
+    fn the_incremental_wrap_table_agrees_with_a_full_rebuild() {
+        // Typing re-measures ONE row and re-sums the rest arithmetically; a
+        // multi-row edit rebuilds everything. The two must not disagree, so
+        // this drives both and compares — the fast path is only ever a
+        // shorter way to compute the same table.
+        let text: String = (0..40)
+            .map(|i| format!("{}{}\n", i, "x".repeat(i * 3)))
+            .collect();
+        let mut ed = test_ed(&text);
+        ed.show_line_numbers = false;
+        ed.text_w = 12;
+        ed.ensure_wrap_prefix();
+
+        for (row, extra) in [(0usize, 30usize), (17, 40), (39, 60)] {
+            ed.bs_mut().cursor = Pos { row, col: 0 };
+            for _ in 0..extra {
+                ed.insert_char('y');
+            }
+            ed.ensure_wrap_prefix();
+            let incremental = ed.bs().wrap_prefix.clone();
+            let rows = ed.bs().wrap_rows.clone();
+            // The same buffer, forced down the full-rebuild path.
+            ed.bs_mut().wrap_dirty_row = None;
+            ed.bs_mut().wrap_lines = 0;
+            ed.ensure_wrap_prefix();
+            assert_eq!(
+                ed.bs().wrap_prefix,
+                incremental,
+                "row {row}: the incremental table disagrees with a full rebuild"
+            );
+            assert_eq!(ed.bs().wrap_rows, rows, "row {row}: row geometry differs");
+        }
+    }
+
+    #[test]
+    fn a_row_that_stops_wrapping_is_still_measured_once() {
+        // The dirty-row path must notice a row that shrinks back under the
+        // viewport, not just one that grows past it.
+        let mut ed = test_ed(&format!("{}\nshort", "a".repeat(30)));
+        ed.show_line_numbers = false;
+        ed.text_w = 10;
+        ed.ensure_wrap_prefix();
+        assert_eq!(
+            ed.bs().wrap_prefix,
+            vec![0, 3, 4],
+            "30 cols → 3 visual rows"
+        );
+        ed.bs_mut().cursor = Pos { row: 0, col: 30 };
+        for _ in 0..25 {
+            press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        ed.ensure_wrap_prefix();
+        assert_eq!(ed.bs().wrap_prefix, vec![0, 1, 2], "5 cols → 1 visual row");
     }
 
     #[test]

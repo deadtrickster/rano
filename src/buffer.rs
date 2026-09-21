@@ -65,6 +65,26 @@ impl Buffer {
         Pos { row, col }
     }
 
+    /// Whether this buffer holds at least `cap` bytes of text, stopping as
+    /// soon as the answer is known.
+    ///
+    /// A predicate rather than a length on purpose: the exact size needs a
+    /// pass over every line, and the only caller wants to compare against a
+    /// threshold. This is O(rows until `cap` is reached) — bounded by `cap`,
+    /// whatever the document's size — so asking "is this a big file?" stays
+    /// cheap on a file that is enormous.
+    pub fn is_at_least(&self, cap: usize) -> bool {
+        let mut n = 0usize;
+        for l in &self.lines {
+            // +1 for the newline `text()` puts after each line.
+            n += l.len() + 1;
+            if n >= cap {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn text(&self) -> String {
         let joined: String = self
             .lines

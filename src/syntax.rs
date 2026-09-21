@@ -14,7 +14,7 @@
 //! reparsing it. How much of the document that actually saves is the
 //! grammar's decision rather than this crate's — see the note on `Stream`.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -224,7 +224,7 @@ impl Lang {
             Lang::JavaScript => JS_HIGHLIGHTS_QUERY.as_str(),
             Lang::TypeScript | Lang::Tsx => TS_HIGHLIGHTS_QUERY.as_str(),
             Lang::Markdown => MARKDOWN_HIGHLIGHTS_QUERY,
-            Lang::MarkdownInline => tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+            Lang::MarkdownInline => MARKDOWN_INLINE_HIGHLIGHTS_QUERY.as_str(),
             Lang::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
             Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
@@ -369,11 +369,14 @@ const DOCKERFILE_HIGHLIGHTS_QUERY: &str = r##"
  (#match? @constant "^[A-Z][A-Z_0-9]*$"))
 "##;
 
-/// Highlights query for Markdown, rano's own — the grammar crate's query
-/// uses nvim-treesitter capture names (`@text.title`, …) that [`theme`]
-/// does not map, and its inline grammar is a separate tree meant for
-/// injections, which rano's engine does not run. Block structure only;
-/// inline text stays plain. Capture names are the shared vocabulary.
+/// Highlights query for Markdown — the BLOCK half, rano's own. The grammar
+/// crate's block query uses nvim-treesitter capture names (`@text.title`, …)
+/// that [`theme`] does not map, so the structural rules are spelled out here.
+///
+/// Inline content — emphasis, code spans, links, raw HTML — is not reachable
+/// from this grammar at all: those are nodes of markdown's *other* grammar,
+/// parsed over the ranges this tree marks as inline (see
+/// [`markdown_inline_ranges`] and [`MARKDOWN_INLINE_HIGHLIGHTS_QUERY`]).
 const MARKDOWN_HIGHLIGHTS_QUERY: &str = r##"
 ; Headings: markers purple, text yellow.
 (atx_h1_marker) @keyword
@@ -392,7 +395,6 @@ const MARKDOWN_HIGHLIGHTS_QUERY: &str = r##"
 ; Structure markers: fences, quotes, tables, lists.
 (fenced_code_block_delimiter) @punctuation.bracket
 (block_quote_marker) @punctuation.bracket
-(block_continuation) @punctuation.bracket
 (pipe_table_delimiter_row) @punctuation.bracket
 (list_marker_plus) @punctuation.bracket
 (list_marker_minus) @punctuation.bracket
@@ -405,6 +407,14 @@ const MARKDOWN_HIGHLIGHTS_QUERY: &str = r##"
 ; Fenced-code info string (```yaml and friends).
 (info_string) @attribute
 
+; Code itself, so a fence reads as code and not as prose (nano colours the
+; whole block; there is no injection grammar here to colour it by language).
+(code_fence_content) @text.literal
+(indented_code_block) @text.literal
+
+; Raw HTML in the document.
+(html_block) @tag
+
 ; Link reference definitions.
 (link_destination) @property
 (link_title) @string
@@ -415,6 +425,27 @@ const MARKDOWN_HIGHLIGHTS_QUERY: &str = r##"
 (numeric_character_reference) @escape
 (backslash_escape) @escape
 "##;
+
+/// The inline half of markdown — emphasis, code spans, links, raw HTML —
+/// which no block-grammar query can reach: those are nodes of the OTHER
+/// grammar, parsed over the ranges the block tree marks as inline content
+/// (see [`markdown_inline_ranges`]).
+///
+/// `tree-sitter-md`'s own inline query plus the two node kinds it leaves
+/// uncoloured, so a reader gets the distinctions nano's markdown mode draws:
+/// `~~struck~~` and raw HTML tags. The names are nvim-treesitter's, which is
+/// what `theme` maps.
+static MARKDOWN_INLINE_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+        r##"
+; Not in the crate's query (nvim-treesitter leaves them to injections).
+(strikethrough) @text.strike
+(html_tag) @tag
+"##
+    )
+});
 
 /// Highlights query for Common Lisp. The grammar crate ships none, so this
 /// is rano's own. Capture names are the standard tree-sitter set — [`theme`]
@@ -725,6 +756,43 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// The byte ranges of a markdown block tree's inline content: every `inline`
+/// and `pipe_table_cell` node's range, split around its NAMED children.
+///
+/// Those children are what the block grammar already parsed (an `inline_code`
+/// span, a link destination), so the inline grammar must not re-parse them;
+/// the unnamed text between them is the inline content proper. Sorted, which
+/// is what tree-sitter's included ranges require.
+///
+/// This is what makes markdown's two-grammar split work at all: emphasis,
+/// code spans and links are nodes of the *inline* grammar, and no query over
+/// the block tree can see them.
+fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "inline" || node.kind() == "pipe_table_cell" {
+            let mut at = node.start_byte();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor).filter(|c| c.is_named()) {
+                if child.start_byte() > at {
+                    out.push((at, child.start_byte()));
+                }
+                at = at.max(child.end_byte());
+            }
+            if at < node.end_byte() {
+                out.push((at, node.end_byte()));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 fn theme(name: &str) -> Style {
     match name {
         "comment" => Style::default().fg(rgb(0x7f, 0x84, 0x8e)),
@@ -745,6 +813,22 @@ fn theme(name: &str) -> Style {
         "property" => Style::default().fg(rgb(0xd1, 0x9a, 0x66)),
         "function" | "method" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
         "variable.builtin" | "tag" | "error" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
+        // Markdown's own vocabulary (nvim-treesitter names, which is what the
+        // inline query uses). The distinctions are nano's markdown mode's:
+        // code and literals in cyan, emphasis and strong visually weighted,
+        // links and URLs in the link colour, struck text dimmed.
+        "text.literal" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
+        "text.emphasis" => Style::default()
+            .fg(rgb(0x98, 0xc3, 0x79))
+            .add_modifier(Modifier::ITALIC),
+        "text.strong" => Style::default()
+            .fg(rgb(0xe5, 0xc0, 0x7b))
+            .add_modifier(Modifier::BOLD),
+        "text.uri" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
+        "text.reference" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
+        "text.strike" => Style::default()
+            .fg(rgb(0x7f, 0x84, 0x8e))
+            .add_modifier(Modifier::CROSSED_OUT),
         // Dotted names we didn't match exactly fall back to their prefix
         // (e.g. "type.builtin" -> "type", "punctuation.bracket" -> "punctuation").
         _ => match name.split_once('.') {
@@ -756,6 +840,10 @@ fn theme(name: &str) -> Style {
 
 pub struct Highlighter {
     parser: Parser,
+    /// Markdown only: a second parser for the inline grammar, whose tree is
+    /// parsed over the block tree's inline ranges. Kept so the inline pass
+    /// does not allocate a parser per refresh.
+    inline_parser: Parser,
     line_styles: Vec<Vec<Style>>,
     /// The last successful parse, kept so syntax errors can be surfaced
     /// without a language server (see [`Highlighter::syntax_errors`]).
@@ -766,6 +854,7 @@ impl Highlighter {
     pub fn new() -> Self {
         Self {
             parser: Parser::new(),
+            inline_parser: Parser::new(),
             line_styles: Vec::new(),
             tree: None,
         }
@@ -810,6 +899,43 @@ impl Highlighter {
 
         let tree = self.tree.as_ref().unwrap();
         self.line_styles = Self::build_styles(&source, tree, &query);
+        // Markdown is two grammars. The block pass above coloured structure;
+        // emphasis, code spans and links are nodes of the *inline* grammar
+        // and can only come from a second parse over the ranges the block
+        // tree marked. Both overlay one grid, in that order.
+        if lang == Lang::Markdown {
+            let block = self.tree.clone().expect("just set");
+            let mut grid = std::mem::take(&mut self.line_styles);
+            if let Some(inline) = self.markdown_inline_tree(&source, &block)
+                && let Some(iquery) = highlight_query(Lang::MarkdownInline)
+            {
+                Self::apply_styles(&source, &inline, &iquery, &mut grid);
+            }
+            self.line_styles = grid;
+        }
+    }
+
+    /// Parse markdown's inline content with the inline grammar, restricted to
+    /// the ranges the block tree marks as inline ([`markdown_inline_ranges`]).
+    /// `None` when the ranges are empty or the grammar will not load.
+    fn markdown_inline_tree(&mut self, src: &str, block: &Tree) -> Option<Tree> {
+        let ranges: Vec<Range> = markdown_inline_ranges(block)
+            .into_iter()
+            .map(|(s, e)| Range {
+                start_byte: s,
+                end_byte: e,
+                start_point: point_of(src, s).into(),
+                end_point: point_of(src, e).into(),
+            })
+            .collect();
+        if ranges.is_empty() {
+            return None;
+        }
+        self.inline_parser
+            .set_language(&Lang::MarkdownInline.language())
+            .ok()?;
+        self.inline_parser.set_included_ranges(&ranges).ok()?;
+        self.inline_parser.parse(src.as_bytes(), None)
     }
 
     /// Style for the character at `p`, if any capture colors it.
@@ -854,7 +980,18 @@ impl Highlighter {
             return Vec::new();
         };
         self.tree = Some(tree);
-        Self::build_classes(src, self.tree.as_ref().unwrap(), &query)
+        let mut grid = Self::build_classes(src, self.tree.as_ref().unwrap(), &query);
+        // The same two-grammar split as `refresh`, so an embedder reading
+        // capture names sees the inline constructs too.
+        if lang == Lang::Markdown {
+            let block = self.tree.clone().expect("just set");
+            if let Some(inline) = self.markdown_inline_tree(src, &block)
+                && let Some(iquery) = highlight_query(Lang::MarkdownInline)
+            {
+                Self::apply_classes(src, &inline, &iquery, &mut grid);
+            }
+        }
+        grid
     }
 
     /// Syntax errors from the last parse as `(line, col, end_col, message)`
@@ -905,6 +1042,14 @@ impl Highlighter {
             .into_iter()
             .map(|n| vec![Style::default(); n])
             .collect();
+        Self::apply_styles(src, tree, query, &mut line_styles);
+        line_styles
+    }
+
+    /// Overlay one tree's captures on an existing style grid. Called twice for
+    /// markdown — the block tree, then the inline tree over the same cells —
+    /// which is what makes the second pass compose instead of fight.
+    fn apply_styles(src: &str, tree: &Tree, query: &Query, line_styles: &mut [Vec<Style>]) {
         Self::for_each_capture(src, tree, query, |r, cs, name| {
             let style = theme(name);
             if style == Style::default() {
@@ -914,7 +1059,6 @@ impl Highlighter {
                 *cell = style;
             }
         });
-        line_styles
     }
 
     /// The capture grid without a palette: one row per line, one entry per
@@ -929,12 +1073,17 @@ impl Highlighter {
             .into_iter()
             .map(|n| vec![None; n])
             .collect();
+        Self::apply_classes(src, tree, query, &mut grid);
+        grid
+    }
+
+    /// Overlay one tree's captures on an existing class grid.
+    fn apply_classes(src: &str, tree: &Tree, query: &Query, grid: &mut [Vec<Option<String>>]) {
         Self::for_each_capture(src, tree, query, |r, cs, name| {
             for cell in &mut grid[r][cs] {
                 *cell = Some(name.to_string());
             }
         });
-        grid
     }
 
     /// Walk every query capture and hand the caller the cells it covers as
@@ -1951,8 +2100,10 @@ mod tests {
     }
 
     // The markdown query is rano's own; assert the capture names, not just
-    // that something is coloured. Code-fence content stays plain: the block
-    // grammar has no injections, so embedded code is not re-parsed.
+    // that something is coloured. Code-fence content is coloured as one
+    // literal run — nano colours the whole fence too — and it is NOT
+    // re-parsed: no injection grammar runs, so a ```rust block is cyan, not
+    // Rust-coloured.
     #[test]
     fn markdown_classes_name_the_block_structure() {
         let src = "# Title\n\n- item\n\n```rust\nfn main() {}\n```\n";
@@ -1964,7 +2115,11 @@ mod tests {
         assert_eq!(grid[2][0].as_deref(), Some("punctuation.bracket")); // `-`
         assert_eq!(grid[4][0].as_deref(), Some("punctuation.bracket")); // fence
         assert_eq!(grid[4][3].as_deref(), Some("attribute")); // rust info string
-        assert_eq!(grid[5][0].as_deref(), None); // fence content is plain
+        assert_eq!(grid[5][0].as_deref(), Some("text.literal")); // fence content
+        // The whole body, not just its first character: `fn` is not a keyword
+        // here, because the fence is not parsed as Rust.
+        assert_eq!(grid[5][3].as_deref(), Some("text.literal"));
+        assert_eq!(grid[5][0], grid[5][3]);
     }
 
     #[test]
@@ -3461,5 +3616,257 @@ mod query_cache_tests {
                 rest.as_secs_f64() * 1e6 / (rounds - 1) as f64
             );
         }
+    }
+}
+
+/// Markdown's two-grammar highlighting: the block pass does structure, the
+/// inline pass does emphasis/code/links, and they overlay one grid.
+#[cfg(test)]
+mod markdown_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A document with one of each construct, at known rows.
+    const DOC: &str = "\
+# Head `x`
+
+A para with **bold** and `code` and *it* and [link](http://x) and ~~strike~~.
+
+> quote
+
+- item
+
+```rust
+fn main() {}
+```
+
+<div>html</div>
+
+---
+";
+
+    /// The style at the character `off` chars past `text` on `row`.
+    fn style_in(src: &str, row: usize, text: &str, off: usize) -> Option<Style> {
+        let mut buf = Buffer::new();
+        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.name = Some(std::path::PathBuf::from("x.md"));
+        let mut hl = Highlighter::new();
+        hl.refresh(&buf);
+        let line = src.split('\n').nth(row).expect("row in range");
+        let col = line.find(text).expect("probe text on the row") + off;
+        hl.style_at(Pos { row, col })
+    }
+
+    #[test]
+    fn inline_constructs_are_coloured_and_told_apart() {
+        // The finding: the block grammar cannot see emphasis, code spans or
+        // links, so before the inline pass every one of these was plain.
+        let strong = style_in(DOC, 2, "**bold**", 2).expect("strong text is coloured");
+        let code = style_in(DOC, 2, "`code`", 1).expect("a code span is coloured");
+        let emphasis = style_in(DOC, 2, "*it*", 1).expect("emphasis is coloured");
+        let link = style_in(DOC, 2, "[link]", 1).expect("link text is coloured");
+        let url = style_in(DOC, 2, "http://x", 0).expect("a URL is coloured");
+        let strike = style_in(DOC, 2, "~~strike~~", 2).expect("struck text is coloured");
+
+        // Each is its own thing on screen. The four *kinds* are told apart,
+        // as nano's markdown mode tells them apart; a link's text and its
+        // destination deliberately share the link colour, because they are
+        // one construct (nano colours an inline link all one colour too).
+        let kinds = [
+            ("strong", strong),
+            ("code", code),
+            ("emphasis", emphasis),
+            ("strike", strike),
+        ];
+        for (i, (an, a)) in kinds.iter().enumerate() {
+            for (bn, b) in &kinds[i + 1..] {
+                assert_ne!(a, b, "{an} and {bn} must look different");
+            }
+        }
+        assert_eq!(link, url, "a link and its destination are one construct");
+        for (name, style) in [("link", link), ("url", url)] {
+            assert_ne!(style, strong, "{name} must not read as emphasis");
+            assert_ne!(style, code, "{name} must not read as code");
+        }
+        // And no construct wears the delimiter's grey, or prose's default.
+        let delimiter = style_in(DOC, 2, "**bold**", 0).expect("delimiters are coloured");
+        for (name, style) in [
+            ("strong", strong),
+            ("code", code),
+            ("emphasis", emphasis),
+            ("link", link),
+            ("strike", strike),
+        ] {
+            assert_ne!(style, delimiter, "{name} must not wear the delimiter grey");
+            assert_ne!(
+                style,
+                Style::default(),
+                "{name} must not read as plain prose"
+            );
+        }
+        // And each carries the weight nano's markdown mode gives it.
+        assert!(strong.add_modifier.contains(Modifier::BOLD), "strong");
+        assert!(emphasis.add_modifier.contains(Modifier::ITALIC), "emphasis");
+        assert!(
+            strike.add_modifier.contains(Modifier::CROSSED_OUT),
+            "strike"
+        );
+        assert_eq!(code.fg, theme("text.literal").fg, "code spans read as code");
+    }
+
+    #[test]
+    fn the_two_passes_overlay_instead_of_clobbering() {
+        // A heading's text is `type` yellow, but a code span inside it must
+        // still be a code span: the inline pass runs second and wins on the
+        // cells it covers, while the rest of the heading keeps its colour.
+        let heading = style_in(DOC, 0, "Head", 0).expect("heading text is coloured");
+        let inner_code = style_in(DOC, 0, "`x`", 1).expect("code inside a heading");
+        assert_ne!(heading, inner_code, "the code span must not be swallowed");
+        assert_eq!(inner_code.fg, theme("text.literal").fg);
+        // The marker keeps the block pass's colour.
+        assert_eq!(
+            style_in(DOC, 0, "#", 0).map(|s| s.fg),
+            Some(theme("keyword").fg),
+        );
+    }
+
+    #[test]
+    fn block_structure_still_works() {
+        // The inline pass must not undo what the block pass established.
+        assert_eq!(
+            style_in(DOC, 4, "> quote", 0).map(|s| s.fg),
+            Some(theme("punctuation.bracket").fg),
+            "block quote marker",
+        );
+        assert_eq!(
+            style_in(DOC, 6, "- item", 0).map(|s| s.fg),
+            Some(theme("punctuation.bracket").fg),
+            "list marker",
+        );
+        assert_eq!(
+            style_in(DOC, 14, "---", 0).map(|s| s.fg),
+            Some(theme("comment").fg),
+            "thematic break",
+        );
+        // A fenced body reads as code (nano colours the whole fence).
+        assert!(style_in(DOC, 9, "fn main", 0).is_some(), "fence body");
+        // Raw HTML is a tag.
+        assert_eq!(
+            style_in(DOC, 12, "<div>html</div>", 0).map(|s| s.fg),
+            Some(theme("tag").fg),
+        );
+    }
+
+    #[test]
+    fn block_continuation_indentation_is_not_painted() {
+        // From the head-parity doc: `(block_continuation) @punctuation.bracket`
+        // was in the query, and a block_continuation node spans the leading
+        // whitespace of a continuation line — so the indent of one bullet's
+        // second line painted while its neighbour's did not, and two adjacent
+        // identical lines looked different. The rule is gone.
+        let src = "- **A:** first line\n  continued here\n- **B:** another\n  also continued\n";
+        let mut buf = Buffer::new();
+        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.name = Some(std::path::PathBuf::from("x.md"));
+        let mut hl = Highlighter::new();
+        hl.refresh(&buf);
+        for row in [1usize, 3] {
+            for col in 0..2 {
+                assert_eq!(
+                    hl.style_at(Pos { row, col }),
+                    None,
+                    "row {row} col {col}: continuation indentation is not content"
+                );
+            }
+        }
+        // …while the bullet markers themselves are still painted.
+        assert!(hl.style_at(Pos { row: 0, col: 0 }).is_some());
+        assert!(hl.style_at(Pos { row: 2, col: 0 }).is_some());
+    }
+
+    #[test]
+    fn inline_ranges_cover_the_inline_text_and_skip_parsed_children() {
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Markdown.language()).unwrap();
+        let tree = parser.parse(DOC.as_bytes(), None).unwrap();
+        let ranges = markdown_inline_ranges(&tree);
+        assert!(!ranges.is_empty());
+        // Sorted and disjoint: tree-sitter's own requirement, enforced here so
+        // a caller never has to.
+        for w in ranges.windows(2) {
+            assert!(w[0].1 <= w[1].0, "unsorted or overlapping: {ranges:?}");
+        }
+        // The `**bold**` text is inline content, so some range covers it.
+        let at = DOC.find("bold").unwrap();
+        assert!(
+            ranges.iter().any(|(s, e)| *s <= at && at < *e),
+            "no inline range covers the emphasis text"
+        );
+        // A heading's marker is block structure, not inline content.
+        let hash = DOC.find('#').unwrap();
+        assert!(
+            !ranges.iter().any(|(s, e)| *s <= hash && hash < *e),
+            "the heading marker must not be handed to the inline grammar"
+        );
+    }
+
+    #[test]
+    fn classes_sees_the_inline_constructs_too() {
+        // The embedder's view (capture names, no palette) must agree with the
+        // editor's: both run the two passes.
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(DOC, Lang::Markdown);
+        let name_at = |row: usize, text: &str, off: usize| {
+            let col = DOC.split('\n').nth(row).unwrap().find(text).unwrap() + off;
+            grid.get(row).and_then(|r| r.get(col)).cloned().flatten()
+        };
+        assert_eq!(name_at(2, "**bold**", 2).as_deref(), Some("text.strong"));
+        assert_eq!(name_at(2, "`code`", 1).as_deref(), Some("text.literal"));
+        assert_eq!(name_at(2, "*it*", 1).as_deref(), Some("text.emphasis"));
+        assert_eq!(name_at(2, "[link]", 1).as_deref(), Some("text.reference"));
+        assert_eq!(name_at(2, "~~strike~~", 2).as_deref(), Some("text.strike"));
+        // The block half is still there.
+        assert_eq!(name_at(0, "#", 0).as_deref(), Some("keyword"));
+    }
+
+    #[test]
+    fn a_plain_markdown_document_is_still_fast_to_refresh() {
+        // The inline pass is a second parse, so it must not double the cost
+        // of typing in a large markdown file. Measured, not assumed: the
+        // whole document is re-highlighted per edit (per the full-reparse
+        // rule), and this asserts the two passes stay in the same range as
+        // one parse of a document this size.
+        let mut src = String::new();
+        for i in 0..600 {
+            src.push_str(&format!(
+                "Paragraph {i} with **bold** and `code` and a [link](http://x/{i}).\n\n"
+            ));
+        }
+        assert!(src.len() > 40_000, "{} bytes", src.len());
+        let mut buf = Buffer::new();
+        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.name = Some(std::path::PathBuf::from("x.md"));
+        let mut hl = Highlighter::new();
+        let t = Instant::now();
+        hl.refresh(&buf);
+        let two = t.elapsed();
+        // A single-pass language of the same shape, for scale.
+        let mut rb = Buffer::new();
+        rb.lines = buf.lines.clone();
+        rb.name = Some(std::path::PathBuf::from("x.rs"));
+        let t = Instant::now();
+        hl.refresh(&rb);
+        let one = t.elapsed();
+        println!("markdown two-pass {two:?} vs rust one-pass {one:?}");
+        // Measured (release, 60 KB): ~46 ms against ~40 ms, so the inline
+        // parse costs ~15% on top of the block pass and its grid, not a
+        // second full pass. The assertion is deliberately loose — the suite
+        // runs tests in parallel, and a tight timing bound here would flake
+        // rather than catch anything. What it does catch is a blow-up: an
+        // inline pass gone quadratic, or one parse per inline node.
+        assert!(
+            two < one * 8 + Duration::from_millis(50),
+            "markdown's two passes cost {two:?}, a one-pass language {one:?}"
+        );
     }
 }

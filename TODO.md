@@ -237,3 +237,58 @@ Next steps:
   whether the junk-parking stays as belt-and-braces.
 - [ ] Still pending from earlier rounds: live-verify mouse support
   (`tmux send-keys -M`); all rounds uncommitted — commit only on request.
+
+## 11. Markdown rendering and display width (from the head-parity read, done)
+
+Reading `../head-parity-2026-09-21.md` for the letibot/leticl parity work turned
+up two things on rano's own side. Both are fixed; the numbers are here because
+the next reader will want to price the trade, not rediscover it.
+
+- [x] **`width`: a character is not a column.** `ui::display_width` counted
+  every character as one column, so rano had the doc's §2.1 defect by
+  construction: a CJK or emoji line wrapped at twice its true width (the
+  terminal showed ~half the line and the rest never reached the screen), the
+  cursor landed in the wrong cell, a click mapped to the wrong character, and
+  a wrap boundary could split a combining mark from its base. `src/width.rs`
+  now implements char widths (0/1/2), cluster grouping (base + combining
+  marks, ZWJ sequences, paired regional indicators) and a greedy segmenter
+  that never splits a cluster. Verified end-to-end in a tmux pane: a 170-char
+  CJK paragraph (400 columns) wrapped to rows of 196 and 144 columns and the
+  text was recovered character for character — 170/170 — where the old code
+  would have dropped most of it.
+  - Not UAX #11/#29: the ranges a code assistant meets are listed by hand,
+    and a miss costs one column. No generated table, no new dependency.
+  - The per-frame cost work stands: 77/118/118/117/117 µs on the five cases
+    from the earlier benchmark, and a 20 × 500k-row wide-character document
+    scrolled deep is 113 µs, because wrapped rows now render from the wrap
+    table's per-segment char range instead of rescanning the line.
+- [x] **Markdown is two grammars.** The block query cannot see emphasis, code
+  spans or links — they are nodes of the *inline* grammar — so everything
+  inside a paragraph was plain, while nano colours bold, italic, code and
+  links. `Highlighter::refresh`/`classes` now run a second pass: the inline
+  grammar over the byte ranges the block tree marks as inline content
+  (`markdown_inline_ranges`, split around the named children the block
+  grammar already parsed), with both passes overlaying one grid. Fence bodies
+  and indented code are one `text.literal` run (nano colours the whole fence;
+  no injection grammar runs, so a ```rust block is cyan, not Rust), raw HTML
+  is a tag, `~~struck~~` is struck through, and link text and its destination
+  share the link colour — the distinctions nano's markdown mode draws.
+  Cost, measured (release, 60 KB): 46 ms against 40 ms for a Rust file of the
+  same size, so the inline parse is ~15% on top of the block pass.
+- [x] **`(block_continuation) @punctuation.bracket` is gone.** That node
+  spans the leading whitespace of a *continuation* line, so the indent of one
+  bullet's second line painted while its neighbour's did not: two adjacent
+  identical lines looked different (the doc's §1.1/§1.4 example showed it as
+  rows 15 vs 16). A test pins that continuation indentation is not painted.
+
+Left alone on purpose:
+
+- **C4 in the parity doc — a `console` fence.** rano returns `None` for the
+  `console` info string, deliberately (it is the archetypal unknown-fence
+  token, and its own test names it so). The doc records that head A inherits
+  that choice and head B colours `console` as shell. If the ruling goes the
+  other way it is a one-line change in rano's token table, but it is a ruling
+  about the two heads, not a defect here.
+- **Inline code inside a heading** now reads as code (cyan) rather than as
+  heading text. That is the two passes composing; nano's markdown mode does
+  the same, and it is what makes `` `letibot-tui` `` legible inside a heading.

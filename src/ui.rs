@@ -719,6 +719,17 @@ mod tests {
         s.chars().collect()
     }
 
+    /// An editor over a NAMED buffer, so `detect` finds a language and the
+    /// highlighter runs — the draw tests need coloured cells.
+    fn ed_named(name: &str, text: &str) -> Editor {
+        let mut buf = Buffer::new();
+        buf.lines = text.lines().map(|l| l.chars().collect()).collect();
+        buf.name = Some(std::path::PathBuf::from(name));
+        let mut ed = Editor::new(buf, crate::config::Config::default());
+        ed.ensure_wrap_prefix();
+        ed
+    }
+
     /// A window for a one-column test row: display col == char index, so the
     /// range is a plain slice of the line.
     fn win(chars: &[char], lo: usize, hi: usize) -> Vec<(usize, char)> {
@@ -1163,6 +1174,28 @@ mod tests {
     }
 
     // ---------- width: what a character occupies ----------
+
+    #[test]
+    fn draw_colours_markdown_constructs_on_screen() {
+        // Not just `style_at`: the palette has to reach the cells. A markdown
+        // buffer with one of each construct, drawn to a TestBackend.
+        let src = "# H\n\n**bold** `code` *it*\n\n```rust\nlet x = 1;\n```\n";
+        let mut e = ed_named("x.md", src);
+        e.show_line_numbers = false;
+        let mut terminal = Terminal::new(TestBackend::new(30, 24)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let fg = |x: u16, y: u16| buf.cell((x, y)).unwrap().fg;
+        // Row 3 (pane row 3): "**bold** `code` *it*" — the inner text of each
+        // construct, and the delimiters, all distinct.
+        assert_eq!(fg(2, 3), Color::Rgb(0xe5, 0xc0, 0x7b), "strong text");
+        assert_eq!(fg(10, 3), Color::Rgb(0x56, 0xb6, 0xc2), "code span");
+        assert_eq!(fg(17, 3), Color::Rgb(0x98, 0xc3, 0x79), "emphasis");
+        assert_eq!(fg(0, 3), Color::Rgb(0xab, 0xbb, 0xbf), "the `**` delimiter");
+        // The heading and the fenced body, on their own rows.
+        assert_eq!(fg(2, 1), Color::Rgb(0xe5, 0xc0, 0x7b), "heading text");
+        assert_eq!(fg(0, 6), Color::Rgb(0x56, 0xb6, 0xc2), "fence body");
+    }
 
     #[test]
     fn display_width_counts_wide_characters_as_two() {

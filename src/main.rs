@@ -12,6 +12,7 @@ mod search;
 mod search_ctrl;
 mod syntax;
 mod ui;
+mod width;
 
 use std::collections::VecDeque;
 use std::io;
@@ -34,6 +35,19 @@ use editor::{ActionKind, UndoStep};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use search_ctrl::SearchState;
+
+/// Where a buffer row's soft-wrap segments begin, for a row that is not
+/// *simple* (see [`crate::width`]): `(char index, display column)` per
+/// segment. The renderer, the cursor and the mouse all read this instead of
+/// recomputing `seg * view_w`, which is only true while every character is
+/// one column wide.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RowWrap {
+    /// `None` → a simple row: display col == char index, segments affine.
+    pub(crate) segs: Option<Vec<(usize, usize)>>,
+    /// Rendered width of the row in display columns.
+    pub(crate) w: usize,
+}
 
 /// Everything that belongs to ONE open document: text, view state, undo
 /// history and its LSP session. F8 will hold several of these in
@@ -70,12 +84,15 @@ pub struct BufferState {
     /// increasing — every row occupies at least one visual row). Valid only
     /// while `wrap_key` matches the buffer's (edit_gen, view_w).
     pub wrap_prefix: Vec<usize>,
-    /// First tab char index per row, built in the same pass as
-    /// `wrap_prefix` (same freshness): `Some(t)` = first tab at char `t`,
-    /// `None` = the row has no tabs. A tab-free row maps display col ==
-    /// char index, so the per-frame window/col scans become O(1) lookups
-    /// instead of O(line length).
-    pub(crate) wrap_first_tab: Vec<Option<usize>>,
+    /// Per-row wrap geometry, built in the same pass as `wrap_prefix` (and
+    /// with the same freshness key). `None` segments means the row is
+    /// *simple* — every character one column and no tab — so display col ==
+    /// char index and its segments are affine: segment `s` is chars
+    /// `[s*vw, (s+1)*vw)`. A row with a tab, a wide character (CJK, emoji) or
+    /// a combining mark stores where each segment begins, as
+    /// `(char index, display col)`, because neither relation is affine any
+    /// more. See [`crate::width`].
+    pub(crate) wrap_rows: Vec<RowWrap>,
     pub(crate) wrap_key: (u64, usize),
     /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
@@ -112,7 +129,7 @@ impl BufferState {
             exec_job: None,
             scroll_x: 0,
             wrap_prefix: Vec::new(),
-            wrap_first_tab: Vec::new(),
+            wrap_rows: Vec::new(),
             wrap_key: (0, 0),
             edit_gen: 0,
             undo: VecDeque::new(),
@@ -1426,6 +1443,86 @@ mod ed_tests {
         assert!(!ed.wrap);
         press(&mut ed, KeyCode::Char('\\'), KeyModifiers::ALT);
         assert!(ed.wrap);
+    }
+
+    #[test]
+    fn wrap_table_and_motion_handle_wide_characters() {
+        // 5 CJK characters = 10 display columns in a 4-column view: three
+        // visual rows of 2, 2 and 1 characters. Nothing may split a glyph,
+        // and the cursor's column must be measured in cells, not characters.
+        let mut ed = test_ed("中文字语言\nx");
+        ed.show_line_numbers = false;
+        ed.text_w = 4;
+        ed.ensure_wrap_prefix();
+        assert_eq!(
+            ed.bs().wrap_prefix,
+            vec![0, 3, 4],
+            "10 columns / 4 per row = 3 visual rows"
+        );
+        assert_eq!(ed.seg_count(0), 3);
+        // Segments begin at characters 0, 2 and 4 — and at display columns
+        // 0, 4 and 8, which is what the renderer paints from.
+        assert_eq!(ed.seg_chars(0, 0), (0, 2));
+        assert_eq!(ed.seg_chars(0, 1), (2, 4));
+        assert_eq!(ed.seg_chars(0, 2), (4, 5));
+        assert_eq!(ed.seg_disp(0, 0), (0, 4));
+        assert_eq!(ed.seg_disp(0, 1), (4, 8));
+        assert_eq!(ed.seg_disp(0, 2), (8, 10));
+        // A char col maps to its visual row and to its offset inside it.
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 0 }), 0);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 1 }), 0);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 2 }), 1);
+        assert_eq!(ed.visual_pos(Pos { row: 0, col: 4 }), 2);
+        assert_eq!(ed.disp_in_seg(0, 0), 0);
+        assert_eq!(ed.disp_in_seg(0, 1), 2, "one glyph in, on row 0");
+        assert_eq!(ed.disp_in_seg(0, 4), 0, "start of the third row");
+        // End goes to the end of the VISUAL row — a cluster boundary, never
+        // the middle of a glyph — and Down carries that offset across.
+        ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+        press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
+        press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
+        ed.bs_mut().cursor = Pos { row: 0, col: 1 };
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 0, col: 3 },
+            "one glyph in on the row below"
+        );
+    }
+
+    #[test]
+    fn mouse_pos_maps_wide_columns_to_the_clicked_character() {
+        let mut ed = test_ed("中文字语言\nx");
+        ed.show_line_numbers = false;
+        ed.text_w = 4;
+        ed.ensure_wrap_prefix();
+        // Pane column 1 is the left cell of 中; column 3 is inside 文.
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 1, 1)));
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 1, 3)));
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 1 });
+        // Pane row 2 is the second visual row: its column 3 is inside 语.
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 3)));
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
+        // Past the last cell of the final row → end of line.
+        assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 3, 4)));
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 5 });
+    }
+
+    #[test]
+    fn wheel_scrolls_wide_rows_by_visual_row() {
+        // 5 CJK characters in a 4-column view is 3 visual rows; a wheel
+        // notch must move three of them, not three characters.
+        let mut ed = test_ed("中文字语言\nx");
+        ed.show_line_numbers = false;
+        ed.text_w = 4;
+        ed.text_h = 1; // otherwise the sheet fits and there is nowhere to scroll
+        ed.ensure_wrap_prefix();
+        assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+        assert_eq!(ed.bs().scroll, 3, "one buffer row is three visual rows");
+        // The cursor is pinned onto the edge it would have crossed.
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
     }
 
     #[test]

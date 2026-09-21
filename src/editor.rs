@@ -11,12 +11,14 @@ use crossterm::event::{MouseButton, MouseEvent};
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::BufferState;
+use crate::RowWrap;
 use crate::buffer::{Buffer, Pos};
 use crate::config;
 use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
 use crate::search_ctrl::ReplaceState;
 use crate::ui;
+use crate::width;
 
 #[derive(Debug, Clone)]
 pub struct Flash {
@@ -291,22 +293,35 @@ impl Editor {
             .cursor
             .row
             .min(self.bs().buf.lines.len().saturating_sub(1));
-        // Tab-free rows (fresh wrap table): display col == char index.
-        let no_tabs = matches!(self.row_first_tab(row), Some(None));
+        // A simple row (fresh wrap table): display col == char index.
+        let simple = self.row_is_simple(row) == Some(true);
         let bs = self.bs_mut();
         let line = &bs.buf.lines[row];
-        let disp = if no_tabs {
+        let disp = if simple {
             bs.cursor.col.min(line.len())
         } else {
             ui::display_col(line, bs.cursor.col, tab_width)
         };
-        let line_w = if no_tabs {
+        let line_w = if simple {
             line.len()
         } else {
             ui::display_width(line, tab_width)
         };
         bs.scroll_x = bs.scroll_x.min(disp).max((disp + 1).saturating_sub(view_w));
         bs.scroll_x = bs.scroll_x.min(line_w);
+        // The viewport's left edge must not fall inside a DOUBLE-WIDTH
+        // character: painting half of one and putting the cursor a cell off
+        // is worse than one column of slack. A tab is fine — the renderer
+        // clips it into the leading spaces the edge has left.
+        if bs.scroll_x > 0 {
+            let at = ui::char_at_display(line, bs.scroll_x, tab_width);
+            if line
+                .get(at)
+                .is_some_and(|c| crate::width::char_width(*c) > 1)
+            {
+                bs.scroll_x = ui::display_col(line, at, tab_width);
+            }
+        }
     }
 
     // ---------- soft wrap (M-\) ----------
@@ -322,9 +337,11 @@ impl Editor {
     }
 
     /// Rebuild the visual-row prefix table when the buffer or the wrap
-    /// width changed since the last build. No-op when wrap is off. Also
-    /// records each row's first tab index (same pass, same freshness) so
-    /// tab-free rows skip the per-frame display-col scans.
+    /// width changed since the last build. No-op when wrap is off. The same
+    /// pass records each row's segment geometry (see [`RowWrap`]) so a row
+    /// with a tab, a wide character or a combining mark never has to be
+    /// walked again per frame — a 500k-char line must not cost 500k steps
+    /// every frame.
     pub(crate) fn ensure_wrap_prefix(&mut self) {
         if !self.wrap {
             return;
@@ -332,64 +349,152 @@ impl Editor {
         let vw = self.view_w();
         let key = (self.bs().edit_gen, vw);
         let fresh = self.bs().wrap_key == key
-            && self.bs().wrap_prefix.len() == self.bs().buf.lines.len() + 1;
+            && self.bs().wrap_prefix.len() == self.bs().buf.lines.len() + 1
+            && self.bs().wrap_rows.len() == self.bs().buf.lines.len();
         if fresh {
             return;
         }
         let tw = self.tab_width.max(1);
-        let mut prefix = Vec::with_capacity(self.bs().buf.lines.len() + 1);
-        let mut first_tab = Vec::with_capacity(self.bs().buf.lines.len());
+        let n = self.bs().buf.lines.len();
+        let mut prefix = Vec::with_capacity(n + 1);
+        let mut rows = Vec::with_capacity(n);
         prefix.push(0);
         for line in &self.bs().buf.lines {
-            // A tab's width depends on the ABSOLUTE display col, which does
-            // not reset at wrap boundaries, so the full-line width is
-            // exactly the sum of the segment widths.
-            let mut w = 0;
-            let mut ft: Option<usize> = None;
-            for (i, &c) in line.iter().enumerate() {
-                if c == '\t' {
-                    if ft.is_none() {
-                        ft = Some(i);
-                    }
-                    w += tw - (w % tw);
-                } else {
-                    w += 1;
-                }
+            if width::is_simple(line) {
+                // Every character one column: segments are affine and the
+                // renderer needs no table.
+                prefix.push(*prefix.last().unwrap() + line.len().div_ceil(vw).max(1));
+                rows.push(RowWrap {
+                    segs: None,
+                    w: line.len(),
+                });
+                continue;
             }
-            prefix.push(*prefix.last().unwrap() + w.div_ceil(vw).max(1));
-            first_tab.push(ft);
+            let segs = width::segments(line, tw, vw);
+            let w = width::width(line, tw);
+            prefix.push(*prefix.last().unwrap() + segs.len());
+            rows.push(RowWrap {
+                segs: Some(segs),
+                w,
+            });
         }
         let bs = self.bs_mut();
         bs.wrap_prefix = prefix;
-        bs.wrap_first_tab = first_tab;
+        bs.wrap_rows = rows;
         bs.wrap_key = key;
     }
 
-    /// First tab char index of row `r` from the wrap table, when it is
-    /// fresh: `Some(Some(t))` = first tab at char `t`, `Some(None)` = the
-    /// row has no tabs (display col == char index), `None` = unknown
-    /// (table stale or never built — callers fall back to scanning).
-    pub(crate) fn row_first_tab(&self, r: usize) -> Option<Option<usize>> {
+    /// The wrap geometry of row `r` from the table, when it is fresh.
+    /// `None` means the table is stale or absent and callers must fall back
+    /// to scanning the line.
+    fn row_wrap(&self, r: usize) -> Option<&RowWrap> {
         let bs = self.bs();
-        if bs.wrap_key != (bs.edit_gen, self.view_w())
-            || bs.wrap_first_tab.len() != bs.buf.lines.len()
-        {
+        if bs.wrap_key != (bs.edit_gen, self.view_w()) || bs.wrap_rows.len() != bs.buf.lines.len() {
             return None;
         }
-        bs.wrap_first_tab.get(r).copied()
+        bs.wrap_rows.get(r)
+    }
+
+    /// `Some(true)` when row `r` is simple — every character one column and
+    /// no tab, so display col == char index — and `None` when the table is
+    /// stale and the caller must scan. `Some(false)` means the row needs the
+    /// width-aware paths.
+    pub(crate) fn row_is_simple(&self, r: usize) -> Option<bool> {
+        self.row_wrap(r).map(|rw| rw.segs.is_none())
+    }
+
+    /// How many visual rows buffer row `r` occupies.
+    pub(crate) fn seg_count(&self, r: usize) -> usize {
+        let len = self.line_len(r);
+        if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
+            return segs.len().max(1);
+        }
+        len.div_ceil(self.view_w()).max(1)
+    }
+
+    /// Char range `[lo, hi)` of segment `seg` of buffer row `r`.
+    pub(crate) fn seg_chars(&self, r: usize, seg: usize) -> (usize, usize) {
+        let len = self.line_len(r);
+        if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
+            let lo = segs.get(seg).map(|s| s.0).unwrap_or(len);
+            let hi = segs.get(seg + 1).map(|s| s.0).unwrap_or(len);
+            return (lo.min(len), hi.min(len));
+        }
+        let vw = self.view_w();
+        let lo = (seg * vw).min(len);
+        (lo, (lo + vw).min(len))
+    }
+
+    /// Display range `[d0, d1)` segment `seg` of buffer row `r` paints into.
+    pub(crate) fn seg_disp(&self, r: usize, seg: usize) -> (usize, usize) {
+        if let Some(rw) = self.row_wrap(r) {
+            if let Some(segs) = &rw.segs {
+                let d0 = segs.get(seg).map(|s| s.1).unwrap_or(rw.w);
+                let d1 = segs.get(seg + 1).map(|s| s.1).unwrap_or(rw.w);
+                return (d0, d1);
+            }
+            return (
+                (seg * self.view_w()).min(rw.w),
+                rw.w.min((seg + 1) * self.view_w()),
+            );
+        }
+        let len = self.line_len(r);
+        let vw = self.view_w();
+        ((seg * vw).min(len), ((seg + 1) * vw).min(len))
+    }
+
+    /// Which segment of buffer row `r` holds char col `col`.
+    pub(crate) fn seg_of_col(&self, r: usize, col: usize) -> usize {
+        let len = self.line_len(r);
+        let col = col.min(len);
+        if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
+            // The starts are sorted and strictly increasing, so the segment
+            // is the last one that begins at or before `col`.
+            return match segs.binary_search_by_key(&col, |s| s.0) {
+                Ok(i) => i,
+                Err(0) => 0,
+                Err(i) => i - 1,
+            };
+        }
+        (col / self.view_w()).min(self.seg_count(r).saturating_sub(1))
+    }
+
+    /// Display offset of char col `col` inside its own segment — where the
+    /// cursor sits on the visual row, which is `disp % view_w` only while
+    /// every character is one column wide.
+    pub(crate) fn disp_in_seg(&self, r: usize, col: usize) -> usize {
+        let (lo, _) = self.seg_chars(r, self.seg_of_col(r, col));
+        if self.row_is_simple(r) == Some(true) {
+            // Char index == display col, so the offset is the distance from
+            // the segment's first char.
+            return col.min(self.line_len(r)).saturating_sub(lo);
+        }
+        let line = &self.bs().buf.lines[r];
+        ui::display_col(line, col, self.tab_width)
+            .saturating_sub(self.seg_disp(r, self.seg_of_col(r, col)).0)
+    }
+
+    /// Char col at display offset `within` into segment `seg` of row `r`
+    /// (clamped to the segment, so it never spills onto the next one).
+    pub(crate) fn col_in_seg(&self, r: usize, seg: usize, within: usize) -> usize {
+        let (lo, hi) = self.seg_chars(r, seg);
+        if self.row_is_simple(r) == Some(true) {
+            return (lo + within).min(hi);
+        }
+        let (d0, _) = self.seg_disp(r, seg);
+        let line = &self.bs().buf.lines[r];
+        ui::char_at_display(line, d0 + within, self.tab_width).clamp(lo, hi)
+    }
+
+    fn line_len(&self, r: usize) -> usize {
+        self.bs().buf.lines.get(r).map(Vec::len).unwrap_or(0)
     }
 
     /// Visual row containing position `p` (wrap on only).
     pub(crate) fn visual_pos(&self, p: Pos) -> usize {
         let bs = self.bs();
         let r = p.row.min(bs.buf.lines.len().saturating_sub(1));
-        let line = &bs.buf.lines[r];
-        let vw = self.view_w();
-        let disp = match self.row_first_tab(r) {
-            Some(None) => p.col.min(line.len()),
-            _ => ui::display_col(line, p.col, self.tab_width),
-        };
-        bs.wrap_prefix.get(r).copied().unwrap_or(0) + disp / vw
+        bs.wrap_prefix.get(r).copied().unwrap_or(0) + self.seg_of_col(r, p.col)
     }
 
     /// (buffer row, wrap segment) of visual row `v`, clamped to the buffer
@@ -408,15 +513,6 @@ impl Editor {
         };
         let r = r.min(bs.buf.lines.len().saturating_sub(1));
         (r, v - bs.wrap_prefix[r])
-    }
-
-    /// Char col of display col `d` on buffer row `r` (clamped to EOL).
-    fn col_at_disp(&self, r: usize, d: usize) -> usize {
-        let line = &self.bs().buf.lines[r];
-        match self.row_first_tab(r) {
-            Some(None) => d.min(line.len()),
-            _ => ui::char_at_display(line, d, self.tab_width),
-        }
     }
 
     pub(crate) fn edit_invalidate(&mut self) {
@@ -1046,7 +1142,12 @@ impl Editor {
         if x < g {
             return Some(Pos { row, col: 0 });
         }
-        let disp = x - g + seg * self.view_w() + bs.scroll_x;
+        let disp = if self.wrap {
+            let (d0, _) = self.seg_disp(row, seg);
+            d0 + (x - g)
+        } else {
+            bs.scroll_x + (x - g)
+        };
         let line = &bs.buf.lines[row];
         Some(Pos {
             row,
@@ -1098,19 +1199,14 @@ impl Editor {
             let max_scroll = total.saturating_sub(text_h);
             let scroll = (self.bs().scroll as i64 + delta).clamp(0, max_scroll as i64) as usize;
             let cv = self.visual_pos(self.bs().cursor);
-            let vw = self.view_w();
             let pin = if cv < scroll {
                 let (r, seg) = self.buf_row_of_visual(scroll);
-                Some(Pos {
-                    row: r,
-                    col: self.col_at_disp(r, seg * vw),
-                })
+                let (lo, _) = self.seg_chars(r, seg);
+                Some(Pos { row: r, col: lo })
             } else if text_h > 0 && cv >= scroll + text_h {
                 let (r, seg) = self.buf_row_of_visual(scroll + text_h - 1);
-                Some(Pos {
-                    row: r,
-                    col: self.col_at_disp(r, (seg + 1) * vw),
-                })
+                let (_, hi) = self.seg_chars(r, seg);
+                Some(Pos { row: r, col: hi })
             } else {
                 None
             };
@@ -1493,10 +1589,9 @@ impl Editor {
     /// the visual row (clamped to the target row's length). Wrap on only.
     fn goto_visual_row(&mut self, v: usize) {
         let c = self.bs().cursor;
-        let disp = ui::display_col(&self.bs().buf.lines[c.row], c.col, self.tab_width);
-        let vw = self.view_w();
+        let within = self.disp_in_seg(c.row, c.col);
         let (r, seg) = self.buf_row_of_visual(v);
-        let col = self.col_at_disp(r, seg * vw + disp % vw);
+        let col = self.col_in_seg(r, seg, within);
         self.bs_mut().cursor = Pos { row: r, col };
     }
 
@@ -1539,7 +1634,8 @@ impl Editor {
             // Start of the VISUAL row, not of the buffer row.
             let cv = self.visual_pos(self.bs().cursor);
             let (r, seg) = self.buf_row_of_visual(cv);
-            self.bs_mut().cursor.col = self.col_at_disp(r, seg * self.view_w());
+            let (lo, _) = self.seg_chars(r, seg);
+            self.bs_mut().cursor.col = lo;
             return;
         }
         self.bs_mut().cursor.col = 0;
@@ -1550,7 +1646,8 @@ impl Editor {
             // End of the VISUAL row, not of the buffer row.
             let cv = self.visual_pos(self.bs().cursor);
             let (r, seg) = self.buf_row_of_visual(cv);
-            self.bs_mut().cursor.col = self.col_at_disp(r, (seg + 1) * self.view_w());
+            let (_, hi) = self.seg_chars(r, seg);
+            self.bs_mut().cursor.col = hi;
             return;
         }
         let bs = self.bs_mut();

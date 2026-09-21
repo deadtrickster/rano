@@ -8,6 +8,9 @@
 //! - [`syntax`] — tree-sitter highlighting: language detection, the
 //!   capture walk, and [`syntax::Highlighter::classes`] for callers that
 //!   own their palette rather than borrowing rano's.
+//! - [`width`] — display width: how many columns a character takes, where a
+//!   line's wrap segments begin, and which clusters may never be split.
 
 pub mod buffer;
 pub mod syntax;
+pub mod width;

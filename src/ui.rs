@@ -2,6 +2,7 @@ use crate::buffer::Pos;
 use crate::editor::Editor;
 use crate::lsp;
 use crate::prompt::{Prompt, prompt_label};
+use crate::width;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -73,134 +74,156 @@ pub(crate) fn gutter_width(rows: usize) -> usize {
 }
 
 /// Rendered width of `chars` with tabs advancing to the next multiple of
-/// `tab_width` (`tab_width` 0 is treated as 1 to avoid division by zero).
+/// `tab_width` (`tab_width` 0 is treated as 1) and wide characters (CJK,
+/// emoji) counting two columns. See [`crate::width`].
 pub(crate) fn display_width(chars: &[char], tab_width: usize) -> usize {
-    let tw = tab_width.max(1);
-    let mut w = 0;
-    for &c in chars {
-        if c == '\t' {
-            w += tw - (w % tw);
-        } else {
-            w += 1;
-        }
+    if width::is_simple(chars) {
+        return chars.len();
     }
-    w
+    width::width(chars, tab_width)
 }
 
 /// Inverse of `display_col`: the char index whose cell contains display
 /// column `disp`. Clicking past the end of the line lands on the line
-/// length; clicking inside a tab lands on the tab itself.
+/// length, clicking inside a tab lands on the tab itself, and a cell inside
+/// a wide character lands on that character — never inside the cluster.
 pub(crate) fn char_at_display(line: &[char], disp: usize, tab_width: usize) -> usize {
-    let tw = tab_width.max(1);
-    // Fast path: no tab in [0, disp) → display col == char index there.
-    let pre = &line[..disp.min(line.len())];
-    if !pre.contains(&'\t') {
+    if width::is_simple(line) {
         return disp.min(line.len());
     }
-    let mut w = 0usize;
-    for (i, &c) in line.iter().enumerate() {
-        let cw = if c == '\t' { tw - (w % tw) } else { 1 };
-        if w + cw > disp {
-            return i;
+    for c in width::clusters(line, tab_width) {
+        if c.w > 0 && disp < c.disp + c.w {
+            return c.start;
         }
-        w += cw;
     }
     line.len()
 }
 
 /// Display col of char index `col` within `line` (col clamped to line len).
+///
+/// Measured over the prefix's *clusters*, so a col that points inside a
+/// ZWJ sequence reports the column its glyph starts at rather than one per
+/// code point.
 pub(crate) fn display_col(line: &[char], col: usize, tab_width: usize) -> usize {
     let col = col.min(line.len());
-    // Fast path: no tab in the prefix → display col == char index.
-    if !line[..col].contains(&'\t') {
+    if width::is_simple(&line[..col]) {
         return col;
     }
-    display_width(&line[..col], tab_width)
+    width::width(&line[..col], tab_width)
 }
 
-/// The window of a KNOWN tab-free row: display col == char index, so it is
-/// a plain slice — no scan of the chars left of `scroll_x`.
-fn tab_free_window(line: &[char], scroll_x: usize, view_w: usize) -> Vec<(usize, char)> {
-    let end = scroll_x.saturating_add(view_w);
-    let start = scroll_x.min(line.len());
-    line[start..end.min(line.len())]
+/// The window of a KNOWN-simple row — every character one column and no tab,
+/// so display col == char index and the window is a plain slice.
+fn simple_window<'a>(
+    line: &'a [char],
+    lo: usize,
+    hi: usize,
+) -> impl Iterator<Item = (usize, char)> + 'a {
+    let start = lo.min(line.len());
+    let end = hi.min(line.len()).max(start);
+    line[start..end]
         .iter()
+        .copied()
         .enumerate()
-        .map(|(i, &c)| (start + i, c))
-        .collect()
+        .map(move |(i, c)| (start + i, c))
 }
 
-/// Visible window of `line` as display cols `[scroll_x, scroll_x + view_w)`:
-/// `(absolute char col, rendered char)` pairs with tabs expanded to spaces up
-/// to the next multiple of `tab_width` (`tab_width` 0 is treated as 1). A tab
-/// straddling `scroll_x` is clipped into leading spaces.
-fn text_window(
-    line: &[char],
-    scroll_x: usize,
-    view_w: usize,
-    tab_width: usize,
-) -> Vec<(usize, char)> {
-    let tw = tab_width.max(1);
-    let end = scroll_x.saturating_add(view_w);
-    // Fast path: no tab in [0, end) → display col == char index there (tabs
-    // only widen), so the window is a plain slice. The check stops at the
-    // first tab, so indented lines pay only their indent. Callers that know
-    // the row is tab-free (fresh wrap table) use tab_free_window directly.
-    let pre = &line[..end.min(line.len())];
-    if !pre.contains(&'\t') {
-        return tab_free_window(line, scroll_x, view_w);
-    }
+/// Visible window of `line` as display cols `[d0, d1)`: `(absolute char col,
+/// rendered char)` pairs with tabs expanded to spaces and wide characters
+/// kept whole. A tab straddling `d0` is clipped into leading spaces.
+///
+/// This is the HORIZONTAL-SCROLL window (E3/F2), where the edges are display
+/// columns the operator scrolled to and can therefore land mid-cluster. A
+/// wrapped row instead asks [`seg_window`] for the characters of one of its
+/// segments, which the wrap table already delimits.
+fn text_window(line: &[char], d0: usize, d1: usize, tab_width: usize) -> Vec<(usize, char)> {
     let mut out = Vec::new();
-    let mut d = 0;
-    for (i, &c) in line.iter().enumerate() {
-        let w = if c == '\t' { tw - (d % tw) } else { 1 };
-        let (lo, hi) = (d, d + w);
-        d = hi;
-        if hi <= scroll_x {
-            continue; // fully left of the window
-        }
-        if lo >= end {
+    // Lazy, and it stops at `d1`: a window near the end of a long line must
+    // not walk the whole line to find its edge.
+    for c in width::Clusters::new(line, tab_width) {
+        if c.disp >= d1 {
             break; // fully right of the window
         }
-        if c == '\t' {
-            for _ in lo.max(scroll_x)..hi.min(end) {
-                out.push((i, ' '));
+        if c.w == 0 {
+            // Zero-width clusters only arise at the start of a line (after a
+            // base they would have joined it). Emit their characters so a
+            // base is never separated from them.
+            if c.disp >= d0 {
+                out.extend((c.start..c.end).map(|i| (i, line[i])));
+            }
+            continue;
+        }
+        if c.disp + c.w <= d0 {
+            continue; // fully left of the window
+        }
+        if line[c.start] == '\t' {
+            for _ in c.disp.max(d0)..(c.disp + c.w).min(d1) {
+                out.push((c.start, ' '));
             }
         } else {
-            out.push((i, c));
-        }
-        if d >= end {
-            break;
+            out.extend((c.start..c.end).map(|i| (i, line[i])));
         }
     }
     out
 }
 
-/// One rendered text line. The window is display cols
-/// `[scroll_x, scroll_x + view_w)` of `chars` (tabs expanded, E3/F2); styles
-/// are resolved at ABSOLUTE positions (abs_row, char col) via `char_style`,
-/// so search/selection/diagnostic lookups never see window-relative coords.
-/// `diags` is THIS row's slice of the frame's merged list — draw walks the
-/// sorted list once per frame (see `diag_range`) — so no per-row filter.
-/// Consecutive equal styles coalesce into a single span.
-fn line_to_spans(
-    chars: &[char],
-    abs_row: usize,
-    scroll_x: usize,
-    view_w: usize,
+/// The characters of ONE wrap segment: `line[lo..hi)` (both cluster
+/// boundaries, straight out of the wrap table), rendered as if painting began
+/// at display column `d0` — which is where that segment starts, so a tab
+/// inside it expands to its true remaining advance and a wide character is
+/// emitted whole.
+///
+/// This is the wrapped-row window, and it costs one pass over the segment
+/// rather than a walk from the start of the line: a 500k-character row at a
+/// deep visual row must not re-scan its own head every frame.
+fn seg_window(
+    line: &[char],
+    lo: usize,
+    hi: usize,
+    d0: usize,
     tab_width: usize,
+) -> Vec<(usize, char)> {
+    let tw = tab_width.max(1);
+    let start = lo.min(line.len());
+    let end = hi.min(line.len()).max(start);
+    let mut out = Vec::with_capacity(end.saturating_sub(start));
+    let mut disp = d0;
+    for (i, &c) in line[start..end].iter().enumerate() {
+        let i = start + i;
+        if c == '\t' {
+            let w = tw - (disp % tw);
+            for _ in 0..w {
+                out.push((i, ' '));
+            }
+            disp += w;
+        } else {
+            disp += width::char_width(c);
+            out.push((i, c));
+        }
+    }
+    out
+}
+
+/// One rendered text line from an already-chosen window of `(char col,
+/// rendered char)` pairs. Styles are resolved at ABSOLUTE positions (abs_row,
+/// char col) via `char_style`, so search/selection/diagnostic lookups never
+/// see window-relative coords. `diags` is THIS row's slice of the frame's
+/// merged list — draw walks the sorted list once per frame (see
+/// `diag_range`) — so no per-row filter. Consecutive equal styles coalesce
+/// into a single span.
+///
+/// The window comes from [`seg_window`] for a wrapped row and from
+/// [`text_window`] for a horizontally-scrolled one; both hand back whole
+/// clusters, so a base is never painted without its combining marks.
+fn line_to_spans(
+    abs_row: usize,
+    window: impl Iterator<Item = (usize, char)>,
     ed: &Editor,
     diags: &[lsp::Diagnostic],
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
-    // Known tab-free row (fresh wrap table): skip text_window's scan of the
-    // chars left of scroll_x — O(view_w) instead of O(scroll_x) per frame.
-    let window = match ed.row_first_tab(abs_row) {
-        Some(None) => tab_free_window(chars, scroll_x, view_w),
-        _ => text_window(chars, scroll_x, view_w, tab_width),
-    };
     for (col, ch) in window {
         let style = ed.char_style_with(Pos { row: abs_row, col }, diags);
         match run_style {
@@ -261,13 +284,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             // whole line every frame — a 500k-char line must not cost 500k
             // steps per frame. The fallback covers a missing table (tests
             // that draw without the run loop's adjust_scroll).
-            let count = if r + 1 < bs.wrap_prefix.len() {
-                bs.wrap_prefix[r + 1] - bs.wrap_prefix[r]
-            } else {
-                display_width(&bs.buf.lines[r], ed.tab_width)
-                    .div_ceil(view_w.max(1))
-                    .max(1)
-            };
+            let count = ed.seg_count(r);
             // The top line may start MID-way (seg > 0): emit only its
             // remaining segments. Emitting all `count` would add `seg`
             // phantom rows past the line's end — blank gaps that collapse
@@ -361,22 +378,49 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     }
 
     // ---- text area (rows 1..text_h) ----
-    // A wrap segment is just the text window at scroll_x = seg * view_w:
-    // text_window's display-col math is absolute, so tabs straddling a wrap
-    // boundary clip correctly.
+    // A wrap segment is the display range the wrap table records for it,
+    // which is `seg * view_w` only while every character is one column wide;
+    // a horizontal-scroll viewport is the same window at `scroll_x`.
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
     for (i, (r, seg)) in vis.iter().enumerate() {
         let (a, b) = diag_range[i];
         match bs.buf.lines.get(*r) {
-            Some(chars) => lines.push(line_to_spans(
-                chars,
-                *r,
-                if ed.wrap { seg * view_w } else { bs.scroll_x },
-                view_w,
-                ed.tab_width,
-                ed,
-                &diags[a..b],
-            )),
+            Some(chars) => {
+                let line = match ed.row_is_simple(*r) {
+                    // A simple row: display col == char index, so the
+                    // segment's display range IS its char range and the
+                    // window is a slice. This is the common case (ASCII
+                    // source) and the one the per-frame cost is measured on.
+                    Some(true) => {
+                        let (lo, hi) = if ed.wrap {
+                            ed.seg_chars(*r, *seg)
+                        } else {
+                            (bs.scroll_x, bs.scroll_x.saturating_add(view_w))
+                        };
+                        line_to_spans(*r, simple_window(chars, lo, hi), ed, &diags[a..b])
+                    }
+                    _ if ed.wrap => {
+                        let (lo, hi) = ed.seg_chars(*r, *seg);
+                        let (d0, _) = ed.seg_disp(*r, *seg);
+                        line_to_spans(
+                            *r,
+                            seg_window(chars, lo, hi, d0, ed.tab_width).into_iter(),
+                            ed,
+                            &diags[a..b],
+                        )
+                    }
+                    _ => {
+                        let d1 = bs.scroll_x.saturating_add(view_w);
+                        line_to_spans(
+                            *r,
+                            text_window(chars, bs.scroll_x, d1, ed.tab_width).into_iter(),
+                            ed,
+                            &diags[a..b],
+                        )
+                    }
+                };
+                lines.push(line);
+            }
             None => lines.push(Line::default()),
         }
     }
@@ -424,7 +468,9 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             let line = bs.buf.lines.get(p.row).map(Vec::as_slice).unwrap_or(&[]);
             let disp = display_col(line, p.col, ed.tab_width);
             let x = if ed.wrap {
-                (g + disp % view_w.max(1)) as u16
+                // Offset within the word's own visual row, not modulo the
+                // viewport: a row of wide characters wraps short of it.
+                (g + ed.disp_in_seg(p.row, p.col)) as u16
             } else {
                 (g + disp.saturating_sub(bs.scroll_x)) as u16
             };
@@ -566,20 +612,20 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 bs.cursor.row as i64 - bs.scroll as i64
             };
             if cy >= 0 && (cy as u16) < text_h as u16 {
-                // char col → display col → minus scroll_x (or the wrap
-                // segment's offset) → plus gutter
+                // char col → display col → minus scroll_x (or the offset
+                // within the wrap segment's own row) → plus gutter
                 let line = bs
                     .buf
                     .lines
                     .get(bs.cursor.row)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let disp = match ed.row_first_tab(bs.cursor.row) {
-                    Some(None) => bs.cursor.col.min(line.len()),
+                let disp = match ed.row_is_simple(bs.cursor.row) {
+                    Some(true) => bs.cursor.col.min(line.len()),
                     _ => display_col(line, bs.cursor.col, ed.tab_width),
                 };
                 let cx = if ed.wrap {
-                    (g + disp % view_w.max(1)) as u16
+                    (g + ed.disp_in_seg(bs.cursor.row, bs.cursor.col)) as u16
                 } else {
                     (g + disp.saturating_sub(bs.scroll_x)) as u16
                 };
@@ -673,6 +719,12 @@ mod tests {
         s.chars().collect()
     }
 
+    /// A window for a one-column test row: display col == char index, so the
+    /// range is a plain slice of the line.
+    fn win(chars: &[char], lo: usize, hi: usize) -> Vec<(usize, char)> {
+        simple_window(chars, lo, hi).collect()
+    }
+
     // ---------- gutter_width ----------
 
     #[test]
@@ -712,7 +764,7 @@ mod tests {
     #[test]
     fn line_to_spans_coalesces_unstyled() {
         let e = ed("abc");
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &[]);
+        let line = line_to_spans(0, win(&chars("abc"), 0, 80).into_iter(), &e, &[]);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "abc");
     }
@@ -722,7 +774,7 @@ mod tests {
         let mut e = ed("abc");
         e.bs_mut().mark = Some(Pos { row: 0, col: 1 });
         e.bs_mut().cursor = Pos { row: 0, col: 2 };
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &[]);
+        let line = line_to_spans(0, win(&chars("abc"), 0, 80).into_iter(), &e, &[]);
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "b");
@@ -736,14 +788,14 @@ mod tests {
     #[test]
     fn line_to_spans_empty_line() {
         let e = ed("");
-        let line = line_to_spans(&chars(""), 0, 0, 80, 8, &e, &[]);
+        let line = line_to_spans(0, win(&chars(""), 0, 80).into_iter(), &e, &[]);
         assert_eq!(line.spans.len(), 0);
     }
 
     #[test]
     fn line_to_spans_clips_to_max_w() {
         let e = ed("abc");
-        let line = line_to_spans(&chars("abc"), 0, 0, 2, 8, &e, &[]);
+        let line = line_to_spans(0, win(&chars("abc"), 0, 2).into_iter(), &e, &[]);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "ab");
     }
@@ -772,7 +824,7 @@ mod tests {
                 severity: 1,
             },
         ];
-        let line = line_to_spans(&chars("abc"), 0, 0, 80, 8, &e, &diags[..1]);
+        let line = line_to_spans(0, win(&chars("abc"), 0, 80).into_iter(), &e, &diags[..1]);
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[0].style, Style::default());
@@ -793,7 +845,7 @@ mod tests {
         let want: Vec<(usize, char)> = line.iter().enumerate().map(|(i, &c)| (i, c)).collect();
         assert_eq!(text_window(&line, 0, 80, 8), want);
         assert_eq!(
-            text_window(&line, 5, 3, 8),
+            text_window(&line, 5, 8, 8),
             vec![(5, 'f'), (6, 'g'), (7, 'h')]
         );
     }
@@ -803,7 +855,7 @@ mod tests {
         // a: disp 0, tab: disp 1..8, b: disp 8 — window [2, 6) is all tab
         let line = chars("a\tb");
         assert_eq!(
-            text_window(&line, 2, 4, 8),
+            text_window(&line, 2, 6, 8),
             vec![(1, ' '), (1, ' '), (1, ' '), (1, ' ')]
         );
     }
@@ -833,7 +885,7 @@ mod tests {
         let mut e = ed("abcdefgh");
         e.bs_mut().mark = Some(Pos { row: 0, col: 6 });
         e.bs_mut().cursor = Pos { row: 0, col: 7 };
-        let line = line_to_spans(&chars("abcdefgh"), 0, 5, 3, 8, &e, &[]);
+        let line = line_to_spans(0, win(&chars("abcdefgh"), 5, 8).into_iter(), &e, &[]);
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "f");
         assert_eq!(line.spans[1].content, "g");
@@ -987,7 +1039,12 @@ mod tests {
         let mut e = ed("a\tb");
         e.bs_mut().mark = Some(Pos { row: 0, col: 1 });
         e.bs_mut().cursor = Pos { row: 0, col: 2 };
-        let line = line_to_spans(&chars("a\tb"), 0, 0, 80, 8, &e, &[]);
+        let line = line_to_spans(
+            0,
+            text_window(&chars("a\tb"), 0, 80, 8).into_iter(),
+            &e,
+            &[],
+        );
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "       ");
@@ -1103,6 +1160,103 @@ mod tests {
         // Gutter number on the first segment only.
         assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1");
         assert_eq!(buf.cell((1, 2)).unwrap().symbol(), " ");
+    }
+
+    // ---------- width: what a character occupies ----------
+
+    #[test]
+    fn display_width_counts_wide_characters_as_two() {
+        // A CJK line is twice as wide as its character count. Measuring one
+        // column per character is what writes half of it off the screen.
+        assert_eq!(display_width(&chars("中文"), 8), 4);
+        assert_eq!(display_width(&chars("こんにちは"), 8), 10);
+        assert_eq!(display_width(&chars("😀"), 8), 2);
+        // Combining marks add nothing; a ZWJ sequence is one glyph.
+        assert_eq!(display_width(&chars("e\u{301}"), 8), 1);
+        assert_eq!(display_width(&chars("\u{1f468}\u{200d}\u{1f469}"), 8), 2);
+        // Tabs still advance to the next stop, measured over the width so far.
+        assert_eq!(display_width(&chars("中\t"), 8), 8);
+    }
+
+    #[test]
+    fn display_col_and_char_at_display_agree_for_wide_rows() {
+        let line = chars("中文字");
+        // Char index → display col: two columns each.
+        assert_eq!(display_col(&line, 0, 8), 0);
+        assert_eq!(display_col(&line, 1, 8), 2);
+        assert_eq!(display_col(&line, 3, 8), 6);
+        // …and back: any cell of a wide character maps to that character.
+        assert_eq!(char_at_display(&line, 0, 8), 0);
+        assert_eq!(char_at_display(&line, 1, 8), 0, "the right half of 中");
+        assert_eq!(char_at_display(&line, 2, 8), 1);
+        assert_eq!(char_at_display(&line, 3, 8), 1);
+        assert_eq!(char_at_display(&line, 99, 8), 3, "past EOL → line end");
+    }
+
+    #[test]
+    fn char_at_display_never_lands_inside_a_cluster() {
+        // "e◌́" is one column holding two code points. No display column maps
+        // to the combining mark, so a click can never put the cursor between
+        // the base and its accent; and col 1 (just after `e`) and col 2 (at
+        // `x`) both report column 1, because there is only one cell there.
+        let line = chars("e\u{301}x");
+        assert_eq!(char_at_display(&line, 0, 8), 0);
+        assert_eq!(
+            char_at_display(&line, 1, 8),
+            2,
+            "the cell is `x`, not the accent"
+        );
+        assert_eq!(
+            display_col(&line, 1, 8),
+            1,
+            "the cursor sits past the glyph"
+        );
+        assert_eq!(display_col(&line, 2, 8), 1, "…in the same cell as `x`");
+    }
+
+    #[test]
+    fn draw_wraps_wide_characters_whole() {
+        // 5 CJK characters = 10 columns in a 4-column view: three visual
+        // rows of 2, 2 and 1 characters, and no row ever shows half a glyph.
+        let mut e = ed("中文字语言\nx");
+        e.show_line_numbers = false;
+        e.text_w = 4;
+        e.ensure_wrap_prefix();
+        let mut terminal = Terminal::new(TestBackend::new(4, 12)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let sym = |x: u16, y: u16| buf.cell((x, y)).unwrap().symbol().to_string();
+        assert_eq!(sym(0, 1), "中");
+        assert_eq!(sym(2, 1), "文");
+        assert_eq!(sym(0, 2), "字");
+        assert_eq!(sym(2, 2), "语");
+        assert_eq!(sym(0, 3), "言");
+        // The next buffer row starts on the row after the last segment.
+        assert_eq!(sym(0, 4), "x");
+    }
+
+    #[test]
+    fn draw_never_splits_a_combining_mark_from_its_base() {
+        // Four one-column clusters in a ONE-column view: every row holds
+        // exactly one cluster. If the wrap cut by character index instead of
+        // by cluster — the old rule — a row would hold a bare accent and the
+        // next would start with the base it belongs to.
+        let mut e = ed(&format!("{}x", "e\u{301}".repeat(3)));
+        e.show_line_numbers = false;
+        e.text_w = 1;
+        e.ensure_wrap_prefix();
+        let mut terminal = Terminal::new(TestBackend::new(1, 12)).unwrap();
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        // One cell per row, each holding a whole base+accent grapheme.
+        for y in 1..=3 {
+            assert_eq!(
+                buf.cell((0, y)).unwrap().symbol(),
+                "e\u{301}",
+                "row {y} split the cluster"
+            );
+        }
+        assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "x");
     }
 
     #[test]

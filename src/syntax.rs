@@ -756,32 +756,43 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The byte ranges of a markdown block tree's inline content: every `inline`
-/// and `pipe_table_cell` node's range, split around its NAMED children.
+/// The byte ranges of a markdown block tree's inline content, **grouped by
+/// the node that owns them**: one inner vec per `inline` / `pipe_table_cell`
+/// node, each holding that node's ranges.
 ///
-/// Those children are what the block grammar already parsed (an `inline_code`
-/// span, a link destination), so the inline grammar must not re-parse them;
-/// the unnamed text between them is the inline content proper. Sorted, which
-/// is what tree-sitter's included ranges require.
+/// The grouping is the point, not an accident of implementation. The inline
+/// grammar must be handed ONE NODE's ranges at a time, because it treats the
+/// ranges it is given as a single concatenated stream: an emphasis delimiter
+/// or a backtick run that cannot close inside its own node will happily pair
+/// with one thousands of bytes later, in a different paragraph. That is not
+/// hypothetical — measured on a 33 KB document, one unlucky `` ` ```console ` ``
+/// span grew from 15 KB to 27 KB and painted everything between it and the
+/// end of the document as a code span. `tree-sitter-md`'s own
+/// `MarkdownParser` parses per node for the same reason.
 ///
-/// This is what makes markdown's two-grammar split work at all: emphasis,
-/// code spans and links are nodes of the *inline* grammar, and no query over
-/// the block tree can see them.
-fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
+/// Inside a node, the ranges are the node's range split around its NAMED
+/// children: those are what the block grammar already parsed, so the inline
+/// grammar must not re-parse them. The unnamed text between them is the
+/// inline content proper.
+fn markdown_inline_node_ranges(tree: &Tree) -> Vec<Vec<(usize, usize)>> {
     let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if node.kind() == "inline" || node.kind() == "pipe_table_cell" {
+            let mut ranges = Vec::new();
             let mut at = node.start_byte();
             let mut cursor = node.walk();
             for child in node.children(&mut cursor).filter(|c| c.is_named()) {
                 if child.start_byte() > at {
-                    out.push((at, child.start_byte()));
+                    ranges.push((at, child.start_byte()));
                 }
                 at = at.max(child.end_byte());
             }
             if at < node.end_byte() {
-                out.push((at, node.end_byte()));
+                ranges.push((at, node.end_byte()));
+            }
+            if !ranges.is_empty() {
+                out.push(ranges);
             }
         }
         let mut cursor = node.walk();
@@ -789,6 +800,19 @@ fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
             stack.push(child);
         }
     }
+    // Document order, so the captures of an earlier node are applied first
+    // (they cannot overlap, but a stable order keeps the result reproducible).
+    out.sort_unstable();
+    out
+}
+
+/// Every inline range of the tree, flattened and sorted — "which bytes of
+/// this document are inline content", which is what a caller pairing a second
+/// grammar needs to know. The engine itself drives
+/// [`markdown_inline_node_ranges`], because it must parse per node.
+#[cfg(test)]
+fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = markdown_inline_node_ranges(tree).concat();
     out.sort_unstable();
     out
 }
@@ -898,44 +922,64 @@ impl Highlighter {
         };
 
         let tree = self.tree.as_ref().unwrap();
-        self.line_styles = Self::build_styles(&source, tree, &query);
+        let mut grid = Self::build_styles(&source, tree, &query);
         // Markdown is two grammars. The block pass above coloured structure;
         // emphasis, code spans and links are nodes of the *inline* grammar
-        // and can only come from a second parse over the ranges the block
-        // tree marked. Both overlay one grid, in that order.
+        // and can only come from a second pass over the ranges the block tree
+        // marked. Both overlay one grid, in that order.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
-            let mut grid = std::mem::take(&mut self.line_styles);
-            if let Some(inline) = self.markdown_inline_tree(&source, &block)
-                && let Some(iquery) = highlight_query(Lang::MarkdownInline)
-            {
-                Self::apply_styles(&source, &inline, &iquery, &mut grid);
-            }
-            self.line_styles = grid;
+            self.markdown_inline_pass(&source, &block, |t, q| {
+                Self::apply_styles(&source, t, q, &mut grid)
+            });
         }
+        self.line_styles = grid;
     }
 
-    /// Parse markdown's inline content with the inline grammar, restricted to
-    /// the ranges the block tree marks as inline ([`markdown_inline_ranges`]).
-    /// `None` when the ranges are empty or the grammar will not load.
-    fn markdown_inline_tree(&mut self, src: &str, block: &Tree) -> Option<Tree> {
-        let ranges: Vec<Range> = markdown_inline_ranges(block)
-            .into_iter()
-            .map(|(s, e)| Range {
-                start_byte: s,
-                end_byte: e,
-                start_point: point_of(src, s).into(),
-                end_point: point_of(src, e).into(),
-            })
-            .collect();
-        if ranges.is_empty() {
-            return None;
-        }
-        self.inline_parser
+    /// Run the inline half of markdown's highlighting: for each inline node,
+    /// parse the inline grammar over THAT NODE's ranges and hand the caller
+    /// the resulting tree.
+    ///
+    /// One parse per node, not one parse over all the ranges at once. The
+    /// inline grammar sees the ranges it is given as one concatenated stream,
+    /// so a delimiter that cannot close inside its own node would pair with
+    /// one in a later paragraph and swallow the document between them
+    /// (measured: a 12 KB code span out of a stray `` ` ```console ` ``). Per
+    /// node, the worst case is confined to the node — which is what
+    /// `tree-sitter-md`'s own parser does, and why.
+    fn markdown_inline_pass<F: FnMut(&Tree, &Query)>(
+        &mut self,
+        src: &str,
+        block: &Tree,
+        mut apply: F,
+    ) {
+        let Some(query) = highlight_query(Lang::MarkdownInline) else {
+            return;
+        };
+        if self
+            .inline_parser
             .set_language(&Lang::MarkdownInline.language())
-            .ok()?;
-        self.inline_parser.set_included_ranges(&ranges).ok()?;
-        self.inline_parser.parse(src.as_bytes(), None)
+            .is_err()
+        {
+            return;
+        }
+        for ranges in markdown_inline_node_ranges(block) {
+            let ts_ranges: Vec<Range> = ranges
+                .iter()
+                .map(|&(s, e)| Range {
+                    start_byte: s,
+                    end_byte: e,
+                    start_point: point_of(src, s).into(),
+                    end_point: point_of(src, e).into(),
+                })
+                .collect();
+            if self.inline_parser.set_included_ranges(&ts_ranges).is_err() {
+                continue;
+            }
+            if let Some(tree) = self.inline_parser.parse(src.as_bytes(), None) {
+                apply(&tree, &query);
+            }
+        }
     }
 
     /// Style for the character at `p`, if any capture colors it.
@@ -985,11 +1029,9 @@ impl Highlighter {
         // capture names sees the inline constructs too.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
-            if let Some(inline) = self.markdown_inline_tree(src, &block)
-                && let Some(iquery) = highlight_query(Lang::MarkdownInline)
-            {
-                Self::apply_classes(src, &inline, &iquery, &mut grid);
-            }
+            self.markdown_inline_pass(src, &block, |t, q| {
+                Self::apply_classes(src, t, q, &mut grid)
+            });
         }
         grid
     }
@@ -3808,6 +3850,144 @@ fn main() {}
             !ranges.iter().any(|(s, e)| *s <= hash && hash < *e),
             "the heading marker must not be handed to the inline grammar"
         );
+    }
+
+    #[test]
+    fn one_nodes_backtick_never_pairs_with_another_nodes() {
+        // The bug this pins, found by running rano on a real 33 KB document:
+        // the inline grammar treats the ranges it is handed as ONE
+        // concatenated stream, so a backtick that cannot close inside its own
+        // node pairs with one in a later node. Measured on that document, a
+        // single stray `` ` ```console ` `` grew into a 12 KB code span and
+        // painted every paragraph after it as code — the screen went cyan
+        // from that line to the bottom.
+        //
+        // Two nodes, the first ending on a lone backtick. Combined, the only
+        // closer available is the next node's, so the parse crosses the
+        // boundary (that span is `` `\n\nanother ` ``). Per node it cannot,
+        // which is why the pass parses per node.
+        let src = "Para one ends with a lone backtick `\n\nanother `code` span here.\n";
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(src, Lang::Markdown);
+        let cap = |off: usize| -> Option<String> {
+            grid.iter()
+                .flat_map(|r| r.iter())
+                .nth(off)
+                .cloned()
+                .flatten()
+        };
+        // Offsets of the two inline nodes, from the block tree.
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Markdown.language()).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let groups = markdown_inline_node_ranges(&tree);
+        assert_eq!(groups.len(), 2, "two paragraphs, two inline nodes");
+        let (second_start, _) = groups[1][0];
+        assert_eq!(&src[second_start..second_start + 7], "another");
+        // The prose of the second paragraph is NOT a code span.
+        for off in second_start..second_start + 7 {
+            assert_ne!(
+                cap(off).as_deref(),
+                Some("text.literal"),
+                "offset {off} was swallowed by the previous node's backtick"
+            );
+        }
+        // …and the second paragraph's own code span still works.
+        let code = src.find("`code`").unwrap() + 1;
+        assert_eq!(cap(code).as_deref(), Some("text.literal"));
+    }
+
+    /// Every parse the inline pass hands out covers exactly ONE node's ranges.
+    ///
+    /// This is the invariant that keeps a delimiter from pairing across
+    /// paragraphs. It watches the trees the pass actually produces, so it
+    /// fails if the pass is ever changed to hand the grammar several nodes'
+    /// ranges at once — which is the shape of the bug: on it, one parse
+    /// covered 12 KB of a 33 KB document and painted everything after it.
+    fn assert_pass_is_per_node(src: &str) {
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Markdown.language()).unwrap();
+        let block = parser.parse(src.as_bytes(), None).unwrap();
+        let groups = markdown_inline_node_ranges(&block);
+        assert!(!groups.is_empty(), "the fixture has no inline content");
+        // Within a group: sorted and disjoint (tree-sitter's own rule).
+        for (i, g) in groups.iter().enumerate() {
+            assert!(g.windows(2).all(|w| w[0].1 <= w[1].0), "group {i}: {g:?}");
+        }
+        let mut hl = Highlighter::new();
+        let mut parsed: Vec<(usize, usize)> = Vec::new();
+        hl.markdown_inline_pass(src, &block, |tree, _q| {
+            let r = tree.root_node();
+            parsed.push((r.start_byte(), r.end_byte()));
+        });
+        assert_eq!(
+            parsed.len(),
+            groups.len(),
+            "one parse per node, no more and no fewer"
+        );
+        for (a, b) in &parsed {
+            let covering = groups
+                .iter()
+                .filter(|g| g.first().unwrap().0 <= *a && *b <= g.last().unwrap().1)
+                .count();
+            assert_eq!(
+                covering, 1,
+                "a parse covered {a}..{b}, which is not one node's ranges"
+            );
+        }
+        // And the flattened helper agrees with the groups.
+        let flat = markdown_inline_ranges(&block);
+        assert_eq!(flat.len(), groups.iter().map(|g| g.len()).sum::<usize>());
+        assert!(
+            flat.windows(2).all(|w| w[0].1 <= w[1].0),
+            "flattened: {flat:?}"
+        );
+    }
+
+    #[test]
+    fn the_inline_pass_parses_one_node_at_a_time() {
+        assert_pass_is_per_node(
+            "# H\n\nfirst `code` here\n\nsecond **bold** here\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+        );
+        assert_pass_is_per_node(
+            "Para one ends with a lone backtick `\n\nanother `code` span here.\n\n` ```console ` and done.\n",
+        );
+    }
+
+    /// The same invariant on the real document that exposed the bug — the one
+    /// the operator had open. Skipped when it is not on this machine, so the
+    /// suite stays self-contained.
+    #[test]
+    fn the_pass_is_per_node_on_the_parity_document() {
+        let path = "/home/dead/Projects/head-parity-2026-09-21.md";
+        let Ok(src) = std::fs::read_to_string(path) else {
+            eprintln!("{path} is not here; skipping");
+            return;
+        };
+        assert_pass_is_per_node(&src);
+        // And no row is painted as one long code span. The symptom was 300-odd
+        // cyan rows: everything from the stray backtick to the end of the file.
+        let mut hl = Highlighter::new();
+        let grid = hl.classes(&src, Lang::Markdown);
+        for (r, line) in src.split('\n').enumerate() {
+            let Some(row) = grid.get(r) else { continue };
+            let len = line.chars().count();
+            if len < 4 {
+                continue;
+            }
+            let literal = row
+                .iter()
+                .filter(|c| c.as_deref() == Some("text.literal"))
+                .count();
+            // Indented code blocks are legitimately all-literal, and the
+            // document has two (the A=/B= legend).
+            let indented = line.starts_with("    ");
+            assert!(
+                literal < len || indented,
+                "row {r} is entirely a code span: {:?}",
+                &line[..line.len().min(50)]
+            );
+        }
     }
 
     #[test]

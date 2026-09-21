@@ -650,7 +650,9 @@ fn highlight_query(lang: Lang) -> Option<Arc<Query>> {
     if let Some(q) = guard.get(&lang) {
         return q.clone();
     }
-    let compiled = Query::new(&lang.language(), lang.query()).ok().map(Arc::new);
+    let compiled = Query::new(&lang.language(), lang.query())
+        .ok()
+        .map(Arc::new);
     guard.insert(lang, compiled.clone());
     compiled
 }
@@ -711,7 +713,11 @@ fn line_char_counts(src: &str) -> Vec<usize> {
 /// Identity for an ASCII line, and a walk for the rare line that has a multibyte
 /// character in it.
 fn char_col(src: &str, lo: usize, b: usize, ascii: bool) -> usize {
-    if ascii { b - lo } else { src[lo..b].chars().count() }
+    if ascii {
+        b - lo
+    } else {
+        src[lo..b].chars().count()
+    }
 }
 
 /// One-Dark-ish palette for a dark background.
@@ -2991,17 +2997,21 @@ mod stream_spans_tests {
         let spans = stream.spans();
         let on = |row: usize, text: &str| {
             let line = src.split('\n').nth(row).unwrap();
-            line.find(text).unwrap() as usize
+            line.find(text).unwrap()
         };
         // `fn` is on row 0 at char 0, and something captured it.
         assert!(
-            spans.iter().any(|s| s.row == 0 && s.start == 0 && s.end == 2),
+            spans
+                .iter()
+                .any(|s| s.row == 0 && s.start == 0 && s.end == 2),
             "`fn` is not covered: {spans:?}"
         );
         // `let` is on row 1, after the indent.
         let col = on(1, "let");
         assert!(
-            spans.iter().any(|s| s.row == 1 && s.start == col && s.end == col + 3),
+            spans
+                .iter()
+                .any(|s| s.row == 1 && s.start == col && s.end == col + 3),
             "`let` is not covered at {col}: {spans:?}"
         );
         // Nothing on an empty last row, and no row index out of range.
@@ -3023,7 +3033,10 @@ mod stream_spans_tests {
         let line = src.split('\n').nth(1).unwrap();
         let chars = line.chars().count();
         assert_eq!(chars, 18, "the fixture's own arithmetic");
-        assert!(line.len() > chars, "the fixture must have a byte/char split");
+        assert!(
+            line.len() > chars,
+            "the fixture must have a byte/char split"
+        );
         let string = spans
             .iter()
             .find(|s| s.row == 1 && s.name == "string")
@@ -3031,7 +3044,10 @@ mod stream_spans_tests {
         assert_eq!((string.start, string.end), (12, 17), "{string:?}");
         // As byte offsets they would be 12 and 23 — the second is past the line, which
         // is the bug this pins.
-        assert!(spans.iter().all(|s| s.row != 1 || s.end <= chars), "{spans:?}");
+        assert!(
+            spans.iter().all(|s| s.row != 1 || s.end <= chars),
+            "{spans:?}"
+        );
     }
 
     /// Before a push, and for a language with no query, spans are empty rather than a
@@ -3103,13 +3119,16 @@ mod stream_spans_tests {
                 src.lines().enumerate().any(|(row, line)| {
                     line.find(probe).is_some_and(|col| {
                         let col = line[..col].chars().count();
-                        spans
-                            .iter()
-                            .any(|s| s.row == row && s.start <= col && s.end >= col + probe.chars().count())
+                        spans.iter().any(|s| {
+                            s.row == row && s.start <= col && s.end >= col + probe.chars().count()
+                        })
                     })
                 })
             };
-            assert!(covered(expect_in), "{token}: `{expect_in}` is not covered: {spans:?}");
+            assert!(
+                covered(expect_in),
+                "{token}: `{expect_in}` is not covered: {spans:?}"
+            );
         }
     }
 
@@ -3152,8 +3171,14 @@ mod stream_spans_tests {
                 doc.len(),
                 tokens.len(),
             );
-            assert!(last > first, "{lang:?}: a longer text must cost more per push");
-            assert!(late_us < 10_000.0, "{lang:?}: a push cost a millisecond or more");
+            assert!(
+                last > first,
+                "{lang:?}: a longer text must cost more per push"
+            );
+            assert!(
+                late_us < 10_000.0,
+                "{lang:?}: a push cost a millisecond or more"
+            );
         }
     }
 
@@ -3181,8 +3206,6 @@ mod stream_spans_tests {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod name_tests {
@@ -3264,7 +3287,11 @@ mod node_shape_tests {
         assert_eq!(name.kind, "identifier");
         assert_eq!(name.start, 3, "the name is `main` at byte 3");
         // And the field is a name, not a kind: the parentheses are children too.
-        assert!(f.children.iter().any(|c| c.field.is_none()), "{:#?}", f.children);
+        assert!(
+            f.children.iter().any(|c| c.field.is_none()),
+            "{:#?}",
+            f.children
+        );
 
         // The root is under no field.
         assert_eq!(root.field, None);
@@ -3285,7 +3312,10 @@ mod node_shape_tests {
         }
         let n = find(&root, "integer_literal").expect("the 1");
         assert_eq!(n.start_point.row, 1, "second line");
-        assert_eq!(n.start_point.column, 12, "byte column, after four spaces of indent");
+        assert_eq!(
+            n.start_point.column, 12,
+            "byte column, after four spaces of indent"
+        );
         assert_eq!(n.end_point.column, 13);
         // And rano's Point round-trips into tree-sitter's, which is what a parser needs.
         let ts: tree_sitter::Point = n.start_point.into();

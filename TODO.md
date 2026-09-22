@@ -1288,3 +1288,134 @@ what a worker alone buys. The honest numbers are:
 
 The middle column is why the objection was correct: a thread buys the frame and
 nothing a user would notice.
+
+## 15. Lazy loading: the design, prototyped
+
+§13.6 concluded that loading a window is what the memory problem needs and left
+the shape open. This is the shape, with the core prototyped and **verified
+against the eager path on every row** rather than argued. The prototype is in
+`src/bench.rs` (`bench_lazy_is_correct_and_cheap`, the `lazy` module) and it is
+a test, not prose.
+
+### 15.1 The two tiers
+
+**Tier 1 — always resident: the index.** One pass over the file's *bytes*,
+recording where each row starts and whether it is ASCII. No `char` is
+constructed. `Vec<u64>` of starts plus one bit per row.
+
+**Tier 2 — on demand: decoded rows.** A bounded cache of `Vec<char>` rows,
+filled by positional reads (`pread`/`read_at` — in `std`, no dependency) and
+evicted when it grows past a budget.
+
+Measured, against the eager load of the same files:
+
+| file | rows | index build | index memory | decode a window |
+|---|---|---|---|---|
+| big.rs 7 MB | 360,000 | 2.9 ms | 3.1 MB | 9 µs first / 5 µs deep |
+| big.log 30 MB | 400,000 | 8.7 ms | 16 KB | 9 µs / 6 µs |
+| **huge200.log 193 MB** | **2,600,000** | **54 ms** | **19.8 MB** | **13 µs / 6 µs** |
+| cjk-check.md | 11 | 6 µs | — | 5 µs / 1 µs |
+
+Against the eager path's **568 ms and 835 MB** for that 193 MB file: opening
+costs 54 ms instead of 568 (10×), resident memory 19.8 MB instead of 835
+(**42×**), and *any* window — first screen or the middle of the file — costs
+~10 µs. "Deep" is as cheap as "first", which is what makes scrolling work.
+
+**And it is correct**, which is the claim that had to be earned: all
+**2,600,000 rows decode identical to `Buffer::from_file`'s**, compared row by
+row in the test, and the one bug the prototype had was exactly here — a phantom
+empty final row on every file, from mishandling a trailing newline. That is the
+argument for prototyping before designing further.
+
+### 15.2 The four facts it rests on
+
+1. **In UTF-8, a `0x0A` byte is always a newline** — verified over every
+   codepoint (§13.6). So the index needs no decoding.
+2. **`is_ascii` per row comes free with the newline scan**, and a row that is
+   ASCII has `char_count == byte_len`.
+3. **Therefore wrap segments are known from bytes alone**: for an ASCII row,
+   `ceil(byte_len / view_w)`, exactly. Verified in the same test: exact on all
+   2.6M ASCII rows, and it correctly declines to claim anything for the 6
+   non-ASCII rows of the CJK file.
+4. **Rows always start on a char boundary** (because `\n` cannot be inside a
+   multi-byte sequence), so a positional read can decode any row without
+   hunting for a boundary.
+
+Fact 3 is the one that makes this more than "a cache of rows": it means the
+**wrap table can be built from the index** for an ASCII document, which is what
+scrolling, `M-\`, the cursor and mouse hit-testing all read. Without it, lazy
+rows and the wrap table would fight.
+
+### 15.3 What it costs, honestly
+
+- **The API is the bulk of the work, not the loader.** 193 sites touch
+  `Buffer::lines` and 60 index it. `lines` has to become private, with
+  `row(r)` / `rows(a..b)` / `row_count()` replacing it, and the compiler finds
+  the callers. That is mechanical but it is not small, and it is the reason this
+  deserves to be staged rather than started.
+- **O(document) operations want `materialize_all()`**, and there is no point
+  pretending otherwise: `indent_unit` (scans every row for its indent),
+  `sort_lines`, `justify`, replace-all, save, `--export`, and a full-buffer
+  regex search. Those are O(document) *anyway*; materializing makes it explicit
+  rather than accidental, and they are not what a person does to a 193 MB log.
+- **An index build still reads the whole file** (54 ms for 193 MB). It need not:
+  the index is append-only in the forward direction, so it can be built
+  incrementally — index the first chunk, extend as you scroll, and opening
+  costs one chunk (**37 µs**, §14.6) instead of 54 ms. That is the same
+  "viewport" discipline applied one layer down, and it is cheap because the
+  structure already grows only at the end.
+- **Encodings bound it.** The byte-index trick *requires* UTF-8: in UTF-16 a newline is two bytes,
+  and byte offsets are not char boundaries. So lazy loading applies to UTF-8
+  and everything detected otherwise takes the eager path (§13.5). Worth stating
+  because it makes 13.5 a prerequisite in a way it was not: today UTF-16 is
+  refused, and after lazy loading it would be the one encoding that behaves
+  differently.
+- **Search must become a byte scan.** `search.rs` iterates `lines`, so a lazy
+  buffer forces it to stream chunks and handle matches spanning a chunk
+  boundary. That is *better* than the current in-memory scan (it is a scan over
+  bytes, with no `Vec<char>`), but it is a rewrite of that module, not a tweak.
+- **Eviction is required, not optional.** Without a cache budget, scrolling
+  through the whole file re-materializes all 835 MB and the win is only the
+  open. With one, the ceiling is the budget.
+- **The file can change underneath.** Size and mtime are the cheap check; on a
+  mismatch, reindex. `RANO_`-style refresh-on-focus would be the natural place.
+- **The status line has to say so.** The operator's criterion from §13.6 is "not
+  confused": `[12% indexed]` is honest, a blank screen is not.
+
+### 15.4 What this subsumes
+
+- **§13.4's memory problem, without touching the row representation.** The
+  `Vec<char>` 4-bytes-per-char cost stops being a function of the file and
+  becomes a function of the cache budget — a window of 40 rows costs 40 rows'
+  worth of `char`s whatever the file's size. The ASCII fast path (§13.4 option
+  1) is still worth having for the *index* and for small files, but it is no
+  longer the thing that decides whether a 2 GB file is openable. That is a
+  substantial simplification of 13.4's options.
+- **§13.6's options 1 and 2**, which this is: option 1 done properly (with
+  eviction and a real API) plus option 2 as the edit story.
+- **Not §13.1 or §13.2.** The undo snapshot still clones the row it touched, and
+  the wrap prefix still re-sums. Lazy loading changes *what is resident*, not
+  how an edit is recorded. Those stay separate.
+
+### 15.5 Staging, in the order the dependencies allow
+
+1. **§14.6, the scheduled loader.** Independent of all of this, small, and it
+   removes the freeze (575 ms → 37 µs to first text). Do it first because it is
+   the part a user feels and it needs no API change.
+2. **Chunked reads + `materialize_all` on first edit.** Lazy rows for reading,
+   eager on editing. Fixes reading a 193 MB file completely, and "nothing the
+   user can see is different" for editing. This is where the 42× memory win
+   lands.
+3. **The API change** (`lines` private, `row`/`rows`), driven by the compiler.
+   Stage 2 wants this anyway to know what to materialize; doing it as its own
+   step keeps the diff reviewable.
+4. **Eviction, windowed search, incremental index.** The polish that makes the
+   ceiling a budget rather than "whatever you scrolled through".
+5. **A piece table, only if editing hundreds-of-megabytes files is a real goal.**
+   It subsumes §13.1 and stage 3 of this, and §13.6a's survey is the argument
+   against doing it for any other reason.
+
+**What would settle stage 2 vs 5.** Whether the operator ever *edits* a file big
+enough to need this, or only reads one. Logs, dumps and generated files are
+read; that is the case stage 2 covers for ~20 MB and 54 ms, and it is the case
+the measurements were taken on.

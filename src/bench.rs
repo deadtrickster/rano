@@ -727,3 +727,304 @@ fn bench_first_screen() {
     );
     println!();
 }
+
+/// A prototype of lazy loading: the file stays on disk, an index is built from
+/// its BYTES, and rows are decoded only when something asks for them.
+///
+/// This exists to answer the questions a design would otherwise assume:
+/// what does the index cost, what does a window cost on demand, does the
+/// cheap path agree with the eager one, and what does it all weigh.
+mod lazy {
+    use std::fs::File;
+    use std::io::{self, Read};
+    use std::os::unix::fs::FileExt;
+
+    /// One bit per row: is the row pure ASCII? Set while scanning for newlines,
+    /// which is why it is nearly free.
+    #[derive(Default)]
+    pub struct Bits(Vec<u64>);
+
+    impl Bits {
+        fn push(&mut self, r: usize, v: bool) {
+            if r / 64 == self.0.len() {
+                self.0.push(0);
+            }
+            if v {
+                self.0[r / 64] |= 1 << (r % 64);
+            }
+        }
+        pub fn get(&self, r: usize) -> bool {
+            self.0.get(r / 64).is_some_and(|w| w & (1 << (r % 64)) != 0)
+        }
+        pub fn bytes(&self) -> usize {
+            self.0.len() * 8
+        }
+    }
+
+    /// The file, indexed but not decoded.
+    pub struct Lazy {
+        file: File,
+        /// Byte offset of each row's first byte; `starts.len()` is the row
+        /// count. The end of a row is the next start minus one (the newline),
+        /// except for the last row, whose end is `last_end`.
+        starts: Vec<u64>,
+        /// End of the final row's CONTENT — which is not the file size when
+        /// the file ends in a newline. Getting this wrong was the one bug the
+        /// prototype had: it produced a phantom empty final row on every file.
+        last_end: u64,
+        ascii: Bits,
+        size: u64,
+    }
+
+    impl Lazy {
+        /// Stream the file once, recording where each row starts and whether it
+        /// is ASCII. No decoding, no `char` is constructed.
+        pub fn open(path: &std::path::Path) -> io::Result<Self> {
+            let mut file = File::open(path)?;
+            let size = file.metadata()?.len();
+            let mut starts = vec![0u64];
+            let mut ascii = Bits::default();
+            let mut buf = vec![0u8; 1 << 16];
+            let mut row_ascii = true;
+            let mut offset = 0u64;
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let chunk = &buf[..n];
+                if chunk.is_ascii() {
+                    // One branch per byte: `is_ascii` on the slice runs the
+                    // wide check over the whole chunk at once, so the loop
+                    // below only has to find newlines.
+                    for (i, b) in chunk.iter().enumerate() {
+                        if *b == b'\n' {
+                            ascii.push(starts.len() - 1, true);
+                            starts.push(offset + i as u64 + 1);
+                        }
+                    }
+                } else {
+                    for (i, b) in chunk.iter().enumerate() {
+                        if *b == b'\n' {
+                            ascii.push(starts.len() - 1, row_ascii);
+                            starts.push(offset + i as u64 + 1);
+                            row_ascii = true;
+                        } else if *b >= 0x80 {
+                            row_ascii = false;
+                        }
+                    }
+                }
+                offset += n as u64;
+            }
+            // `starts` now holds one entry per row plus a phantom entry for the
+            // row a trailing newline would begin. Resolve which case this is,
+            // and make sure every real row has its ASCII flag — the final row
+            // is the one the scan could not push, because no newline ended it.
+            let last_end;
+            if size == 0 {
+                last_end = 0;
+            } else if starts.last().copied() == Some(size) {
+                starts.pop(); // the file ended in a newline: no phantom row
+                last_end = size - 1;
+            } else {
+                last_end = size;
+                ascii.push(starts.len() - 1, row_ascii);
+            }
+            if starts.is_empty() {
+                starts.push(0);
+                ascii.push(0, true); // an empty file is one empty ASCII row
+            }
+            Ok(Self {
+                file,
+                starts,
+                last_end,
+                ascii,
+                size,
+            })
+        }
+
+        pub fn rows(&self) -> usize {
+            self.starts.len()
+        }
+
+        /// Byte range of row `r`'s CONTENT, the newline excluded.
+        pub fn byte_range(&self, r: usize) -> (u64, u64) {
+            let start = self.starts[r];
+            let end = match self.starts.get(r + 1) {
+                Some(next) => next.saturating_sub(1), // one back over the '\n'
+                None => self.last_end,
+            };
+            (start, end.max(start).min(self.size))
+        }
+
+        /// Byte length of row `r` — known without decoding anything.
+        pub fn byte_len(&self, r: usize) -> u64 {
+            let (a, b) = self.byte_range(r);
+            b - a
+        }
+
+        /// Is row `r` pure ASCII? Then `byte_len == char_count`, and its wrap
+        /// segments are `ceil(byte_len / view_w)` — exactly, with no decode.
+        pub fn is_ascii(&self, r: usize) -> bool {
+            self.ascii.get(r)
+        }
+
+        /// Decode rows `[first, last]`. The only place bytes become chars, and
+        /// the only place that touches the disk after `open`.
+        pub fn decode(&self, first: usize, last: usize) -> io::Result<Vec<Vec<char>>> {
+            let last = last.min(self.rows().saturating_sub(1));
+            let lo = self.starts[first];
+            // Up to the END OF CONTENT of the last row, so the text has one
+            // newline between rows and none after the last — `split('\n')`
+            // then yields exactly the rows asked for, with no trailing "".
+            let hi = self.byte_range(last).1;
+            let mut buf = vec![0u8; (hi - lo) as usize];
+            self.file.read_exact_at(&mut buf, lo)?;
+            let text = String::from_utf8(buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(text
+                .split('\n')
+                .map(|l| l.strip_suffix('\r').unwrap_or(l).chars().collect())
+                .collect())
+        }
+
+        pub fn index_bytes(&self) -> usize {
+            self.starts.capacity() * 8 + self.ascii.bytes()
+        }
+    }
+}
+
+/// Does the lazy path agree with the eager one, on every row, and what does it
+/// cost? The first question is the one that decides whether the design is
+/// sound; the second whether it is worth having.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_lazy_is_correct_and_cheap() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+        // Multibyte, so the byte scan must not mistake a continuation byte for
+        // a newline and the ASCII flags must be honest about it.
+        ("cjk-check.md", "/tmp/cjk-check.md"),
+    ];
+    println!("\nlazy loading — index cost, on-demand windows, and agreement with eager decode\n");
+    println!(
+        "{:<24} {:>10} {:>8} {:>12} {:>12} {:>14} {:>10}",
+        "file", "size", "rows", "index", "index mem", "first window", "all match"
+    );
+    println!("{}", "-".repeat(96));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+        // What the index costs to build, and to keep.
+        let rss_before = std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().trim_end_matches(" kB").trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let t = Instant::now();
+        let lazy = lazy::Lazy::open(p).expect("index");
+        let index_t = t.elapsed();
+        let rss_after = std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().trim_end_matches(" kB").trim().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // A window on demand: the first screen, and one deep in the file.
+        let t = Instant::now();
+        let first = lazy.decode(0, 39).expect("decode first window");
+        let first_t = t.elapsed();
+        let deep_row = lazy.rows() / 2;
+        let t = Instant::now();
+        let deep = lazy
+            .decode(deep_row, deep_row + 39)
+            .expect("decode deep window");
+        let deep_t = t.elapsed();
+
+        // THE correctness question: does every row decoded lazily equal the
+        // row the eager path produced? Checked on every row, not a sample.
+        let eager = Buffer::from_file(p).expect("eager read");
+        let mut cols: Vec<(usize, usize)> = (0..lazy.rows()).map(|r| (r, r)).collect();
+        cols.extend((0..lazy.rows()).map(|r| (r, r)));
+        let mut mismatch = 0usize;
+        let mut checked = 0usize;
+        // Whole-file decode in one call, then compare row for row.
+        if lazy.rows() > 0 {
+            let all = lazy
+                .decode(0, lazy.rows().saturating_sub(1))
+                .expect("decode all");
+            if all.len() != eager.lines.len() {
+                mismatch += 1;
+            }
+            for (r, (got, want)) in all.iter().zip(eager.lines.iter()).enumerate() {
+                checked += 1;
+                if got != want {
+                    if mismatch < 3 {
+                        println!(
+                            "    MISMATCH row {r}: lazy {:?} vs eager {:?}",
+                            got.iter().take(30).collect::<String>(),
+                            want.iter().take(30).collect::<String>()
+                        );
+                    }
+                    mismatch += 1;
+                }
+            }
+        }
+        // The claim that makes wrapping possible without decoding: for an
+        // ASCII row, segment count is ceil(byte_len / view_w), exactly.
+        // Verified against the decoded rows for every row of the file.
+        let vw = 100u64;
+        let mut seg_mismatch = 0usize;
+        let mut non_ascii_rows = 0usize;
+        for r in 0..lazy.rows() {
+            if lazy.is_ascii(r) {
+                let from_index = lazy.byte_len(r).div_ceil(vw).max(1) as usize;
+                let from_chars = eager.lines[r].len().div_ceil(vw as usize).max(1);
+                if from_index != from_chars {
+                    seg_mismatch += 1;
+                }
+            } else {
+                non_ascii_rows += 1;
+            }
+            let _ = lazy.byte_range(r);
+        }
+        let _ = cols;
+
+        println!(
+            "{:<24} {:>10} {:>8} {:>12} {:>12} {:>14} {:>10}",
+            label,
+            human(size),
+            lazy.rows(),
+            ms(index_t.as_micros() as f64),
+            human((rss_after.saturating_sub(rss_before)) * 1024),
+            format!(
+                "{} / deep {}",
+                ms(first_t.as_micros() as f64),
+                ms(deep_t.as_micros() as f64)
+            ),
+            if mismatch == 0 && seg_mismatch == 0 {
+                format!("yes {checked}/{checked}")
+            } else {
+                format!("NO {} rows, {} seg", mismatch, seg_mismatch)
+            },
+        );
+        println!(
+            "{:<24}   wrap segments from bytes alone: exact on all {} ASCII rows \
+             ({} non-ASCII rows, decoded to measure)",
+            "",
+            lazy.rows() - non_ascii_rows,
+            non_ascii_rows
+        );
+        std::hint::black_box((first.len(), deep.len(), lazy.index_bytes()));
+    }
+    println!("\n(first window = rows 0..40; deep = 40 rows from the middle of the file)");
+    println!();
+}

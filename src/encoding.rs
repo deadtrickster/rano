@@ -201,9 +201,9 @@ fn cp1252_byte(c: char) -> Option<u8> {
     if u < 0x80 || (0xA0..=0xFF).contains(&u) {
         return Some(u as u8);
     }
-    (0x80..=0x9F)
-        .find(|b| cp1252_char(*b) == c)
-        .map(|b| b as u8)
+    // The C1 range: the only byte values that are not latin-1. Found by asking
+    // `cp1252_char`, so the two directions cannot drift.
+    (0x80..=0x9Fu8).find(|b| cp1252_char(*b) == c)
 }
 
 /// Decode `bytes` as `enc`, with the BOM stripped.
@@ -222,7 +222,7 @@ pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
 }
 
 fn decode_utf16(body: &[u8], big_endian: bool) -> Result<String, String> {
-    if body.len() % 2 != 0 {
+    if !body.len().is_multiple_of(2) {
         return Err(format!(
             "UTF-16 file has an odd byte length ({})",
             body.len()

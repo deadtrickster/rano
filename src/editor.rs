@@ -118,7 +118,7 @@ pub struct Editor {
     pub def_back: Vec<DefBack>,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
-    highlight_dirty: bool,
+    pub(crate) highlight_dirty: bool,
 }
 
 /// Live completion popup state: the filtered candidate list, the selected
@@ -707,6 +707,13 @@ impl Editor {
     fn edit_invalidate_impl(&mut self, row: Option<usize>) {
         {
             let bs = self.bs_mut();
+            // An edit during a load: the user has started working in the part
+            // that arrived, so stop the rest from landing underneath them. The
+            // adopted rows stay; the buffer is left exactly as it is on screen.
+            if let Some(job) = bs.load.as_ref() {
+                job.cancel();
+            }
+            bs.load = None;
             bs.buf.modified = true;
             bs.search_matches = None;
             bs.search.current = 0;
@@ -2246,6 +2253,12 @@ impl Editor {
     /// buffer at-or-after the current one (wrapping) becomes current and
     /// gets the save prompt; with none modified the editor quits.
     pub(crate) fn try_quit(&mut self) {
+        // ^C is the interrupt, and while a file is still arriving that is what
+        // it should do: stop reading it. The rows already adopted stay on
+        // screen, so the user is left with the part of the file they have.
+        // (TODO.md §14.6: the loop has to answer the keyboard during a load,
+        // and this is what makes the answer real rather than merely prompt.)
+        self.cancel_load();
         if let Some(i) = self.first_modified_from(self.cur) {
             if i != self.cur {
                 self.cur = i;

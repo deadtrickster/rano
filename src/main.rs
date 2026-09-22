@@ -6,6 +6,8 @@ mod exec;
 mod exec_ctrl;
 mod export;
 mod keys;
+mod load_ctrl;
+mod loader;
 mod lsp;
 mod lsp_ctrl;
 mod prompt;
@@ -20,7 +22,7 @@ mod bench;
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -110,6 +112,9 @@ pub struct BufferState {
     pub(crate) wrap_dirty_row: Option<usize>,
     /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
+    /// A file still arriving from disk; `None` once it has (or a normal,
+    /// fully-loaded buffer). See `load_ctrl.rs`.
+    pub(crate) load: Option<crate::loader::LoadJob>,
     pub(crate) undo: VecDeque<UndoStep>,
     redo: VecDeque<UndoStep>,
     pending: Option<UndoStep>,
@@ -148,6 +153,7 @@ impl BufferState {
             wrap_lines: 0,
             wrap_dirty_row: None,
             edit_gen: 0,
+            load: None,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             pending: None,
@@ -163,6 +169,11 @@ impl BufferState {
 
 impl Editor {
     pub fn status_text(&self) -> Option<String> {
+        // A load in flight is the most important thing to say: without it the
+        // screen is a frame with nothing in it, which reads as frozen.
+        if let Some(s) = self.loading_text() {
+            return Some(s);
+        }
         if let Some(f) = &self.status
             && f.until > Instant::now()
         {
@@ -270,29 +281,26 @@ fn main() {
         }
         return;
     }
+    // The file is NOT read here. Reading it before the terminal is set up is
+    // what made `rano huge.log` a dead screen — no frame, no event loop, so not
+    // even ^C — for 575 ms at 184 MB and about six seconds at 2 GB. The run
+    // loop starts a loader instead and adopts rows as they arrive; see
+    // `load_ctrl.rs` and `loader.rs`.
     let file = args.first().cloned();
     let mut buf = Buffer::new();
-    let mut read_lines: Option<usize> = None;
+    let mut load: Option<PathBuf> = None;
     if let Some(f) = &file {
         let p = Path::new(f);
+        // The name is set either way, so language detection, the title bar and
+        // the gutter are right from the first frame.
+        buf.name = Some(p.to_path_buf());
         if p.exists() {
-            match Buffer::from_file(p) {
-                Ok(b) => {
-                    read_lines = Some(b.lines.len());
-                    buf = b;
-                }
-                Err(e) => {
-                    eprintln!("rano: cannot read {}: {}", f, e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            buf.name = Some(p.to_path_buf());
+            load = Some(p.to_path_buf());
         }
     }
 
     let cfg = config::load();
-    if let Err(e) = run(buf, read_lines, cfg) {
+    if let Err(e) = run(buf, load, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -350,7 +358,7 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
     Ok(())
 }
 
-fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Result<()> {
+fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()> {
     // Panic guard: restore the terminal, then report the panic normally.
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -364,10 +372,15 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut ed = Editor::new(buf, cfg);
-    if let Some(n) = read_lines
-        && n > 0
+    if let Some(path) = load
+        && let Err(e) = ed.start_load(&path)
     {
-        ed.flash(&format!("Read {} line{}", n, if n == 1 { "" } else { "s" }));
+        // The one load failure reported before a frame is drawn: there is
+        // nothing on screen yet to attach a status line to.
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        eprintln!("rano: cannot read {}: {}", path.display(), e);
+        std::process::exit(1);
     }
     // D6 dirty-draw: redraw only when something changed. Any handled key,
     // paste or resize dirties (coarse); the pollers below report their own
@@ -405,7 +418,12 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
         if ed.quit {
             break Ok(());
         }
-        if event::poll(Duration::from_millis(200))? {
+        // While a file is arriving the loop must come back promptly to adopt
+        // it, or the text appears in 200 ms lumps and the load looks like a
+        // stutter rather than a stream. 8 ms is a frame at 120 Hz; otherwise the
+        // idle wait is the long one, because a keystroke is what ends it.
+        let wait = if ed.loading() { 8 } else { 200 };
+        if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                     ed.handle_key(k);
@@ -420,6 +438,9 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
                 _ => {}
             }
         }
+        // The load, beside the other pollers: bounded per iteration, never
+        // waiting, and it reports its own state changes.
+        dirty |= ed.load_poll();
         dirty |= ed.tick_status();
         dirty |= ed.lsp_poll();
         dirty |= ed.lsp_flush(Instant::now());

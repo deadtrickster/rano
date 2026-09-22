@@ -744,24 +744,87 @@ fn detect_shebang(line: &str) -> Option<Lang> {
 /// same few rows.
 pub const LARGE_BUFFER: usize = 2 << 20;
 
-/// The text of buffer rows `[first, last]` inclusive, newline-joined, ending
-/// with a newline — the same shape [`Buffer::text`] gives for the same rows.
+/// A char window into a buffer: which rows, and — for the first and last row
+/// only — which columns of them.
 ///
-/// Allocates only the slice: this is what makes a windowed highlight
-/// independent of the document's size, where `buf.text()` would copy all of it.
-fn rows_text(buf: &Buffer, first: usize, last: usize) -> String {
-    let last = last.min(buf.lines.len().saturating_sub(1));
-    let mut s = String::with_capacity(
-        buf.lines[first..=last]
-            .iter()
-            .map(|l| l.len() * 4 + 1)
-            .sum(),
-    );
-    for row in &buf.lines[first..=last] {
-        s.extend(row.iter());
+/// A row range is not enough to bound the work. minified JavaScript, one-line
+/// JSON and a minified CSS bundle are a single row megabytes long, so `rows`
+/// alone would put the whole file in the window. `cols` is what makes the
+/// window a window in that case: `(char col the first row starts at, char col
+/// the last row ends at)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    /// Buffer rows covered, inclusive.
+    pub rows: (usize, usize),
+    /// `(start, end)` char columns, applied to the first and last row
+    /// respectively. Ignored for a single row where start >= end.
+    pub cols: (usize, usize),
+}
+
+impl Window {
+    /// A window over whole rows.
+    pub fn rows(first: usize, last: usize) -> Self {
+        Self {
+            rows: (first, last),
+            cols: (0, usize::MAX),
+        }
+    }
+
+    /// A window over one row's `[from, to)` char columns.
+    pub fn cols(row: usize, from: usize, to: usize) -> Self {
+        Self {
+            rows: (row, row),
+            cols: (from, to),
+        }
+    }
+
+    /// The char range of `row` this window covers, as `(from, to)`.
+    pub fn cols_of(&self, row: usize) -> (usize, usize) {
+        let from = if row == self.rows.0 { self.cols.0 } else { 0 };
+        let to = if row == self.rows.1 {
+            self.cols.1
+        } else {
+            usize::MAX
+        };
+        (from, to)
+    }
+
+    /// How many characters the window can cover, for a buffer whose rows are
+    /// `len_of`. Bounded by the buffer, not by the request.
+    pub fn char_count(&self, n_rows: usize, len_of: impl Fn(usize) -> usize) -> usize {
+        let last = self.rows.1.min(n_rows.saturating_sub(1));
+        let mut total = 0usize;
+        for row in self.rows.0..=last {
+            let (from, to) = self.cols_of(row);
+            let len = len_of(row);
+            let from = from.min(len);
+            let to = to.min(len).max(from);
+            total += to - from + 1; // +1 for the newline joining rows
+        }
+        total
+    }
+}
+
+/// The window's text, and the `(row, col)` offset of the window's first
+/// character — which is what [`Highlighter::style_at`] adds back.
+///
+/// Shaped like the rows it came from: each covered row is followed by a
+/// newline, so a partial first row still reads as a line to the grammar and
+/// the row arithmetic in `for_each_capture` stays true.
+fn window_text(buf: &Buffer, win: Window) -> (String, usize, usize) {
+    let last = win.rows.1.min(buf.lines.len().saturating_sub(1));
+    let first = win.rows.0.min(last);
+    let mut s = String::with_capacity(win.char_count(buf.lines.len(), |r| buf.lines[r].len()) * 4);
+    for row in first..=last {
+        let (from, to) = win.cols_of(row);
+        let line = &buf.lines[row];
+        let from = from.min(line.len());
+        let to = to.min(line.len()).max(from);
+        s.extend(line[from..to].iter());
         s.push('\n');
     }
-    s
+    let base_col = win.cols_of(first).0.min(buf.lines[first].len());
+    (s, first, base_col)
 }
 
 /// Char count per `\n`-split line — `split('\n')`'s pieces exactly, so a trailing
@@ -903,9 +966,9 @@ pub struct Highlighter {
     /// `[window, window + len)`, because a windowed refresh parses only that
     /// slice; the slice's own line 0 is `line_styles[0]`.
     line_styles: Vec<Vec<Style>>,
-    /// The buffer row `line_styles[0]` is, when the grid covers a window
-    /// rather than the whole buffer.
-    window: Option<usize>,
+    /// The char window the grid covers, when it covers a window rather than
+    /// the whole buffer, plus the `(row, col)` offset of the grid's first cell.
+    window: Option<(Window, usize, usize)>,
     /// The last successful parse, kept so syntax errors can be surfaced
     /// without a language server (see [`Highlighter::syntax_errors`]).
     tree: Option<Tree>,
@@ -934,60 +997,71 @@ impl Highlighter {
         self.refresh_rows(buf, None);
     }
 
-    /// Highlight only buffer rows `[first, last]` inclusive, and only those
-    /// bytes.
+    /// Highlight only a byte window of the buffer, addressed as a char range.
     ///
-    /// Cost is proportional to the slice, not to the document. A keystroke on
-    /// a 7 MB file measured ~1.4 s when this highlighted everything (723 ms
-    /// re-parsing the document text, ~600 ms walking every capture in it); a
-    /// viewport-sized slice is in the microsecond range, which is what makes
-    /// typing on a large file usable at all.
+    /// Cost is proportional to the window, not to the document. Before this, a
+    /// keystroke on a 7 MB file cost ~1.4 s when everything was highlighted
+    /// (723 ms re-parsing the document, ~600 ms walking every capture in it);
+    /// a viewport window is in the microsecond range.
+    ///
+    /// The window is a CHAR range rather than a row range because a row can be
+    /// megabytes long: minified JavaScript and one-line JSON are single lines,
+    /// and a row window over one of those is the whole file. `cols` bounds the
+    /// first and last rows, so the window is still the few thousand
+    /// characters a person can see when the document is one enormous line.
     ///
     /// The trade is stated rather than hidden: a construct opening OUTSIDE the
-    /// slice and closing inside it is coloured as though it opened inside (a
-    /// block comment continued from above is the visible case), and syntax
-    /// diagnostics are not produced for a windowed highlight. Callers pass a
-    /// margin around the viewport so those edges are off screen; see
-    /// [`crate::editor`]'s `HIGHLIGHT_MARGIN`.
-    pub fn refresh_window(&mut self, buf: &Buffer, first: usize, last: usize) {
-        let last = last.min(buf.lines.len().saturating_sub(1));
-        if first > last {
+    /// window and closing inside it is coloured as though it opened inside (a
+    /// block comment continued from above is the visible case), and a windowed
+    /// highlight produces no tree-sitter syntax diagnostics. Callers pass a
+    /// margin so those edges are off screen; see [`crate::editor`]'s
+    /// `HIGHLIGHT_MARGIN`.
+    pub fn refresh_window(&mut self, buf: &Buffer, win: Window) {
+        let last = win.rows.1.min(buf.lines.len().saturating_sub(1));
+        if win.rows.0 > last {
             return;
         }
-        self.refresh_rows(buf, Some((first, last)));
+        self.refresh_rows(buf, Some(win));
     }
 
-    /// First buffer row [`Self::style_at`] can answer for, or `None` when the
-    /// whole buffer is styled.
-    pub fn styled_from(&self) -> Option<usize> {
-        self.window
+    /// The char range [`Self::style_at`] can answer for, when it is a window.
+    pub fn styled_window(&self) -> Option<Window> {
+        self.window.map(|(w, _, _)| w)
     }
 
-    fn refresh_rows(&mut self, buf: &Buffer, rows: Option<(usize, usize)>) {
+    fn refresh_rows(&mut self, buf: &Buffer, win: Option<Window>) {
         let first_line = buf.lines.first().map(|l| l.iter().collect::<String>());
         let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
             self.clear();
             return;
         };
 
-        // Only the requested rows' bytes are materialised. `buf.text()` copies
+        // Only the window's characters are materialised. `buf.text()` copies
         // the whole document — 200 MB of memcpy per keystroke at 200 MB — so a
-        // windowed refresh slices first. The tree, the style grid and every
-        // row index below are then relative to the slice, and `style_at` adds
-        // the offset back; nothing else has to know.
-        let source = match rows {
-            None => buf.text(),
-            Some((first, last)) => rows_text(buf, first, last),
+        // window is sliced first. The tree, the style grid and every index
+        // below are then relative to the slice, and `style_at` adds the offset
+        // back; nothing else has to know.
+        let (source, base_row, base_col) = match win {
+            None => (buf.text(), 0usize, 0usize),
+            Some(w) => {
+                let (text, base_row, base_col) = window_text(buf, w);
+                (text, base_row, base_col)
+            }
         };
+        // What was actually parsed, after the buffer's own bounds clamped it.
+        let parsed = win.map(|w| Window {
+            rows: (w.rows.0, w.rows.1.min(buf.lines.len().saturating_sub(1))),
+            cols: w.cols,
+        });
         if self.parser.set_language(&lang.language()).is_err() {
             self.clear();
             return;
         }
 
-        // Always a fresh parse, of the slice. Reusing the previous tree for
+        // Always a fresh parse, of the window. Reusing the previous tree for
         // incremental parsing leaks byte offsets from the old (possibly
         // longer) source into the new tree, which panics inside tree-sitter
-        // when a line is shortened. Re-parsing a slice is fast at any file
+        // when a line is shortened. Re-parsing a window is fast at any file
         // size; re-parsing a whole document is not.
         let Some(tree) = self.parser.parse(source.as_bytes(), None) else {
             self.clear();
@@ -1011,12 +1085,12 @@ impl Highlighter {
         // marked. Both overlay one grid, in that order.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
-            self.markdown_inline_pass(&source, &block, |t, q| {
-                Self::apply_styles(&source, t, q, &mut grid)
+            self.markdown_inline_pass(&source, &block, |slice, base_row, t, q| {
+                Self::apply_styles(slice, t, q, base_row, &mut grid)
             });
         }
         self.line_styles = grid;
-        self.window = rows.map(|(first, _)| first);
+        self.window = parsed.map(|w| (w, base_row, base_col));
     }
 
     /// Drop everything this highlighter knows. The state after a failure, and
@@ -1038,7 +1112,7 @@ impl Highlighter {
     /// (measured: a 12 KB code span out of a stray `` ` ```console ` ``). Per
     /// node, the worst case is confined to the node — which is what
     /// `tree-sitter-md`'s own parser does, and why.
-    fn markdown_inline_pass<F: FnMut(&Tree, &Query)>(
+    fn markdown_inline_pass<F: FnMut(&str, usize, &Tree, &Query)>(
         &mut self,
         src: &str,
         block: &Tree,
@@ -1054,36 +1128,82 @@ impl Highlighter {
         {
             return;
         }
-        for ranges in markdown_inline_node_ranges(block) {
-            let ts_ranges: Vec<Range> = ranges
+        // Line starts for the whole source, computed ONCE: the per-node row
+        // base below needs them, and recomputing per node made this quadratic.
+        let mut line_starts = vec![0usize];
+        for (i, b) in src.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        let row_of = |byte: usize| {
+            line_starts
+                .partition_point(|&o| o <= byte)
+                .saturating_sub(1)
+        };
+
+        for group in markdown_inline_node_ranges(block) {
+            // ONE NODE, and only that node's bytes are handed to the parser.
+            //
+            // Passing the whole source with the node's ranges as
+            // `set_included_ranges` is what the API suggests and it is
+            // quadratic: tree-sitter has to walk the excluded input to reach
+            // each range, so a 2,400-paragraph document cost 9.8× for 4× the
+            // text (measured 2026-09-22, caught by
+            // `the_markdown_two_pass_is_linear_in_the_document`). The slice
+            // below makes each parse cost its own node.
+            //
+            // The slice is grown to FULL rows so the row base is a whole-row
+            // offset and a node's columns stay aligned with the grid's.
+            let lo = group[0].0;
+            let hi = group[group.len() - 1].1;
+            let base_row = row_of(lo);
+            let slice_lo = line_starts[base_row];
+            let slice_hi = line_starts
+                .get(row_of(hi.saturating_sub(1)) + 1)
+                .copied()
+                .unwrap_or(src.len())
+                .max(hi);
+            let slice = &src[slice_lo..slice_hi];
+            let ranges: Vec<Range> = group
                 .iter()
                 .map(|&(s, e)| Range {
-                    start_byte: s,
-                    end_byte: e,
-                    start_point: point_of(src, s).into(),
-                    end_point: point_of(src, e).into(),
+                    start_byte: s.saturating_sub(slice_lo),
+                    end_byte: e.saturating_sub(slice_lo).min(slice.len()),
+                    start_point: point_of(slice, s.saturating_sub(slice_lo)).into(),
+                    end_point: point_of(slice, e.saturating_sub(slice_lo).min(slice.len())).into(),
                 })
                 .collect();
-            if self.inline_parser.set_included_ranges(&ts_ranges).is_err() {
+            if self.inline_parser.set_included_ranges(&ranges).is_err() {
                 continue;
             }
-            if let Some(tree) = self.inline_parser.parse(src.as_bytes(), None) {
-                apply(&tree, &query);
+            if let Some(tree) = self.inline_parser.parse(slice.as_bytes(), None) {
+                apply(slice, base_row, &tree, &query);
             }
         }
     }
 
     /// Style for the character at `p`, if any capture colors it.
     pub fn style_at(&self, p: Pos) -> Option<Style> {
-        // A windowed grid is indexed from its own first row, so map the
-        // absolute row down. Outside the window there is no answer, which the
-        // caller reads as "uncoloured" — see [`Self::refresh_window`].
-        let idx = match self.window {
-            Some(base) => p.row.checked_sub(base)?,
-            None => p.row,
+        // A windowed grid is indexed from the window's own first character, so
+        // map the absolute position down: the row by the window's first row,
+        // and — only on that first row — the column by the window's first
+        // column. Outside the window there is no answer, which the caller
+        // reads as "uncoloured" — see [`Self::refresh_window`].
+        let (row_idx, col_idx) = match self.window {
+            Some((_, base_row, base_col)) => {
+                let row = p.row.checked_sub(base_row)?;
+                let col = if row == 0 {
+                    p.col.checked_sub(base_col)?
+                } else {
+                    p.col
+                };
+                (row, col)
+            }
+            None => (p.row, p.col),
         };
-        let row = self.line_styles.get(idx)?;
-        let st = row.get(p.col)?;
+        let row = self.line_styles.get(row_idx)?;
+        let st = row.get(col_idx)?;
         if *st == Style::default() {
             None
         } else {
@@ -1127,8 +1247,8 @@ impl Highlighter {
         // capture names sees the inline constructs too.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
-            self.markdown_inline_pass(src, &block, |t, q| {
-                Self::apply_classes(src, t, q, &mut grid)
+            self.markdown_inline_pass(src, &block, |slice, base_row, t, q| {
+                Self::apply_classes(slice, t, q, base_row, &mut grid)
             });
         }
         grid
@@ -1191,15 +1311,21 @@ impl Highlighter {
             .into_iter()
             .map(|n| vec![Style::default(); n])
             .collect();
-        Self::apply_styles(src, tree, query, &mut line_styles);
+        Self::apply_styles(src, tree, query, 0, &mut line_styles);
         line_styles
     }
 
     /// Overlay one tree's captures on an existing style grid. Called twice for
     /// markdown — the block tree, then the inline tree over the same cells —
     /// which is what makes the second pass compose instead of fight.
-    fn apply_styles(src: &str, tree: &Tree, query: &Query, line_styles: &mut [Vec<Style>]) {
-        Self::for_each_capture(src, tree, query, |r, cs, name| {
+    fn apply_styles(
+        src: &str,
+        tree: &Tree,
+        query: &Query,
+        row_base: usize,
+        line_styles: &mut [Vec<Style>],
+    ) {
+        Self::for_each_capture(src, tree, query, row_base, |r, cs, name| {
             let style = theme(name);
             if style == Style::default() {
                 return;
@@ -1222,13 +1348,19 @@ impl Highlighter {
             .into_iter()
             .map(|n| vec![None; n])
             .collect();
-        Self::apply_classes(src, tree, query, &mut grid);
+        Self::apply_classes(src, tree, query, 0, &mut grid);
         grid
     }
 
     /// Overlay one tree's captures on an existing class grid.
-    fn apply_classes(src: &str, tree: &Tree, query: &Query, grid: &mut [Vec<Option<String>>]) {
-        Self::for_each_capture(src, tree, query, |r, cs, name| {
+    fn apply_classes(
+        src: &str,
+        tree: &Tree,
+        query: &Query,
+        row_base: usize,
+        grid: &mut [Vec<Option<String>>],
+    ) {
+        Self::for_each_capture(src, tree, query, row_base, |r, cs, name| {
             for cell in &mut grid[r][cs] {
                 *cell = Some(name.to_string());
             }
@@ -1252,6 +1384,7 @@ impl Highlighter {
         src: &str,
         tree: &Tree,
         query: &Query,
+        row_base: usize,
         mut f: impl FnMut(usize, std::ops::Range<usize>, &str),
     ) {
         // Byte ranges of each line — `split('\n')`'s pieces exactly, including the
@@ -1311,7 +1444,7 @@ impl Highlighter {
                 let cs = char_col(src, lo, s_l, ascii[r]);
                 let ce = char_col(src, lo, e_l, ascii[r]);
                 if ce > cs {
-                    f(r, cs..ce, name);
+                    f(r + row_base, cs..ce, name);
                 }
             }
         }
@@ -1693,7 +1826,7 @@ impl Stream {
             return Vec::new();
         };
         let mut out = Vec::new();
-        Highlighter::for_each_capture(&self.src, tree, &query, |row, range, name| {
+        Highlighter::for_each_capture(&self.src, tree, &query, 0, |row, range, name| {
             out.push(Span {
                 row,
                 start: range.start,
@@ -3794,46 +3927,52 @@ mod query_cache_tests {
 #[cfg(test)]
 mod markdown_tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
+    /// The two-pass markdown highlight must be LINEAR in the document, which
+    /// is the property that matters and the one an absolute stopwatch cannot
+    /// state: a wall-clock bound here flaked under the suite's own parallelism.
+    /// Doubling the document must roughly double the work, not square it.
     #[test]
-    fn a_plain_markdown_document_is_still_fast_to_refresh() {
-        // The inline pass is a second parse, so it must not double the cost
-        // of typing in a large markdown file. Measured, not assumed: the
-        // whole document is re-highlighted per edit (per the full-reparse
-        // rule), and this asserts the two passes stay in the same range as
-        // one parse of a document this size.
-        let mut src = String::new();
-        for i in 0..600 {
-            src.push_str(&format!(
-                "Paragraph {i} with **bold** and `code` and a [link](http://x/{i}).\n\n"
-            ));
-        }
-        assert!(src.len() > 40_000, "{} bytes", src.len());
-        let mut buf = Buffer::new();
-        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
-        buf.name = Some(std::path::PathBuf::from("x.md"));
-        let mut hl = Highlighter::new();
-        let t = Instant::now();
-        hl.refresh(&buf);
-        let two = t.elapsed();
-        // A single-pass language of the same shape, for scale.
-        let mut rb = Buffer::new();
-        rb.lines = buf.lines.clone();
-        rb.name = Some(std::path::PathBuf::from("x.rs"));
-        let t = Instant::now();
-        hl.refresh(&rb);
-        let one = t.elapsed();
-        println!("markdown two-pass {two:?} vs rust one-pass {one:?}");
-        // Measured (release, 60 KB): ~46 ms against ~40 ms, so the inline
-        // parse costs ~15% on top of the block pass and its grid, not a
-        // second full pass. The assertion is deliberately loose — the suite
-        // runs tests in parallel, and a tight timing bound here would flake
-        // rather than catch anything. What it does catch is a blow-up: an
-        // inline pass gone quadratic, or one parse per inline node.
+    fn the_markdown_two_pass_is_linear_in_the_document() {
+        let build = |paras: usize| {
+            let mut src = String::new();
+            for i in 0..paras {
+                src.push_str(&format!(
+                    "Paragraph {i} with **bold** and `code` and a [link](http://x/{i}).\n\n"
+                ));
+            }
+            let mut buf = Buffer::new();
+            buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+            buf.name = Some(std::path::PathBuf::from("x.md"));
+            buf
+        };
+        let time = |buf: &Buffer| {
+            let mut hl = Highlighter::new();
+            hl.refresh(buf); // warm the query and the tree
+            let t = Instant::now();
+            for _ in 0..3 {
+                hl.refresh(buf);
+            }
+            t.elapsed().as_secs_f64() / 3.0
+        };
+        let small = build(300);
+        let big = build(1_200);
+        assert!(big.lines.len() == small.lines.len() * 4);
+        let (a, b) = (time(&small), time(&big));
+        println!(
+            "markdown refresh: {:.1} ms at {} lines, {:.1} ms at {} lines ({:.1}× for 4×)",
+            a * 1e3,
+            small.lines.len(),
+            b * 1e3,
+            big.lines.len(),
+            b / a
+        );
+        // 4× the document: quadratic would be 16×, so a bound of 8× separates
+        // the two by a wide margin while tolerating a loaded machine.
         assert!(
-            two < one * 8 + Duration::from_millis(50),
-            "markdown's two passes cost {two:?}, a one-pass language {one:?}"
+            b < a * 8.0,
+            "the two-pass highlight looks quadratic: {a:.4} s → {b:.4} s for 4× the text"
         );
     }
 
@@ -3855,26 +3994,59 @@ mod markdown_tests {
             assert!(g.windows(2).all(|w| w[0].1 <= w[1].0), "group {i}: {g:?}");
         }
         let mut hl = Highlighter::new();
+        // What each parse was handed: its own node's bytes, and the row base
+        // the grid will offset by.
         let mut parsed: Vec<(usize, usize)> = Vec::new();
-        hl.markdown_inline_pass(src, &block, |tree, _q| {
-            let r = tree.root_node();
-            parsed.push((r.start_byte(), r.end_byte()));
+        let mut bases: Vec<usize> = Vec::new();
+        hl.markdown_inline_pass(src, &block, |slice, base_row, _tree, _q| {
+            parsed.push((slice.len(), 0));
+            bases.push(base_row);
         });
         assert_eq!(
             parsed.len(),
             groups.len(),
             "one parse per node, no more and no fewer"
         );
-        for (a, b) in &parsed {
-            let covering = groups
-                .iter()
-                .filter(|g| g.first().unwrap().0 <= *a && *b <= g.last().unwrap().1)
-                .count();
-            assert_eq!(
-                covering, 1,
-                "a parse covered {a}..{b}, which is not one node's ranges"
+        // THE invariant that keeps this linear: no parse is handed more than
+        // its own node. Handing it the whole source with the node's ranges is
+        // what made a 2,400-paragraph document cost 9.8× for 4× the text —
+        // tree-sitter walks the excluded input to reach each range.
+        let line_starts = {
+            let mut v = vec![0usize];
+            for (i, b) in src.bytes().enumerate() {
+                if b == b'\n' {
+                    v.push(i + 1);
+                }
+            }
+            v
+        };
+        // The slice is grown to whole rows, so allow the slack to the end of
+        // the node's last row; anything near the document's size is the bug.
+        for (i, g) in groups.iter().enumerate() {
+            let span = g.last().unwrap().1 - g.first().unwrap().0;
+            // The same upper bound the pass uses: the start of the row after
+            // the node's last row, so the slice can end on a whole line.
+            let row_of = |b: usize| line_starts.partition_point(|&o| o <= b).saturating_sub(1);
+            let row_end = line_starts
+                .get(row_of(g.last().unwrap().1.saturating_sub(1)) + 1)
+                .copied()
+                .unwrap_or(src.len())
+                .max(g.last().unwrap().1);
+            // The slice starts at the beginning of the node's FIRST row, not
+            // at the node, so the allowance is measured from there.
+            let allowed = row_end - line_starts[row_of(g.first().unwrap().0)];
+            assert!(
+                parsed[i].0 <= allowed,
+                "parse {i} was handed {} bytes for a node of {span} (allowed {allowed})",
+                parsed[i].0
             );
         }
+        // Rows ascend, and the first parse starts at the document's first row
+        // when the first node does.
+        assert!(
+            bases.windows(2).all(|w| w[0] <= w[1]),
+            "row bases: {bases:?}"
+        );
         // And the flattened helper agrees with the groups.
         let flat = markdown_inline_ranges(&block);
         assert_eq!(flat.len(), groups.iter().map(|g| g.len()).sum::<usize>());
@@ -4205,12 +4377,16 @@ mod window_tests {
 
         let mut full = Highlighter::new();
         full.refresh(&buf);
-        assert_eq!(full.styled_from(), None, "a full refresh styles row 0 up");
+        assert_eq!(full.styled_window(), None, "a full refresh styles row 0 up");
 
         for (first, last) in [(0usize, 20usize), (100, 140), (700, 799)] {
             let mut win = Highlighter::new();
-            win.refresh_window(&buf, first, last);
-            assert_eq!(win.styled_from(), Some(first));
+            win.refresh_window(&buf, Window::rows(first, last));
+            assert_eq!(
+                win.styled_window(),
+                Some(Window::rows(first, last)),
+                "the window is recorded as asked for"
+            );
             let mut styled = 0usize;
             for row in first..=last {
                 let line = &buf.lines[row];
@@ -4246,6 +4422,73 @@ mod window_tests {
         }
     }
 
+    /// A window can start and end MID-ROW, which is what makes a one-line
+    /// document editable: minified JavaScript, one-line JSON and a minified
+    /// CSS bundle are a single row megabytes long, and a row-shaped window
+    /// over one of those is the whole file.
+    #[test]
+    fn a_window_can_be_part_of_a_single_enormous_row() {
+        /// Columns at each end of the window where a crossing construct may
+        /// differ from a full pass.
+        const EDGE: usize = 32;
+        // One row, long enough that a whole-row window would be the document.
+        let row: String = (0..40_000)
+            .map(|i| format!("function f{i}(a,b){{return a+b}}"))
+            .collect();
+        let mut buf = Buffer::new();
+        buf.lines = vec![row.chars().collect()];
+        buf.name = Some(std::path::PathBuf::from("bundle.js"));
+        assert_eq!(buf.lines.len(), 1, "the document is one row");
+        assert!(buf.lines[0].len() > 500_000, "and a big one");
+
+        let mut full = Highlighter::new();
+        full.refresh(&buf);
+
+        // A window over 2,000 characters of it, 100,000 in.
+        let win = Window::cols(0, 100_000, 102_000);
+        assert!(win.char_count(buf.lines.len(), |r| buf.lines[r].len()) < 2_100);
+        let mut hl = Highlighter::new();
+        hl.refresh_window(&buf, win);
+        assert_eq!(hl.styled_window(), Some(win));
+        // Inside the window, away from its edges, the colours are exactly a
+        // full pass's. That is the promise; the margin is what makes it true,
+        // and it is asserted separately below rather than assumed.
+        let interior = 100_000 + EDGE..102_000 - EDGE;
+        for col in interior.clone() {
+            let p = Pos { row: 0, col };
+            assert_eq!(
+                hl.style_at(p),
+                full.style_at(p),
+                "col {col} differs between the window and the full pass"
+            );
+        }
+        assert!(interior.count() > 1_900, "most of the window is interior");
+        // At the very edges a construct that opened outside the window is
+        // coloured as though it opened here: that is the trade, and this is
+        // the assertion that keeps it from being a surprise. The editor passes
+        // a margin so these characters are not on screen.
+        let edge_differs = (100_000..100_000 + EDGE)
+            .chain(102_000 - EDGE..102_000)
+            .filter(|c| {
+                hl.style_at(Pos { row: 0, col: *c }) != full.style_at(Pos { row: 0, col: *c })
+            })
+            .count();
+        println!(
+            "{edge_differs} of {} edge columns differ (the documented trade)",
+            EDGE * 2
+        );
+        // And outside the window there is no answer, so the renderer leaves
+        // the rest of the row uncoloured rather than colouring it wrongly.
+        assert_eq!(hl.style_at(Pos { row: 0, col: 0 }), None);
+        assert_eq!(
+            hl.style_at(Pos {
+                row: 0,
+                col: 102_001
+            }),
+            None
+        );
+    }
+
     /// The window parses only its own rows, so its cost must not track the
     /// document's size. Stated as a comparison rather than a stopwatch: the
     /// same 60 rows of a document four times longer must cost about the same.
@@ -4266,10 +4509,10 @@ mod window_tests {
         let time_window = |buf: &Buffer| {
             let mut hl = Highlighter::new();
             // Warm, then measure.
-            hl.refresh_window(buf, 1_000, 1_060);
+            hl.refresh_window(buf, Window::rows(1_000, 1_060));
             let t = Instant::now();
             for _ in 0..5 {
-                hl.refresh_window(buf, 1_000, 1_060);
+                hl.refresh_window(buf, Window::rows(1_000, 1_060));
             }
             t.elapsed().div_f64(5.0).as_secs_f64() / buf.lines.len() as f64
         };

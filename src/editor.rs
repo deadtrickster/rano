@@ -116,6 +116,9 @@ pub struct Editor {
     pub(crate) completion_retries: u8,
     /// Where M-, returns to, one entry per definition jump (stacked).
     pub def_back: Vec<DefBack>,
+    /// The style grid is behind the buffer; the next frame re-highlights. See
+    /// [`Self::ensure_highlight`].
+    highlight_dirty: bool,
 }
 
 /// Live completion popup state: the filtered candidate list, the selected
@@ -214,6 +217,7 @@ impl Editor {
             completion_retry: None,
             completion_retries: 0,
             def_back: Vec::new(),
+            highlight_dirty: true,
         };
         ed.lsp_sync();
         ed
@@ -412,7 +416,16 @@ impl Editor {
     /// so the two cannot disagree about what a row looks like — the cheap path
     /// is only ever a shorter way to compute the same thing.
     fn row_wrap_of_line(line: &[char], tab_width: usize, view_w: usize) -> RowWrap {
-        if width::is_simple(line) {
+        // A row of megabytes is measured affinely unless its HEAD is
+        // non-ordinary. Scanning all of it to answer the question cost 25 ms
+        // per keystroke on a 4 MB minified bundle, which is the slowest thing
+        // left in the editor. See `width::is_simple_prefix` for the trade.
+        let bounded = if line.len() > Self::LONG_ROW {
+            width::is_simple_prefix(line, Self::LONG_ROW)
+        } else {
+            width::is_simple(line)
+        };
+        if bounded {
             // Every character one column: segments are affine and the renderer
             // needs no table.
             return RowWrap {
@@ -569,24 +582,75 @@ impl Editor {
     /// huge file still parse in well under a frame.
     pub(crate) const HIGHLIGHT_MARGIN: usize = 200;
 
-    /// The buffer rows a highlight should cover for the current viewport,
-    /// with a margin, clamped to the buffer.
-    fn highlight_window(&self, text_h: usize) -> (usize, usize) {
+    /// Characters either side of the viewport on the SAME row, for a row too
+    /// long to hand to the parser whole.
+    ///
+    /// A row can be megabytes long — minified JavaScript, one-line JSON, a
+    /// bundled CSS file — and then a row-shaped window is the whole document.
+    /// 4,000 characters is several screen widths even on an ultra-wide
+    /// terminal, so this margin is never seen, and it bounds the parse on a
+    /// document whose *first* row is 4 MB.
+    pub(crate) const COL_MARGIN: usize = 4_000;
+
+    /// A row longer than this is windowed by columns rather than handed over
+    /// whole. Well past any hand-written line (the longest in letibot's
+    /// 25,000-line `app.rs` is 334) and well under the megabytes a minifier
+    /// produces.
+    pub(crate) const LONG_ROW: usize = 8_000;
+
+    /// The window a highlight should cover for the current viewport: the
+    /// visible rows plus a margin, and for a row too long to hand over whole,
+    /// the visible columns plus a margin.
+    fn highlight_window(&self, text_h: usize) -> syntax::Window {
         let bs = self.bs();
         let last_row = bs.buf.lines.len().saturating_sub(1);
         // Visual row → buffer row, when the wrap table is fresh. The scroll
         // position is in visual rows (M-\), so a deep scroll into a long line
         // still lands on the right buffer row.
-        let (first_row, last_visible) = if self.wrap && !bs.wrap_prefix.is_empty() {
-            let (r0, _) = self.buf_row_of_visual(bs.scroll);
-            let (r1, _) = self.buf_row_of_visual(bs.scroll + text_h.max(1));
-            (r0, r1)
+        let (first_vis, last_vis, first_seg, last_seg) = if self.wrap && !bs.wrap_prefix.is_empty()
+        {
+            let (r0, s0) = self.buf_row_of_visual(bs.scroll);
+            let (r1, s1) = self.buf_row_of_visual(bs.scroll + text_h.max(1));
+            (r0, r1, s0, s1)
         } else {
-            (bs.scroll, bs.scroll + text_h)
+            (bs.scroll, bs.scroll + text_h, 0, 0)
         };
-        let first = first_row.saturating_sub(Self::HIGHLIGHT_MARGIN);
-        let last = (last_visible + Self::HIGHLIGHT_MARGIN).min(last_row);
-        (first.min(last), last)
+        let first = first_vis.saturating_sub(Self::HIGHLIGHT_MARGIN);
+        let last = (last_vis + Self::HIGHLIGHT_MARGIN).min(last_row);
+        let (first, last) = (first.min(last), last);
+        // Column bounds, for the long-row case. Only meaningful on the first
+        // and last row of the window; every other row is taken whole.
+        let from = if bs.buf.lines[first_vis].len() > Self::LONG_ROW {
+            let (lo, _) = self.seg_chars(first_vis, first_seg);
+            lo.saturating_sub(Self::COL_MARGIN)
+        } else {
+            0
+        };
+        let to = if bs.buf.lines[last_vis].len() > Self::LONG_ROW {
+            let (_, hi) = self.seg_chars(last_vis, last_seg);
+            hi.saturating_add(Self::COL_MARGIN)
+        } else {
+            usize::MAX
+        };
+        syntax::Window {
+            rows: (first, last),
+            cols: (from, to),
+        }
+    }
+
+    /// Whether the style grid is behind the buffer and the frame should
+    /// re-highlight before painting.
+    ///
+    /// Highlighting lazily, once per frame rather than once per edit, is what
+    /// makes a fast typist cost one highlight per painted frame instead of one
+    /// per keystroke — and it is what lets a huge file open at all, since the
+    /// first highlight is then the viewport window rather than the document.
+    pub(crate) fn ensure_highlight(&mut self) {
+        if !self.highlight_dirty {
+            return;
+        }
+        self.highlight_dirty = false;
+        self.highlight_now();
     }
 
     /// Re-highlight for the current viewport: the whole buffer when it is
@@ -595,17 +659,16 @@ impl Editor {
     /// The decision is by BYTES, not by how many rows the window happens to
     /// cover. A 4 MB file that is a single line has a window of exactly one
     /// row, and treating "the window is the whole buffer" as a reason to
-    /// highlight everything put that line back on the slow path — the whole
-    /// document re-parsed and re-walked per keystroke.
+    /// highlight everything put that line back on the slow path.
     ///
     /// This replaced `hl.refresh` on every keystroke. Measured 2026-09-22
     /// (release, one keystroke):
     ///
-    /// | buffer | whole document | viewport window |
+    /// | buffer | whole document | window |
     /// |---|---|---|
-    /// | 7 MB Rust | 1452 ms | 89 ms |
-    /// | 4 MB minified JS (1 line) | 2246 ms | ~1060 ms |
-    /// | 30 MB log | 365 ms | 365 ms (no syntax to skip; the wrap table is the cost) |
+    /// | 7 MB Rust | 1452 ms | 1.4 ms |
+    /// | 4 MB minified JS (1 line) | 2246 ms | see `bench.rs` |
+    /// | 30 MB log | 365 ms | 0.57 ms |
     pub(crate) fn highlight_now(&mut self) {
         // Before the window is measured, not after: the window is derived from
         // the wrap table, and an edit that added or removed a row leaves that
@@ -613,14 +676,14 @@ impl Editor {
         // end, and a stale total would put the window in the wrong place.
         self.ensure_wrap_prefix();
         let text_h = self.text_h;
-        let (first, last) = self.highlight_window(text_h);
+        let win = self.highlight_window(text_h);
         // Big enough that a whole-document highlight would be felt per
         // keystroke. Below this the full highlight is exact and cheap, and the
         // window would only add the risk of a construct crossing its edge.
         let windowed = self.bs().buf.is_at_least(syntax::LARGE_BUFFER);
         let bs = self.bs_mut();
         if windowed {
-            bs.hl.refresh_window(&bs.buf, first, last);
+            bs.hl.refresh_window(&bs.buf, win);
         } else {
             bs.hl.refresh(&bs.buf);
         }
@@ -651,12 +714,11 @@ impl Editor {
             bs.lsp_dirty = true;
             bs.wrap_dirty_row = row;
         }
-        // The highlight, so the edit's own colours are right before the next
-        // frame. Every edit path funnels through here, which is what makes one
-        // call site enough — and why the bump above must come first: the
-        // window this reads is measured in rows off the wrap table, which is
-        // keyed on `edit_gen`.
-        self.highlight_now();
+        // Not highlighted here: the frame does it, once, via
+        // `ensure_highlight`. Every edit path funnels through here, so this one
+        // flag is enough, and a burst of keystrokes between two frames then
+        // costs one highlight instead of one per key.
+        self.highlight_dirty = true;
     }
 
     /// The union of tree-sitter and LSP diagnostics, row-major — what the
@@ -2046,6 +2108,10 @@ impl Editor {
                     let bs = self.bs_mut();
                     bs.buf.name = Some(path);
                     bs.buf.modified = false;
+                    // The file's name changed, so its language may have too:
+                    // re-establish the highlight here rather than waiting for
+                    // the frame. Rare (a save, a rename), so the windowed path
+                    // would only add the risk of a stale language.
                     bs.hl.refresh(&bs.buf);
                     refresh_syntax_diags(bs);
                 }

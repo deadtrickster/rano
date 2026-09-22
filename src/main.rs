@@ -122,7 +122,7 @@ impl BufferState {
         if buf.lines.is_empty() {
             buf.lines.push(Vec::new());
         }
-        let mut bs = Self {
+        let bs = Self {
             buf,
             hl: syntax::Highlighter::new(),
             lsp: None,
@@ -153,8 +153,10 @@ impl BufferState {
             pending: None,
             last_kind: None,
         };
-        bs.hl.refresh(&bs.buf);
-        editor::refresh_syntax_diags(&mut bs);
+        // No highlight here. On a 200 MB file a refresh now would be the whole
+        // document parsed before the first frame; the run loop highlights the
+        // viewport instead, and it is the same call the editor makes on every
+        // keystroke. See `Editor::ensure_highlight`.
         bs
     }
 }
@@ -384,6 +386,12 @@ fn run(buf: Buffer, read_lines: Option<usize>, cfg: config::Config) -> io::Resul
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
         if dirty {
+            // The frame's highlight, after the scroll the window is measured
+            // against. Lazy on purpose: a burst of keystrokes between two
+            // frames costs one highlight here rather than one per key, and a
+            // huge file's first highlight is this window rather than the whole
+            // document.
+            ed.ensure_highlight();
             // Hide the physical cursor while the frame paints: the backend
             // moves it across the cells it writes, and on a fast scroll that
             // sweep shows as a ghost cursor blinking at painted cells (often
@@ -1308,12 +1316,16 @@ mod ed_tests {
         buf.lines = vec!["fn main() {".chars().collect()];
         let mut ed = Editor::new(buf, config::Config::default());
         ed.edit_invalidate();
+        // Diagnostics are part of the highlight now, so the test does what the
+        // run loop does before a frame.
+        ed.ensure_highlight();
         assert!(
             !ed.bs().syntax_diags.is_empty(),
             "unclosed fn block must yield a tree-sitter diagnostic"
         );
         ed.bs_mut().buf.lines = vec!["fn main() {}".chars().collect()];
         ed.edit_invalidate();
+        ed.ensure_highlight();
         assert!(ed.bs().syntax_diags.is_empty(), "clean parse has no diags");
     }
 
@@ -1726,6 +1738,62 @@ mod ed_tests {
         }
         ed.ensure_wrap_prefix();
         assert_eq!(ed.bs().wrap_prefix, vec![0, 1, 2], "5 cols → 1 visual row");
+    }
+
+    #[test]
+    fn an_edit_highlights_on_the_frame_not_per_key() {
+        // The open cost, and the reason a burst of typing costs one highlight
+        // rather than one per keystroke. A big buffer is highlighted by
+        // viewport window and only when a frame asks for it, so nothing is
+        // parsed at open and nothing is parsed by the edit itself.
+        let text: String = (0..60_000)
+            .map(|i| format!("pub fn f{i}(x: usize) -> usize {{ x + {i} }}\n"))
+            .collect();
+        assert!(text.len() > 2 << 20, "{} bytes", text.len());
+        let mut ed = test_ed(&text);
+        // A name, so the highlighter has a language at all (`detect` works
+        // from the name and the shebang).
+        ed.bs_mut().buf.name = Some(std::path::PathBuf::from("big.rs"));
+        ed.show_line_numbers = false;
+        ed.text_w = 100;
+        ed.text_h = 40;
+
+        // Opening parses nothing: the grid is empty until a frame asks.
+        assert_eq!(
+            ed.bs().hl.styled_window(),
+            None,
+            "open must not highlight a whole big file"
+        );
+        assert_eq!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }), None);
+
+        // The frame's call: a viewport window, not the document.
+        ed.ensure_highlight();
+        let win = ed
+            .bs()
+            .hl
+            .styled_window()
+            .expect("a window, not the whole buffer");
+        let rows = win.rows.1 - win.rows.0;
+        assert!(
+            rows < 500,
+            "the window must be the viewport plus a margin, got {rows} rows of {}",
+            ed.bs().buf.lines.len()
+        );
+        assert!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }).is_some());
+
+        // An edit marks the grid stale and does NOT re-highlight; the next
+        // frame does, once, however many keys arrived in between.
+        ed.bs_mut().cursor = Pos { row: 3, col: 0 };
+        for _ in 0..5 {
+            ed.insert_char('y');
+        }
+        // Five keystrokes, one highlight — and it happens when asked.
+        ed.ensure_highlight();
+        assert!(ed.bs().hl.styled_window().is_some());
+        // Idempotent: asking twice is free and changes nothing.
+        let before = ed.bs().hl.styled_window();
+        ed.ensure_highlight();
+        assert_eq!(ed.bs().hl.styled_window(), before);
     }
 
     #[test]

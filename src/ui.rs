@@ -727,6 +727,9 @@ mod tests {
         buf.name = Some(std::path::PathBuf::from(name));
         let mut ed = Editor::new(buf, crate::config::Config::default());
         ed.ensure_wrap_prefix();
+        // The run loop highlights before it paints; a draw test that skipped
+        // this would be asserting on an un-highlighted editor.
+        ed.ensure_highlight();
         ed
     }
 

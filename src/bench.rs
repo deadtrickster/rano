@@ -97,9 +97,11 @@ fn samples() -> Vec<Sample> {
     let mut v = Vec::new();
     // One enormous line: the minified-JS shape, and the wrap/cursor stress.
     for (label, path) in [
+        ("minified20.js (20MB 1 line)", "/tmp/ranoperf/minified20.js"),
         ("minified.js (1 line)", "/tmp/ranoperf/minified.js"),
         ("oneline.txt (1 line)", "/tmp/ranoperf/oneline.txt"),
         ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
         ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
         ("big.md (3 MB)", "/tmp/ranoperf/big.md"),
         // Real files, if this machine still has them.
@@ -195,9 +197,11 @@ fn bench() {
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_breakdown() {
     let paths: Vec<(&str, &str)> = vec![
+        ("minified20 (20MB 1 line)", "/tmp/ranoperf/minified20.js"),
         ("minified.js (1 line)", "/tmp/ranoperf/minified.js"),
         ("oneline.txt (1 line)", "/tmp/ranoperf/oneline.txt"),
         ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
         ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
     ];
     println!("\nkeystroke breakdown — median of 3, µs\n");
@@ -224,53 +228,72 @@ fn bench_breakdown() {
         e.text_w = 120;
         e.text_h = 36;
 
-        let first = buf.lines.first().map(|l| l.iter().collect::<String>());
-        let lang = crate::syntax::detect(buf.name.as_deref(), first.as_deref());
-        let src = buf.text();
-        let (t_parse, _) = match lang {
-            Some(lang) => {
-                let mut parser = tree_sitter::Parser::new();
-                parser.set_language(&lang.language()).expect("language");
-                time(3, || {
-                    std::hint::black_box(parser.parse(src.as_bytes(), None).expect("parse"));
-                })
-            }
-            None => (0.0, 0.0),
-        };
-
-        let (t_editbuf, _) = time(3, || {
-            e.bs_mut().buf.insert_char(0, 0, 'x');
-            e.bs_mut().buf.backspace(0, 1);
-        });
-
-        // The whole highlight (parse + capture walk + grid), and the walk on
-        // its own, so a slow keystroke can be attributed inside `refresh`.
         let (t_refresh, _) = time(3, || {
             e.bs_mut().hl.refresh(&buf);
         });
-        let (t_hlnow, _) = time(3, || {
-            e.highlight_now();
-        });
-        let (t_wrap, _) = time(3, || {
-            e.bs_mut().edit_gen = e.bs().edit_gen.wrapping_add(1);
-            e.ensure_wrap_prefix();
-        });
-        // ONE insertion: a key+backspace pair is two edits and doubled every
-        // number in this table before 2026-09-22.
+        // ONE insertion, then the frame's highlight: the honest cost of a
+        // keystroke is the edit plus the highlight the next frame pays. These
+        // are separate numbers because they are paid by different code.
         let (t_key, _) = time(3, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         });
+        let (t_frame, _) = time(3, || {
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.ensure_highlight();
+        });
 
         println!(
-            "{:<22} {:>9} {:>11} {:>12} {:>12} {:>11} {:>11} {:>11}",
+            "{:<28} {:>10} {:>14} {:>16} {:>16}",
             label,
             human(size),
-            ms(t_parse),
             ms(t_refresh),
-            ms(t_hlnow),
-            ms(t_wrap),
-            ms(t_editbuf),
             ms(t_key),
+            ms(t_frame),
+        );
+    }
+    println!();
+}
+
+/// What a person waits for after `rano FILE`: read the file, then the first
+/// highlight. Both are in here because both are before the first frame.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_open() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.md (3 MB)", "/tmp/ranoperf/big.md"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nopen — read the file, then the first highlight\n");
+    println!(
+        "{:<28} {:>10} {:>14} {:>14} {:>14}",
+        "file", "size", "read", "first hl", "total"
+    );
+    println!("{}", "-".repeat(86));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let t = Instant::now();
+        let buf = Buffer::from_file(p).expect("read");
+        let read = t.elapsed();
+        let mut e = Editor::new(buf, config::Config::default());
+        e.text_w = 120;
+        e.text_h = 36;
+        let t = Instant::now();
+        e.ensure_wrap_prefix();
+        e.ensure_highlight();
+        let first = t.elapsed();
+        println!(
+            "{:<28} {:>10} {:>14} {:>14} {:>14}",
+            label,
+            human(size),
+            ms(read.as_micros() as f64),
+            ms(first.as_micros() as f64),
+            ms((read + first).as_micros() as f64),
         );
     }
     println!();

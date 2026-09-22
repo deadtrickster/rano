@@ -129,10 +129,31 @@ fn is_wide(u: u32) -> bool {
 /// paths in `ui`/`editor` are exact. This is the common case (ASCII source)
 /// and the one the per-frame cost is measured on.
 pub fn is_simple(chars: &[char]) -> bool {
-    chars.iter().all(|&c| {
-        let u = c as u32;
-        u != 0x09 && char_width(c) == 1
-    })
+    is_simple_prefix(chars, usize::MAX)
+}
+
+/// [`is_simple`] over at most the first `limit` characters.
+///
+/// The bound exists for rows measured in megabytes: a minified bundle or a
+/// one-line JSON blob is a single row of millions of characters, and scanning
+/// every one of them to answer "is this row ordinary?" costs ~6 ns per
+/// character — 25 ms on a 4 MB row, per keystroke. A caller that has a cheap
+/// fallback for the rare non-simple case can bound the scan and take it.
+///
+/// **The trade, stated:** a row longer than `limit` whose first `limit`
+/// characters are ordinary is *assumed* ordinary for its whole length, so a
+/// tab or a wide character past the limit would be mis-measured by the column
+/// it occupies — one column, on a row nobody can see the end of.
+pub fn is_simple_prefix(chars: &[char], limit: usize) -> bool {
+    // ASCII and not a tab: the answer `char_width(c) == 1` gives for every
+    // character this accepts, without the range checks. A non-ASCII character
+    // that IS one column wide (é, for one) now answers false, which is
+    // CONSERVATIVE — the row takes the general measuring path and renders
+    // identically — and it is what makes the scan cheap enough to run over
+    // 193M characters at open (measured 2026-09-22: 1.1 s → 120 ms).
+    chars[..limit.min(chars.len())]
+        .iter()
+        .all(|&c| c.is_ascii() && c != '\t')
 }
 
 /// One cluster: where it starts, and the display column its first cell sits
@@ -323,6 +344,34 @@ mod tests {
                 assert_eq!(take, eager[..k], "{s:?} stopped after {k}");
             }
         }
+    }
+
+    #[test]
+    fn a_bounded_simplicity_scan_is_conservative_and_cheap() {
+        // A row of megabytes must not be scanned whole to answer "is this
+        // row ordinary?" — 193 MB of that was 1.1 s at open. The bound
+        // answers for a prefix and the answer is conservative: everything it
+        // accepts IS simple, so a row it wrongly rejects renders identically
+        // through the general path.
+        let plain = cs(&"a".repeat(50_000));
+        assert!(is_simple_prefix(&plain, 4_000));
+        assert!(is_simple(&plain)); // and unbounded agrees
+        // A tab PAST the bound: the bounded scan misses it (the stated
+        // trade), and the unbounded scan catches it.
+        let mut late_tab = cs(&"a".repeat(10_000));
+        late_tab[5_000] = '\t';
+        assert!(is_simple_prefix(&late_tab, 4_000), "the bound stops first");
+        assert!(!is_simple(&late_tab), "the full scan sees it");
+        // A non-ASCII one-column character (é) is rejected even though it
+        // occupies a single column: conservative, and the reason the scan is
+        // a cheap ASCII test.
+        assert!(!is_simple_prefix(&cs("café"), 100));
+        // A tab or a wide character inside the bound is caught.
+        assert!(!is_simple_prefix(&cs("a\tb"), 100));
+        assert!(!is_simple_prefix(&cs("中日"), 100));
+        // An empty row is trivially simple, and a limit of 0 accepts anything.
+        assert!(is_simple_prefix(&[], 100));
+        assert!(is_simple_prefix(&cs("\t"), 0));
     }
 
     #[test]

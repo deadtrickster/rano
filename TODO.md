@@ -351,18 +351,8 @@ The concern was typing on heavy syntaxes, minified JS (one enormous line) and
 
 ### Still slow, and why
 
-- [ ] **A single line of megabytes has no window to hide in.** minified.js is
-  one 4 MB line: the window is per-ROW, so it covers the entire file, and a
-  keystroke still parses and walks all 4 MB (~1.1 s). The fix is a window
-  expressed in (row, col) — the wrap table already knows the visible
-  segment's char range (`seg_chars`), so the parse could start mid-line.
-  That is the next thing to do, and it is the case the operator named first.
-- [ ] **Opening a 200 MB file parses it once, in full.** The first highlight
-  is O(document) by construction; at 200 MB that is minutes. Nothing in this
-  round touches it. Options: parse incrementally from empty (feed the buffer
-  in chunks, keeping the tree), or open with highlighting off above a size
-  nothing sane would highlight, or parse only the first window and mark the
-  rest unhighlighted until scrolled to.
+- [ ] **Opening a 200 MB file parses it once, in full.** SOLVED 2026-09-22 by
+  the windowed open below; kept as the record of what the problem was.
 - [ ] **`buf.text()` per whole-buffer refresh** copies the document (24 ms at
   30 MB). Only reached for small buffers and the export path now, so it is
   not on the hot path — but the export path pays it twice (once to parse,
@@ -387,3 +377,77 @@ Whole-document highlight vs the pieces, median of 3:
 
 (`wrap tbl` and `hl.refresh` are the direct calls; a keystroke uses the
 incremental table and the window, which is why `keypress` is far below them.)
+
+### 12b. Hundreds of megabytes, minified files, and what research said
+
+Researched 2026-09-22, operator-instigated. Three findings changed the design:
+
+1. **`ts_parser_set_included_ranges` parses a PORTION of a document "but still
+   return a syntax tree whose ranges match up with the document as a whole"**
+   (tree-sitter's *Advanced Parsing*). The tree keeps absolute offsets, so a
+   partial parse needs no re-basing.
+2. **Helix parses only the visible text** and has filed the consequence as a
+   known trade (`helix#2285`: a definition off screen is not highlighted).
+   Same family: `helix#3072` asks for exactly this on large files.
+3. **VS Code goes further and skips tokenisation outright for long lines**
+   (`editor.maxTokenizationLineLength`), and disables it wholesale for large
+   files (`editor.largeFileOptimizations`).
+
+The operator's framing is the design: **parsing does not imply colouring, and
+for a huge file you colour only the visible part plus a margin.** What landed:
+
+- [x] **The window is a CHAR range, not a row range** (`syntax::Window`:
+  `rows` plus `cols` for the first and last row). A row can be megabytes —
+  minified JS, one-line JSON — so a row-shaped window over one of those is
+  the whole file. Measured: 4 MB single-line bundle **1108 ms → 5.0 ms** per
+  keystroke; a 20 MB one, **40.7 ms**.
+- [x] **Highlighting is lazy, once per FRAME** (`Editor::ensure_highlight`),
+  not once per edit. A burst of keystrokes between two frames costs one
+  highlight; the run loop calls it before painting, which is what makes the
+  first frame of a huge file the viewport window rather than the document.
+- [x] **Opening is windowed too.** `BufferState::new` no longer highlights:
+  measured open, read + first highlight — 7 MB Rust **35 ms**, 30 MB log
+  **58 ms**, 193 MB **387 ms** (299 of it the read).
+- [x] **The wrap table's per-row scan got a fast conservative path**
+  (`width::is_simple_prefix`: ASCII-and-not-a-tab, which is what 193M
+  characters of a log needs). First highlight of the 193 MB file **1.1 s →
+  88 ms**.
+- [x] **A quadratic in markdown's inline pass.** It handed the parser the
+  whole source per node; tree-sitter walks the excluded input to reach each
+  range, so a 2,400-paragraph document cost **9.8× for 4× the text**. Now
+  each node's own bytes are sliced and the row base offset added back:
+  **4.0×**, dead linear. Caught by a new test that asserts the ratio rather
+  than a wall-clock bound — the old bound flaked under the suite's own
+  parallelism, and replacing it is what found this.
+
+Measured after all of it (release, one keystroke = edit + the frame's
+highlight):
+
+| file | size | edit only | edit + highlight |
+|---|---|---|---|
+| 193 MB log | 184.2 MiB | 0.1 µs | **4.0 ms** |
+| 30 MB log | 29.2 MiB | 632 µs | **0.50 ms** |
+| 20 MB minified JS (1 line) | 19.9 MiB | 32 ms | **40.7 ms** |
+| 4 MB minified JS (1 line) | 3.9 MiB | 844 µs | **5.0 ms** |
+| 7 MB Rust | 7.0 MiB | 462 µs | **1.6 ms** |
+
+Still slow, with the measurement that says so:
+
+- [ ] **Undo clones the whole row on every keystroke.** minified20's
+  "edit only" is 32 ms and it is all `begin_action`: the undo snapshot for a
+  one-character insertion on a 20 MB single row copies the row. For an
+  ordinary file that is a few hundred bytes and invisible; for a single
+  enormous row it is the largest cost left. A fix means recording the char
+  range an insertion touched instead of the row — a change to the undo model
+  (`UndoStep.before: Vec<Vec<char>>`), not a local patch.
+- [ ] **The wrap prefix is re-summed from the edited row down**, O(rows)
+  arithmetic. That is the 193 MB file's 4.0 ms per keystroke (2.6M additions).
+  A Fenwick tree over segment counts would make it O(log rows); a 4 ms
+  keystroke on a 193 MB file is not worth that yet.
+- [ ] **`hl.refresh` (whole document) is still O(document)** by design, and
+  the export path calls it. `rano --export html huge200.log` will take as long
+  as it takes: colouring everything is what an export is for.
+- [ ] **A window's edges are approximate** — a construct opening outside is
+  coloured as if it opened inside. `a_window_can_be_part_of_a_single_enormous_row`
+  prints how many columns differ (4 of 64 at a 32-column probe), which is why
+  the editor's margin is 4,000 columns and 200 rows.

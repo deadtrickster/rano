@@ -13,5 +13,10 @@
 
 pub mod buffer;
 pub mod encoding;
+// The row store (§15) is exposed by the LIBRARY target until the editor's
+// migration to it lands, which is what §16.3 stage 3 is. It is not declared in
+// `main.rs` yet because nothing there reads it, and a module the binary does
+// not use is dead code by the compiler's reckoning — correctly.
+pub mod rows;
 pub mod syntax;
 pub mod width;

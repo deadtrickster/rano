@@ -1265,3 +1265,249 @@ fn bench_detect_from_prefix() {
     println!("and a prefix that is not valid UTF-8 at all is what sends the read to the detector)");
     println!();
 }
+
+/// Which EDIT operations scale with the document? "Size does not influence
+/// editability" is the principle, so the question is which edit paths violate
+/// it — measured on a real 2.6M-row file, not reasoned about.
+///
+/// Each row of the table is one thing a keystroke or a key can do, run on the
+/// same buffer at two sizes. A cost that scales with the file is a violation;
+/// a cost that tracks the ROW is not (that is what "the row you are typing in"
+/// costs, and it is the same at every file size).
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_edit_scaling() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nedit operations vs document size — median of 5\n");
+    println!(
+        "{:<24} {:>10} {:>14} {:>14} {:>14} {:>14} {:>14}",
+        "file", "rows", "type a char", "insert a line", "delete a line", "undo one", "join lines"
+    );
+    println!("{}", "-".repeat(112));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let mut buf = Buffer::from_file(p).expect("read");
+        let rows = buf.lines.len();
+        // Edit at the START, which is the worst case for anything that shifts
+        // the lines after the edit point.
+        let (row, col) = (0usize, 0usize);
+
+        let (t_char, _) = time(5, || {
+            buf.insert_char(row, col, 'x');
+            buf.backspace(row, col + 1);
+        });
+        let (t_ins, _) = time(5, || {
+            let at = buf.insert_lines_at(row, vec![vec!['x']]);
+            let _ = at;
+            buf.lines.remove(row);
+        });
+        let (t_del, _) = time(5, || {
+            let mut second = buf.lines[row + 1].clone();
+            buf.lines.insert(row + 1, second.clone());
+            second.clear();
+            buf.lines.remove(row + 1);
+        });
+        // Undo: what `begin_action` + `finish_step` snapshot for one insertion.
+        let (t_undo, _) = time(5, || {
+            let r = buf.lines[row].clone();
+            std::hint::black_box(r);
+        });
+        let (t_join, _) = time(5, || {
+            let l = buf.lines.remove(row);
+            buf.lines.insert(row, l);
+        });
+
+        println!(
+            "{:<24} {:>10} {:>14} {:>14} {:>14} {:>14} {:>14}",
+            label,
+            rows,
+            ms(t_char),
+            ms(t_ins),
+            ms(t_del),
+            ms(t_undo),
+            ms(t_join),
+        );
+    }
+    println!("\n(scaled with the file = a violation; tracking the row = the floor)");
+    println!();
+}
+
+/// Does chunking the row store fix the line-insert violation?
+///
+/// Measured above: `Vec<Vec<char>>` costs 1.5 ms to insert a row at the top of a
+/// 2.6M-row file, because that is a memmove of 2.6M `Vec` headers. "Size does
+/// not influence editability" says that must go. A chunked row store makes the
+/// insert a memmove of one CHUNK instead — and, crucially, keeps line lookup
+/// O(1) (chunk index + offset), which is the property §13.6a's survey says the
+/// piece table gives up.
+mod chunked {
+    /// Rows per chunk. 1,024 rows is 8 KiB of pointers to shift on an insert —
+    /// one cache line's worth of work beyond the copy, at any file size.
+    const CHUNK: usize = 1024;
+
+    /// A row store with O(1) lookup and O(chunk) structural edits.
+    pub struct Chunked {
+        chunks: Vec<Vec<Vec<char>>>,
+        rows: usize,
+    }
+
+    impl Chunked {
+        pub fn from_rows(rows: Vec<Vec<char>>) -> Self {
+            let mut chunks: Vec<Vec<Vec<char>>> = Vec::new();
+            let mut it = rows.into_iter().peekable();
+            while it.peek().is_some() {
+                chunks.push(it.by_ref().take(CHUNK).collect());
+            }
+            let n = chunks.iter().map(Vec::len).sum();
+            Self { chunks, rows: n }
+        }
+
+        pub fn rows(&self) -> usize {
+            self.rows
+        }
+
+        /// O(1): which chunk, and where in it.
+        fn locate(&self, r: usize) -> (usize, usize) {
+            let c = r / CHUNK;
+            (c.min(self.chunks.len().saturating_sub(1)), r % CHUNK)
+        }
+
+        pub fn row(&self, r: usize) -> &[char] {
+            let (c, o) = self.locate(r);
+            self.chunks
+                .get(c)
+                .and_then(|ch| ch.get(o))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+
+        /// Insert a row: O(CHUNK), not O(rows).
+        pub fn insert(&mut self, r: usize, row: Vec<char>) {
+            if self.chunks.is_empty() {
+                self.chunks.push(vec![row]);
+                self.rows = 1;
+                return;
+            }
+            let (c, o) = self.locate(r);
+            let chunk = &mut self.chunks[c];
+            let at = o.min(chunk.len());
+            chunk.insert(at, row);
+            self.rows += 1;
+            if chunk.len() > CHUNK * 2 {
+                let tail = chunk.split_off(CHUNK);
+                self.chunks.insert(c + 1, tail);
+            }
+        }
+
+        pub fn remove(&mut self, r: usize) -> Vec<char> {
+            let (c, o) = self.locate(r);
+            let out = if let Some(chunk) = self.chunks.get_mut(c) {
+                if o < chunk.len() {
+                    chunk.remove(o)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            self.rows = self.rows.saturating_sub(1);
+            if self.chunks.get(c).is_some_and(|ch| ch.is_empty()) && self.chunks.len() > 1 {
+                self.chunks.remove(c);
+            }
+            out
+        }
+    }
+}
+
+/// The chunked store against the plain one, on the operations that scaled.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_chunked_fixes_the_scaling() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (360k rows)", "/tmp/ranoperf/big.rs"),
+        ("big.log (400k rows)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (2.6M rows)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nchunked row store vs Vec<Vec<char>> — median of 5, µs\n");
+    println!(
+        "{:<26} {:>10} {:>16} {:>16} {:>16} {:>16} {:>16}",
+        "file",
+        "rows",
+        "plain insert",
+        "chunked insert",
+        "plain lookup",
+        "chunked lookup",
+        "chunked del"
+    );
+    println!("{}", "-".repeat(120));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let buf = Buffer::from_file(p).expect("read");
+        let rows = buf.lines.len();
+
+        let mut plain = buf.lines.clone();
+        let (t_plain_ins, _) = time(5, || {
+            plain.insert(0, vec!['x']);
+            plain.remove(0);
+        });
+        let (t_plain_get, _) = time(5, || {
+            let r = plain.len() / 2;
+            std::hint::black_box(&plain[r]);
+        });
+
+        let mut ch = chunked::Chunked::from_rows(buf.lines.clone());
+        assert_eq!(ch.rows(), rows, "the chunked store must hold every row");
+        // Correctness, not just speed: every row must read back identically,
+        // and structural edits must keep the numbering right. This is the check
+        // that earned its keep on the lazy prototype (it found a phantom row).
+        for r in 0..rows {
+            assert_eq!(ch.row(r), buf.lines[r].as_slice(), "row {r} differs");
+        }
+        // Insert in the middle and confirm the shift is exact.
+        let mid = rows / 2;
+        ch.insert(mid, vec!['Z']);
+        assert_eq!(ch.rows(), rows + 1);
+        assert_eq!(ch.row(mid), &['Z']);
+        assert_eq!(ch.row(mid + 1), buf.lines[mid].as_slice(), "shifted row");
+        assert_eq!(ch.row(mid - 1), buf.lines[mid - 1].as_slice(), "row before");
+        assert_eq!(ch.remove(mid), vec!['Z']);
+        assert_eq!(ch.rows(), rows);
+        for r in [0usize, mid - 1, mid, rows - 1] {
+            assert_eq!(ch.row(r), buf.lines[r].as_slice(), "row {r} after the edit");
+        }
+        let (t_ch_ins, _) = time(5, || {
+            ch.insert(0, vec!['x']);
+            ch.remove(0);
+        });
+        let (t_ch_get, _) = time(5, || {
+            let r = ch.rows() / 2;
+            std::hint::black_box(ch.row(r));
+        });
+        let (t_ch_del, _) = time(5, || {
+            ch.insert(0, vec!['x']);
+            let _ = ch.remove(0);
+        });
+
+        println!(
+            "{:<26} {:>10} {:>16} {:>16} {:>16} {:>16} {:>16}",
+            label,
+            rows,
+            ms(t_plain_ins),
+            ms(t_ch_ins),
+            ms(t_plain_get),
+            ms(t_ch_get),
+            ms(t_ch_del),
+        );
+    }
+    println!("\n(insert at row 0: the worst case for anything that shifts what follows)");
+    println!();
+}

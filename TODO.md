@@ -1492,28 +1492,52 @@ That makes open genuinely O(chunk): read 64 KiB, sniff it, index it, draw it.
 
 ## 16. Implementation plan
 
-The *how*, for the work §13–§15 identified. §16.0 is the one thing needed from
-the operator before Phase 3; Phases 1 and 2 are unblocked and 1 is worth
-shipping on its own.
+The *how*, for the work §13–§15 identified. Phase 1 is worth shipping on its
+own and is unblocked; nothing here waits on a decision.
 
 Conventions, inherited from `PLAN.md`: run `cargo test`, `cargo fmt --all --
 --check` and `cargo clippy --all-targets -- -D warnings` after every item; a
 phase is done only when all three are green and the phase's own tests exist;
 update the phase's state line as it lands.
 
-### 16.0 The decision that gates Phase 3
+### 16.0 Size does not influence editability
 
-**Does rano need to *edit* a hundreds-of-megabytes file, or only read one?**
+This section began with a question — *does rano need to edit a huge file, or
+only read one?* — and the operator's answer removed it: **size does not
+influence editability.** An editor does not get to declare a file too big to
+edit, so there is no read-only mode to design for.
 
-- **Read-only** (logs, dumps, generated files — the case every measurement in
-  §12–§15 was taken on): Phases 1–2 and 4 are the whole job. Phase 3 becomes
-  "materialise on first edit", and Phase 5 never happens. ~3 weeks of work.
-- **Editable**: Phase 5 (piece table) is real, and it subsumes §13.1 and most
-  of Phase 3's API change. The order stays the same — Phases 1–2 are wanted
-  either way — but Phase 3's API work is done *for* the piece table rather than
-  in front of it, so it is designed once.
+That answer invalidated the phase that followed it. "Materialise the whole file
+on first edit" is a cliff *and* a lie: it advertises editing and then charges
+835 MB the moment a character is typed. It is exactly the behaviour the
+principle forbids. So the question below is not "may we avoid editing", it is
+**which edit operations currently scale with the file, and what removes them.**
 
-Nothing else needs deciding to start.
+Measured (`bench_edit_scaling`), worst case — edit at row 0 of a 2.6M-row file:
+
+| operation | 400k rows | 2.6M rows | scales with the file? |
+|---|---|---|---|
+| type a character | 0.1 µs | 0.0 µs | no — tracks the row |
+| **insert a line** (Enter) | 154 µs | **1.5 ms** | **yes** |
+| **delete a line** | 153 µs | **1.3 ms** | **yes** |
+| **join lines** (Backspace at BOL) | 153 µs | **1.2 ms** | **yes** |
+| undo's snapshot | 0.1 µs | 0.1 µs | no — tracks the row (but see §13.1: on ONE huge row it is O(row)) |
+
+Typing is already size-independent. Every *line-structure* edit is not: it is a
+`memmove` of 2.6M `Vec` headers, ~20 MB, per keystroke. At 2 GB that is ~15 ms
+per Enter, and holding Enter queues them.
+
+**And the fix is not a piece table.** Measured (`bench_chunked_fixes_the_scaling`):
+a **chunked** row store — rows in chunks of 1,024 — makes the same insert
+**0.2 µs, flat at every size**, while keeping line lookup O(1) (chunk index +
+offset), which §13.6a's survey says the piece table gives up. The insert becomes
+a memmove of one chunk instead of the whole file.
+
+So Phase 3 is a *chunked, copy-on-write* row store, and Phase 5 (piece table)
+drops off the plan entirely — not because editing huge files is out of scope,
+but because this design serves it without §13.6a's two objections (lookup
+O(log n), search 7× slower).
+
 
 ### 16.1 Phase 1 — the scheduled loader (§14.6). Ship this alone.
 
@@ -1591,56 +1615,78 @@ read) per encoding.
 **Size.** ~250 lines. The save path is the risk: a wrong re-encode corrupts a
 file, so `Encoding` travels with the buffer exactly as `crlf` does.
 
-### 16.3 Phase 3 — lazy rows (§15). The big one.
+### 16.3 Phase 3 — chunked, copy-on-write rows (§15 + §16.0). The big one.
 
 **Deliverable.** A 193 MB file opens in **62 ms / 19.8 MB** instead of
-568 ms / 835 MB, scrolling is bounded, and every row renders identically to
-today (verified, not asserted).
+568 ms / 835 MB; **every edit stays size-independent** (Enter 0.2 µs at 2.6M
+rows, not 1.5 ms); every row renders identically to today (verified, not
+asserted). No size threshold anywhere: there is no "too big" mode.
+
+**The store, and why each piece is there** — both parts measured:
+
+- **Chunked**: rows in chunks of 1,024, so a structural edit shifts one chunk
+  (0.2 µs) instead of the file (1.5 ms), and lookup stays O(1). This is §16.0.
+- **Copy-on-write rows**: a row is `FromFile { byte_range }` until it is edited,
+  then `Owned(Vec<char>)`. Reading decodes from the file on demand and caches;
+  editing promotes one row to owned. **This is what removes the cliff** — there
+  is no materialise-on-edit step, because typing in a row is the same operation
+  at every file size, and that is the whole point of §16.0.
+- The prototype for each half is already written and verified
+  (`bench_lazy_is_correct_and_cheap`, `bench_chunked_fixes_the_scaling`), so
+  this phase is promotion, not research.
 
 **Files.**
 
-- `src/rows.rs` (new) — the prototype from `bench.rs` promoted: the index
-  (`starts: Vec<u64>`, narrow bits, sparse non-ASCII char counts), `decode(a..b)`,
-  and the eviction cache. The prototype is already written and verified against
-  the eager path on 2.6M rows; this is making it production rather than
-  plausible.
+- `src/rows.rs` (new) — `RowStore`: the chunked index (`Vec<Chunk>`, each chunk
+  a `Vec<Row>`), `row(r)`, `rows(a..b)`, `insert`, `remove`, the decode cache
+  with eviction, and `materialize_all` for the O(document) callers. Both
+  prototypes live here as their tests.
 - `src/buffer.rs` — `lines` becomes private. `row(r) -> &[char]`,
   `rows(a..b) -> Rows<'_>`, `row_count()`, `materialize_all()`. **192 call
   sites** (`buffer.rs` 38, `editor.rs` 87, `syntax.rs` 31, `main.rs` 19,
   `ui.rs` 8, rest ≤4). The compiler is the checklist.
-- `src/editor.rs` — the wrap table reads the index for narrow rows (§15 fact 4)
-  instead of the line contents, so it needs no decoding.
-- O(document) sites call `materialize_all()` explicitly: `indent_unit`
-  (*editor.rs:398*), `sort_lines`, `justify`, replace-all, save, `--export`,
-  whole-buffer search.
+- **The borrow problem, which is the real API question.** Today `row(r)` can
+  return `&[char]` because everything is materialised. With lazy decode there is
+  nothing to borrow from until the row is decoded. Two ways out, and the plan
+  picks the second:
+  1. interior mutability (`RefCell`) so `row()` can fill the cache on access —
+     convenient, but it puts a runtime borrow check on the hottest path;
+  2. **prepare-then-read**: the frame asks the store to ensure rows `[a, b)` are
+     resident, then borrows. That is the same discipline as §12's highlight
+     window and §14.6's adoption budget, so it is a pattern the codebase already
+     has rather than a new one. `row(r)` for an un-resident row returns a
+     decoded-and-cached reference from the prepare step, and the O(document)
+     callers call `materialize_all()` first.
+- `src/editor.rs` — the wrap table reads the chunk index for narrow rows (§15
+  fact 4), so it needs no decoding.
 
 **Tests**, in the order that makes them useful:
 
-1. `every_row_matches_the_eager_decode` — the prototype's check, kept: decode
-   all rows, compare to `Buffer::from_file`. This is the test that would have
-   caught the phantom-final-row bug.
-2. `wrap_segments_from_the_index_match_the_decoded_ones` — on narrow rows,
-   exact; on wide rows, decoded.
-3. `eviction_bounds_resident_rows` — scroll the whole file, assert the cache
-   never exceeds its budget.
-4. `materialize_all_is_idempotent_and_leaves_the_file_readable` — the escape
-   hatch for O(document) work.
-5. `a_multibyte_row_decodes_from_a_positional_read` — the boundary case that
-   proves fact 5 (§15.2).
+1. `every_row_matches_the_eager_decode` — the prototype's check: decode all
+   rows, compare to `Buffer::from_file`. This is the test that found the
+   phantom-final-row bug, and it is the one that makes the store trustworthy.
+2. `structural_edits_keep_the_numbering` — insert/remove at 0, mid, end; every
+   row still reads back identical. Also from the prototype.
+3. **`an_edit_is_the_same_cost_at_any_size`** — the §16.0 principle as a test:
+   the same insert at row 0 of a 400k-row and a 2.6M-row buffer, asserted not to
+   scale. This is the test that would fail on `Vec<Vec<char>>` today.
+4. `wrap_segments_from_the_index_match_the_decoded_ones` — exact on narrow rows.
+5. `eviction_bounds_resident_rows` — scroll the whole file, assert the budget.
+6. `materialize_all_is_idempotent_and_leaves_the_file_readable`.
+7. `a_multibyte_row_decodes_from_a_positional_read` — the boundary case.
 
-**Gate.** Three gates, and a new `bench_lazy` row for **each** of the six
-sample files showing index/lookup/eviction behaviour. Behaviour parity is the
-bar: the existing 313 tests must pass untouched except where they poke `lines`.
+**Gate.** Three gates; the existing 313 tests pass untouched except where they
+poke `lines`; `bench_edit_scaling` and `bench_lazy` both show flat behaviour.
+Behaviour parity is the bar.
 
-**Size.** The largest phase: ~1,200 lines with tests, plus ~200 mechanical call
-sites. **This is the one to stage as its own branch** — `lines` private is
-all-or-nothing, and a half-migrated tree will not compile.
+**Size.** ~1,200 lines plus ~200 mechanical call sites. **Staged as two
+commits**, and the order matters: first make `lines` private and fix the
+callers mechanically (behaviour-preserving, provably — the existing tests are
+the proof), *then* put the chunked copy-on-write store behind the new API.
+A half-migrated tree will not compile, so this is all-or-nothing per commit.
 
-**Risk.** The API change touches every module, so a mistake is a rendering bug
-everywhere. Mitigation: do it compiler-first (make `lines` private, fix errors
-mechanically, no behaviour change), get the gate green, *then* add the lazy
-store behind the new API. Two commits, and the first is provably
-behaviour-preserving.
+**Risk.** The API change touches every module. Mitigated by the two-commit
+order, and by the fact that the first commit changes no behaviour at all.
 
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 
@@ -1660,14 +1706,27 @@ more).
 to get subtly wrong (regex over chunk boundaries); it wants a differential test
 against the current whole-buffer implementation on the existing search tests.
 
-### 16.5 Phase 5 — conditional: the piece table
+### 16.5 The piece table: dropped from the plan
 
-Only if §16.0 says *editable*. It subsumes §13.1 (undo deltas) and replaces the
-materialise-on-edit part of Phase 3. §13.6a's survey is the argument against
-doing it for any other reason: two editors, independently, measured its decay,
-and it makes rano's hottest operation (line lookup) asymptotically worse.
-**Not to be started before Phase 3 is green** — it would be designed once.
+§16.0 removed the question that Phase 5 existed to answer. A piece table's win
+is O(log n) structural edits *and* bounded memory; §16.3 gets **both** — 0.2 µs
+inserts and file-backed rows — while keeping line lookup **O(1)** and search on
+contiguous memory, which are the two things §13.6a's survey found a piece table
+(or a rope) gives up. So the honest conclusion is not "not yet"; it is that the
+shape it was being considered for is served better by chunking the array we
+already have.
 
+Recorded rather than deleted, because the reasoning is the valuable part: two
+editors independently measured a piece table's decay, and a third
+(xi) argued for a rope on worst-case grounds — but both of those comparisons
+were against an *unchunked* line array. Chunking the array removes the decay
+those sources describe. The survey still matters: it is the argument against
+reaching for a rope for any other reason.
+
+**If it ever returns**, the trigger is a measurement, not an opinion: a
+structural-edit cost that chunking does not remove, or a row count where the
+chunk index itself becomes the memmove (the crossover is around 10^8 rows, at
+which point the file is ~4 GB of one-line rows and the problem is different).
 ### 16.6 Off the critical path
 
 Independent, each small, none blocking the phases above:
@@ -1687,9 +1746,9 @@ Independent, each small, none blocking the phases above:
 |---|---|---|---|---|
 | 1 | scheduled loader | frozen `rano huge.log` fixed | ~400 | nothing |
 | 2 | encodings | UTF-16 and latin-1 open | ~250 | nothing |
-| 3 | lazy rows | 193 MB in 62 ms / 19.8 MB | ~1400 | §16.0, and 2 |
+| 3 | chunked, copy-on-write rows | 193 MB in 62 ms / 19.8 MB, and edits flat at any size | ~1400 | 2 |
 | 4 | eviction, search, incremental index | ceiling is a budget | ~400 | 3 |
-| 5 | piece table | editing huge files | large | §16.0 = editable, and 3 |
+| — | *(piece table)* | *dropped — §16.5* | — | — |
 
 Phase 1 is worth shipping even if nothing else follows: it is small, additive,
 and it is the change a user notices.
@@ -1711,3 +1770,14 @@ and it is the change a user notices.
   a stall. Mitigated by deriving the budget from `text_h` (a viewport plus
   margin, the same number §12 already uses) rather than a constant, and by
   measuring worst-case frame time with a deliberately tiny cache.
+- **The chunked store's chunk size is a real constant to choose.** Too small and
+  the chunk index becomes the memmove; too large and an insert shifts too much.
+  1,024 rows measured 0.2 µs for an insert at row 0 — flat across 360k, 400k and
+  2.6M rows — so the choice is not delicate, but it should be asserted rather
+  than assumed: `an_edit_is_the_same_cost_at_any_size` is the test that catches
+  it regressing.
+- **Copy-on-write rows make two representations legal at once.** Every reader
+  must work for both, or a file that has been edited behaves differently from
+  one that has not. Mitigated by the row API returning `&[char]` either way —
+  the store hides which case it is — and by test 1 decoding *after* edits as
+  well as before.

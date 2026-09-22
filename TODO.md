@@ -1539,6 +1539,40 @@ but because this design serves it without §13.6a's two objections (lookup
 O(log n), search 7× slower).
 
 
+### 16.0a State: what has landed (2026-09-22)
+
+| phase | state | evidence |
+|---|---|---|
+| 1 loader | **done** | content on screen 120 ms after launch on the 193 MB log (was 575 ms of blank); `^C` exits during the load; 20 tests |
+| 2 encodings | **done** | all six shapes: UTF-16 opens, latin-1 and cp1252 open (were refused), the UTF-8 BOM is stripped rather than being a column; 12 tests plus loader/load_ctrl coverage |
+| 3 store | **built and tested**, not yet wired | `src/rows.rs`: chunked + copy-on-write, 12 tests, exposed by the library target |
+| 3 migration | **not started** | 192 `lines` call sites; see the warning below |
+| 4 eviction/search/index | pending | needs 3 |
+
+**The migration is the part that cannot be half-done.** `Buffer::lines` is a
+public field read by every module, and a partly-migrated tree does not compile —
+so it is one commit, and the plan's ordering (make it private behaviour-
+preserving *first*, put the store behind it *second*) is what keeps that commit
+reviewable.
+
+**And it has one problem the store alone does not solve**, found while building
+it and worth knowing before starting: several callers iterate every row
+(`ensure_wrap_prefix`, `build_styles`, `search`, `export`), and with lazy decode
+iteration needs `&mut` to decode — which is the whole point, but it means those
+callers cannot simply be pointed at accessors. Each needs a decision:
+
+- **the wrap table** should read the INDEX rather than the rows (byte lengths
+  are known without decoding, and for a narrow row the char count is the byte
+  count — §15 fact 4). This is the one that makes scrolling work at any size,
+  and it is the reason the index exists.
+- **the highlighter** already takes a window (§12), so it needs its rows
+  materialised for that window only — which is what `ensure` is for.
+- **search and export** are O(document) by nature; they call
+  `materialize_all()` and say so, rather than pretending otherwise.
+
+That is real design work, not a mechanical port, which is why this is stage 3
+rather than part of the store.
+
 ### 16.1 Phase 1 — the scheduled loader (§14.6). Ship this alone.
 
 **Deliverable.** `rano huge.log` puts a frame on screen and starts handling keys

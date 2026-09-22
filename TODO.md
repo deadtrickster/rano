@@ -728,6 +728,17 @@ The byte scan is 15× faster and the index is **42× smaller**. That is the whol
 argument, and it is why the operator's framing is the right one: **edit is a
 viewport, so load the minimum that makes the top of the file look right.**
 
+**The sources agree, independently.** VS Code reached the same conclusion from
+their own reimplementation (§13.7): "Finding and caching line breaks is much
+faster than splitting the file into an array of strings." And their sharpest
+lesson is about rano's existing hot path: they tuned `insert`/`delete`/`search`
+and found "none of those optimizations mattered. The hottest method was
+`getLineContent`" — invoked by the view *and the tokenizer*. In rano that is
+`line_to_spans` and the capture walk, which is why §12 was about the highlight
+and not the data structure. It also means any change here is judged by what it
+does to line lookup, not to editing: making lookup worse to make editing better
+would be trading the hot path for the cold one.
+
 **Mechanism, and the one fact that makes it possible.** `Buffer` is
 `lines: Vec<Vec<char>>` (*buffer.rs:11-12*) and `from_file` fills every row
 before returning (*buffer.rs:40*). To decode only a window you first have to
@@ -771,14 +782,30 @@ same for `0x0D`), so a byte scan finds exactly the line breaks. That is what
    original file size". Their design adds three things ours would need too:
    per-node line-break caches, a red-black tree with subtree metadata for
    O(log n) lookup, and multiple buffers because a single buffer capped out.
-   *Cost:* a rewrite of `Buffer` and the save path. The undo model (13.1) sits
-   on top of it, so those two want doing together or not at all.
+
+   **And the part that argues against it** — the half of the VS Code post read
+   second, recorded in §13.7: their own benchmark found "TA DA, we found the
+   Achilles heel of piece tree. A large file, with 1000s of edits, will lead to
+   thousands or tens of thousands of nodes … that is significantly more than
+   `O(1)` which the line array enjoyed." Line lookup becomes `O(log n)` in the
+   number of **edits**, where rano's array is `O(1)`. Their mitigation was to
+   consider "a normalization step, where we would recreate buffers and nodes if
+   certain conditions such as a high number of nodes are met" — a second
+   mechanism to get back what the first gave up. They also warn that CRLF in a
+   tree took "several attempts until I had a solution that was correct and
+   fast", which rano avoids entirely with `crlf: bool`.
+
+   *Cost:* a rewrite of `Buffer` and the save path, plus a normalization pass,
+   and it makes the hottest operation asymptotically worse by their own
+   profiling. The undo model (13.1) sits on top of it, so those two want doing
+   together or not at all.
 4. **Just reduce the per-line overhead.** `Vec<Vec<char>>` pays 24 bytes of
-   header *per line* — 56% of a 19-character row *(*13.4*'s 6.71 bytes/char
-   for `big.rs`)*. A flat `Vec<char>` plus a line-start index removes it and is
-   a much smaller change than 3. **But it does not touch the 4-bytes-per-char
-   cost**, which is the one that says 184 MB → 835 MB, so it is a 30% fix for
-   the same amount of surgery. It is not a substitute for 1–3.
+   header *per line* — 56% of a 19-character row, which is what §13.4's 6.71
+   bytes/char for `big.rs` is made of. A flat `Vec<char>` plus a line-start
+   index removes it and is a much smaller change than 3. **But it does not
+   touch the 4-bytes-per-char cost**, which is the one that says 184 MB →
+   835 MB, so it is a 30% fix for the same amount of surgery. It is not a
+   substitute for 1–3.
 
 **What would settle it.** Whether the operator wants to *edit* a
 hundreds-of-megabytes file, or only read one. Reading is the case that happens
@@ -794,3 +821,99 @@ what the UI, the highlighter and the search are written against), so it wants
 doing deliberately and with the load-on-demand path covered by tests before
 the eager path comes out. Option 3 subsumes 13.1 and 13.4 and should be
 decided before either is implemented, or the work is done twice.
+
+### 13.7 Sources, and what was actually read
+
+The research behind §13 was done 2026-09-22. Recorded here because a finding
+without an address cannot be checked, and because the distinction between
+"read the page" and "saw a search snippet" decides how much weight a claim can
+carry.
+
+**Read in full** (fetched and read end to end):
+
+- Tree-sitter, *Advanced Parsing* —
+  <https://tree-sitter.github.io/tree-sitter/using-parsers/3-advanced-parsing.html>
+  The `set_included_ranges` documentation quoted in §12a is from here: "create
+  a syntax tree based on the text in certain *ranges* of a file", and the Go
+  binding's phrasing "parse only a *portion* of a document but still return a
+  syntax tree whose ranges match up with the document as a whole". Also the
+  editing section (`ts_tree_edit` before re-parsing with the old tree), which
+  is the API §13.3's option 2 would need.
+- VS Code, *Text Buffer Reimplementation*, Peng Lyu, 2018-03-23 —
+  <https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation>
+  The primary source for §13.6's option 3. Read in two sittings — the first
+  200 lines, then the rest — and the second half changed what I recorded, see
+  below.
+
+**Saw only as search snippets** (the claim is quoted from the snippet, not
+verified against the page):
+
+- VS Code large-file handling — <https://github.com/microsoft/vscode/issues/30243>
+  ("over 30MB or over 300K lines will be considered a large file"), and
+  <https://code.visualstudio.com/updates/v1_15> ("by disabling certain
+  features for large files, for example tokenization, line guides, and
+  wrapping or folding, we were able to optimize memory usage, in some cases,
+  by as much as 50%").
+- `editor.maxTokenizationLineLength` — the setting that skips tokenisation for
+  long lines, and <https://github.com/microsoft/vscode/issues/240918>, that it
+  is *not* honoured for some large files.
+- Helix — <https://github.com/helix-editor/helix/issues/2285> (highlighting
+  only works when the definition is on screen — the visible-only trade),
+  <https://github.com/helix-editor/helix/issues/3072> ("very slow *editing* of
+  large files when tree-sitter is used … like 2 seconds on 50K lines"), and
+  <https://github.com/helix-editor/helix/issues/338> (disabling tree-sitter on
+  >100 MB files; "tree-sitter/tree-sitter#222").
+- `chardetng` — <https://docs.rs/chardetng/> and
+  <https://docs.rs/chardetng/latest/chardetng/struct.EncodingDetector.html>.
+  The comparative claims quoted in §13.5 ("more accurate than ICU, more
+  complete than chardet, more explainable and modifiable than
+  compact_enc_det") are the crate's own marketing, from its docs front page —
+  not an independent benchmark.
+- Editor memory comparisons —
+  <https://github.com/levivilet/lvce-memory-benchmark> (note: not consulted
+  for any claim above; recorded because it came back in the search and
+  someone wanting numbers should start there).
+
+**What the second half of the VS Code post added** (and one thing it took
+away):
+
+1. **The piece tree's real weakness is line lookup, not editing.** "TA DA, we
+   found the Achilles heel of piece tree. A large file, with 1000s of edits,
+   will lead to thousands or tens of thousands of nodes … that is
+   significantly more than `O(1)` which the line array enjoyed." Line lookup
+   is `O(log N)` where `N` is the number of *edits*, not the file size. So the
+   piece table is not free for a reader; it trades memory for line-lookup
+   speed, and rano's current line array is `O(1)`. That belongs in §13.6's
+   option 3 and it was not in the first draft.
+2. **"The most important lesson this reimplementation taught me is to always
+   do real world profiling."** They tuned `insert`/`delete`/`search` and found
+   "none of those optimizations mattered. The hottest method was
+   `getLineContent`" — invoked by the view *and the tokenizer*. That is
+   exactly rano's hot path, and exactly why §12 was about the highlight rather
+   than the data structure.
+3. **They name the trap rano is in.** "Our text model used to assume that the
+   buffer is stored in an array and we frequently use `getLineContent` even
+   though sometimes it wasn't necessary. For example, if we just want to know
+   the character code of the first character of a line, we used a
+   `getLineContent` first and then did `charCodeAt` … This is wasteful."
+   rano's `buf.text()` per re-highlight is the same mistake at document scale:
+   re-encoding every line to hand the parser a `String` — 24 ms at 30 MB
+   (§12's table) — when the parser could read the bytes.
+4. **CRLF in a tree is "a programmer's nightmare"**: "for every modification,
+   we need to check if it splits a Carriage Return/Line Feed (CRLF) sequence,
+   or if it creates a new CRLF sequence". rano sidesteps this entirely —
+   `crlf: bool` records one decision for the whole file and the save path
+   re-applies it. Worth keeping in mind before any piece-table work: this is
+   the part that took them "several attempts".
+5. **Their opening benchmark is the same claim as §13.6's**, independently:
+   "Finding and caching line breaks is much faster than splitting the file
+   into an array of strings." That is the byte scan versus decode, which is
+   the measurement that makes §13.6 possible.
+
+**One caveat on that post's numbers.** The memory, opening-time and
+editing-time comparisons are *images* (`memoryusage.webp`, `fileopen.webp`,
+`write.webp`, `read.webp`). The qualitative claims are in the prose and are
+quoted above; the actual figures were not read, so no number from that post is
+cited in this document. The one figure quoted — their old line array using
+"around 600MB" for a 35 MB, 13.7-million-line file — is in the prose, and it
+is the reason §13.6 says "some 20 times the initial file size".

@@ -25,7 +25,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// One measured file.
 struct Sample {
@@ -610,5 +610,120 @@ fn bench_cold_open() {
     }
     println!("\n(the read still has to finish before the text appears; the point is that the");
     println!("window and its chrome are up, and the event loop is running, while it does)");
+    println!();
+}
+
+/// Scheduling, measured: time to the first SCREENFUL of text rather than the
+/// first frame.
+///
+/// A frame with nothing in it is not the goal — the goal is the top of the
+/// file, and that does not need the whole file. This reads in chunks and stops
+/// as soon as it has enough rows to fill a viewport, which is the "minimum
+/// that makes the user happy" from §13.6 stated as a number.
+///
+/// It also measures cancellation latency: a chunked reader that checks a flag
+/// between chunks can abandon a 184 MB read promptly, which a single
+/// `read_to_string` cannot.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_first_screen() {
+    /// A viewport's worth of rows.
+    const ROWS: usize = 40;
+    /// Read granularity. 64 KiB is one page-cache-friendly read and ~800 rows
+    /// of a log line, so the first chunk is usually enough on its own.
+    const CHUNK: usize = 64 * 1024;
+
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\ntime to the first screenful of text — {ROWS} rows, {CHUNK}-byte chunks\n");
+    println!(
+        "{:<26} {:>10} {:>14} {:>12} {:>16} {:>16}",
+        "file", "size", "first screen", "bytes read", "whole file", "cancel seen"
+    );
+    println!("{}", "-".repeat(100));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+        // Time to the first screen: read chunk by chunk, decode, stop at ROWS.
+        let (t_screen, bytes_read) = {
+            use std::io::Read as _;
+            let mut f = fs::File::open(p).expect("open");
+            let t = Instant::now();
+            let mut buf = vec![0u8; CHUNK];
+            let mut text = String::new();
+            let mut total = 0usize;
+            loop {
+                let n = f.read(&mut buf).expect("read");
+                if n == 0 {
+                    break;
+                }
+                total += n;
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if text.matches('\n').count() >= ROWS {
+                    break;
+                }
+            }
+            let lines: Vec<Vec<char>> = text
+                .lines()
+                .take(ROWS)
+                .map(|l| l.chars().collect())
+                .collect();
+            std::hint::black_box(lines.len());
+            (t.elapsed(), total)
+        };
+
+        // The whole file, for contrast (the number in §14.1).
+        let t = Instant::now();
+        let whole = Buffer::from_file(p).expect("read");
+        let whole_t = t.elapsed();
+        std::hint::black_box(whole.lines.len());
+
+        // Cancellation: how soon does a chunked read notice the flag? The flag
+        // is checked per chunk, so the bound is one chunk, not one file.
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f2 = flag.clone();
+        let t = Instant::now();
+        let handle = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut f = fs::File::open(p).expect("open");
+            let mut buf = vec![0u8; CHUNK];
+            let mut n_reads = 0usize;
+            loop {
+                if f2.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                match f.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => n_reads += 1,
+                }
+            }
+            n_reads
+        });
+        // Let it get going, then cancel.
+        std::thread::sleep(Duration::from_millis(5));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancel_latency = t.elapsed();
+        let _ = handle.join();
+
+        println!(
+            "{:<26} {:>10} {:>14} {:>12} {:>16} {:>16}",
+            label,
+            human(size),
+            ms(t_screen.as_micros() as f64),
+            human(bytes_read as u64),
+            ms(whole_t.as_micros() as f64),
+            ms(cancel_latency.as_micros() as f64),
+        );
+    }
+    println!(
+        "\n(first screen = read until {ROWS} newlines; cancel seen = ~one chunk after the flag)"
+    );
     println!();
 }

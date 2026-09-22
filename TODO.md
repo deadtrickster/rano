@@ -1125,17 +1125,32 @@ three are snippet-level claims (§14.5), and all three are moot given (1)–(3).
 
 ### 14.3 The fix, hand-rolled
 
+**Corrected: see §14.6.** This section first claimed the fix was "one thread,
+one channel", with a sketch that ended in `rx.recv()`. The operator's objection
+was exact — *"you yourself telling me even ^C is blocked, so at least some
+scheduling is a must here"* — and the sketch had the same bug one level down:
+`recv()` moves the block off the read and onto the wait, leaving the loop and
+`^C` just as dead. A thread is necessary and not sufficient.
+
+What survives from here is the *pattern*, which is the tree's own (below), and
+the four decisions the sketch needed; what changed is that they are
+requirements of a scheduler rather than details of a thread. §14.6 states it.
+
 No new dependency, and no new pattern either — **the tree already does this
 twice**: `lsp.rs` spawns the handshake on a thread and adopts the client when it
 lands (`lsp_starting: Option<(String, Receiver<...>)>`), and `exec.rs` drains
 each pipe on its own reader thread and sends exactly one message per channel.
-The loader is the same shape:
+Both are polled, never waited on:
 
 ```rust
-// In the run loop, before the first frame:
-let (tx, rx) = mpsc::channel();
-std::thread::spawn(move || { let _ = tx.send(Buffer::from_file(&path)); });
-// Draw an empty buffer NOW; adopt in the loop when `rx` has it.
+// `lsp_poll` — the shape the loader wants, rather than `recv()`
+if let Some((tag, rx)) = self.bs_mut().lsp_starting.take() {
+    match rx.try_recv() {                    // <- try_recv, so the loop runs
+        Ok(Ok(client)) => { /* adopt, if not stale */ }
+        Ok(Err(e))     => { /* flash the error */ }
+        Err(TryRecvError::Empty) => { /* put it back, try next frame */ }
+    }
+}
 ```
 
 What it needs beyond the sketch, stated because each is a decision:
@@ -1153,10 +1168,7 @@ What it needs beyond the sketch, stated because each is a decision:
 - **Failure.** A read error must arrive as a message and become a status line,
   not an `eprintln!` from a thread nobody is reading.
 
-None of this needs a runtime: one thread, one channel, one message. That is
-also why the hand-rolled choice is the *right* one here rather than a
-purist one — `tokio` would add a scheduler, a reactor and a dependency tree to
-move one `String` across a boundary.
+None of this needs a runtime — but it does need **scheduling**, which is §14.6.
 
 ### 14.4 What `io_uring` would change, if anything ever did
 
@@ -1197,3 +1209,82 @@ pipelined. That is a long way off, and it is not what fixes the freeze.
 - `bench_cold_open`, in `src/bench.rs`, is the measurement — reproducible, and
   it prints the empty-frame variant beside the blocking one so the comparison
   is visible rather than argued.
+
+### 14.6 Scheduling is the requirement — a thread is not enough
+
+The objection, and it is right: *"you yourself telling me even `^C` is blocked,
+so at least some scheduling is a must here."* §14.3's first sketch ended in
+`rx.recv()`. That moves the block from the read to the wait and leaves the loop
+and `^C` exactly as dead as before — the same bug, one level down. What is
+needed is not a worker but **a scheduler**, and the good news is that rano
+already has one; the loader just has to join it.
+
+**Two structural facts about the current code.**
+
+1. **The loop does not exist during the load.** `main()` reads the file and
+   *then* calls `run(buf, …)` (*main.rs:275-295*). So no amount of scheduling
+   inside the loop helps until the open moves into it. This is the change.
+2. **The loop is already a scheduler** — `ed.lsp_poll()`, `ed.lsp_flush()`,
+   `ed.completion_retry_poll()`, `ed.exec_poll()` (*main.rs:428-432*) are all
+   polled once per iteration and all return "did anything change", which is
+   precisely the contract a loader wants. And the only blocking call in the
+   whole loop is `event::poll(200 ms)` — the idle wait, which is where the
+   loop *should* block, because a keystroke ends it.
+
+**What the scheduler has to do, stated as four requirements** (each has a
+measurement or a failure attached, so none is decorative):
+
+1. **Run from the first iteration, with no buffer yet.** The editor holds a
+   `Loading` state, draws immediately, and adopts rows as they arrive.
+2. **Never wait on the job.** `try_recv()`, exactly as `lsp_poll` does — put the
+   receiver back on `Empty` and try again next frame.
+3. **Bound the work per iteration.** This is the requirement that a naive
+   hand-rolled version gets wrong: `while let Ok(chunk) = rx.try_recv() { adopt }`
+   is unbounded, and a worker faster than the loop turns adoption itself into
+   the freeze. Adoption needs a budget — N rows or a time slice per frame —
+   which is what makes the loop's worst-case iteration bounded rather than
+   merely usually-short.
+4. **Be cancellable, promptly.** One `AtomicBool` the worker checks per chunk.
+   Set by `^C` (quit), by an edit (the user is typing; do not clobber), and by
+   opening another file.
+
+**And the payload should be chunks, not one buffer** — which is what turns
+"responsive" into "content appears immediately". Measured, `bench_first_screen`:
+
+| file | first screenful | bytes read | whole file |
+|---|---|---|---|
+| big.rs 7 MB | **59 µs** | 64 KiB | 27.7 ms |
+| big.log 30 MB | **35 µs** | 64 KiB | 93.5 ms |
+| huge200.log 193 MB | **37 µs** | 64 KiB | 516.6 ms |
+
+**37 µs to the first screenful of a 193 MB file, against 516 ms for the whole
+thing** — 14,000× — because the top of the file needs one chunk, not the file.
+That is §13.6's "load the minimum that makes the user happy" as a number, and
+it means the loading design and the window design are the same design: decode
+what is on screen, fetch the rest as it is asked for.
+
+Cancellation latency measured in the same test: **~5 ms**, bounded by the chunk
+size and the check interval rather than by the file — a 193 MB read abandons in
+5 ms because the flag is checked per 64 KiB chunk rather than once at the end.
+A single `read_to_string` cannot be abandoned at all.
+
+**Why this is still not a runtime.** The scheduler is: one loop that already
+exists, one job state polled per iteration, one `AtomicBool`, one channel. What
+`tokio` would add is a reactor, a work-stealing executor and a dependency tree
+to move chunks across a boundary that rano already crosses four times per
+iteration with `std::sync::mpsc`. The operator's "we will not use tokio, hand
+roll" is not a purist preference here — it is the smaller design.
+
+**What this changes about §14's earlier claim.** §14.1's "575 ms → 261 µs"
+compared a blocking read against a thread that was *waited on*, so it overstated
+what a worker alone buys. The honest numbers are:
+
+| | today | thread, waited on | scheduled, chunked |
+|---|---|---|---|
+| first frame with chrome | 575 ms | 261 µs | **261 µs** |
+| first text on screen | 575 ms | 575 ms | **37 µs** |
+| `^C` works after | 575 ms | 575 ms | **first iteration** |
+| cancels a 193 MB read in | n/a | never | **~5 ms** |
+
+The middle column is why the objection was correct: a thread buys the frame and
+nothing a user would notice.

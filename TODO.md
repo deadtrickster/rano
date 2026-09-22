@@ -1489,3 +1489,225 @@ The last row is the one to notice: it is the only O(file) step left, and it is
 avoidable — the index grows only at the end, so it can be extended chunk by
 chunk, and `[12% indexed]` in the status line is honest about the rest (§15.3).
 That makes open genuinely O(chunk): read 64 KiB, sniff it, index it, draw it.
+
+## 16. Implementation plan
+
+The *how*, for the work §13–§15 identified. §16.0 is the one thing needed from
+the operator before Phase 3; Phases 1 and 2 are unblocked and 1 is worth
+shipping on its own.
+
+Conventions, inherited from `PLAN.md`: run `cargo test`, `cargo fmt --all --
+--check` and `cargo clippy --all-targets -- -D warnings` after every item; a
+phase is done only when all three are green and the phase's own tests exist;
+update the phase's state line as it lands.
+
+### 16.0 The decision that gates Phase 3
+
+**Does rano need to *edit* a hundreds-of-megabytes file, or only read one?**
+
+- **Read-only** (logs, dumps, generated files — the case every measurement in
+  §12–§15 was taken on): Phases 1–2 and 4 are the whole job. Phase 3 becomes
+  "materialise on first edit", and Phase 5 never happens. ~3 weeks of work.
+- **Editable**: Phase 5 (piece table) is real, and it subsumes §13.1 and most
+  of Phase 3's API change. The order stays the same — Phases 1–2 are wanted
+  either way — but Phase 3's API work is done *for* the piece table rather than
+  in front of it, so it is designed once.
+
+Nothing else needs deciding to start.
+
+### 16.1 Phase 1 — the scheduled loader (§14.6). Ship this alone.
+
+**Deliverable.** `rano huge.log` puts a frame on screen and starts handling keys
+within ~261 µs, shows text as soon as it has a screenful (**37 µs**), responds
+to `^C` from the first iteration, and cancels an in-flight 184 MB read in
+**~5 ms** when interrupted.
+
+**Files.**
+
+- `src/main.rs` — `main()` stops reading. `run()` takes a path, not a `Buffer`
+  (*main.rs:295*, *353*). The size check and the `read_lines` flash move in.
+- `src/loader.rs` (new) — `LoadJob`:
+  ```
+  pub struct LoadJob {
+      rx: Receiver<Chunk>,           // Ok(rows) | Err(io::Error)
+      cancel: Arc<AtomicBool>,       // set by ^C, by an edit, by a new open
+      rows_read: usize,
+  }
+  impl LoadJob {
+      pub fn spawn(path: PathBuf) -> io::Result<Self>;   // one thread
+      pub fn poll(&mut self, budget: usize) -> Adopted;  // try_recv, bounded
+      pub fn cancel(&self);
+  }
+  ```
+  Chunks arrive already split into rows and already encoding-normalised, so the
+  loop never sees raw bytes. 64 KiB reads, matching the measurement.
+- `src/editor.rs` — a `Loading` state: the editor holds rows-so-far plus a flag,
+  so `ui::draw` can paint a status line and the buffer's own rows.
+- `src/main.rs` loop — `dirty |= ed.load_poll()` beside `lsp_poll`/`exec_poll`
+  (*main.rs:428-432*), which is the contract those already satisfy.
+
+**The four requirements from §14.6, each with its test:**
+
+1. Frame before rows → `a_loading_editor_draws_a_frame_and_its_status`.
+2. `try_recv`, never `recv` → `the_loop_iteration_never_blocks_on_the_loader`
+   (poll a job whose worker is asleep).
+3. **Bounded adoption** → `adoption_is_budgeted_so_a_fast_worker_cannot_stall_the_loop`
+   (feed 10,000 chunks with a 100-row budget and assert the loop yields).
+4. Prompt cancellation → `cancelling_stops_the_reader_within_a_chunk` (assert the
+   worker sees the flag and exits; the 5 ms bound is in `bench_first_screen`).
+
+Plus: `a_read_error_becomes_a_status_line`, `an_edit_during_the_load_is_not_clobbered`.
+
+**Gate.** All three gates, and `bench_cold_open` shows the same or better
+numbers. **Rollback** is trivial: the loader is additive until `main()` stops
+reading, so the change is one call site.
+
+**Size.** ~400 lines with tests, mostly new file. One `run()` signature change.
+
+### 16.2 Phase 2 — encodings (§13.5). Unblocks Phase 3.
+
+**Deliverable.** A UTF-16 file opens; a UTF-8 BOM is stripped and remembered
+rather than becoming a column; a latin-1 file either opens (lossy, with
+`encoding` recorded so a save round-trips) or is refused with a message that
+says why.
+
+**Files.**
+
+- `src/buffer.rs` — `pub enum Encoding { Utf8, Utf8Bom, Utf16Le, Utf16Be,
+  Latin1 }` beside `crlf` (*buffer.rs:15*); `from_file` does BOM sniff → prefix
+  validate → (optional) detector; `file_text` re-encodes (*buffer.rs:104*).
+- `src/syntax.rs` — `LARGE_BUFFER`'s windowed path already assumes UTF-8; the
+  ladder is what makes that assumption checkable, so a non-UTF-8 file must take
+  the eager path (documented at the call site).
+- Optional dep: `encoding_rs` + `chardetng` for the third rung only.
+
+**Tests.** The six-shape table from §13.5 as a test, not a table: UTF-8,
+UTF-8+BOM, UTF-16LE/BE+BOM, latin-1, cp1252 → each either opens with the right
+`Encoding` or refuses with the right message; plus a round-trip (read, write,
+read) per encoding.
+
+**Gate.** Three gates; `bench_detect_from_prefix` unchanged (8 µs).
+
+**Size.** ~250 lines. The save path is the risk: a wrong re-encode corrupts a
+file, so `Encoding` travels with the buffer exactly as `crlf` does.
+
+### 16.3 Phase 3 — lazy rows (§15). The big one.
+
+**Deliverable.** A 193 MB file opens in **62 ms / 19.8 MB** instead of
+568 ms / 835 MB, scrolling is bounded, and every row renders identically to
+today (verified, not asserted).
+
+**Files.**
+
+- `src/rows.rs` (new) — the prototype from `bench.rs` promoted: the index
+  (`starts: Vec<u64>`, narrow bits, sparse non-ASCII char counts), `decode(a..b)`,
+  and the eviction cache. The prototype is already written and verified against
+  the eager path on 2.6M rows; this is making it production rather than
+  plausible.
+- `src/buffer.rs` — `lines` becomes private. `row(r) -> &[char]`,
+  `rows(a..b) -> Rows<'_>`, `row_count()`, `materialize_all()`. **192 call
+  sites** (`buffer.rs` 38, `editor.rs` 87, `syntax.rs` 31, `main.rs` 19,
+  `ui.rs` 8, rest ≤4). The compiler is the checklist.
+- `src/editor.rs` — the wrap table reads the index for narrow rows (§15 fact 4)
+  instead of the line contents, so it needs no decoding.
+- O(document) sites call `materialize_all()` explicitly: `indent_unit`
+  (*editor.rs:398*), `sort_lines`, `justify`, replace-all, save, `--export`,
+  whole-buffer search.
+
+**Tests**, in the order that makes them useful:
+
+1. `every_row_matches_the_eager_decode` — the prototype's check, kept: decode
+   all rows, compare to `Buffer::from_file`. This is the test that would have
+   caught the phantom-final-row bug.
+2. `wrap_segments_from_the_index_match_the_decoded_ones` — on narrow rows,
+   exact; on wide rows, decoded.
+3. `eviction_bounds_resident_rows` — scroll the whole file, assert the cache
+   never exceeds its budget.
+4. `materialize_all_is_idempotent_and_leaves_the_file_readable` — the escape
+   hatch for O(document) work.
+5. `a_multibyte_row_decodes_from_a_positional_read` — the boundary case that
+   proves fact 5 (§15.2).
+
+**Gate.** Three gates, and a new `bench_lazy` row for **each** of the six
+sample files showing index/lookup/eviction behaviour. Behaviour parity is the
+bar: the existing 313 tests must pass untouched except where they poke `lines`.
+
+**Size.** The largest phase: ~1,200 lines with tests, plus ~200 mechanical call
+sites. **This is the one to stage as its own branch** — `lines` private is
+all-or-nothing, and a half-migrated tree will not compile.
+
+**Risk.** The API change touches every module, so a mistake is a rendering bug
+everywhere. Mitigation: do it compiler-first (make `lines` private, fix errors
+mechanically, no behaviour change), get the gate green, *then* add the lazy
+store behind the new API. Two commits, and the first is provably
+behaviour-preserving.
+
+### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
+
+**Deliverable.** Scrolling far and back is cheap; `^W` works on a file too big
+to hold; opening costs one chunk rather than one pass.
+
+**Files.** `src/rows.rs` (cache policy), `src/search.rs` (rewrite to a chunked
+byte scan — currently 1 `.lines` site, but it becomes a scan with match
+crossover handling), `src/editor.rs` (extend the index as scrolling discovers
+more).
+
+**Tests.** `search_finds_a_match_spanning_a_chunk_boundary`;
+`scrolling_back_and_forth_does_not_regrow_the_cache`;
+`the_index_extends_without_rereading`.
+
+**Size.** ~400 lines. **Risk.** Search is the module whose semantics are easiest
+to get subtly wrong (regex over chunk boundaries); it wants a differential test
+against the current whole-buffer implementation on the existing search tests.
+
+### 16.5 Phase 5 — conditional: the piece table
+
+Only if §16.0 says *editable*. It subsumes §13.1 (undo deltas) and replaces the
+materialise-on-edit part of Phase 3. §13.6a's survey is the argument against
+doing it for any other reason: two editors, independently, measured its decay,
+and it makes rano's hottest operation (line lookup) asymptotically worse.
+**Not to be started before Phase 3 is green** — it would be designed once.
+
+### 16.6 Off the critical path
+
+Independent, each small, none blocking the phases above:
+
+- **§13.1 undo deltas** — 17 ms per keystroke on a 20 MB single row. Wants
+  Phase 3's API anyway (the row is the thing being cloned), so doing it after
+  Phase 3 is cheaper than before. Its own risk: undo bugs lose text, so a
+  property test (N random edits, undo all, compare) precedes it.
+- **§13.2 wrap-prefix Fenwick tree** — 1.7 ms per keystroke at 2.6M rows.
+  Self-contained, well-tested area, low risk. Can go any time.
+- **§13.3 window edges** — accept and document, or seed from a real tree. Not
+  urgent; the margin already makes it invisible in use.
+
+### 16.7 Order, and what ships when
+
+| # | phase | ships | size | blocked by |
+|---|---|---|---|---|
+| 1 | scheduled loader | frozen `rano huge.log` fixed | ~400 | nothing |
+| 2 | encodings | UTF-16 and latin-1 open | ~250 | nothing |
+| 3 | lazy rows | 193 MB in 62 ms / 19.8 MB | ~1400 | §16.0, and 2 |
+| 4 | eviction, search, incremental index | ceiling is a budget | ~400 | 3 |
+| 5 | piece table | editing huge files | large | §16.0 = editable, and 3 |
+
+Phase 1 is worth shipping even if nothing else follows: it is small, additive,
+and it is the change a user notices.
+
+### 16.8 Risks, and what makes each one survivable
+
+- **The `lines` API change is wide.** Mitigated by ordering (compiler-driven,
+  behaviour-preserving commit first) and by every existing test continuing to
+  pass.
+- **The save path is where an encoding bug loses data.** Mitigated by
+  `Encoding` on the buffer beside `crlf`, and a round-trip test per encoding
+  before anything else uses it.
+- **Undo is where a bug loses text.** Mitigated by keeping §13.1 off the
+  critical path and putting a property test in front of it.
+- **Search semantics over chunks.** Mitigated by differential testing against
+  the current implementation, which stays until the new one agrees.
+- **Lazy loading makes every frame depend on eviction.** A cache miss during a
+  frame is a disk read; if the budget is small relative to the viewport, that is
+  a stall. Mitigated by deriving the budget from `text_h` (a viewport plus
+  margin, the same number §12 already uses) rather than a constant, and by
+  measuring worst-case frame time with a deliberately tiny cache.

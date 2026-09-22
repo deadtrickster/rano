@@ -1,5 +1,11 @@
 # rano — implementation plan (compaction-survival artifact)
 
+> **Superseded for new work.** This file covers the 2026-09 build, which reached
+> PROJECT COMPLETE (40/40, 166 tests) and whose phases A–G are all done. The
+> plan for the responsiveness and large-file work is **TODO.md §16**, with the
+> problems it addresses in §13–§15. This file is kept for its STATE history and
+> its conventions.
+
 Grounded to the code as of 2026-09-06. Companion to TODO.md (the what); this file
 is the how. Update STATE after every phase. Source files: src/{main,buffer,lsp,
 syntax,ui}.rs. main.rs is ~1528 lines; Editor struct at main.rs:79-105.

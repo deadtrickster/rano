@@ -4077,12 +4077,25 @@ mod markdown_tests {
             return;
         };
         assert_pass_is_per_node(&src);
-        // And no row is painted as one long code span. The symptom was 300-odd
-        // cyan rows: everything from the stray backtick to the end of the file.
+        // And no row is painted as one long code span OUTSIDE a code block.
+        // The symptom was 300-odd cyan rows: everything from a stray backtick
+        // to the end of the file. Code blocks are the legitimate case, and
+        // there are two of them: indented, and fenced.
+        //
+        // This check was too narrow when it only excused indented rows — it
+        // failed on the first fenced line of a document revised after the test
+        // was written, which is a test bug rather than a highlighting one. The
+        // fence state is tracked here the way the block grammar sees it.
         let mut hl = Highlighter::new();
         let grid = hl.classes(&src, Lang::Markdown);
+        let mut in_fence = false;
         for (r, line) in src.split('\n').enumerate() {
             let Some(row) = grid.get(r) else { continue };
+            let fence_marker = line.trim_start().starts_with("```");
+            let was_in_fence = in_fence;
+            if fence_marker {
+                in_fence = !in_fence;
+            }
             let len = line.chars().count();
             if len < 4 {
                 continue;
@@ -4091,12 +4104,10 @@ mod markdown_tests {
                 .iter()
                 .filter(|c| c.as_deref() == Some("text.literal"))
                 .count();
-            // Indented code blocks are legitimately all-literal, and the
-            // document has two (the A=/B= legend).
-            let indented = line.starts_with("    ");
+            let in_code = was_in_fence || in_fence || line.starts_with("    ");
             assert!(
-                literal < len || indented,
-                "row {r} is entirely a code span: {:?}",
+                literal < len || in_code,
+                "row {r} is entirely a code span outside any code block: {:?}",
                 &line[..line.len().min(50)]
             );
         }

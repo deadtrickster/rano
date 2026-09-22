@@ -756,16 +756,37 @@ same for `0x0D`), so a byte scan finds exactly the line breaks. That is what
 
 **Options, and they are a staging rather than a menu.**
 
-1. **Memory-map the file, index it in bytes, decode only the window.**
-   `mmap` (page cache, not anonymous RSS) + a `u64` line-start table + decode
-   the visible rows into `Vec<char>` — *the same `Window` the highlighter
-   already takes* (`.rows`/`.cols`), applied to loading instead of colouring.
-   Opening a 184 MB file then costs ~20 MB and ~40 ms, and scrolling is
-   bounded. **Editing needs an answer**, which is option 2.
+1. **Read the file in pieces, index it in bytes, decode only the window.**
+   A `u64` line-start table built from a positional read, then decode the
+   visible rows into `Vec<char>` — *the same `Window` the highlighter already
+   takes* (`.rows`/`.cols`), applied to loading instead of colouring. Opening
+   a 184 MB file then costs ~20 MB and ~40 ms, and scrolling is bounded.
+   **Editing needs an answer**, which is option 2.
+
+   **Not `mmap`, and this is a correction.** I originally wrote "mmap + index",
+   which is the obvious reading of the numbers and the wrong one. Sublime
+   wrote a whole article about why, *Use mmap With Care*, after shipping it in
+   Sublime Merge — four independent caveats, quoted in §13.7: any read can
+   raise `SIGBUS` (a network mount dropping, another process truncating the
+   file), so you need a signal handler, and `setjmp`/`longjmp` out of one is
+   undefined behaviour "especially on MacOS" — `sigsetjmp`/`siglongjmp` plus
+   `SA_NODEFER` and thread-local state; on Windows the mapping *locks the file
+   against deletion* even with `FILE_SHARE_DELETE`, which is why Sublime
+   releases mappings on idle; and signal handlers are global, so any library
+   that installs its own (Breakpad) breaks the arrangement, with "no nice
+   solution" and "only unsatisfying workarounds". Their own conclusion: "In
+   hindsight it's difficult to justify using `mmap` over `pread`" — and their
+   benchmark said `pread` was "around ⅔ as fast as `mmap`", i.e. the whole
+   benefit for two-thirds the speed and none of the hazards. Their advice is
+   exactly this option: "copy only the portions of the file that you require
+   into memory".
+
    *Cost:* `Buffer` becomes an enum or gains a "not loaded" state for rows
    outside the materialised window; every `lines[r]` read has to be able to
    say "not here". That is the same shape of change as 13.4's ASCII fast path,
-   and they would fight if done separately.
+   and they would fight if done separately. It also wants a bounded cache with
+   eviction, not just a window — scrolling backwards through 184 MB must not
+   re-read from the start each time.
 2. **Materialise on first edit.** The window is loaded; the moment a keystroke
    lands in a huge file, fall back to reading the whole thing as today. Simple,
    honest, and it fixes the case that actually happens — *reading* a 184 MB log
@@ -795,6 +816,14 @@ same for `0x0D`), so a byte scan finds exactly the line breaks. That is what
    tree took "several attempts until I had a solution that was correct and
    fast", which rano avoids entirely with `crlf: bool`.
 
+   **A second independent objection, from the author of xi-editor** (read in
+   full for §13.7, and this is why the survey was worth doing): "many good
+   editors have been written using piece tables, but I'm not a huge fan;
+   performance is very good when first opening the file, but degrades over
+   time." Two editors, independently, found the same shape of decay — and
+   neither chose the piece table in the end. A rope is what xi, Helix and
+   Lapce use.
+
    *Cost:* a rewrite of `Buffer` and the save path, plus a normalization pass,
    and it makes the hottest operation asymptotically worse by their own
    profiling. The undo model (13.1) sits on top of it, so those two want doing
@@ -822,6 +851,69 @@ doing deliberately and with the load-on-demand path covered by tests before
 the eager path comes out. Option 3 subsumes 13.1 and 13.4 and should be
 decided before either is implemented, or the work is done twice.
 
+### 13.6a The survey: five containers, and where this section was wrong
+
+Reading properly (§13.7) changed the recommendation here twice, so the evidence
+is set out rather than summarised. xi-editor's author enumerates the options as
+"contiguous string, gapped buffer, array of lines, piece table, and rope", and
+that is the frame:
+
+| container | memory | line lookup | search | non-local edit | who uses it |
+|---|---|---|---|---|---|
+| **array of lines** (rano today) | 4× + 24 B/line | **O(1)** | slice-local | O(row) | VS Code until 1.21 |
+| contiguous string | ~1× | O(1) | slice | O(document) | fine "under a megabyte or so" |
+| gap buffer | ~1×, "always in ideal state" | O(log n) via metrics tree | **7× faster than a rope** | O(n) gap move | Emacs, decades |
+| piece table | ~1× initially | O(log n) in EDITS | poor | O(log n) | VS Code today |
+| rope | ~1× ideal, worse after edits | O(log n) | **7× slower** | O(log n) | xi, Helix, Lapce |
+
+What the sources say, in their own words:
+
+- **rano's model is a named failure mode.** On the array of lines: "has
+  performance failure modes, most notably very long lines." That is the
+  minified-JS problem, diagnosed independently of our measurements.
+- **The piece table is not the answer.** VS Code measured its own decay ("the
+  Achilles heel of piece tree … thousands or tens of thousands of nodes") and
+  xi's author says the same from the other side: "performance is very good when
+  first opening the file, but degrades over time." §13.6's option 3 called it
+  "the real answer"; on the evidence it is not.
+- **The rope's cost lands exactly on rano's hot paths.** Line lookup is
+  `O(log n)` instead of `O(1)`, and search over a rope is `7× slower` than over
+  a contiguous buffer — "searching 1 GB text, the gap buffer runs in 35 ms,
+  which is around 7x faster than the next fastest rope (~250 ms)", because the
+  regex crate needs a slice. rano searches (`^W`, M-F, `search.rs`).
+- **And the sharpest observation, which is rano's case exactly**: "the larger a
+  file is the less likely I am to be editing it, but the more likely I am to be
+  searching it."
+- **A gap buffer is a serious contender** — ~1× memory, fastest search, no
+  fragmentation — with O(n) gap moves (22 ms to move across 1 GB, ~100 ms to
+  resize at 1 GB) as the price for non-local edits.
+- **Both alternatives store UTF-8 bytes**, so the metrics tree gives `O(log n)`
+  char indexing — meaning a rope or gap buffer **costs rano the `O(1)` char
+  column indexing the UI, cursor and search are all built on.** That is the
+  part the "just use a rope" reflex misses.
+
+**Revised recommendation.** rano's hot operations are line lookup, char-column
+indexing and search; its non-local edits (sort, replace-all) are rare, and big
+files are read, not typed into. That set argues *against* a rope — it makes two
+of the three hot operations asymptotically worse. So:
+
+1. **For memory, the ASCII fast path (13.4 option 1) is the best value**: it
+   keeps `O(1)` indexing, takes ASCII source and logs from 4 bytes/char to 1,
+   and is ~20 call sites rather than a rewrite. It does not fix the 24-byte
+   per-line header as cleanly, which is a smaller follow-on.
+2. **A gap buffer is the alternative worth pricing properly** if the fast path
+   proves insufficient — 1× memory and the fastest search, paid for with O(n)
+   non-local edits and the loss of `O(1)` char indexing.
+3. **Loading (this section) is a separate decision from representation** (13.4),
+   and it is the one with the clearest win: positional reads and a byte index,
+   measured at 15× faster and 42× smaller.
+
+**What would settle it, honestly.** Not more reading. rano has `bench.rs`;
+what is missing is the *operation mix* — how much of a frame is line lookup
+versus search versus edit on real files. Measuring that on the current model
+would say whether `O(1)` line lookup is worth defending, and the answer decides
+between 1 and 2.
+
 ### 13.7 Sources, and what was actually read
 
 The research behind §13 was done 2026-09-22. Recorded here because a finding
@@ -844,6 +936,39 @@ carry.
   The primary source for §13.6's option 3. Read in two sittings — the first
   200 lines, then the rest — and the second half changed what I recorded, see
   below.
+
+- Sublime HQ, *Use mmap With Care* —
+  <https://www.sublimetext.com/blog/articles/use-mmap-with-care>
+  Read in full. The four caveats quoted in §13.6 option 1 (SIGBUS on a network
+  drop or truncation; `setjmp`/`longjmp` from a handler being undefined
+  behaviour "especially on MacOS"; Windows holding a lock that blocks deletion;
+  signal handlers colliding with Breakpad) and the `pread` recommendation are
+  from here. Published after they shipped `mmap` in Sublime Merge and "found
+  it considerably more difficult than we had first thought".
+- Raph Levien, *xi-editor retrospective* —
+  <https://raphlinus.github.io/xi/2020/06/27/xi-retrospective.html>
+  Read in full. The five-container taxonomy, "array of lines has performance
+  failure modes, most notably very long lines", the piece-table objection
+  ("degrades over time"), "my favorite aspect of the rope … is its excellent
+  worst-case performance", and "in Rust, a rope is the sweet spot" are all from
+  the *The rope* section. Note the author's stake: he wrote `xi-rope`, so his
+  preference is not disinterested — the piece-table objection is corroborated
+  by VS Code's own benchmark, which is why it carries.
+- Troy Hinckley, *Text showdown: Gap Buffers vs Ropes* —
+  <https://coredumped.dev/2023/08/09/text-showdown-gap-buffers-vs-ropes/>
+  Read in full, and this is the only source with real numbers rather than
+  prose: memory overhead per container, the 1 GB search figures (35 ms gap
+  buffer against ~250 ms best rope), the 22 ms/100 ms gap-move and resize
+  costs, and the conclusion "gap buffers are better for searching and memory
+  usage, but ropes are better at non-local editing patterns". The author is
+  reimplementing Emacs in Rust and says so, so read his gap-buffer result with
+  that in mind; the benchmark repository is linked and reproducible.
+- `ropey` crate metadata — <https://crates.io/api/v1/crates/ropey>
+  **Read the head, not all 626 lines**: the crate record and version list, not
+  every release entry. What it says: 1.6.1 is the newest stable (2023-10-18),
+  2.0.0-beta.1 exists (2025-08-02), 11.87 M downloads total, MIT, 8,542 lines
+  of Rust. Recorded because "use a rope" needs a crate that is actually
+  maintained.
 
 **Saw only as search snippets** (the claim is quoted from the snippet, not
 verified against the page):
@@ -873,6 +998,19 @@ verified against the page):
   <https://github.com/levivilet/lvce-memory-benchmark> (note: not consulted
   for any claim above; recorded because it came back in the search and
   someone wanting numbers should start there).
+- The rope-crate landscape — <https://crates.io/crates/crop> and
+  <https://github.com/josephg/editing-traces>. crop's README compares itself,
+  Jumprope and Ropey on editing traces and says "as of April 2023 there are (to
+  my knowledge) 3 rope crates that are still actively maintained". Two years
+  old and self-interested (it is crop's own README announcing crop as fastest),
+  so it is recorded as a pointer, not relied on.
+- Zed's rope and SumTree — <https://zed.dev/blog/zed-decoded-rope-sumtree>.
+  Listed because Zed is the other modern Rust editor with a custom text
+  structure, and §13.6a's table does not include it. Not read; its own
+  large-file issue (<https://github.com/zed-industries/zed/issues/4701>, "Open
+  a 4G file, it is stuck for a very long time, and the memory consumption is
+  very high") came back in the same search and suggests a rope alone does not
+  settle the hundreds-of-megabytes case.
 
 **What the second half of the VS Code post added** (and one thing it took
 away):
@@ -909,6 +1047,14 @@ away):
    "Finding and caching line breaks is much faster than splitting the file
    into an array of strings." That is the byte scan versus decode, which is
    the measurement that makes §13.6 possible.
+
+**Why this section kept changing.** §13.6's first draft recommended mmap and
+called a piece table "the real answer"; both were written from one post read
+three-quarters of the way through. The survey contradicts both — mmap for
+reasons Sublime documented four of, the piece table for reasons two editors
+measured independently. The lesson recorded here rather than privately: a
+recommendation needs more than one source, and a source needs reading to the
+end. Both were corrected in place rather than quietly dropped.
 
 **One caveat on that post's numbers.** The memory, opening-time and
 editing-time comparisons are *images* (`memoryusage.webp`, `fileopen.webp`,

@@ -23,6 +23,7 @@ use crate::width;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -317,6 +318,152 @@ fn bench_open() {
             ms(read.as_micros() as f64),
             ms(first.as_micros() as f64),
             ms((read + first).as_micros() as f64),
+        );
+    }
+    println!();
+}
+
+/// How the read path behaves: time AND memory.
+///
+/// The read is the one part of the open cost that was never opened up — every
+/// other measurement in this file is about highlighting. It matters because
+/// `Buffer`'s text model is `Vec<Vec<char>>`, and a `char` is four bytes.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_read() {
+    /// Peak resident set size in KiB, from the kernel. Monotonic: it is the
+    /// high-water mark, so it must be read once at the end of the process's
+    /// heaviest point, not per file.
+    fn peak_rss_kib() -> u64 {
+        let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                return rest
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+            }
+        }
+        0
+    }
+    fn rss_kib() -> u64 {
+        let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                return rest
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nread — time and memory, one file per process\n");
+    println!(
+        "{:<26} {:>10} {:>10} {:>12} {:>14} {:>10}",
+        "file", "size", "chars", "read", "RSS delta", "bytes/char"
+    );
+    println!("{}", "-".repeat(90));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let before = rss_kib();
+        let t = Instant::now();
+        let buf = Buffer::from_file(p).expect("read");
+        let read = t.elapsed();
+        let after = rss_kib();
+        let chars: usize = buf.lines.iter().map(Vec::len).sum();
+        let delta = after.saturating_sub(before);
+        println!(
+            "{:<26} {:>10} {:>10} {:>12} {:>14} {:>10.2}",
+            label,
+            human(size),
+            chars,
+            ms(read.as_micros() as f64),
+            human(delta * 1024),
+            if chars > 0 {
+                delta as f64 * 1024.0 / chars as f64
+            } else {
+                0.0
+            }
+        );
+        std::hint::black_box(&buf);
+        drop(buf);
+    }
+    // The arithmetic behind the RSS column, stated so it needs no trust.
+    let c = std::mem::size_of::<char>();
+    let v = std::mem::size_of::<Vec<char>>();
+    println!("\nsize_of::<char>() = {c} bytes; size_of::<Vec<char>>() = {v} bytes (per LINE)");
+    println!(
+        "so a row of n characters costs 4n + {v} + allocator overhead, and a 1-byte-per-character"
+    );
+    println!("file becomes at least 4 bytes per character before it is editable.");
+    println!("\npeak RSS for the process: {} KiB", peak_rss_kib());
+    println!();
+}
+
+/// The read path, phase by phase: what `Buffer::from_file` actually spends.
+///
+/// `from_file` is four steps — read the bytes, validate them as UTF-8, look
+/// for CRLF, convert every line to `Vec<char>` — and the conversion is the one
+/// that costs both time and memory, because a `char` is four bytes.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_read_phases() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nread phases — median of 3, ms\n");
+    println!(
+        "{:<26} {:>10} {:>12} {:>12} {:>14} {:>14}",
+        "file", "size", "read+utf8", "crlf scan", "chars convert", "total"
+    );
+    println!("{}", "-".repeat(94));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let (t_read, _) = time(3, || {
+            let text = fs::read_to_string(p).expect("read");
+            std::hint::black_box(text.len());
+        });
+        let text = fs::read_to_string(p).expect("read");
+        let (t_crlf, _) = time(3, || {
+            std::hint::black_box(text.contains("\r\n"));
+        });
+        let (t_chars, _) = time(3, || {
+            let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+            std::hint::black_box(lines.len());
+        });
+        let (t_all, _) = time(3, || {
+            let b = Buffer::from_file(p).expect("read");
+            std::hint::black_box(b.lines.len());
+        });
+        println!(
+            "{:<26} {:>10} {:>12} {:>12} {:>14} {:>14}",
+            label,
+            human(size),
+            ms(t_read),
+            ms(t_crlf),
+            ms(t_chars),
+            ms(t_all),
         );
     }
     println!();

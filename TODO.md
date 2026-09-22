@@ -402,11 +402,11 @@ Measured after all of it (release, median of 3, edit point mid-document —
 For scale, the same keystroke before any of this work: 7 MB Rust **1452 ms**,
 4 MB minified JS **1108 ms**, 30 MB log **182 ms**.
 
-## 13. Three costs left, to take one at a time
+## 13. Four costs left, to take one at a time
 
-These are the remaining O(something-big) paths on a keystroke. They are
-different problems on different shapes of file, so they are separate
-decisions. Each has: what you see, the measurement, the mechanism with its
+These are the remaining O(something-big) paths — three on a keystroke, one on
+a read. They are different problems on different shapes of file, so they are
+separate decisions. Each has: what you see, the measurement, the mechanism with its
 code location, the options and what they cost, and what would settle it.
 
 ### 13.1 The undo snapshot clones the row — twice per keystroke
@@ -547,3 +547,88 @@ plus a documented limit is the right cost.
 trade rather than hide it. It should not be attempted without the `InputEdit`
 correctness work in §12 (every mutation funnelled through `Buffer`), because a
 wrong edit description is a panic, not a wrong colour.
+
+### 13.4 How a file gets read, and what it costs
+
+**What you see.** Nothing, until a file is big enough that the memory matters
+— and one hard limitation: **rano cannot open a file that is not valid
+UTF-8.** A latin-1 log, a file with one stray byte, a binary: "cannot read
+…: stream did not contain valid UTF-8", and that is the end of it.
+
+**Measurement.** `Buffer::from_file` is four steps, and `bench_read_phases`
+times each (release, median of 3):
+
+| file | size | read + UTF-8 | CRLF scan | chars convert | total |
+|---|---|---|---|---|---|
+| big.rs | 7.0 MiB | 312 µs | 115 µs | 32.7 ms | 27.6 ms |
+| big.log | 29.2 MiB | 2.4 ms | 551 µs | 75.9 ms | 81.5 ms |
+| huge200.log | 184.2 MiB | 51.9 ms | 4.5 ms | **506.9 ms** | 568.5 ms |
+
+And the memory, from `/proc/self/status` either side of the read:
+
+| file | size | chars | RSS delta | bytes/char |
+|---|---|---|---|---|
+| big.rs | 7.0 MiB | 6,975,560 | 44.6 MiB | **6.71** |
+| big.log | 29.2 MiB | 30,182,170 | 130.1 MiB | 4.52 |
+| huge200.log | 184.2 MiB | 190,595,760 | **835.1 MiB** | 4.59 |
+
+**Mechanism.** `Buffer::from_file`, *buffer.rs:36-52*:
+
+1. `fs::read_to_string(path)` — the whole file into a `String`, validated as
+   UTF-8. Reading the bytes is **11%** of the cost, and this is the line that
+   refuses a non-UTF-8 file outright.
+2. `text.contains("\r\n")` — a second full pass to remember the line ending.
+   **1%.**
+3. `text.lines().map(|l| l.chars().collect())` — every line becomes a
+   `Vec<char>`. **89% of the read**: 507 ms of 568 ms at 184 MB.
+4. Stored as `Vec<Vec<char>>`.
+
+The memory is arithmetic, not a mystery: `size_of::<char>() == 4` and
+`size_of::<Vec<char>>() == 24` per *line*. A row of `n` characters costs
+`4n + 24 +` allocator overhead, so a one-byte-per-character file needs at
+least 4× its size to be editable. The measured 6.71 bytes/char for `big.rs` is
+the 24-byte per-line header dominating: those rows average 19 characters, so
+the header is 56% of the row's cost. `big.log`'s 73-character rows pay 4.52.
+
+**The architectural note.** The same text exists in three representations: it
+is read as **bytes**, decoded to **chars** for the buffer, and then
+*re-encoded* to **bytes** for the parser — `buf.text()` does
+`l.iter().collect::<String>()` per line on every re-highlight (*buffer.rs:88*,
+43 `chars().collect()` sites in the tree). That round trip is why `buf.text()`
+appears at 24 ms for a 30 MB file in §12's table, and why a windowed highlight
+still pays it.
+
+**Options.**
+
+1. **A per-line ASCII fast path: `Bytes(Vec<u8>) | Chars(Vec<char>)`.** 4×
+   less memory on everything ASCII — which is nearly all source and logs —
+   with indexing still O(1) behind a match, and the non-ASCII lines keep the
+   current behaviour exactly. This mirrors `width::is_simple_prefix`, already
+   in the tree for the same reason. *Cost:* every `line[i]` becomes a match:
+   12 direct index sites and 8 iterator sites (*editor.rs*, *ui.rs*,
+   *search*.rs, *syntax.rs*).
+2. **`String` per line with a byte offset.** 1 byte per character, but a
+   char-column lookup becomes O(col) — and the codebase indexes by **char
+   column** everywhere (cursor, rows, ranges). This would slow the hot paths
+   to save memory, which is the wrong trade for an editor.
+3. **One `String` for the file, a line-start table, and a per-line char-offset
+   index.** The most compact, and it makes `buf.text()` free — the parser
+   would read the original bytes instead of a re-encoding. Biggest change:
+   `&[Vec<char>]` is the shape the highlighter and the whole UI are written
+   against.
+4. **`String::from_utf8_lossy` instead of `read_to_string`.** Not a perf
+   fix — it makes the non-UTF-8 refusal go away (replacement characters where
+   the bytes were not text, which is what every other editor does). Small,
+   separate, and arguably the more user-visible bug of the two.
+
+**What would settle it.** Whether rano is expected to open files where 4.6×
+the size does not fit in RAM. At 184 MB that is 835 MB resident, which is
+fine; at 2 GB it is 9 GB, which is not. If "hundreds of megabytes" is the
+ceiling, nothing here needs doing beyond option 4 — the honest answer is that
+the `Vec<char>` model is a deliberate choice for O(1) char indexing and it
+costs 4×.
+
+**Risk.** Options 1–3 touch the buffer's core representation, which every
+module reads: a mistake is a rendering or editing bug across the board, not a
+local one. Option 4 is three lines and its risk is showing `U+FFFD` where a
+file was not really text.

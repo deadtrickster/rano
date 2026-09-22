@@ -402,11 +402,17 @@ Measured after all of it (release, median of 3, edit point mid-document —
 For scale, the same keystroke before any of this work: 7 MB Rust **1452 ms**,
 4 MB minified JS **1108 ms**, 30 MB log **182 ms**.
 
-## 13. Four costs left, to take one at a time
+## 13. Six costs left, to take one at a time
 
-These are the remaining O(something-big) paths — three on a keystroke, one on
-a read. They are different problems on different shapes of file, so they are
-separate decisions. Each has: what you see, the measurement, the mechanism with its
+Six, and they are not independent: **13.6 (edit is a viewport) subsumes 13.1
+(undo) and 13.4 (the read model)**, because all three are the same question —
+what does the editor hold in memory, and what does it fetch. Deciding 13.6
+first would settle the other two; deciding them first risks doing the work
+twice. The rest are independent.
+
+Three are on a keystroke, two on a read, one on a window's edges. They are
+different problems on different shapes of file, so they are separate
+decisions. Each has: what you see, the measurement, the mechanism with its
 code location, the options and what they cost, and what would settle it.
 
 ### 13.1 The undo snapshot clones the row — twice per keystroke
@@ -632,3 +638,159 @@ costs 4×.
 module reads: a mistake is a rendering or editing bug across the board, not a
 local one. Option 4 is three lines and its risk is showing `U+FFFD` where a
 file was not really text.
+
+### 13.5 Encodings: rano opens UTF-8 or nothing
+
+**What you see.** A file that is not valid UTF-8 cannot be opened at all:
+"cannot read …: stream did not contain valid UTF-8", and nothing else happens.
+No dialog, no lossy view, no way in. Verified on real bytes — of six common
+shapes of the same small document, **three are refused**:
+
+| file | bytes | what a detection ladder says | rano today |
+|---|---|---|---|
+| utf8.txt | 47 | UTF-8 (validates) | opens |
+| utf8-bom.txt | 50 | UTF-8 (BOM) | opens, **BOM kept as U+FEFF** |
+| utf16le-bom.txt | 86 | UTF-16LE (BOM) | **refused** |
+| utf16be-bom.txt | 86 | UTF-16BE (BOM) | **refused** |
+| latin1.txt | 42 | legacy → detection needed | **refused** |
+| cp1252.txt | 42 | legacy → detection needed | **refused** |
+
+The BOM row is a second, quieter bug: a UTF-8 BOM *validates*, so the file
+opens — with `U+FEFF` as the first character of the buffer. It is zero-width
+(so invisible) but it is a real column: `Home` goes to before it, a click on
+the first visible character lands one column right of it, and a regex anchored
+at `^` sees it. It is preserved on save, which is correct; it is not *handled*.
+
+**Mechanism.** `fs::read_to_string(path)?` — *buffer.rs:37*. One line, and its
+`InvalidData` error is the whole story: no BOM check before it, no fallback
+after it. `Buffer` has `crlf: bool` (*buffer.rs:15*) but nothing for encoding.
+
+**The ladder that is standard.** Three rungs, cheapest first:
+
+1. **BOM.** Definitive, six comparisons: `EF BB BF` UTF-8, `FF FE` UTF-16LE,
+   `FE FF` UTF-16BE, `FF FE 00 00` UTF-32LE, `00 00 FE FF` UTF-32BE. A
+   reference implementation is a dozen lines and no dependency.
+2. **Valid UTF-8 → UTF-8.** The whole file validating as UTF-8 is
+   overwhelming evidence for real text; this is what every editor does.
+3. **Otherwise, guess.** This is the only rung that needs help, and the
+   standard tooling is `chardetng` (Mozilla's detector, the one behind
+   Firefox's "repair text encoding") paired with `encoding_rs` (the WHATWG
+   decoders, same author — Henri Sivonen). `chardetng` is a statistical
+   detector for legacy content; `encoding_rs` does the decoding, including
+   the round-trip encoders.
+
+**Options.**
+
+1. **BOM ladder + strip-and-remember the BOM.** No dependency, ~40 lines.
+   Fixes UTF-16 (which is entirely defined by its BOM in practice) and the
+   U+FEFF column, and still refuses BOM-less legacy. Remembers the BOM so a
+   save puts it back.
+2. **Add `unicode-bom`-style handling plus a lossy fallback.** No dependency
+   either: decode legacy bytes as **windows-1252** (the superset of latin-1
+   that browsers assume) and replace the rest with `U+FFFD`. The file opens
+   and the user is not confused — but the replacement characters are *in the
+   buffer*, so a save writes them back and **silently corrupts the file**.
+   That is the trap in this design, and it is why option 2 is not enough on its
+   own: it needs `Buffer.encoding` set and a re-encode on save, at which point
+   it is option 3 without the detector.
+3. **The full ladder: BOM, then UTF-8, then `chardetng` + `encoding_rs`, with
+   `Buffer.encoding` remembered and a re-encode on save.** Non-UTF-8 files
+   open correctly *and* round-trip. Two new dependencies (the brief's
+   no-new-deps rule was scoped to the `Stream` work, not to this), both
+   well-established and small; `encoding_rs` is already in most trees
+   indirectly.
+
+**What would settle it.** Whether opening a latin-1 log is something the
+operator wants. If yes, option 3; if "UTF-8 and UTF-16 only" is the answer,
+option 1 is 40 lines and no dependency. The one thing that is not defensible
+is the status quo, because the failure is silent-ish and total.
+
+**Risk.** Option 1 is small and self-contained. Option 3's risk is the save
+path: writing a file back in the wrong encoding corrupts it, so the encoding
+has to travel with the buffer (like `crlf` already does) and the save path has
+to honour it. `--export` would also need to decide what it emits (UTF-8 is
+right for HTML/ANSI output).
+
+### 13.6 Edit is a viewport: load a window, not the file
+
+**What you see.** Nothing — until it is the reason memory runs out. And it is
+the biggest single number in this document: **a 184 MB file costs 835 MB
+resident**, because opening decodes all of it eagerly.
+
+**Measurement.** `bench_read` and `bench_line_index`, release, median of 3:
+
+| | 184 MB file |
+|---|---|
+| today: read + decode every line | **554 ms**, **835 MB RSS** |
+| scan the bytes for newlines only | **36.8 ms**, **19.8 MB** |
+
+The byte scan is 15× faster and the index is **42× smaller**. That is the whole
+argument, and it is why the operator's framing is the right one: **edit is a
+viewport, so load the minimum that makes the top of the file look right.**
+
+**Mechanism, and the one fact that makes it possible.** `Buffer` is
+`lines: Vec<Vec<char>>` (*buffer.rs:11-12*) and `from_file` fills every row
+before returning (*buffer.rs:40*). To decode only a window you first have to
+know **which byte each row starts at** — and that can be answered *without
+decoding at all*:
+
+> In UTF-8, a `0x0A` byte is always a newline. Multi-byte sequences use only
+> lead bytes `C2`–`F4` and continuation bytes `80`–`BF`, so no `0x0A` can occur
+> inside one.
+
+Verified over every codepoint (0 whose UTF-8 encoding contains `0x0A`, and the
+same for `0x0D`), so a byte scan finds exactly the line breaks. That is what
+`bench_line_index` measures: 36.8 ms and 19.8 MB for 184 MB of log, against
+554 ms and 835 MB to decode it.
+
+**Options, and they are a staging rather than a menu.**
+
+1. **Memory-map the file, index it in bytes, decode only the window.**
+   `mmap` (page cache, not anonymous RSS) + a `u64` line-start table + decode
+   the visible rows into `Vec<char>` — *the same `Window` the highlighter
+   already takes* (`.rows`/`.cols`), applied to loading instead of colouring.
+   Opening a 184 MB file then costs ~20 MB and ~40 ms, and scrolling is
+   bounded. **Editing needs an answer**, which is option 2.
+   *Cost:* `Buffer` becomes an enum or gains a "not loaded" state for rows
+   outside the materialised window; every `lines[r]` read has to be able to
+   say "not here". That is the same shape of change as 13.4's ASCII fast path,
+   and they would fight if done separately.
+2. **Materialise on first edit.** The window is loaded; the moment a keystroke
+   lands in a huge file, fall back to reading the whole thing as today. Simple,
+   honest, and it fixes the case that actually happens — *reading* a 184 MB log
+   — while leaving editing exactly as it is (835 MB, and it works).
+   *Cost:* one `if` at the edit boundary, plus a pause the first time. The
+   user is not confused, because nothing they can see is different.
+3. **A piece table over the original file and an edit buffer.** The real
+   answer: the file's bytes stay on disk (or mapped), edits append to an
+   in-memory buffer, and the document is a list of nodes pointing at one or
+   the other. **This is what VS Code did** and their numbers are the same
+   shape as ours: their old line array used 600 MB for a 35 MB / 13.7M-line
+   file — "roughly 20 times the initial file size", i.e. the same 4×-plus-
+   metadata problem — and the piece tree brought memory "very close to the
+   original file size". Their design adds three things ours would need too:
+   per-node line-break caches, a red-black tree with subtree metadata for
+   O(log n) lookup, and multiple buffers because a single buffer capped out.
+   *Cost:* a rewrite of `Buffer` and the save path. The undo model (13.1) sits
+   on top of it, so those two want doing together or not at all.
+4. **Just reduce the per-line overhead.** `Vec<Vec<char>>` pays 24 bytes of
+   header *per line* — 56% of a 19-character row *(*13.4*'s 6.71 bytes/char
+   for `big.rs`)*. A flat `Vec<char>` plus a line-start index removes it and is
+   a much smaller change than 3. **But it does not touch the 4-bytes-per-char
+   cost**, which is the one that says 184 MB → 835 MB, so it is a 30% fix for
+   the same amount of surgery. It is not a substitute for 1–3.
+
+**What would settle it.** Whether the operator wants to *edit* a
+hundreds-of-megabytes file, or only read one. Reading is the case that happens
+(logs, dumps, generated files) and options 1+2 fix it completely for ~20 MB
+and 40 ms. Editing a 184 MB file is the case that justifies a piece table, and
+it is a rewrite. My reading of "the minimum that makes the user happy and not
+confused" is options 1+2: the top of the file is right, scrolling works, typing
+works, and the memory ceiling moves from "about a gigabyte" to "about the size
+of what you are looking at".
+
+**Risk.** Option 1 changes the shape every module reads (`&[Vec<char>]` is
+what the UI, the highlighter and the search are written against), so it wants
+doing deliberately and with the load-on-demand path covered by tests before
+the eager path comes out. Option 3 subsumes 13.1 and 13.4 and should be
+decided before either is implemented, or the work is done twice.

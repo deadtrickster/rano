@@ -468,3 +468,67 @@ fn bench_read_phases() {
     }
     println!();
 }
+
+/// What a line index costs when it is built from BYTES instead of characters.
+///
+/// In UTF-8 a 0x0A byte is always a newline — multi-byte sequences use only
+/// lead bytes C2-F4 and continuation bytes 80-BF, so no 0x0A can appear inside
+/// one (verified over every codepoint in the 0.1-0.2 s this test's sibling
+/// takes). That means the row index can be built by scanning the file's bytes,
+/// with no decoding at all, which is what makes "load only the viewport"
+/// possible: you need to know where row N starts before you can decode it, and
+/// this answers that without touching a `char`.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_line_index() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\nline index from bytes — median of 3\n");
+    println!(
+        "{:<26} {:>10} {:>10} {:>14} {:>16} {:>14}",
+        "file", "size", "lines", "byte scan", "index memory", "vs decode"
+    );
+    println!("{}", "-".repeat(96));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let bytes = fs::read(p).expect("read");
+        let size = bytes.len();
+        let (t_scan, _) = time(3, || {
+            let mut starts: Vec<u64> = Vec::new();
+            for (i, b) in bytes.iter().enumerate() {
+                if *b == b'\n' {
+                    starts.push(i as u64);
+                }
+            }
+            std::hint::black_box(starts.len());
+        });
+        // What that index costs to keep, against decoding the whole file.
+        let mut starts: Vec<u64> = Vec::new();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'\n' {
+                starts.push(i as u64);
+            }
+        }
+        let (t_decode, _) = time(3, || {
+            let text = String::from_utf8(bytes.clone()).expect("utf8");
+            let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+            std::hint::black_box(lines.len());
+        });
+        println!(
+            "{:<26} {:>10} {:>10} {:>14} {:>16} {:>14}",
+            label,
+            human(size as u64),
+            starts.len() + 1,
+            ms(t_scan),
+            human(starts.len() as u64 * 8),
+            ms(t_decode),
+        );
+    }
+    println!();
+}

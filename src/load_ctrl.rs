@@ -65,6 +65,36 @@ impl Editor {
         }
         match outcome {
             Adopted::Nothing | Adopted::Rows(_) => {}
+            Adopted::Encoding(enc) => {
+                // Recorded on the buffer so a save writes the file back the way
+                // it was found; no rows yet, so nothing to redraw.
+                self.bs_mut().buf.encoding = enc;
+            }
+            Adopted::NeedsEager(enc) => {
+                // UTF-16: this reader cannot split its rows on byte newlines,
+                // so the file is read whole. Correct, and the eager path is
+                // what any size of such a file needs anyway — but it must not
+                // leave the editor stuck in a loading state.
+                self.bs_mut().load = None;
+                let path = self.bs().buf.name.clone();
+                if let Some(path) = path {
+                    match Buffer::from_file(&path) {
+                        Ok(read) => {
+                            let bs = self.bs_mut();
+                            bs.buf.lines = read.lines;
+                            bs.buf.crlf = read.crlf;
+                            bs.buf.encoding = read.encoding;
+                            bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
+                            bs.scroll = 0;
+                            bs.edit_gen = bs.edit_gen.wrapping_add(1);
+                        }
+                        Err(e) => self.flash(&format!("Read failed: {e}")),
+                    }
+                }
+                let _ = enc;
+                self.highlight_dirty = true;
+                dirty = true;
+            }
             Adopted::Finished { crlf, .. } => {
                 let rows = {
                     let bs = self.bs_mut();
@@ -222,10 +252,15 @@ mod tests {
         ed.start_load(&t.0).expect("start");
         let first = ed.loading_text().expect("loading text");
         assert!(first.starts_with("Reading"), "{first}");
-        // Let it adopt some, then the count must have moved — or the load is
-        // already done, which is also fine.
-        std::thread::sleep(Duration::from_millis(20));
-        ed.load_poll();
+        // Poll until the count moves — or the load finishes first, which is
+        // also fine. One poll is not enough to assert anything: the first one
+        // may only carry the encoding decision.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ed.loading() && ed.loading_text().as_deref() == Some(first.as_str()) {
+            assert!(Instant::now() < deadline, "the count never advanced");
+            ed.load_poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
         if ed.loading() {
             let later = ed.loading_text().expect("still loading");
             assert_ne!(later, first, "the count should advance");
@@ -263,15 +298,73 @@ mod tests {
     }
 
     #[test]
-    fn a_load_failure_becomes_a_status_line() {
-        let t = Temp::new("bad.bin", b"caf\xe9 not utf-8\n");
+    fn a_latin1_file_opens_with_its_letters_intact() {
+        // The bug this fixes: a file that is not valid UTF-8 used to be refused
+        // outright. It is now the last rung of the ladder, so it opens — and
+        // the buffer remembers how to save it back.
+        let t = Temp::new("latin1b.bin", b"caf\xe9 latin-1\n");
+        let mut ed = ed();
+        ed.start_load(&t.0).expect("start");
+        finish(&mut ed);
+        assert_eq!(rows(&ed), ["caf\u{e9} latin-1"]);
+        assert_eq!(ed.bs().buf.encoding, crate::encoding::Encoding::Cp1252);
+        // And it saves back to the same bytes rather than being rewritten as
+        // UTF-8 with a replacement character in it.
+        assert_eq!(ed.bs().buf.file_bytes().unwrap(), b"caf\xe9 latin-1\n");
+    }
+
+    #[test]
+    fn a_loading_utf16_file_falls_back_to_the_eager_path() {
+        // UTF-16 rows cannot be found by scanning bytes, so the streaming
+        // reader declines and the file is read whole. The user sees the file;
+        // the editor is not left stuck in a loading state.
+        let text = "one\ntwo\nthree\n";
+        let bytes = crate::encoding::encode(text, crate::encoding::Encoding::Utf16Le).unwrap();
+        let t = Temp::new("u16.txt", &bytes);
+        let mut ed = ed();
+        ed.start_load(&t.0).expect("start");
+        finish(&mut ed);
+        assert!(!ed.loading(), "not left loading");
+        assert_eq!(rows(&ed), ["one", "two", "three"]);
+        assert_eq!(ed.bs().buf.encoding, crate::encoding::Encoding::Utf16Le);
+    }
+
+    #[test]
+    fn a_utf8_bom_is_not_the_first_column() {
+        // The quiet bug: the BOM validated as UTF-8, so the file opened with
+        // U+FEFF as the buffer's first character — invisible, but Home, click
+        // positioning and `^`-anchored regexes all saw it.
+        let bytes = [&[0xEF, 0xBB, 0xBF][..], b"hello\n"].concat();
+        let t = Temp::new("bom.txt", &bytes);
+        let mut ed = ed();
+        ed.start_load(&t.0).expect("start");
+        finish(&mut ed);
+        assert_eq!(rows(&ed), ["hello"], "no U+FEFF in the first row");
+        assert!(!ed.bs().buf.lines[0].contains(&'\u{FEFF}'));
+        assert_eq!(ed.bs().buf.encoding, crate::encoding::Encoding::Utf8Bom);
+        // And the BOM comes back on save.
+        assert!(
+            ed.bs()
+                .buf
+                .file_bytes()
+                .unwrap()
+                .starts_with(&[0xEF, 0xBB, 0xBF])
+        );
+    }
+
+    #[test]
+    fn a_failed_fallback_becomes_a_status_line() {
+        // A UTF-16 file that cannot be decoded: odd byte length, so it is
+        // neither streamable nor decodable. The message reaches the status
+        // line rather than a thread nobody reads.
+        let t = Temp::new("u16bad.bin", &[0xFF, 0xFE, 0x41]);
         let mut ed = ed();
         ed.start_load(&t.0).expect("start");
         finish(&mut ed);
         assert!(!ed.loading());
-        let status = ed.status_text().expect("a message");
+        let status = ed.status_text().unwrap_or_default();
         assert!(
-            status.contains("failed") || status.contains("UTF-8"),
+            status.contains("failed") || status.contains("UTF-16"),
             "the failure is reported, got {status:?}"
         );
     }

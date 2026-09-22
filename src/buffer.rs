@@ -1,3 +1,4 @@
+use crate::encoding::{self, Encoding, Scope};
 use std::fs;
 use std::path::PathBuf;
 
@@ -13,6 +14,11 @@ pub struct Buffer {
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
+    /// How the bytes map to these characters. Carried on the buffer for the
+    /// same reason `crlf` is: a save has to write the file back the way it was
+    /// found, or opening a cp1252 file and saving it would rewrite it as UTF-8
+    /// with replacement characters in it. See [`crate::encoding`].
+    pub encoding: Encoding,
 }
 
 impl Buffer {
@@ -22,6 +28,7 @@ impl Buffer {
             name: None,
             modified: false,
             crlf: false,
+            encoding: Encoding::Utf8,
         }
     }
 }
@@ -33,22 +40,44 @@ impl Default for Buffer {
 }
 
 impl Buffer {
+    /// Read `path`, detecting its encoding.
+    ///
+    /// The ladder is in [`crate::encoding`]; what it buys here is that a
+    /// UTF-16 or windows-1252 file opens at all, and that a UTF-8 BOM is
+    /// stripped rather than becoming an invisible first column.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
-        let text = fs::read_to_string(path)?;
-        // detect CRLF before str::lines() strips the \r
+        let bytes = fs::read(path)?;
+        let encoding = encoding::detect(&bytes, Scope::Whole);
+        let text = encoding::decode(&bytes, encoding)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(Self::from_text(&text, Some(path.to_path_buf()), encoding))
+    }
+
+    /// A buffer over already-decoded text: the rows, the CRLF decision and the
+    /// one-row invariant, in one place so `from_file`, the loader and the tests
+    /// cannot disagree about them.
+    pub fn from_text(text: &str, name: Option<PathBuf>, encoding: Encoding) -> Self {
+        // Detect CRLF before `str::lines()` strips the \r.
         let crlf = text.contains("\r\n");
-        let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
-        let lines = if lines.is_empty() {
-            vec![Vec::new()]
-        } else {
-            lines
-        };
-        Ok(Self {
+        let mut lines: Vec<Vec<char>> = text
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).chars().collect())
+            .collect();
+        // `split` gives a trailing empty piece for a final newline; `lines()`
+        // did not. Drop it, then apply the invariant.
+        if lines.len() > 1 && lines.last().is_some_and(Vec::is_empty) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            lines.push(Vec::new());
+        }
+        Self {
             lines,
-            name: Some(path.to_path_buf()),
+            name,
             modified: false,
             crlf,
-        })
+            encoding,
+        }
     }
 
     pub fn line_len(&self, row: usize) -> usize {
@@ -117,6 +146,17 @@ impl Buffer {
             return joined + "\r\n";
         }
         joined
+    }
+
+    /// The file's bytes: `file_text` in the buffer's own encoding, BOM
+    /// included.
+    ///
+    /// The save path uses this rather than `file_text`, so a file read as
+    /// cp1252 is written as cp1252. A character the encoding cannot represent
+    /// is an error rather than a `?`: silently replacing a character is data
+    /// loss, and the caller can say so instead.
+    pub fn file_bytes(&self) -> Result<Vec<u8>, String> {
+        encoding::encode(&self.file_text(), self.encoding)
     }
 
     fn remove_empty_line(&mut self, row: usize) -> bool {
@@ -308,6 +348,7 @@ mod tests {
             name: None,
             modified: false,
             crlf: false,
+            encoding: Encoding::Utf8,
         }
     }
 

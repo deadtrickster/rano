@@ -12,5 +12,6 @@
 //!   line's wrap segments begin, and which clusters may never be split.
 
 pub mod buffer;
+pub mod encoding;
 pub mod syntax;
 pub mod width;

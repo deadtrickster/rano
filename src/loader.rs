@@ -56,6 +56,12 @@ pub const ADOPT_BUDGET: usize = 8 * BATCH;
 /// One message from the reader thread.
 #[derive(Debug)]
 pub enum LoadMsg {
+    /// The encoding the reader decided, sent before any row so the buffer knows
+    /// how to save the file back. Only the byte-splittable encodings reach here.
+    Encoding(crate::encoding::Encoding),
+    /// The file is not one this reader can stream — UTF-16, whose rows cannot be
+    /// found without decoding — so its owner should read it whole instead.
+    NeedsEager(crate::encoding::Encoding),
     /// Rows in file order. Every row is complete: the reader holds a partial
     /// row back until its newline arrives, so a chunk boundary can never
     /// split one.
@@ -80,6 +86,10 @@ pub enum Adopted {
     Finished { rows: usize, crlf: bool },
     /// The read failed; the string is for the status line.
     Failed(String),
+    /// The reader decided the encoding before any row arrived.
+    Encoding(crate::encoding::Encoding),
+    /// The file cannot be streamed (UTF-16) and its owner should read it whole.
+    NeedsEager(crate::encoding::Encoding),
 }
 
 /// A file being read on another thread.
@@ -90,6 +100,9 @@ pub struct LoadJob {
     done: bool,
     /// Rows handed out so far, for the status line.
     pub rows_read: usize,
+    /// The encoding the reader decided, once it has. `None` until the first
+    /// chunk has been sniffed.
+    pub encoding: Option<crate::encoding::Encoding>,
 }
 
 impl LoadJob {
@@ -109,6 +122,7 @@ impl LoadJob {
             cancel,
             done: false,
             rows_read: 0,
+            encoding: None,
         })
     }
 
@@ -132,6 +146,14 @@ impl LoadJob {
         // messages reach it and the loop stops. See `ADOPT_BUDGET`.
         while out.len() - before < ADOPT_BUDGET {
             match self.rx.try_recv() {
+                Ok(LoadMsg::Encoding(enc)) => {
+                    self.encoding = Some(enc);
+                    return Adopted::Encoding(enc);
+                }
+                Ok(LoadMsg::NeedsEager(enc)) => {
+                    self.done = true;
+                    return Adopted::NeedsEager(enc);
+                }
                 Ok(LoadMsg::Rows(mut rows)) => {
                     debug_assert!(
                         rows.len() <= BATCH,
@@ -179,15 +201,41 @@ impl LoadJob {
     }
 }
 
+/// One row's bytes as characters, in the file's encoding.
+///
+/// A whole row at a time is what makes a multi-byte character split across two
+/// chunk reads a non-event: the bytes accumulate until the newline, so the
+/// sequence is never cut.
+fn decode_row(
+    bytes: &[u8],
+    encoding: Option<crate::encoding::Encoding>,
+) -> Result<Vec<char>, String> {
+    use crate::encoding::{self, Encoding};
+    match encoding.unwrap_or(Encoding::Utf8) {
+        Encoding::Cp1252 => Ok(encoding::decode(bytes, Encoding::Cp1252)?.chars().collect()),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(s) => Ok(s.chars().collect()),
+            Err(e) => Err(format!("not UTF-8 at byte {}", e.valid_up_to())),
+        },
+    }
+}
+
 /// The reader thread: one pass, decoding rows as their newlines arrive.
 ///
 /// It never re-reads and never holds the whole file: `pending` is one partial
 /// row, and a row is sent as soon as it is complete.
 fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
+    use crate::encoding::{self, Encoding, Scope};
     let mut buf = vec![0u8; CHUNK];
     let mut pending: Vec<u8> = Vec::new();
     let mut batch: Vec<Vec<char>> = Vec::with_capacity(BATCH);
     let mut crlf = false;
+    // The first chunk decides the encoding, from the same 64 KiB prefix the
+    // ladder is measured at (TODO.md §13.5: 8 µs against 46 ms for a
+    // whole-file scan, agreeing with the whole-file answer on every shape).
+    let mut encoding: Option<Encoding> = None;
+    let mut first = true;
+    let mut first_chunk_bom = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -200,8 +248,38 @@ fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
                 return;
             }
         };
+        if first {
+            first = false;
+            // `Prefix` unless this read got the whole file: a sequence cut by
+            // the read is the reader's doing, not the file's.
+            let whole = (n as u64) == file.metadata().map(|m| m.len()).unwrap_or(0);
+            let scope = if whole { Scope::Whole } else { Scope::Prefix };
+            let enc = encoding::detect(&buf[..n], scope);
+            if !enc.rows_split_on_byte_newlines() {
+                // UTF-16: no byte-level newline to split on, so this reader
+                // cannot do it. The owner decodes the file whole instead —
+                // which is what any file whose rows cannot be found without
+                // decoding needs, at any size.
+                let _ = tx.send(LoadMsg::NeedsEager(enc));
+                return;
+            }
+            if tx.send(LoadMsg::Encoding(enc)).is_err() {
+                return; // the loop is gone; nothing to deliver to
+            }
+            encoding = Some(enc);
+            first_chunk_bom = true;
+        }
         let chunk = &buf[..n];
-        let mut start = 0usize;
+        let mut start = if first_chunk_bom {
+            // The BOM is at the very start of the file and is not content: it
+            // is skipped here rather than decoded, or it would be U+FEFF as the
+            // buffer's first character — invisible, but a real column that
+            // Home, click positioning and `^`-anchored regexes all see.
+            first_chunk_bom = false;
+            encoding.map(|e| e.bom().len()).unwrap_or(0).min(n)
+        } else {
+            0
+        };
         // Split on newlines; everything before the last one is complete rows.
         for (i, b) in chunk.iter().enumerate() {
             if *b != b'\n' {
@@ -212,13 +290,10 @@ fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
                 pending.pop();
                 crlf = true;
             }
-            match std::str::from_utf8(&pending) {
-                Ok(s) => batch.push(s.chars().collect()),
+            match decode_row(&pending, encoding) {
+                Ok(row) => batch.push(row),
                 Err(e) => {
-                    let _ = tx.send(LoadMsg::Failed(format!(
-                        "not UTF-8 at byte {}",
-                        e.valid_up_to()
-                    )));
+                    let _ = tx.send(LoadMsg::Failed(e));
                     return;
                 }
             }
@@ -240,13 +315,10 @@ fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
             pending.pop();
             crlf = true;
         }
-        match std::str::from_utf8(&pending) {
-            Ok(s) => batch.push(s.chars().collect()),
+        match decode_row(&pending, encoding) {
+            Ok(row) => batch.push(row),
             Err(e) => {
-                let _ = tx.send(LoadMsg::Failed(format!(
-                    "not UTF-8 at byte {}",
-                    e.valid_up_to()
-                )));
+                let _ = tx.send(LoadMsg::Failed(e));
                 return;
             }
         }
@@ -295,6 +367,8 @@ mod tests {
             let before = rows.len();
             match job.poll(&mut rows) {
                 Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
+                Adopted::Encoding(_) => {}
+                Adopted::NeedsEager(e) => panic!("unexpected eager path: {}", e.name()),
                 Adopted::Rows(n) => assert_eq!(n, rows.len() - before, "count matches"),
                 Adopted::Finished { rows: n, crlf: c } => {
                     assert_eq!(n, rows.len() - before, "count matches");
@@ -463,7 +537,7 @@ mod tests {
             match job.poll(&mut sink) {
                 Adopted::Finished { .. } | Adopted::Failed(_) => break,
                 Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
-                Adopted::Rows(_) => {}
+                _ => {}
             }
         }
         assert!(
@@ -484,22 +558,73 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_arrives_as_a_message() {
-        // Not a panic on a thread: the loop has to be able to say so.
+    fn latin1_bytes_are_decoded_as_cp1252_not_refused() {
+        // What changed: a file that is not valid UTF-8 used to be refused
+        // outright — "stream did not contain valid UTF-8" and no way in. It is
+        // now the last rung of the ladder, so the file opens and its accented
+        // letters are right. The byte 0xE9 is 'e-acute', not an error.
         let t = Temp::new("latin1.bin", b"caf\xe9 latin-1\n");
         let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
+        let (rows, _, _) = drain(&mut job);
+        assert_eq!(text(&rows), ["caf\u{e9} latin-1"]);
+        assert_eq!(job.encoding, Some(crate::encoding::Encoding::Cp1252));
+    }
+
+    #[test]
+    fn the_encoding_is_reported_before_any_row() {
+        // The buffer needs to know how to save before it has any rows: a file
+        // opened and saved immediately must not be rewritten as UTF-8.
+        for (name, body, want) in [
+            (
+                "enc_plain.txt",
+                b"plain\n".to_vec(),
+                crate::encoding::Encoding::Utf8,
+            ),
+            (
+                "enc_bom.txt",
+                [&[0xEF, 0xBB, 0xBF][..], b"plain\n"].concat(),
+                crate::encoding::Encoding::Utf8Bom,
+            ),
+            (
+                "enc_latin.bin",
+                b"caf\xe9\n".to_vec(),
+                crate::encoding::Encoding::Cp1252,
+            ),
+        ] {
+            let t = Temp::new(name, &body);
+            let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
+            let mut sink = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while job.encoding.is_none() {
+                assert!(Instant::now() < deadline, "{name}: never reported");
+                job.poll(&mut sink);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(job.encoding, Some(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn utf16_is_declined_for_the_eager_path() {
+        // Its rows cannot be found without decoding — U+000A is two bytes — so
+        // the streaming reader declines rather than emitting wrong rows. The
+        // owner reads it whole instead, which is what such a file needs at any
+        // size.
+        let text = "one\ntwo\n";
+        let bytes = crate::encoding::encode(text, crate::encoding::Encoding::Utf16Le).unwrap();
+        let t = Temp::new("u16.txt", &bytes);
+        let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
+        let mut sink = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut sink: Vec<Vec<char>> = Vec::new();
         loop {
-            assert!(Instant::now() < deadline);
+            assert!(Instant::now() < deadline, "never declined");
             match job.poll(&mut sink) {
-                Adopted::Failed(e) => {
-                    assert!(e.contains("UTF-8"), "message says why: {e}");
+                Adopted::NeedsEager(e) => {
+                    assert_eq!(e, crate::encoding::Encoding::Utf16Le);
                     break;
                 }
-                Adopted::Finished { .. } => panic!("invalid UTF-8 was accepted"),
-                Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
-                Adopted::Rows(_) => {}
+                Adopted::Finished { .. } => panic!("UTF-16 was streamed as if it were UTF-8"),
+                _ => std::thread::sleep(Duration::from_millis(1)),
             }
         }
     }

@@ -2107,9 +2107,18 @@ impl Editor {
     }
 
     pub(crate) fn save_to(&mut self, path: PathBuf) {
-        let text = self.bs().buf.file_text();
-        let bytes = text.len();
-        match fs::write(&path, text) {
+        // The buffer's OWN encoding, not always UTF-8: a file read as cp1252 or
+        // UTF-16 is written back the way it was found, or opening and saving
+        // would rewrite it as UTF-8 with the characters replaced.
+        let encoded = match self.bs().buf.file_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                self.flash(&format!("Cannot save: {e}"));
+                return;
+            }
+        };
+        let bytes = encoded.len();
+        match fs::write(&path, encoded) {
             Ok(()) => {
                 {
                     let bs = self.bs_mut();
@@ -2162,13 +2171,16 @@ impl Editor {
         if name.trim().is_empty() {
             return;
         }
-        match fs::read_to_string(expand_tilde(&name)) {
-            Ok(text) => {
-                let mut lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
-                if lines.is_empty() {
-                    lines.push(Vec::new());
-                }
+        match Buffer::from_file(Path::new(&expand_tilde(&name))) {
+            Ok(read) => {
+                // The whole read comes from `Buffer::from_file`, so `^R` gets
+                // the same encoding detection as startup and remembers what it
+                // found for the eventual save.
+                let lines = read.lines;
                 let count = lines.len();
+                self.bs_mut().buf.crlf = read.crlf;
+                self.bs_mut().buf.encoding = read.encoding;
+                assert!(!lines.is_empty(), "from_file always yields one row");
                 if self.bs().buf.lines.len() == 1 && self.bs().buf.lines[0].is_empty() {
                     self.begin_action(ActionKind::ReadFile, 0, 1);
                     self.bs_mut().buf.lines = lines;

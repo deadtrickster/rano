@@ -2,6 +2,7 @@ mod bindings;
 mod buffer;
 mod config;
 mod editor;
+mod encoding;
 mod exec;
 mod exec_ctrl;
 mod export;

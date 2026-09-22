@@ -270,7 +270,7 @@ the next reader will want to price the trade, not rediscover it.
   (`markdown_inline_ranges`, split around the named children the block
   grammar already parsed), with both passes overlaying one grid. Fence bodies
   and indented code are one `text.literal` run (nano colours the whole fence;
-  no injection grammar runs, so a ```rust block is cyan, not Rust), raw HTML
+  no injection grammar runs, so a `` ```rust `` block is cyan, not Rust), raw HTML
   is a tag, `~~struck~~` is struck through, and link text and its destination
   share the link colour — the distinctions nano's markdown mode draws.
   Cost, measured (release, 60 KB): 46 ms against 40 ms for a Rust file of the
@@ -349,36 +349,8 @@ The concern was typing on heavy syntaxes, minified JS (one enormous line) and
   instrument that isolates parse+colorise from draw.
 - [x] `src/bench.rs` — the harness, so the numbers can be re-taken.
 
-### Still slow, and why
 
-- [ ] **Opening a 200 MB file parses it once, in full.** SOLVED 2026-09-22 by
-  the windowed open below; kept as the record of what the problem was.
-- [ ] **`buf.text()` per whole-buffer refresh** copies the document (24 ms at
-  30 MB). Only reached for small buffers and the export path now, so it is
-  not on the hot path — but the export path pays it twice (once to parse,
-  once for the markdown inline pass in a loop).
-- [ ] **`rows_text` + `parse` are still per keystroke in the window.** They
-  are proportional to the window, which is what we want, but the parse could
-  in principle be reused incrementally with a correct `InputEdit`. That was
-  not attempted: `editor.rs` mutates `buf.lines` directly in places (the
-  region sort, for one), so tracking a trustworthy edit description needs
-  those paths funnelled through `Buffer` first. A wrong `InputEdit` panics
-  inside tree-sitter, so it is not a change to make halfway.
-
-### Numbers for the record (release, one keystroke, 2026-09-22)
-
-Whole-document highlight vs the pieces, median of 3:
-
-    file           reparse   hl.refresh (full)   highlight_now (window)   wrap tbl   keypress
-    minified.js    488 ms    1079 ms             1076 ms                  25 ms      1109 ms
-    oneline.txt      0       1.9 ms              1.9 ms                   30 ms      33 ms
-    big.log          0       0.1 ms              0.01 ms                  185 ms     0.57 ms
-    big.rs         745 ms    1324 ms             0.83 ms                  43 ms      1.4 ms
-
-(`wrap tbl` and `hl.refresh` are the direct calls; a keystroke uses the
-incremental table and the window, which is why `keypress` is far below them.)
-
-### 12b. Hundreds of megabytes, minified files, and what research said
+### 12a. Hundreds of megabytes, minified files, and what research said
 
 Researched 2026-09-22, operator-instigated. Three findings changed the design:
 
@@ -394,60 +366,184 @@ Researched 2026-09-22, operator-instigated. Three findings changed the design:
    files (`editor.largeFileOptimizations`).
 
 The operator's framing is the design: **parsing does not imply colouring, and
-for a huge file you colour only the visible part plus a margin.** What landed:
+for a huge file you colour only the visible part plus a margin.** A row-shaped
+window is not enough, because a row can be megabytes.
 
-- [x] **The window is a CHAR range, not a row range** (`syntax::Window`:
-  `rows` plus `cols` for the first and last row). A row can be megabytes —
-  minified JS, one-line JSON — so a row-shaped window over one of those is
-  the whole file. Measured: 4 MB single-line bundle **1108 ms → 5.0 ms** per
-  keystroke; a 20 MB one, **40.7 ms**.
+What landed:
+
+- [x] **The window is a CHAR range, not a row range** (`syntax::Window`: `rows`
+  plus `cols` bounding the first and last row).
 - [x] **Highlighting is lazy, once per FRAME** (`Editor::ensure_highlight`),
-  not once per edit. A burst of keystrokes between two frames costs one
-  highlight; the run loop calls it before painting, which is what makes the
-  first frame of a huge file the viewport window rather than the document.
-- [x] **Opening is windowed too.** `BufferState::new` no longer highlights:
-  measured open, read + first highlight — 7 MB Rust **35 ms**, 30 MB log
-  **58 ms**, 193 MB **387 ms** (299 of it the read).
-- [x] **The wrap table's per-row scan got a fast conservative path**
-  (`width::is_simple_prefix`: ASCII-and-not-a-tab, which is what 193M
-  characters of a log needs). First highlight of the 193 MB file **1.1 s →
-  88 ms**.
-- [x] **A quadratic in markdown's inline pass.** It handed the parser the
-  whole source per node; tree-sitter walks the excluded input to reach each
-  range, so a 2,400-paragraph document cost **9.8× for 4× the text**. Now
-  each node's own bytes are sliced and the row base offset added back:
-  **4.0×**, dead linear. Caught by a new test that asserts the ratio rather
-  than a wall-clock bound — the old bound flaked under the suite's own
-  parallelism, and replacing it is what found this.
+  so a burst of keystrokes costs one highlight, and a huge file's first frame
+  is the viewport window rather than the document.
+- [x] **Opening is windowed too** — `BufferState::new` no longer highlights.
+  Measured (read + first highlight): 7 MB Rust **35 ms**, 30 MB log **58 ms**,
+  193 MB **387 ms** (299 of it the read).
+- [x] **`width::is_simple_prefix`** — the wrap table asked "is this row
+  ordinary?" by scanning every character (193M at open). ASCII-and-not-a-tab
+  answers conservatively: the 193 MB first highlight **1.1 s → 88 ms**.
+- [x] **A quadratic in markdown's inline pass**, found by a test written in
+  the same commit: it handed the parser the whole source per node, and
+  tree-sitter walks the excluded input to reach each range, so 2,400
+  paragraphs cost **9.8× for 4× the text**. Slicing each node's own bytes:
+  **4.0×**, dead linear.
 
-Measured after all of it (release, one keystroke = edit + the frame's
-highlight):
+Measured after all of it (release, median of 3, edit point mid-document —
+`bench_breakdown` prints exactly this):
 
-| file | size | edit only | edit + highlight |
-|---|---|---|---|
-| 193 MB log | 184.2 MiB | 0.1 µs | **4.0 ms** |
-| 30 MB log | 29.2 MiB | 632 µs | **0.50 ms** |
-| 20 MB minified JS (1 line) | 19.9 MiB | 32 ms | **40.7 ms** |
-| 4 MB minified JS (1 line) | 3.9 MiB | 844 µs | **5.0 ms** |
-| 7 MB Rust | 7.0 MiB | 462 µs | **1.6 ms** |
+    file                       rows      edit only   edit+highlight   of which
+    minified20 (20.9 MB)          1       33.5 ms        41.2 ms       undo 17.0 ms
+    minified.js (4.1 MB)          1        800 µs         6.0 ms       undo 239 µs
+    oneline.txt (5.0 MB)          1        1.1 ms         2.7 ms       undo 242 µs
+    big.log (30.6 MB)       400,000        264 µs         253 µs       re-sum 240 µs
+    huge200.log (193 MB)  2,600,000        2.0 ms         1.8 ms       re-sum 1.7 ms
+    big.rs (7.3 MB)         360,000        222 µs         1.1 ms       re-sum 209 µs
 
-Still slow, with the measurement that says so:
+For scale, the same keystroke before any of this work: 7 MB Rust **1452 ms**,
+4 MB minified JS **1108 ms**, 30 MB log **182 ms**.
 
-- [ ] **Undo clones the whole row on every keystroke.** minified20's
-  "edit only" is 32 ms and it is all `begin_action`: the undo snapshot for a
-  one-character insertion on a 20 MB single row copies the row. For an
-  ordinary file that is a few hundred bytes and invisible; for a single
-  enormous row it is the largest cost left. A fix means recording the char
-  range an insertion touched instead of the row — a change to the undo model
-  (`UndoStep.before: Vec<Vec<char>>`), not a local patch.
-- [ ] **The wrap prefix is re-summed from the edited row down**, O(rows)
-  arithmetic. That is the 193 MB file's 4.0 ms per keystroke (2.6M additions).
-  A Fenwick tree over segment counts would make it O(log rows); a 4 ms
-  keystroke on a 193 MB file is not worth that yet.
-- [ ] **`hl.refresh` (whole document) is still O(document)** by design, and
-  the export path calls it. `rano --export html huge200.log` will take as long
-  as it takes: colouring everything is what an export is for.
-- [ ] **A window's edges are approximate** — a construct opening outside is
-  coloured as if it opened inside. `a_window_can_be_part_of_a_single_enormous_row`
-  prints how many columns differ (4 of 64 at a 32-column probe), which is why
-  the editor's margin is 4,000 columns and 200 rows.
+## 13. Three costs left, to take one at a time
+
+These are the remaining O(something-big) paths on a keystroke. They are
+different problems on different shapes of file, so they are separate
+decisions. Each has: what you see, the measurement, the mechanism with its
+code location, the options and what they cost, and what would settle it.
+
+### 13.1 The undo snapshot clones the row — twice per keystroke
+
+**What you see.** Typing in a file that is one enormous line lags. Editing
+any ordinary file is unaffected.
+
+**Measurement.** 20.9 MB single-row file, one keystroke: **33.5 ms** of which
+the before-snapshot is **17.0 ms** (measured by taking
+`lines[r..r+1].to_vec()` directly, which is what `begin_action` does) and the
+buffer's own splice is **2.5 ms**. The remaining ~14 ms is the same clone
+again from `current_after` — same code shape, same row, *not* separately
+instrumented, so treat it as inferred rather than measured. On the 4.1 MB
+single-row file the before-clone alone is 239 µs of an 800 µs edit.
+
+**Mechanism.** `UndoStep` stores whole rows:
+`before: Vec<Vec<char>>`, `after: Vec<Vec<char>>` — *editor.rs:47-56*.
+`begin_action` fills `before` with `bs.buf.lines[first..last].to_vec()`
+(*editor.rs:810*); `finish_step` fills `after` via `current_after`, which does
+`self.bs().buf.lines[after_start..end].to_vec()` (*editor.rs:901*). A
+one-character insertion passes `first..last` = one row, so the "region" the
+comment promises is a whole row — megabytes when the row is megabytes.
+
+**Options.**
+
+1. **Store a delta instead of rows.** `before`/`after` become
+   `(row, char_range, text)` — the characters an edit actually touched. The
+   undo application splices them back. This makes a keystroke O(typed text)
+   rather than O(row), which is what it should be.
+   *Cost:* the coalescing rules (`coalesce_kind`, `apply_coalesce`,
+   *editor.rs:846-885*) are written against whole rows — runs of
+   insert/backspace on one row merge by comparing row vectors. Coalescing a
+   *run* of deltas into one is the real work: merge adjacent ranges, keep the
+   earliest `before` slice and the latest `after` slice. Larger diff, but the
+   invariants are local.
+2. **Bound the snapshot by size**: keep full rows under a threshold and
+   deltas above it. Two code paths for one invariant — the reason to prefer 1.
+3. **Leave it.** 17 ms on a 20 MB single line; a 200 MB single line would be
+   ~170 ms per keystroke, which is not typing.
+
+**What would settle it.** Whether coalescing wants to be delta-shaped anyway.
+It currently special-cases `prev.before.len() == 1 && prev.after.len() == 1`
+(*editor.rs:851-856*) — i.e. "both steps touched one row" — which is a fuzzy
+proxy for "these are adjacent edits". Deltas would say it exactly.
+
+**Risk.** Undo/redo is the one place a bug loses a user's text. The undo tests
+(`ed_tests`) cover coalescing, cut/paste and replace; they should be extended
+with a property test — apply N random edits, undo them all, assert the buffer
+is byte-identical — before this changes.
+
+### 13.2 The wrap prefix is re-summed from the edited row down
+
+**What you see.** Typing in a file with millions of lines costs a few
+milliseconds per key. Nothing visible; it is the floor under everything else.
+
+**Measurement.** 193 MB, 2.6M rows: **1.7 ms** of a 2.0 ms edit. 30.6 MB,
+400k rows: **240 µs** of 264 µs. big.rs, 360k rows: **209 µs**. The cost
+tracks the row count (6.5× rows → 7× time), not the bytes.
+
+**Mechanism.** `wrap_prefix[r]` is the total visual-row count before buffer
+row `r`, so an edit on row `k` invalidates every entry after `k`. The
+incremental path re-measures row `k` and then re-sums the rest
+(*editor.rs:383-388*): a loop over `row..n` doing one add each. Correct and
+cheap per row; `n` is 2.6 million.
+
+**Options.**
+
+1. **A Fenwick tree (binary indexed tree) over per-row segment counts.**
+   Point update on the edited row, prefix sum on read — O(log n) for both.
+   The table is already rebuilt wholesale when rows are inserted or removed,
+   so only the point-update path changes.
+   *Cost:* ~40 lines and a new invariant; `wrap_prefix` is read by
+   `buf_row_of_visual` (binary search), `seg_count`, and the renderer, so
+   those would read through the tree instead of the array.
+2. **Leave the array and pay O(rows).** 1.7 ms at 2.6M rows. A 2 GB file of
+   short lines (~26M rows) would be ~17 ms per key — noticeable.
+3. **Cap the table.** Above some row count, drop soft wrap entirely and
+   scroll horizontally. Honest (nano has no wrap at 26M lines either) and
+   much simpler than a Fenwick tree, but it takes the feature away at exactly
+   the size where reading long lines matters most.
+
+**What would settle it.** Whether a Fenwick tree is warranted for the file
+sizes actually opened here. The largest log on this box is 193 MB (2.6M
+rows, 1.7 ms); the point where it hurts is ~10× that.
+
+**Risk.** Low, and contained: the wrap table is fully covered by tests
+(`the_incremental_wrap_table_agrees_with_a_full_rebuild`,
+`a_row_that_stops_wrapping_is_still_measured_once`, the `wrap_prefix_*`
+tests), and any mistake shows as a wrong scroll position, not as data loss.
+
+### 13.3 A window's edges are approximate, and `--export` is whole-document
+
+**What you see.** Two different things, both consequences of the same design,
+so one decision:
+
+- A construct that opens *outside* the highlight window and closes *inside* is
+  coloured as though it opened inside. A block comment started 300 rows above
+  the viewport reads as code until the window catches up with a scroll.
+  Measured by `a_window_can_be_part_of_a_single_enormous_row`, which prints the
+  count rather than hiding it: **4 of 64 probe columns** differ at the window's
+  32-column edges.
+- `rano --export html huge.log` parses and walks the whole document. That is
+  what an export *is*, so it is not a defect — but it means the export path
+  still carries the O(document) cost the editor no longer has.
+
+**Mechanism.** The window is `LARGE_BUFFER` = 2 MiB (*syntax.rs:745*) with
+`HIGHLIGHT_MARGIN` = 200 rows, `COL_MARGIN` = 4,000 columns and
+`LONG_ROW` = 8,000 (*editor.rs:583-599*). The margins are the whole mitigation
+for the approximation: at 200 rows the edges are off screen at any realistic
+terminal height. `syntax_errors` returns empty for a windowed highlight
+(*syntax.rs*, documented), so tree-sitter diagnostics are LSP-only on big
+files.
+
+**Options.**
+
+1. **Accept it, and say so in the UI.** The margins already make it invisible
+   in use; a status-line note ("windowed highlight") would make it honest for
+   someone who scrolls fast enough to see it.
+2. **Seed the window from a real parse.** Parse the *first* window at open,
+   keep that tree, and extend it incrementally as the viewport moves (edit the
+   tree for the inserted text, re-parse with `set_included_ranges` only if the
+   construct at the boundary actually changed). This is the correct fix, and
+   it is the `Stream` design that already exists in `syntax.rs` — but see
+   §12's note: a wrong `InputEdit` panics inside tree-sitter, so it depends on
+   every buffer mutation going through `Buffer` first.
+3. **Widen the margin adaptively**: keep extending the window backwards until
+   the first row of the window parses with no `ERROR` node, bounded by a
+   maximum. Cheap to try, no new invariant, and it fixes exactly the block
+   comment case — but it costs a parse per extension, and a document whose
+   first row is genuinely unparseable would extend to the cap every time.
+
+**What would settle it.** Whether anyone actually sees the approximation. The
+margin is 200 rows; a block comment longer than 400 rows with code visible
+above and below it is the case. If that never happens in practice, option 1
+plus a documented limit is the right cost.
+
+**Risk.** Option 2 is the risky one and it is the one that would remove the
+trade rather than hide it. It should not be attempted without the `InputEdit`
+correctness work in §12 (every mutation funnelled through `Buffer`), because a
+wrong edit description is a panic, not a wrong colour.

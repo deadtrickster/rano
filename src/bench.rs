@@ -204,19 +204,10 @@ fn bench_breakdown() {
         ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
         ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
     ];
-    println!("\nkeystroke breakdown — median of 3, µs\n");
-    println!(
-        "{:<22} {:>9} {:>11} {:>12} {:>12} {:>11} {:>11} {:>11}",
-        "file",
-        "size",
-        "reparse",
-        "hl.refresh",
-        "highlight_now",
-        "wrap tbl",
-        "buf edit",
-        "keypress"
-    );
-    println!("{}", "-".repeat(112));
+    // One labelled line per metric rather than a table: the columns here have
+    // been renamed often enough that a mislabelled number is a real risk, and
+    // a measurement nobody can read is worse than no measurement.
+    println!();
     for (label, path) in paths {
         let p = Path::new(path);
         if !p.exists() {
@@ -227,31 +218,63 @@ fn bench_breakdown() {
         let mut e = Editor::new(buf.clone(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
+        // Put the edit point somewhere real: mid-document, so the undo
+        // snapshot and the wrap re-sum have rows below them as they would when
+        // someone is actually typing.
+        let mid = e.bs().buf.lines.len() / 2;
+        e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
 
-        let (t_refresh, _) = time(3, || {
+        println!(
+            "{} — {} bytes, {} rows, longest row {}",
+            label,
+            size,
+            e.bs().buf.lines.len(),
+            e.bs().buf.lines.iter().map(Vec::len).max().unwrap_or(0)
+        );
+        // The whole document, for scale: what a keystroke used to pay.
+        let (t, _) = time(3, || {
             e.bs_mut().hl.refresh(&buf);
         });
-        // ONE insertion, then the frame's highlight: the honest cost of a
-        // keystroke is the edit plus the highlight the next frame pays. These
-        // are separate numbers because they are paid by different code.
-        let (t_key, _) = time(3, || {
+        println!("    {:>22}  {}", "hl.refresh (whole doc)", ms(t));
+        // The edit alone: the buffer mutation and the undo snapshot.
+        let (t, _) = time(3, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         });
-        let (t_frame, _) = time(3, || {
+        println!("    {:>22}  {}", "edit only", ms(t));
+        // The frame's highlight, which is where the remaining cost lives.
+        let (t, _) = time(3, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
             e.ensure_highlight();
         });
-
-        println!(
-            "{:<28} {:>10} {:>14} {:>16} {:>16}",
-            label,
-            human(size),
-            ms(t_refresh),
-            ms(t_key),
-            ms(t_frame),
-        );
+        println!("    {:>22}  {}", "edit + highlight", ms(t));
+        // The wrap table's incremental update: one row re-measured, then the
+        // prefix re-summed from that row to the end. Arithmetic, but over every
+        // remaining row — O(rows).
+        let (t, _) = time(3, || {
+            let bs = e.bs_mut();
+            bs.edit_gen = bs.edit_gen.wrapping_add(1);
+            bs.wrap_dirty_row = Some(bs.cursor.row);
+            e.ensure_wrap_prefix();
+        });
+        println!("    {:>22}  {}", "wrap table (re-sum)", ms(t));
+        // The undo snapshot: `begin_action` copies the affected rows, so a
+        // one-character insertion on a single enormous row copies the row.
+        let (t, _) = time(3, || {
+            let bs = e.bs_mut();
+            let r = bs.cursor.row;
+            std::hint::black_box(bs.buf.lines[r..r + 1].to_vec());
+        });
+        println!("    {:>22}  {}", "undo row clone", ms(t));
+        // The buffer's own insert: a Vec<char> splice, O(row).
+        let (t, _) = time(3, || {
+            let bs = e.bs_mut();
+            let (r, c) = (bs.cursor.row, bs.cursor.col);
+            bs.buf.insert_char(r, c, 'z');
+            bs.buf.backspace(r, c + 1);
+        });
+        println!("    {:>22}  {}", "buffer splice", ms(t));
+        println!();
     }
-    println!();
 }
 
 /// What a person waits for after `rano FILE`: read the file, then the first

@@ -79,6 +79,22 @@ fn is_zero_width(u: u32) -> bool {
     )
 }
 
+/// [`char_width`]'s width decision for a bare codepoint: `true` when it takes
+/// two columns.
+///
+/// Exposed because a caller scanning BYTES — an index build, a wrap table that
+/// wants segment counts without decoding a row — needs the same answer for a
+/// codepoint it has just assembled from a UTF-8 sequence, and two copies of
+/// this table would drift.
+///
+/// `dead_code` is allowed because the only caller today is the lazy-loading
+/// prototype in `bench.rs` (test-only); the index it exists for is §15 of
+/// TODO.md, not yet written. It is public API of the library target either way.
+#[allow(dead_code)]
+pub fn is_wide_cp(u: u32) -> bool {
+    is_wide(u)
+}
+
 /// East-Asian Wide and Fullwidth, plus the emoji planes terminals render
 /// double-width.
 fn is_wide(u: u32) -> bool {

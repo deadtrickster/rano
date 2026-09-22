@@ -665,6 +665,17 @@ at `^` sees it. It is preserved on save, which is correct; it is not *handled*.
 `InvalidData` error is the whole story: no BOM check before it, no fallback
 after it. `Buffer` has `crlf: bool` (*buffer.rs:15*) but nothing for encoding.
 
+**Detection needs a prefix, not the file** — worth stating because this section
+first implied otherwise, which made encoding look like it forces an eager read.
+Measured (`bench_detect_from_prefix`): deciding from the first 64 KiB costs
+**8 µs on a 193 MB file against 46 ms to scan the whole thing**, and it agrees
+with the whole-file answer on all seven shapes tried, from UTF-16-with-BOM to
+latin-1 to CJK. The ladder's third rung is designed for this: `chardetng`'s own
+docs say *"If you want to perform detection on just the prefix of a longer
+stream, do not pass `last=true`"*, and its `feed` returns whether any non-ASCII
+byte has been seen at all — which is the signal the first two rungs want
+anyway. So the encoding step is a 64 KiB read, not a pass.
+
 **The ladder that is standard.** Three rungs, cheapest first:
 
 1. **BOM.** Definitive, six comparisons: `EF BB BF` UTF-8, `FF FE` UTF-16LE,
@@ -1327,24 +1338,34 @@ row in the test, and the one bug the prototype had was exactly here — a phanto
 empty final row on every file, from mishandling a trailing newline. That is the
 argument for prototyping before designing further.
 
-### 15.2 The four facts it rests on
+### 15.2 The five facts it rests on
 
 1. **In UTF-8, a `0x0A` byte is always a newline** — verified over every
    codepoint (§13.6). So the index needs no decoding.
-2. **`is_ascii` per row comes free with the newline scan**, and a row that is
-   ASCII has `char_count == byte_len`.
-3. **Therefore wrap segments are known from bytes alone**: for an ASCII row,
-   `ceil(byte_len / view_w)`, exactly. Verified in the same test: exact on all
-   2.6M ASCII rows, and it correctly declines to claim anything for the 6
-   non-ASCII rows of the CJK file.
-4. **Rows always start on a char boundary** (because `\n` cannot be inside a
+2. **Char count per row is derivable from bytes for EVERY UTF-8 row**, not just
+   ASCII ones: it is the number of bytes that are not continuation bytes
+   (`b & 0xC0 != 0x80`). Verified: `chars_from_bytes == chars` for ASCII,
+   Latin-1, Greek, Cyrillic, CJK, kana, Hangul and emoji alike.
+3. **The property that matters is "every character is one column", not "the row
+   is ASCII"** — see §15.6, which corrects this section. A Latin-1, Greek or
+   Cyrillic row is non-ASCII and wraps *exactly* like ASCII; a CJK one does
+   not. The per-row flag is therefore **narrow vs wide**, derived from the
+   leading bytes: `0xC2..=0xDF` is always one column (all of U+0080..U+07FF is
+   narrow), and only the 3- and 4-byte leads need the codepoint assembled —
+   arithmetic on at most four bytes, no `char`, no allocation.
+4. **Therefore wrap segments are known from bytes alone** for a narrow row:
+   `ceil(char_count / view_w)`, exactly. Verified exact on all 2.6M rows of the
+   193 MB log, and on 6 of the 11 rows of the CJK file — the other 5 being the
+   wide ones, which are decoded to measure rather than guessed.
+5. **Rows always start on a char boundary** (because `\n` cannot be inside a
    multi-byte sequence), so a positional read can decode any row without
    hunting for a boundary.
 
-Fact 3 is the one that makes this more than "a cache of rows": it means the
-**wrap table can be built from the index** for an ASCII document, which is what
-scrolling, `M-\`, the cursor and mouse hit-testing all read. Without it, lazy
-rows and the wrap table would fight.
+Fact 4 is the one that makes this more than "a cache of rows": it means the
+**wrap table can be built from the index**, which is what scrolling, `M-\`, the
+cursor and mouse hit-testing all read. Without it, lazy rows and the wrap table
+would fight. And since fact 3 covers non-ASCII narrow text, that table is exact
+for far more than source code.
 
 ### 15.3 What it costs, honestly
 
@@ -1419,3 +1440,52 @@ rows and the wrap table would fight.
 enough to need this, or only reads one. Logs, dumps and generated files are
 read; that is the case stage 2 covers for ~20 MB and 54 ms, and it is the case
 the measurements were taken on.
+
+### 15.6 Two corrections, and the loop closed
+
+Both from the operator, both measured, both changing the design.
+
+**"ASCII is not that special."** True, and §15.2 as first written was built on
+`is_ascii` per row, which was the wrong property. Two things are true that the
+word "ASCII" was hiding:
+
+- **Char count is derivable from bytes for every UTF-8 row** — it is the count
+  of non-continuation bytes. Verified equal to the real char count for ASCII,
+  Latin-1, Greek, Cyrillic, CJK, kana, Hangul and emoji.
+- **The property that matters for wrapping is "one column per character", and
+  Latin-1, Greek and Cyrillic satisfy it while being non-ASCII.** A Cyrillic
+  row wraps *exactly* like an ASCII one. So the flag is **narrow vs wide**,
+  decided from leading-byte ranges: `0xC2..=0xDF` is always one column, and
+  only 3- and 4-byte leads need the codepoint assembled. `is_wide_cp` is now
+  exposed from `width.rs` so the byte scan and the renderer cannot disagree
+  about what is wide.
+
+The prototype is corrected accordingly, and the numbers are unchanged where it
+matters — **62 ms and 19.8 MB** for the 193 MB file (against 54 ms and 19.8 MB
+for the ASCII-only version), because counting chars costs nothing for a row
+whose count equals its byte length, so the counts are stored **sparsely** (only
+for rows that are not pure ASCII — empty for every source file and log here).
+What improved is coverage: char counts exact on all 2.6M rows, and segment
+counts exact on all 2.6M *narrow* rows rather than declining every non-ASCII
+one. The CJK file now reports 6 narrow of 11, where the ASCII-only version
+claimed none.
+
+**"You don't have to scan the whole file usually to detect encoding."** Also
+true, and §13.5 implied otherwise. Measured: 8 µs for a 64 KiB prefix against
+46 ms for the whole file, agreeing on every case tried. Amended there.
+
+**What that closes.** With both corrections, **no step of opening a file needs
+the whole file**:
+
+| step | cost | scope |
+|---|---|---|
+| first frame (chrome, event loop live) | 261 µs | nothing |
+| detect encoding from a 64 KiB prefix | 8 µs | one chunk |
+| index the first chunk, extend as you scroll | ~37 µs | one chunk |
+| decode the visible rows | ~10 µs | one window |
+| full index (only if you must know the row count) | 62 ms | whole file |
+
+The last row is the one to notice: it is the only O(file) step left, and it is
+avoidable — the index grows only at the end, so it can be extended chunk by
+chunk, and `[12% indexed]` in the status line is honest about the rest (§15.3).
+That makes open genuinely O(chunk): read 64 KiB, sniff it, index it, draw it.

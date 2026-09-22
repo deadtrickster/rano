@@ -739,8 +739,12 @@ mod lazy {
     use std::io::{self, Read};
     use std::os::unix::fs::FileExt;
 
-    /// One bit per row: is the row pure ASCII? Set while scanning for newlines,
-    /// which is why it is nearly free.
+    /// One bit per row. NOT "is the row pure ASCII" — see `narrow_here`: the
+    /// property that matters is "every character is exactly one column and
+    /// there is no tab", which Latin-1, Greek, Cyrillic and most of the world's
+    /// text satisfy while being non-ASCII. The first version of this prototype
+    /// used `is_ascii` and was wrong: it excluded text that wraps exactly like
+    /// ASCII does.
     #[derive(Default)]
     pub struct Bits(Vec<u64>);
 
@@ -761,6 +765,47 @@ mod lazy {
         }
     }
 
+    /// Does the UTF-8 sequence starting at `b[i]` occupy exactly one column,
+    /// and is it not a tab? Answered from bytes; the 3- and 4-byte cases need
+    /// the codepoint, which is arithmetic on the sequence — no `char`, no
+    /// allocation, and nothing at all for the 99% of bytes that are ASCII.
+    ///
+    /// Returns `(width_is_one, sequence_len)`.
+    fn narrow_here(b: &[u8], i: usize) -> (bool, usize) {
+        let x = b[i];
+        match x {
+            0x09 => (false, 1),       // tab: expands, so not one column
+            0x00..=0x7f => (true, 1), // ASCII
+            0xc2..=0xdf => (true, 2), // U+0080..U+07FF: Latin-1, Greek,
+            //                                Cyrillic, Hebrew, Arabic — all narrow
+            0xe0..=0xef => {
+                // U+0800..U+FFFF: CJK and kana are two columns; Indic, Thai and
+                // the rest are one. The codepoint decides.
+                if i + 2 >= b.len() {
+                    return (false, 1);
+                }
+                let cp = ((x as u32 & 0x0f) << 12)
+                    | ((b[i + 1] as u32 & 0x3f) << 6)
+                    | (b[i + 2] as u32 & 0x3f);
+                (!crate::width::is_wide_cp(cp), 3)
+            }
+            0xf0..=0xf4 => {
+                if i + 3 >= b.len() {
+                    return (false, 1);
+                }
+                let cp = ((x as u32 & 0x07) << 18)
+                    | ((b[i + 1] as u32 & 0x3f) << 12)
+                    | ((b[i + 2] as u32 & 0x3f) << 6)
+                    | (b[i + 3] as u32 & 0x3f);
+                (!crate::width::is_wide_cp(cp), 4)
+            }
+            // A continuation byte where a lead was expected, a surrogate, or an
+            // overlong: not text we can reason about. Treat as wide so the row
+            // takes the decoding path.
+            _ => (false, 1),
+        }
+    }
+
     /// The file, indexed but not decoded.
     pub struct Lazy {
         file: File,
@@ -773,6 +818,14 @@ mod lazy {
         /// prototype had: it produced a phantom empty final row on every file.
         last_end: u64,
         ascii: Bits,
+        /// One bit per row: every BYTE is ASCII, so `char_count == byte_len`.
+        pure_ascii: Bits,
+        /// Char counts for rows that are not pure ASCII, `(row, chars)`,
+        /// ascending. EMPTY for an all-ASCII file — which is every source file
+        /// and almost every log, and the reason the index stays 19.8 MB rather
+        /// than doubling: counting chars costs nothing for a row whose count
+        /// equals its byte length.
+        non_ascii_chars: Vec<(u32, u32)>,
         size: u64,
     }
 
@@ -784,8 +837,12 @@ mod lazy {
             let size = file.metadata()?.len();
             let mut starts = vec![0u64];
             let mut ascii = Bits::default();
+            let mut pure_ascii = Bits::default();
             let mut buf = vec![0u8; 1 << 16];
+            let mut row_narrow = true;
             let mut row_ascii = true;
+            let mut row_chars = 0usize;
+            let mut non_ascii_chars: Vec<(u32, u32)> = Vec::new();
             let mut offset = 0u64;
             loop {
                 let n = file.read(&mut buf)?;
@@ -793,26 +850,64 @@ mod lazy {
                     break;
                 }
                 let chunk = &buf[..n];
+                // Whole-chunk fast path: if the chunk is ASCII there are no
+                // multi-byte sequences to reason about, so the scan is a
+                // newline loop plus one tab test. This is the path every source
+                // file and log takes, and it is what keeps the index near the
+                // cost of the bare newline scan.
                 if chunk.is_ascii() {
-                    // One branch per byte: `is_ascii` on the slice runs the
-                    // wide check over the whole chunk at once, so the loop
-                    // below only has to find newlines.
+                    // No char counting here: a pure-ASCII row's char count IS
+                    // its byte count, so there is nothing to store and nothing
+                    // to count. This is why the index stays near the cost of
+                    // the bare newline scan.
+                    if chunk.contains(&b'\t') {
+                        row_narrow = false;
+                    }
                     for (i, b) in chunk.iter().enumerate() {
                         if *b == b'\n' {
-                            ascii.push(starts.len() - 1, true);
+                            let r = starts.len() - 1;
+                            ascii.push(r, row_narrow);
+                            pure_ascii.push(r, true);
                             starts.push(offset + i as u64 + 1);
+                            row_narrow = true;
                         }
                     }
-                } else {
-                    for (i, b) in chunk.iter().enumerate() {
-                        if *b == b'\n' {
-                            ascii.push(starts.len() - 1, row_ascii);
-                            starts.push(offset + i as u64 + 1);
-                            row_ascii = true;
-                        } else if *b >= 0x80 {
-                            row_ascii = false;
+                    offset += n as u64;
+                    continue;
+                }
+                // Mixed or non-ASCII: per-character, deciding per sequence.
+                let mut i = 0usize;
+                while i < chunk.len() {
+                    let x = chunk[i];
+                    if x == b'\n' {
+                        let r = starts.len() - 1;
+                        ascii.push(r, row_narrow);
+                        pure_ascii.push(r, row_ascii);
+                        if !row_ascii {
+                            non_ascii_chars.push((r as u32, row_chars as u32));
                         }
+                        starts.push(offset + i as u64 + 1);
+                        row_narrow = true;
+                        row_ascii = true;
+                        row_chars = 0;
+                        i += 1;
+                        continue;
                     }
+                    if x < 0x80 {
+                        if x == 0x09 {
+                            row_narrow = false;
+                        }
+                        row_chars += 1;
+                        i += 1;
+                        continue;
+                    }
+                    row_ascii = false;
+                    let (narrow, len) = narrow_here(chunk, i);
+                    if !narrow {
+                        row_narrow = false;
+                    }
+                    row_chars += 1;
+                    i += len;
                 }
                 offset += n as u64;
             }
@@ -828,17 +923,25 @@ mod lazy {
                 last_end = size - 1;
             } else {
                 last_end = size;
-                ascii.push(starts.len() - 1, row_ascii);
+                let r = starts.len() - 1;
+                ascii.push(r, row_narrow);
+                pure_ascii.push(r, row_ascii);
+                if !row_ascii {
+                    non_ascii_chars.push((r as u32, row_chars as u32));
+                }
             }
             if starts.is_empty() {
                 starts.push(0);
                 ascii.push(0, true); // an empty file is one empty ASCII row
+                pure_ascii.push(0, true);
             }
             Ok(Self {
                 file,
                 starts,
                 last_end,
                 ascii,
+                pure_ascii,
+                non_ascii_chars,
                 size,
             })
         }
@@ -865,8 +968,21 @@ mod lazy {
 
         /// Is row `r` pure ASCII? Then `byte_len == char_count`, and its wrap
         /// segments are `ceil(byte_len / view_w)` — exactly, with no decode.
-        pub fn is_ascii(&self, r: usize) -> bool {
+        pub fn is_narrow(&self, r: usize) -> bool {
             self.ascii.get(r)
+        }
+
+        /// Characters in row `r`. Free when the row is pure ASCII (its char
+        /// count IS its byte count); otherwise one binary search into a list
+        /// that is empty for an ASCII file.
+        pub fn char_count(&self, r: usize) -> Option<u64> {
+            if self.pure_ascii.get(r) {
+                return Some(self.byte_len(r));
+            }
+            self.non_ascii_chars
+                .binary_search_by_key(&(r as u32), |(row, _)| *row)
+                .ok()
+                .map(|i| self.non_ascii_chars[i].1 as u64)
         }
 
         /// Decode rows `[first, last]`. The only place bytes become chars, and
@@ -889,7 +1005,10 @@ mod lazy {
         }
 
         pub fn index_bytes(&self) -> usize {
-            self.starts.capacity() * 8 + self.ascii.bytes()
+            self.starts.capacity() * 8
+                + self.non_ascii_chars.capacity() * 8
+                + self.ascii.bytes()
+                + self.pure_ascii.bytes()
         }
     }
 }
@@ -984,12 +1103,23 @@ fn bench_lazy_is_correct_and_cheap() {
         let vw = 100u64;
         let mut seg_mismatch = 0usize;
         let mut non_ascii_rows = 0usize;
+        let mut chars_mismatch = 0usize;
         for r in 0..lazy.rows() {
-            if lazy.is_ascii(r) {
-                let from_index = lazy.byte_len(r).div_ceil(vw).max(1) as usize;
+            if lazy.is_narrow(r) {
+                // Segment count from bytes alone: ceil(chars / view_w), where
+                // `chars` was counted from lead bytes and never decoded.
+                let from_index = lazy
+                    .char_count(r)
+                    .expect("narrow rows have a count")
+                    .div_ceil(vw)
+                    .max(1) as usize;
                 let from_chars = eager.lines[r].len().div_ceil(vw as usize).max(1);
                 if from_index != from_chars {
                     seg_mismatch += 1;
+                }
+                // And the char count itself, for every row, not just narrow ones.
+                if lazy.char_count(r) != Some(eager.lines[r].len() as u64) {
+                    chars_mismatch += 1;
                 }
             } else {
                 non_ascii_rows += 1;
@@ -1010,21 +1140,128 @@ fn bench_lazy_is_correct_and_cheap() {
                 ms(first_t.as_micros() as f64),
                 ms(deep_t.as_micros() as f64)
             ),
-            if mismatch == 0 && seg_mismatch == 0 {
+            if mismatch == 0 && seg_mismatch == 0 && chars_mismatch == 0 {
                 format!("yes {checked}/{checked}")
             } else {
-                format!("NO {} rows, {} seg", mismatch, seg_mismatch)
+                format!(
+                    "NO {} rows, {} seg, {} chars",
+                    mismatch, seg_mismatch, chars_mismatch
+                )
             },
         );
         println!(
-            "{:<24}   wrap segments from bytes alone: exact on all {} ASCII rows \
-             ({} non-ASCII rows, decoded to measure)",
+            "{:<24}   from bytes alone: chars exact on {} rows, segment counts exact on \
+             {} NARROW rows ({} wide/tab rows decoded to measure)",
             "",
+            checked,
             lazy.rows() - non_ascii_rows,
             non_ascii_rows
         );
         std::hint::black_box((first.len(), deep.len(), lazy.index_bytes()));
     }
     println!("\n(first window = rows 0..40; deep = 40 rows from the middle of the file)");
+    println!();
+}
+
+/// Encoding detection does not need the whole file.
+///
+/// The design in §13.5 implied a full-file pass to validate UTF-8, and that
+/// implication is what made encoding look like it forces an eager read. It does
+/// not: a BOM is four bytes, and a valid UTF-8 PREFIX is the evidence the
+/// decision is made on — which is also how `chardetng` is designed (its own
+/// docs: "If you want to perform detection on just the prefix of a longer
+/// stream, do not pass `last=true`"). Combined with lazy loading, no step of
+/// opening a file needs the whole file.
+///
+/// What this measures: the cost of deciding from a prefix, and whether that
+/// decision agrees with the whole-file answer.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_detect_from_prefix() {
+    /// The prefix the ladder looks at. One page-cache read; big enough for a
+    /// BOM, a shebang and many kilobytes of text.
+    const PREFIX: usize = 64 * 1024;
+
+    /// The std-only rungs: BOM sniffing, then "does this prefix validate as
+    /// UTF-8". The legacy rung (chardetng) is the one that needs a crate; it is
+    /// fed the same prefix and is documented for exactly that.
+    fn sniff(prefix: &[u8]) -> &'static str {
+        if prefix.starts_with(b"\xef\xbb\xbf") {
+            return "utf-8 (BOM)";
+        }
+        if prefix.starts_with(b"\xff\xfe\x00\x00") || prefix.starts_with(b"\x00\x00\xfe\xff") {
+            return "utf-32 (BOM)";
+        }
+        if prefix.starts_with(b"\xff\xfe") {
+            return "utf-16le (BOM)";
+        }
+        if prefix.starts_with(b"\xfe\xff") {
+            return "utf-16be (BOM)";
+        }
+        match std::str::from_utf8(prefix) {
+            Ok(_) => "utf-8 (prefix validates)",
+            // Not valid: either the file is legacy, or the prefix ended
+            // mid-sequence. The rung below has to look, and for a prefix the
+            // trailing partial sequence is expected rather than evidence.
+            Err(e) if e.error_len().is_none() => "utf-8 (prefix cut mid-sequence)",
+            Err(_) => "legacy -> detector",
+        }
+    }
+
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+        ("utf8-bom.txt", "/tmp/ranoperf/utf8-bom.txt"),
+        ("utf16le-bom.txt", "/tmp/ranoperf/utf16le-bom.txt"),
+        ("latin1.txt", "/tmp/ranoperf/latin1.txt"),
+        ("cjk-check.md", "/tmp/cjk-check.md"),
+    ];
+    println!("\nencoding from a {PREFIX}-byte prefix — cost, and agreement with the whole file\n");
+    println!(
+        "{:<24} {:>10} {:>16} {:>14} {:>18} {:>18}",
+        "file", "size", "prefix read", "whole-file scan", "prefix says", "whole file says"
+    );
+    println!("{}", "-".repeat(106));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+        let (t_prefix, prefix_says) = {
+            use std::io::Read as _;
+            let t = Instant::now();
+            let mut f = fs::File::open(p).expect("open");
+            let mut buf = vec![0u8; PREFIX];
+            let n = f.read(&mut buf).expect("read");
+            buf.truncate(n);
+            let says = sniff(&buf);
+            (t.elapsed(), says)
+        };
+
+        // The whole file, for contrast: the decode that lazy loading avoids.
+        let (t_all, all_says) = {
+            let t = Instant::now();
+            let bytes = fs::read(p).expect("read");
+            let says = sniff(&bytes);
+            (t.elapsed(), says)
+        };
+
+        println!(
+            "{:<24} {:>10} {:>16} {:>14} {:>18} {:>18}",
+            label,
+            human(size),
+            ms(t_prefix.as_micros() as f64),
+            ms(t_all.as_micros() as f64),
+            prefix_says,
+            all_says
+        );
+    }
+    println!(
+        "\n(a prefix that validates as UTF-8 is the evidence; a prefix cut mid-sequence is not,"
+    );
+    println!("and a prefix that is not valid UTF-8 at all is what sends the read to the detector)");
     println!();
 }

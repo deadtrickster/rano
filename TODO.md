@@ -1063,3 +1063,137 @@ quoted above; the actual figures were not read, so no number from that post is
 cited in this document. The one figure quoted — their old line array using
 "around 600MB" for a 35 MB, 13.7-million-line file — is in the prose, and it
 is the reason §13.6 says "some 20 times the initial file size".
+
+## 14. Responsiveness: the event loop, and why not io_uring
+
+Asked 2026-09-22: could `io_uring` get rid of the UI freezes? Researched, and
+measured. The answer is no, and the reason is that the freezes are not what
+`io_uring` addresses — but the measurements did find the real freeze, and it is
+a wide one.
+
+### 14.1 The freeze, measured
+
+`bench_cold_open` — wall clock from "process started" to "first frame painted",
+which is what `rano huge.log` makes you wait through:
+
+| file | size | today (read on the UI thread) | with the read on a worker |
+|---|---|---|---|
+| big.rs | 7.0 MiB | 71.5 ms | **142 µs** |
+| big.log | 29.2 MiB | 75.8 ms | **207 µs** |
+| huge200.log | 184.2 MiB | **575 ms** | **261 µs** |
+
+Nothing is on screen — no frame, no chrome, no running event loop, so not even
+`^C` is handled — until the whole file has been read, decoded, indexed,
+highlighted and drawn. At 184 MB that is **575 ms of a dead terminal**, and a
+2 GB file would be ~6 s. With the read hoisted off the thread the window is up
+(and the event loop live) in **261 µs**, a 2,200× reduction in time to first
+useful pixel.
+
+### 14.2 Why `io_uring` does not fix it
+
+Three reasons, in decreasing order of decisiveness.
+
+1. **It would not remove the freeze, only shorten it.** The freeze is
+   "everything on the critical path is on the UI thread". `io_uring` is a
+   different *mechanism* for the same blocking read — the thread still waits
+   for the same bytes. `bench_cold_open` shows the read is not the binding cost
+   anyway: at 184 MB, 51.9 ms is the read and **~500 ms is the decode** (§13.4).
+   Making the read asynchronous while decoding 190M characters on the UI thread
+   would move 575 ms to ~520 ms. The fix is a worker thread, whatever the syscall.
+
+2. **Its benefit is concurrency, and rano issues one read.** `io_uring`'s win is
+   submitting many operations without a syscall each and completing them out of
+   order. rano's load is one file, read in sequence, then decodes. §13.6's
+   loading design is *positional reads of the rows you are looking at* — a
+   handful of sequential `pread`s per scroll, which a plain thread issues
+   perfectly well. There is no queue to fill.
+
+3. **It is a security liability, and this is Google's position, not folklore.**
+   From §14.5: 60% of submissions to Google's Vulnerability Rewards Program
+   were `io_uring` exploits, ~$1M paid out on them, and Google's own conclusion —
+   *"we currently consider it safe only for use by trusted components"*. They
+   disabled it in ChromeOS, in Android (seccomp-bpf), and on their production
+   servers. A terminal editor is not a trusted component in Google's sense; it
+   is the program a user points at a file somebody else wrote.
+
+Also worth knowing before reaching for the crate ecosystem: the Rust wrappers
+are not in good shape. `tokio-uring` is the obvious one and the forum thread
+records "there haven't been many releases in recent years … changelog hasn't
+been updated for any release since 2022"; `monoio` and `compio` are
+thread-per-core *runtimes*, i.e. adopt a whole reactor to read one file. All
+three are snippet-level claims (§14.5), and all three are moot given (1)–(3).
+
+### 14.3 The fix, hand-rolled
+
+No new dependency, and no new pattern either — **the tree already does this
+twice**: `lsp.rs` spawns the handshake on a thread and adopts the client when it
+lands (`lsp_starting: Option<(String, Receiver<...>)>`), and `exec.rs` drains
+each pipe on its own reader thread and sends exactly one message per channel.
+The loader is the same shape:
+
+```rust
+// In the run loop, before the first frame:
+let (tx, rx) = mpsc::channel();
+std::thread::spawn(move || { let _ = tx.send(Buffer::from_file(&path)); });
+// Draw an empty buffer NOW; adopt in the loop when `rx` has it.
+```
+
+What it needs beyond the sketch, stated because each is a decision:
+
+- **A visible "loading" state**, not a blank screen. The operator's own words
+  from §13.6 are the criterion — *the minimum that makes the user happy and not
+  confused*. A blank frame is confusing; "reading huge.log…" is not.
+- **The parse is the next cost to move.** Once the read is off-thread, the
+  window's first highlight (71 ms at 184 MB) and the wrap table are on the
+  frame's critical path. Same treatment: measure, then decide. §12's numbers
+  say the *windowed* highlight is ~1 ms, so this may need nothing.
+- **Ordering.** A read that lands after the user has started typing must not
+  clobber the edit; the adoption needs to be refused if `modified` is set, the
+  way a stale LSP handshake is refused by tag today.
+- **Failure.** A read error must arrive as a message and become a status line,
+  not an `eprintln!` from a thread nobody is reading.
+
+None of this needs a runtime: one thread, one channel, one message. That is
+also why the hand-rolled choice is the *right* one here rather than a
+purist one — `tokio` would add a scheduler, a reactor and a dependency tree to
+move one `String` across a boundary.
+
+### 14.4 What `io_uring` would change, if anything ever did
+
+Recorded so the question can be re-asked without redoing the research. Three
+conditions would have to hold together, and none does today:
+
+1. **Many concurrent operations**, not one file read sequentially — e.g. a
+   project-wide search that reads thousands of files, or a reader that
+   pipelines the next N windows while you scroll. rano has neither.
+2. **The decode off the critical path anyway.** `io_uring` shortens the wait; it
+   does not remove the work. Since ~90% of the load is decode (§13.4), the wait
+   is not the problem.
+3. **A wrapper that is not a whole runtime**, and a security posture where the
+   kernel interface is acceptable. Neither is available today.
+
+If a rewrite ever happens, the shape to reach for is a `io_uring`-style ring
+*inside* the loader — submission/completion without a thread per file — which is
+what §13.6's "bounded cache with eviction" would want if scrolling were
+pipelined. That is a long way off, and it is not what fixes the freeze.
+
+### 14.5 Sources for §14
+
+- Google's restriction of `io_uring`, via Phoronix —
+  <https://www.phoronix.com/news/Google-Restricting-IO_uring> — **read in full**.
+  Source of the 60%, the ~$1M, "safe only for use by trusted components", and
+  the ChromeOS/Android/GKE/production-server list.
+- `io_uring`, Wikipedia — <https://en.wikipedia.org/wiki/Io_uring> — touched
+  only for the kernel-side summary; the Google claims above are cited from
+  Phoronix, not from here.
+- Rust wrapper status — <https://users.rust-lang.org/t/status-of-tokio-uring/114481>
+  and <https://zread.ai/bytedance/monoio/30-comparing-with-tokio-and-glmmio>
+  — **search snippets only**, so the "no releases since 2022" and the
+  runtime-versus-library distinction are recorded as leads to check, not as
+  facts relied on. They are moot for the decision either way.
+- The local facts, which are first-hand: `kernel.io_uring_disabled = 0` on this
+  box (kernel 7.0.0-31-generic), so the interface is available — the objection
+  is not that it would fail here, it is that it does not address the freeze.
+- `bench_cold_open`, in `src/bench.rs`, is the measurement — reproducible, and
+  it prints the empty-frame variant beside the blocking one so the comparison
+  is visible rather than argued.

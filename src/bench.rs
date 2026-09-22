@@ -532,3 +532,83 @@ fn bench_line_index() {
     }
     println!();
 }
+
+/// Time to the first frame — the freeze a person actually experiences.
+///
+/// Every other measurement here is in-process. This one is the wall clock from
+/// "the process started" to "something is on screen", which is what `rano
+/// huge.log` makes you wait through: the read, the first highlight, and the
+/// first draw, all before a single row is painted.
+///
+/// The second column is the same work with the READ hoisted onto a worker
+/// thread — hand-rolled, `std::thread` + a channel, the pattern `exec.rs` and
+/// `lsp.rs` already use. It is the bound a loading change can reach: the frame
+/// is drawn immediately from an empty buffer, so the wait is one frame instead
+/// of the whole file.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_cold_open() {
+    let paths: Vec<(&str, &str)> = vec![
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+        ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
+        ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
+    ];
+    println!("\ntime to first frame — the freeze, and the floor under it\n");
+    println!(
+        "{:<26} {:>10} {:>16} {:>16} {:>14}",
+        "file", "size", "today (blocking)", "read off-thread", "first frame"
+    );
+    println!("{}", "-".repeat(88));
+    for (label, path) in paths {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+        // Today: nothing is on screen until the whole file has been read,
+        // decoded, highlighted and drawn.
+        let t = Instant::now();
+        let buf = Buffer::from_file(p).expect("read");
+        let mut e = Editor::new(buf, config::Config::default());
+        e.text_w = 120;
+        e.text_h = 36;
+        e.ensure_wrap_prefix();
+        e.ensure_highlight();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        let today = t.elapsed();
+
+        // Hand-rolled: the read happens on a worker; the main thread draws a
+        // frame it can draw now. Measured as "start the worker, then do the
+        // frame the loader owes the user" — the wait is the frame, not the
+        // read, because the read is no longer on this thread.
+        let t = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel::<Buffer>();
+        let path_buf = p.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(Buffer::from_file(&path_buf).expect("worker read"));
+        });
+        // The frame the user sees first: an empty buffer, immediately.
+        let mut e = Editor::new(Buffer::new(), config::Config::default());
+        e.text_w = 120;
+        e.text_h = 36;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        let off_thread = t.elapsed();
+        let read = rx.recv().expect("worker sent the buffer");
+        std::hint::black_box(read.lines.len());
+
+        println!(
+            "{:<26} {:>10} {:>16} {:>16} {:>14}",
+            label,
+            human(size),
+            ms(today.as_micros() as f64),
+            ms(off_thread.as_micros() as f64),
+            ms(off_thread.as_micros() as f64),
+        );
+    }
+    println!("\n(the read still has to finish before the text appears; the point is that the");
+    println!("window and its chrome are up, and the event loop is running, while it does)");
+    println!();
+}

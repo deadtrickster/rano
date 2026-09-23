@@ -733,16 +733,19 @@ fn detect_shebang(line: &str) -> Option<Lang> {
     }
 }
 
-/// Above this many bytes a buffer is highlighted by viewport window rather
-/// than whole (see [`Highlighter::refresh_window`]).
-///
-/// Chosen so that no ordinary source file is affected: the largest files in a
-/// real tree here are 0.7–0.9 MB (letibot's `app.rs`), and a full highlight of
-/// one of those is a few milliseconds. Beyond this the whole-document cost
-/// grows without bound — 7 MB measured 1.4 s per keystroke, and a 200 MB file
-/// would be minutes per key — while the part a person can actually see is the
-/// same few rows.
-pub const LARGE_BUFFER: usize = 2 << 20;
+// Removed. The editor used to pick a whole-document highlight below this size
+// and a viewport window above it, to keep tree-sitter diagnostics for small
+// files. Measured (`bench_threshold_cliff`), that cost 402 ms per keystroke on
+// a 2.09 MB file against 2.5 ms on the same file one byte over the threshold —
+// a 160x cliff, in the wrong direction, and the windowed highlight of that file
+// is under a millisecond.
+//
+// The window covers the whole buffer when the buffer is small enough for it to,
+// so taking it unconditionally is identical to a full refresh for small files
+// and 500x better for medium ones. There is no size at which the full path
+// wins, so there is no threshold. Diagnostics no longer depend on this choice
+// at all: they come from their own debounced whole-document parse
+// (`Highlighter::parse_for_diagnostics`). See `Editor::highlight_now`.
 
 /// A char window into a buffer: which rows, and — for the first and last row
 /// only — which columns of them.
@@ -969,9 +972,23 @@ pub struct Highlighter {
     /// The char window the grid covers, when it covers a window rather than
     /// the whole buffer, plus the `(row, col)` offset of the grid's first cell.
     window: Option<(Window, usize, usize)>,
+    /// The last windowed parse covered the whole buffer, so its rows line up
+    /// with the caller's and `syntax_errors` can report. Separate from
+    /// `window.is_none()` because a window that happens to cover everything is
+    /// a window, but its tree is complete.
+    window_covers_whole: bool,
     /// The last successful parse, kept so syntax errors can be surfaced
     /// without a language server (see [`Highlighter::syntax_errors`]).
     tree: Option<Tree>,
+    /// A WHOLE-document parse, kept only for diagnostics.
+    ///
+    /// Separate from `tree` because colour can be a window and errors cannot:
+    /// an `ERROR` node outside the window would go unreported. Colour is per
+    /// frame (the window, microseconds); diagnostics are per *pause* — see
+    /// `Editor::diag_flush`, which debounces this the way the LSP debounces
+    /// `didChange`, because nobody needs an error squiggle within 16 ms of a
+    /// keystroke but everybody notices a 400 ms hitch per key.
+    diag_tree: Option<Tree>,
 }
 
 impl Highlighter {
@@ -981,7 +998,9 @@ impl Highlighter {
             inline_parser: Parser::new(),
             line_styles: Vec::new(),
             window: None,
+            window_covers_whole: false,
             tree: None,
+            diag_tree: None,
         }
     }
 
@@ -1091,6 +1110,13 @@ impl Highlighter {
         }
         self.line_styles = grid;
         self.window = parsed.map(|w| (w, base_row, base_col));
+        // A window that covers every row is the whole document, so its tree is
+        // complete and its rows are the caller's. That is the case the editor
+        // relies on when it takes the window unconditionally.
+        self.window_covers_whole = match parsed {
+            Some(w) => w.rows.0 == 0 && w.rows.1 + 1 >= buf.lines.len(),
+            None => false,
+        };
     }
 
     /// Drop everything this highlighter knows. The state after a failure, and
@@ -1099,6 +1125,7 @@ impl Highlighter {
         self.line_styles.clear();
         self.tree = None;
         self.window = None;
+        self.window_covers_whole = false;
     }
 
     /// Run the inline half of markdown's highlighting: for each inline node,
@@ -1183,6 +1210,40 @@ impl Highlighter {
         }
     }
 
+    /// Parse the whole buffer for DIAGNOSTICS only, leaving the colour grid
+    /// alone.
+    ///
+    /// The two are separate because they have different budgets: colour must be
+    /// per frame (so it is a window, microseconds), and an `ERROR` node outside
+    /// that window would go unreported — so errors need a whole-document parse,
+    /// which costs ~180 µs per kilobyte and therefore belongs on a debounce
+    /// rather than on the keystroke path.
+    ///
+    /// Returns false when the language is unknown or the parse failed, in which
+    /// case the caller keeps whatever it had rather than clearing it.
+    pub fn parse_for_diagnostics(&mut self, buf: &Buffer) -> bool {
+        let first_line = buf.lines.first().map(|l| l.iter().collect::<String>());
+        let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
+            self.diag_tree = None;
+            return false;
+        };
+        if self.parser.set_language(&lang.language()).is_err() {
+            self.diag_tree = None;
+            return false;
+        }
+        let source = buf.text();
+        match self.parser.parse(source.as_bytes(), None) {
+            Some(tree) => {
+                self.diag_tree = Some(tree);
+                true
+            }
+            None => {
+                self.diag_tree = None;
+                false
+            }
+        }
+    }
+
     /// Style for the character at `p`, if any capture colors it.
     pub fn style_at(&self, p: Pos) -> Option<Style> {
         // A windowed grid is indexed from the window's own first character, so
@@ -1258,18 +1319,14 @@ impl Highlighter {
     /// in char columns, from `ERROR` nodes and missing nodes. Empty for
     /// scratch buffers and clean parses.
     pub fn syntax_errors(&self, lines: &[Vec<char>]) -> Vec<(usize, usize, usize, String)> {
-        let Some(tree) = self.tree.as_ref() else {
+        // The DIAGNOSTICS tree, not the colour tree: colour is a window and
+        // errors need the whole document. It is `None` until the first
+        // debounced parse, which is why a file reports no errors for the first
+        // few hundred milliseconds after it opens — the LSP's diagnostics
+        // behave the same way, and neither is a squiggle anyone is waiting on.
+        let Some(tree) = self.diag_tree.as_ref() else {
             return Vec::new();
         };
-        // A windowed tree is parsed from a slice, so its rows are slice-relative
-        // and its `lines` do not match the caller's. Offsetting them here would
-        // need the slice's own lines for the column arithmetic, so a windowed
-        // highlight simply reports no syntax diagnostics: the LSP's still
-        // arrive, and a file big enough to need a window is one where per-row
-        // tree-sitter errors are not what a reader is looking at.
-        if self.window.is_some() {
-            return Vec::new();
-        }
         let root = tree.root_node();
         if !root.has_error() {
             return Vec::new();

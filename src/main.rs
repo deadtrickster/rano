@@ -442,6 +442,7 @@ fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()
         // The load, beside the other pollers: bounded per iteration, never
         // waiting, and it reports its own state changes.
         dirty |= ed.load_poll();
+        dirty |= ed.diag_flush(Instant::now());
         dirty |= ed.tick_status();
         dirty |= ed.lsp_poll();
         dirty |= ed.lsp_flush(Instant::now());
@@ -1338,9 +1339,12 @@ mod ed_tests {
         buf.lines = vec!["fn main() {".chars().collect()];
         let mut ed = Editor::new(buf, config::Config::default());
         ed.edit_invalidate();
-        // Diagnostics are part of the highlight now, so the test does what the
-        // run loop does before a frame.
+        // Diagnostics are a WHOLE-document parse now, debounced the way the
+        // LSP's `didChange` is — so the test does what the run loop does: the
+        // frame's highlight (colour), then a flush past the debounce.
         ed.ensure_highlight();
+        let after_the_pause = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        ed.diag_flush(after_the_pause);
         assert!(
             !ed.bs().syntax_diags.is_empty(),
             "unclosed fn block must yield a tree-sitter diagnostic"
@@ -1348,6 +1352,7 @@ mod ed_tests {
         ed.bs_mut().buf.lines = vec!["fn main() {}".chars().collect()];
         ed.edit_invalidate();
         ed.ensure_highlight();
+        ed.diag_flush(after_the_pause);
         assert!(ed.bs().syntax_diags.is_empty(), "clean parse has no diags");
     }
 

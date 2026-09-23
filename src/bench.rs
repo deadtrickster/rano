@@ -1511,3 +1511,196 @@ fn bench_chunked_fixes_the_scaling() {
     println!("\n(insert at row 0: the worst case for anything that shifts what follows)");
     println!();
 }
+
+/// Scrolling, profiled. Not attributed by hand — this test exists to be run
+/// under `perf record`, so the split comes from samples rather than from my
+/// guesses about which phase is expensive.
+///
+/// It scrolls the whole file, one wheel notch at a time, doing exactly what the
+/// run loop does per frame: adjust the scroll, highlight the window, rebuild the
+/// wrap table if it is stale, draw. Then it scrolls back up. Repeat, so there is
+/// enough work to sample.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_scroll_profile() {
+    let path = std::env::var("RANO_PROFILE_FILE")
+        .unwrap_or_else(|_| "/home/dead/Projects/letibot/letibot/crates/tui/src/app.rs".into());
+    let p = Path::new(&path);
+    if !p.exists() {
+        eprintln!("{path} is not here; set RANO_PROFILE_FILE");
+        return;
+    }
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let t = Instant::now();
+    let buf = Buffer::from_file(p).expect("read");
+    let open = t.elapsed();
+    let mut e = Editor::new(buf, config::Config::default());
+    e.text_w = 120;
+    e.text_h = 36;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+
+    // The first frame (open + first window highlight).
+    let t = Instant::now();
+    e.ensure_wrap_prefix();
+    e.ensure_highlight();
+    terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+    let first = t.elapsed();
+
+    let use_wheel = |e: &mut Editor| {
+        let me = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        e.handle_mouse(me(crossterm::event::MouseEventKind::ScrollDown))
+    };
+
+    // One pass: scroll to the bottom, then back to the top, timing every frame.
+    let rows = e.bs().buf.lines.len();
+    let notches = (rows / 3) + 1;
+    println!(
+        "\nscrolling {} — {} bytes, {} rows, {notches} notches each way\n",
+        path, size, rows
+    );
+    println!("  open (read+decode)   {}", ms(open.as_micros() as f64));
+    println!("  first frame          {}", ms(first.as_micros() as f64));
+
+    let mut down: Vec<u128> = Vec::new();
+    let mut up: Vec<u128> = Vec::new();
+    for pass in 0..3 {
+        for _ in 0..notches {
+            let t = Instant::now();
+            use_wheel(&mut e);
+            e.adjust_scroll(e.text_h);
+            e.adjust_scroll_x();
+            e.ensure_highlight();
+            terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+            down.push(t.elapsed().as_nanos());
+        }
+        for _ in 0..notches {
+            let t = Instant::now();
+            e.handle_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            e.adjust_scroll(e.text_h);
+            e.adjust_scroll_x();
+            e.ensure_highlight();
+            terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+            up.push(t.elapsed().as_nanos());
+        }
+        eprintln!(
+            "pass {pass}: down {} frames, up {} frames",
+            down.len(),
+            up.len()
+        );
+    }
+
+    let report = |label: &str, v: &[u128]| {
+        if v.is_empty() {
+            return;
+        }
+        let mut s = v.to_vec();
+        s.sort_unstable();
+        let med = s[s.len() / 2] as f64 / 1e3;
+        let p99 = s[(s.len() * 99 / 100).min(s.len() - 1)] as f64 / 1e3;
+        let worst = s[s.len() - 1] as f64 / 1e3;
+        println!(
+            "  {label:<20} {:<12} p99 {:<12} worst {:<12} (n={})",
+            ms(med),
+            ms(p99),
+            ms(worst),
+            v.len()
+        );
+    };
+    report("scroll down", &down);
+    report("scroll up", &up);
+
+    // The same scroll without the highlight, to separate "the frame" from "the
+    // window highlight the frame asked for".
+    let mut no_hl: Vec<u128> = Vec::new();
+    for _ in 0..notches.min(2_000) {
+        let t = Instant::now();
+        use_wheel(&mut e);
+        e.adjust_scroll(e.text_h);
+        e.adjust_scroll_x();
+        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        no_hl.push(t.elapsed().as_nanos());
+    }
+    report("down, no highlight", &no_hl);
+
+    // And the draw alone, on a settled screen: the floor.
+    let mut draw_only: Vec<u128> = Vec::new();
+    e.ensure_highlight();
+    for _ in 0..notches.min(2_000) {
+        let t = Instant::now();
+        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        draw_only.push(t.elapsed().as_nanos());
+    }
+    report("draw alone", &draw_only);
+    println!();
+}
+
+/// Either side of where `LARGE_BUFFER` used to be (2 MiB).
+///
+/// Kept after the threshold was removed, because it is the regression test for
+/// the cliff it caused: `Editor::highlight_now` used to pick a whole-document
+/// highlight below that size and a window above it, which cost **402 ms per
+/// keystroke on a 2.09 MB file against 2.5 ms on the same file one byte over**.
+/// Both columns must now be the window, at every size.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_threshold_cliff() {
+    println!("\nhighlight cost either side of LARGE_BUFFER (2 MiB = 2,097,152)\n");
+    println!(
+        "{:<28} {:>10} {:>14} {:>16} {:>16}",
+        "file", "size", "whole document", "per keystroke", "windowed"
+    );
+    println!("{}", "-".repeat(88));
+    for (label, path) in [
+        ("just under (2.09 MB)", "/tmp/ranoperf/under2mb.rs"),
+        ("just over  (2.11 MB)", "/tmp/ranoperf/over2mb.rs"),
+        ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
+    ] {
+        let p = Path::new(path);
+        if !p.exists() {
+            continue;
+        }
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let buf = Buffer::from_file(p).expect("read");
+        let rows = buf.lines.len();
+        let mut e = Editor::new(buf.clone(), config::Config::default());
+        e.text_w = 120;
+        e.text_h = 36;
+
+        // The whole document, directly.
+        let (t_whole, _) = time(3, || {
+            e.bs_mut().hl.refresh(&buf);
+        });
+        // A keypress: the edit plus the frame's highlight, which is where the
+        // threshold decides which path runs.
+        let (t_key, _) = time(5, || {
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.ensure_highlight();
+        });
+        // And a viewport window, for comparison.
+        let (t_win, _) = time(3, || {
+            let win = crate::syntax::Window::rows(rows / 2, rows / 2 + 80);
+            e.bs_mut().hl.refresh_window(&buf, win);
+        });
+        println!(
+            "{:<28} {:>10} {:>14} {:>16} {:>16}",
+            label,
+            human(size),
+            ms(t_whole),
+            ms(t_key),
+            ms(t_win)
+        );
+    }
+    println!("\n(no threshold: a keystroke takes the window at every size. The whole-document");
+    println!(" column is `hl.refresh`, which only the export path and the tests call now.)");
+    println!();
+}

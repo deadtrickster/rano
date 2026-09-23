@@ -119,6 +119,12 @@ pub struct Editor {
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
     pub(crate) highlight_dirty: bool,
+    /// Tree-sitter diagnostics are behind the buffer; a debounced whole-
+    /// document parse will refresh them. Separate from `highlight_dirty`
+    /// because the two have different budgets — see `Highlighter::parse_for_diagnostics`.
+    pub(crate) diag_dirty: bool,
+    /// When the last edit happened, for the diagnostics debounce.
+    pub(crate) diag_last_edit: Instant,
 }
 
 /// Live completion popup state: the filtered candidate list, the selected
@@ -218,6 +224,8 @@ impl Editor {
             completion_retries: 0,
             def_back: Vec::new(),
             highlight_dirty: true,
+            diag_dirty: true,
+            diag_last_edit: Instant::now(),
         };
         ed.lsp_sync();
         ed
@@ -653,20 +661,47 @@ impl Editor {
         self.highlight_now();
     }
 
-    /// Re-highlight for the current viewport: the whole buffer when it is
-    /// small, a window around the viewport when it is not.
+    /// Refresh tree-sitter diagnostics, at most once per pause.
     ///
-    /// The decision is by BYTES, not by how many rows the window happens to
-    /// cover. A 4 MB file that is a single line has a window of exactly one
-    /// row, and treating "the window is the whole buffer" as a reason to
-    /// highlight everything put that line back on the slow path.
+    /// The colour grid is per frame and a window; diagnostics are a
+    /// WHOLE-document parse (~180 µs per kilobyte) and therefore belong here
+    /// instead: 300 ms after the last edit, the way `lsp_flush` sends
+    /// `didChange`. Nobody is waiting on a squiggle within a frame of a
+    /// keystroke, and the alternative — parsing the document per keystroke —
+    /// measured 402 ms per key on a 2.09 MB file (`bench_threshold_cliff`).
     ///
-    /// This replaced `hl.refresh` on every keystroke. Measured 2026-09-22
-    /// (release, one keystroke):
+    /// Returns whether diagnostics changed, for the dirty-draw pass.
+    pub(crate) fn diag_flush(&mut self, now: Instant) -> bool {
+        if !self.diag_dirty || now < self.diag_last_edit + Duration::from_millis(300) {
+            return false;
+        }
+        self.diag_dirty = false;
+        let before = self.bs().syntax_diags.len();
+        // `refresh_syntax_diags` takes `&mut`, so the borrow has to be mutable
+        // even though only the diagnostics field changes.
+        let bs = self.bs_mut();
+        if bs.hl.parse_for_diagnostics(&bs.buf) {
+            refresh_syntax_diags(bs);
+        }
+        bs.syntax_diags.len() != before
+    }
+
+    /// Re-highlight for the current viewport — always a window.
+    ///
+    /// There is no size threshold any more. There was one, and it was a cliff in
+    /// the wrong direction: a whole-document highlight below 2 MiB to keep
+    /// tree-sitter diagnostics, and a window above it, which cost **402 ms per
+    /// keystroke on a 2.09 MB file against 2.5 ms on the same file one byte
+    /// over**. Diagnostics no longer depend on the choice (they are their own
+    /// debounced parse), and the window covers the whole buffer whenever the
+    /// buffer is small enough for it to, so the window is never worse.
+    ///
+    /// Measured 2026-09-22 (release, one keystroke):
     ///
     /// | buffer | whole document | window |
     /// |---|---|---|
-    /// | 7 MB Rust | 1452 ms | 1.4 ms |
+    /// | 2.09 MB Rust | 402 ms | 2.5 ms |
+    /// | 7 MB Rust | 1452 ms | 1.3 ms |
     /// | 4 MB minified JS (1 line) | 2246 ms | see `bench.rs` |
     /// | 30 MB log | 365 ms | 0.57 ms |
     pub(crate) fn highlight_now(&mut self) {
@@ -677,17 +712,24 @@ impl Editor {
         self.ensure_wrap_prefix();
         let text_h = self.text_h;
         let win = self.highlight_window(text_h);
-        // Big enough that a whole-document highlight would be felt per
-        // keystroke. Below this the full highlight is exact and cheap, and the
-        // window would only add the risk of a construct crossing its edge.
-        let windowed = self.bs().buf.is_at_least(syntax::LARGE_BUFFER);
+        // ALWAYS a window, and the threshold that used to be here is gone.
+        //
+        // It existed to keep tree-sitter diagnostics for small files (a
+        // windowed parse cannot report them) by paying a whole-document
+        // highlight for anything under 2 MiB. Measured, that cost 402 ms per
+        // keystroke on a 2.09 MB file while the same file one byte over the
+        // threshold cost 2.5 ms — a 160x cliff in the wrong direction, and the
+        // windowed highlight of that file is 774 µs.
+        //
+        // The window covers the whole buffer whenever the buffer is small
+        // enough for it to, so the margin makes this identical to a full
+        // refresh for small files (and `Highlighter::syntax_errors` reports
+        // when it does — see `window_covers_whole`). There is no size at which
+        // the full path is better, so there is no reason to choose.
         let bs = self.bs_mut();
-        if windowed {
-            bs.hl.refresh_window(&bs.buf, win);
-        } else {
-            bs.hl.refresh(&bs.buf);
-        }
-        refresh_syntax_diags(bs);
+        bs.hl.refresh_window(&bs.buf, win);
+        // Diagnostics are NOT refreshed here: they need the whole document and
+        // this is the per-frame path. `diag_flush` does them on a pause.
     }
 
     /// An edit whose one changed row is known: only that row is re-measured
@@ -726,6 +768,10 @@ impl Editor {
         // flag is enough, and a burst of keystrokes between two frames then
         // costs one highlight instead of one per key.
         self.highlight_dirty = true;
+        // And diagnostics, which are a whole-document parse and so wait for a
+        // pause rather than riding the keystroke. See `diag_flush`.
+        self.diag_dirty = true;
+        self.diag_last_edit = Instant::now();
     }
 
     /// The union of tree-sitter and LSP diagnostics, row-major — what the

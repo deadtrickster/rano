@@ -1722,6 +1722,37 @@ A half-migrated tree will not compile, so this is all-or-nothing per commit.
 **Risk.** The API change touches every module. Mitigated by the two-commit
 order, and by the fact that the first commit changes no behaviour at all.
 
+**Landed — commit 1, the accessor layer.** `Buffer::lines` is now `private` and
+every read and write outside `buffer.rs` goes through named row accessors:
+`row`, `row_opt`, `row_mut`, `rows`, `lines_slice`, `rows_mut_slice`,
+`row_count`, `rows_is_empty`, `set_row`, `set_rows`, `insert_row`, `push_row`,
+`append_rows`, `extend_rows`, `splice_rows`, `remove_row`, `clear_rows`,
+`take_rows`, `to_lines`. 216 sites, by file: `editor.rs` 87, `buffer.rs` 38
+(the field's own module, which keeps `self.lines`), `bench.rs` 33, `syntax.rs`
+31, `main.rs` 19, `ui.rs` 8, the rest ≤4.
+
+Two decisions worth recording:
+
+- The accessors return **`&Vec<char>`, not `&[char]`**, on purpose. `Vec<char>`
+  derefs to `[char]`, so every existing read site — `.len()`, `.iter()`,
+  `[c]`, `==`, every slice method — is a rename rather than a rewrite. That is
+  what makes the commit behaviour-preserving by construction, with the existing
+  146 + 361 tests as the whole proof. `row` panics out of range exactly as
+  `lines[r]` did and `row_opt` is the `lines.get(r)` half, so no input changes
+  which operation is performed on it.
+- Making the field **private is the enforcement, not a formality**: it turns the
+  boundary from observed into checked, so commit 2 can swap the storage under
+  the accessors without re-auditing 216 callers. The visibility change was
+  itself the audit — the first build with `lines` private reported exactly 33
+  errors, all in `bench.rs`, which is the proof that nothing in the editor
+  proper still named the field. It cost a `pub` field on the library's
+  `Buffer`; that is a break for an embedder, and it is the intended one.
+
+Commit 2 is the store: `lines` becomes `RowStore`, `row(r)` returns a
+prepare-then-read reference, and the O(document) callers (`to_lines`,
+`lines_slice`, `rows_mut_slice`) become `materialize_all` first. The accessors
+are the seam that makes that a one-file change plus the `ensure` discipline.
+
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 
 **Deliverable.** Scrolling far and back is cheap; `^W` works on a file too big

@@ -43,12 +43,12 @@ fn sample(label: &str, path: &str) -> Option<Sample> {
     }
     let bytes = std::fs::metadata(p).ok()?.len();
     let buf = Buffer::from_file(p).ok()?;
-    let longest = buf.lines.iter().map(Vec::len).max().unwrap_or(0);
+    let longest = buf.rows().map(Vec::len).max().unwrap_or(0);
     Some(Sample {
         label: label.to_string(),
         path: p.to_path_buf(),
         bytes,
-        lines: buf.lines.len(),
+        lines: buf.row_count(),
         longest,
     })
 }
@@ -154,7 +154,7 @@ fn bench() {
         e.ensure_wrap_prefix();
         e.adjust_scroll(text_h);
         // Put the cursor somewhere real, mid-document.
-        let mid = e.bs().buf.lines.len() / 2;
+        let mid = e.bs().buf.row_count() / 2;
         e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
         e.adjust_scroll(text_h);
 
@@ -222,15 +222,15 @@ fn bench_breakdown() {
         // Put the edit point somewhere real: mid-document, so the undo
         // snapshot and the wrap re-sum have rows below them as they would when
         // someone is actually typing.
-        let mid = e.bs().buf.lines.len() / 2;
+        let mid = e.bs().buf.row_count() / 2;
         e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
 
         println!(
             "{} — {} bytes, {} rows, longest row {}",
             label,
             size,
-            e.bs().buf.lines.len(),
-            e.bs().buf.lines.iter().map(Vec::len).max().unwrap_or(0)
+            e.bs().buf.row_count(),
+            e.bs().buf.rows().map(Vec::len).max().unwrap_or(0)
         );
         // The whole document, for scale: what a keystroke used to pay.
         let (t, _) = time(3, || {
@@ -263,7 +263,7 @@ fn bench_breakdown() {
         let (t, _) = time(3, || {
             let bs = e.bs_mut();
             let r = bs.cursor.row;
-            std::hint::black_box(bs.buf.lines[r..r + 1].to_vec());
+            std::hint::black_box(bs.buf.lines_slice()[r..r + 1].to_vec());
         });
         println!("    {:>22}  {}", "undo row clone", ms(t));
         // The buffer's own insert: a Vec<char> splice, O(row).
@@ -385,7 +385,7 @@ fn bench_read() {
         let buf = Buffer::from_file(p).expect("read");
         let read = t.elapsed();
         let after = rss_kib();
-        let chars: usize = buf.lines.iter().map(Vec::len).sum();
+        let chars: usize = buf.rows().map(Vec::len).sum();
         let delta = after.saturating_sub(before);
         println!(
             "{:<26} {:>10} {:>10} {:>12} {:>14} {:>10.2}",
@@ -454,7 +454,7 @@ fn bench_read_phases() {
         });
         let (t_all, _) = time(3, || {
             let b = Buffer::from_file(p).expect("read");
-            std::hint::black_box(b.lines.len());
+            std::hint::black_box(b.row_count());
         });
         println!(
             "{:<26} {:>10} {:>12} {:>12} {:>14} {:>14}",
@@ -597,7 +597,7 @@ fn bench_cold_open() {
         terminal.draw(|f| ui::draw(f, &e)).expect("draw");
         let off_thread = t.elapsed();
         let read = rx.recv().expect("worker sent the buffer");
-        std::hint::black_box(read.lines.len());
+        std::hint::black_box(read.row_count());
 
         println!(
             "{:<26} {:>10} {:>16} {:>16} {:>14}",
@@ -683,7 +683,7 @@ fn bench_first_screen() {
         let t = Instant::now();
         let whole = Buffer::from_file(p).expect("read");
         let whole_t = t.elapsed();
-        std::hint::black_box(whole.lines.len());
+        std::hint::black_box(whole.row_count());
 
         // Cancellation: how soon does a chunked read notice the flag? The flag
         // is checked per chunk, so the bound is one chunk, not one file.
@@ -1080,10 +1080,10 @@ fn bench_lazy_is_correct_and_cheap() {
             let all = lazy
                 .decode(0, lazy.rows().saturating_sub(1))
                 .expect("decode all");
-            if all.len() != eager.lines.len() {
+            if all.len() != eager.row_count() {
                 mismatch += 1;
             }
-            for (r, (got, want)) in all.iter().zip(eager.lines.iter()).enumerate() {
+            for (r, (got, want)) in all.iter().zip(eager.rows()).enumerate() {
                 checked += 1;
                 if got != want {
                     if mismatch < 3 {
@@ -1113,12 +1113,12 @@ fn bench_lazy_is_correct_and_cheap() {
                     .expect("narrow rows have a count")
                     .div_ceil(vw)
                     .max(1) as usize;
-                let from_chars = eager.lines[r].len().div_ceil(vw as usize).max(1);
+                let from_chars = eager.row(r).len().div_ceil(vw as usize).max(1);
                 if from_index != from_chars {
                     seg_mismatch += 1;
                 }
                 // And the char count itself, for every row, not just narrow ones.
-                if lazy.char_count(r) != Some(eager.lines[r].len() as u64) {
+                if lazy.char_count(r) != Some(eager.row(r).len() as u64) {
                     chars_mismatch += 1;
                 }
             } else {
@@ -1293,7 +1293,7 @@ fn bench_edit_scaling() {
             continue;
         }
         let mut buf = Buffer::from_file(p).expect("read");
-        let rows = buf.lines.len();
+        let rows = buf.row_count();
         // Edit at the START, which is the worst case for anything that shifts
         // the lines after the edit point.
         let (row, col) = (0usize, 0usize);
@@ -1305,22 +1305,22 @@ fn bench_edit_scaling() {
         let (t_ins, _) = time(5, || {
             let at = buf.insert_lines_at(row, vec![vec!['x']]);
             let _ = at;
-            buf.lines.remove(row);
+            buf.remove_row(row);
         });
         let (t_del, _) = time(5, || {
-            let mut second = buf.lines[row + 1].clone();
-            buf.lines.insert(row + 1, second.clone());
+            let mut second = buf.row(row + 1).clone();
+            buf.insert_row(row + 1, second.clone());
             second.clear();
-            buf.lines.remove(row + 1);
+            buf.remove_row(row + 1);
         });
         // Undo: what `begin_action` + `finish_step` snapshot for one insertion.
         let (t_undo, _) = time(5, || {
-            let r = buf.lines[row].clone();
+            let r = buf.row(row).clone();
             std::hint::black_box(r);
         });
         let (t_join, _) = time(5, || {
-            let l = buf.lines.remove(row);
-            buf.lines.insert(row, l);
+            let l = buf.remove_row(row);
+            buf.insert_row(row, l);
         });
 
         println!(
@@ -1452,9 +1452,9 @@ fn bench_chunked_fixes_the_scaling() {
             continue;
         }
         let buf = Buffer::from_file(p).expect("read");
-        let rows = buf.lines.len();
+        let rows = buf.row_count();
 
-        let mut plain = buf.lines.clone();
+        let mut plain = buf.to_lines();
         let (t_plain_ins, _) = time(5, || {
             plain.insert(0, vec!['x']);
             plain.remove(0);
@@ -1464,25 +1464,25 @@ fn bench_chunked_fixes_the_scaling() {
             std::hint::black_box(&plain[r]);
         });
 
-        let mut ch = chunked::Chunked::from_rows(buf.lines.clone());
+        let mut ch = chunked::Chunked::from_rows(buf.to_lines());
         assert_eq!(ch.rows(), rows, "the chunked store must hold every row");
         // Correctness, not just speed: every row must read back identically,
         // and structural edits must keep the numbering right. This is the check
         // that earned its keep on the lazy prototype (it found a phantom row).
         for r in 0..rows {
-            assert_eq!(ch.row(r), buf.lines[r].as_slice(), "row {r} differs");
+            assert_eq!(ch.row(r), buf.row(r).as_slice(), "row {r} differs");
         }
         // Insert in the middle and confirm the shift is exact.
         let mid = rows / 2;
         ch.insert(mid, vec!['Z']);
         assert_eq!(ch.rows(), rows + 1);
         assert_eq!(ch.row(mid), &['Z']);
-        assert_eq!(ch.row(mid + 1), buf.lines[mid].as_slice(), "shifted row");
-        assert_eq!(ch.row(mid - 1), buf.lines[mid - 1].as_slice(), "row before");
+        assert_eq!(ch.row(mid + 1), buf.row(mid).as_slice(), "shifted row");
+        assert_eq!(ch.row(mid - 1), buf.row(mid - 1).as_slice(), "row before");
         assert_eq!(ch.remove(mid), vec!['Z']);
         assert_eq!(ch.rows(), rows);
         for r in [0usize, mid - 1, mid, rows - 1] {
-            assert_eq!(ch.row(r), buf.lines[r].as_slice(), "row {r} after the edit");
+            assert_eq!(ch.row(r), buf.row(r).as_slice(), "row {r} after the edit");
         }
         let (t_ch_ins, _) = time(5, || {
             ch.insert(0, vec!['x']);
@@ -1557,7 +1557,7 @@ fn bench_scroll_profile() {
     };
 
     // One pass: scroll to the bottom, then back to the top, timing every frame.
-    let rows = e.bs().buf.lines.len();
+    let rows = e.bs().buf.row_count();
     let notches = (rows / 3) + 1;
     println!(
         "\nscrolling {} — {} bytes, {} rows, {notches} notches each way\n",
@@ -1671,7 +1671,7 @@ fn bench_threshold_cliff() {
         }
         let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         let buf = Buffer::from_file(p).expect("read");
-        let rows = buf.lines.len();
+        let rows = buf.row_count();
         let mut e = Editor::new(buf.clone(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
@@ -1754,7 +1754,7 @@ fn bench_load_throughput() {
         frames += 1;
     }
     let loaded = t.elapsed();
-    let rows = ed.bs().buf.lines.len();
+    let rows = ed.bs().buf.row_count();
     println!("\nload throughput — {path}\n");
     println!("  {:<28} {}", "file", human(size));
     println!("  {:<28} {}", "rows", rows);

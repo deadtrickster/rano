@@ -57,18 +57,18 @@ impl Editor {
             let bs = self.bs_mut();
             // An append, not an edit: tell the wrap table it can extend from
             // where it already is rather than re-measuring the whole file.
-            let was = bs.buf.lines.len();
+            let was = bs.buf.row_count();
             // The buffer starts with one empty row. The first batch replaces
             // it rather than following it, so a file does not appear to begin
             // with a blank line.
-            if bs.buf.lines.len() == 1 && bs.buf.lines[0].is_empty() && !bs.buf.modified {
-                bs.buf.lines.clear();
+            if bs.buf.row_count() == 1 && bs.buf.row(0).is_empty() && !bs.buf.modified {
+                bs.buf.clear_rows();
             }
-            bs.buf.lines.append(&mut rows);
+            bs.buf.append_rows(&mut rows);
             // The first batch replaces the seed row, so the table has to move
             // its start; after that every batch is a pure append.
             bs.wrap_extend_from = Some(
-                if was == 1 && bs.buf.lines.len() > 1 && bs.wrap_rows.len() <= 1 {
+                if was == 1 && bs.buf.row_count() > 1 && bs.wrap_rows.len() <= 1 {
                     0
                 } else {
                     was.min(bs.wrap_rows.len())
@@ -93,9 +93,9 @@ impl Editor {
                 let path = self.bs().buf.name.clone();
                 if let Some(path) = path {
                     match Buffer::from_file(&path) {
-                        Ok(read) => {
+                        Ok(mut read) => {
                             let bs = self.bs_mut();
-                            bs.buf.lines = read.lines;
+                            bs.buf.set_rows(read.take_rows());
                             bs.buf.crlf = read.crlf;
                             bs.buf.encoding = read.encoding;
                             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
@@ -115,10 +115,10 @@ impl Editor {
                     let bs = self.bs_mut();
                     bs.load = None;
                     bs.buf.crlf = crlf;
-                    if bs.buf.lines.is_empty() {
-                        bs.buf.lines.push(Vec::new());
+                    if bs.buf.rows_is_empty() {
+                        bs.buf.push_row(Vec::new());
                     }
-                    bs.buf.lines.len()
+                    bs.buf.row_count()
                 };
                 self.flash(&format!(
                     "Read {} line{}",
@@ -215,12 +215,7 @@ mod tests {
     }
 
     fn rows(ed: &Editor) -> Vec<String> {
-        ed.bs()
-            .buf
-            .lines
-            .iter()
-            .map(|l| l.iter().collect())
-            .collect()
+        ed.bs().buf.rows().map(|l| l.iter().collect()).collect()
     }
 
     #[test]
@@ -293,12 +288,12 @@ mod tests {
         ed.start_load(&t.0).expect("start");
         // Adopt until there is something to edit.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while ed.bs().buf.lines.len() < 10 {
+        while ed.bs().buf.row_count() < 10 {
             assert!(Instant::now() < deadline, "no rows adopted");
             ed.load_poll();
             std::thread::sleep(Duration::from_millis(1));
         }
-        let adopted = ed.bs().buf.lines.len();
+        let adopted = ed.bs().buf.row_count();
         assert!(ed.loading(), "still arriving");
         // Type a character: the load must stop, and what arrived must stay.
         ed.bs_mut().cursor = Pos { row: 0, col: 0 };
@@ -356,7 +351,7 @@ mod tests {
         ed.start_load(&t.0).expect("start");
         finish(&mut ed);
         assert_eq!(rows(&ed), ["hello"], "no U+FEFF in the first row");
-        assert!(!ed.bs().buf.lines[0].contains(&'\u{FEFF}'));
+        assert!(!ed.bs().buf.row(0).contains(&'\u{FEFF}'));
         assert_eq!(ed.bs().buf.encoding, crate::encoding::Encoding::Utf8Bom);
         // And the BOM comes back on save.
         assert!(

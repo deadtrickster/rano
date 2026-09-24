@@ -815,18 +815,18 @@ impl Window {
 /// newline, so a partial first row still reads as a line to the grammar and
 /// the row arithmetic in `for_each_capture` stays true.
 fn window_text(buf: &Buffer, win: Window) -> (String, usize, usize) {
-    let last = win.rows.1.min(buf.lines.len().saturating_sub(1));
+    let last = win.rows.1.min(buf.row_count().saturating_sub(1));
     let first = win.rows.0.min(last);
-    let mut s = String::with_capacity(win.char_count(buf.lines.len(), |r| buf.lines[r].len()) * 4);
+    let mut s = String::with_capacity(win.char_count(buf.row_count(), |r| buf.row(r).len()) * 4);
     for row in first..=last {
         let (from, to) = win.cols_of(row);
-        let line = &buf.lines[row];
+        let line = buf.row(row);
         let from = from.min(line.len());
         let to = to.min(line.len()).max(from);
         s.extend(line[from..to].iter());
         s.push('\n');
     }
-    let base_col = win.cols_of(first).0.min(buf.lines[first].len());
+    let base_col = win.cols_of(first).0.min(buf.row(first).len());
     (s, first, base_col)
 }
 
@@ -1036,7 +1036,7 @@ impl Highlighter {
     /// margin so those edges are off screen; see [`crate::editor`]'s
     /// `HIGHLIGHT_MARGIN`.
     pub fn refresh_window(&mut self, buf: &Buffer, win: Window) {
-        let last = win.rows.1.min(buf.lines.len().saturating_sub(1));
+        let last = win.rows.1.min(buf.row_count().saturating_sub(1));
         if win.rows.0 > last {
             return;
         }
@@ -1049,7 +1049,7 @@ impl Highlighter {
     }
 
     fn refresh_rows(&mut self, buf: &Buffer, win: Option<Window>) {
-        let first_line = buf.lines.first().map(|l| l.iter().collect::<String>());
+        let first_line = buf.row_opt(0).map(|l| l.iter().collect::<String>());
         let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
             self.clear();
             return;
@@ -1069,7 +1069,7 @@ impl Highlighter {
         };
         // What was actually parsed, after the buffer's own bounds clamped it.
         let parsed = win.map(|w| Window {
-            rows: (w.rows.0, w.rows.1.min(buf.lines.len().saturating_sub(1))),
+            rows: (w.rows.0, w.rows.1.min(buf.row_count().saturating_sub(1))),
             cols: w.cols,
         });
         if self.parser.set_language(&lang.language()).is_err() {
@@ -1114,7 +1114,7 @@ impl Highlighter {
         // complete and its rows are the caller's. That is the case the editor
         // relies on when it takes the window unconditionally.
         self.window_covers_whole = match parsed {
-            Some(w) => w.rows.0 == 0 && w.rows.1 + 1 >= buf.lines.len(),
+            Some(w) => w.rows.0 == 0 && w.rows.1 + 1 >= buf.row_count(),
             None => false,
         };
     }
@@ -1222,7 +1222,7 @@ impl Highlighter {
     /// Returns false when the language is unknown or the parse failed, in which
     /// case the caller keeps whatever it had rather than clearing it.
     pub fn parse_for_diagnostics(&mut self, buf: &Buffer) -> bool {
-        let first_line = buf.lines.first().map(|l| l.iter().collect::<String>());
+        let first_line = buf.row_opt(0).map(|l| l.iter().collect::<String>());
         let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
             self.diag_tree = None;
             return false;
@@ -2076,7 +2076,7 @@ mod tests {
 
     fn buf_named(name: &str, text: &str) -> Buffer {
         let mut b = Buffer::new();
-        b.lines = text.lines().map(|l| l.chars().collect()).collect();
+        b.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         b.name = Some(PathBuf::from(name));
         b
     }
@@ -2344,7 +2344,7 @@ mod tests {
         hl.refresh(&b);
         assert!(style_at(&hl, 0, 0).is_some()); // "fn" keyword
         assert!(style_at(&hl, 0, 3).is_some()); // "main" function
-        let line1: String = b.lines[1].iter().collect();
+        let line1: String = b.row(1).iter().collect();
         assert!(style_at(&hl, 1, line1.find('4').unwrap()).is_some()); // 42
         assert!(style_at(&hl, 1, line1.find("fourty").unwrap()).is_some()); // comment
         assert!(style_at(&hl, 1, line1.find('x').unwrap()).is_none()); // plain local
@@ -2401,7 +2401,7 @@ mod tests {
         assert!(style_at(&hl, 1, 1).is_some()); // defun keyword
         assert!(style_at(&hl, 1, 7).is_some()); // greet, the defined function
         assert!(style_at(&hl, 1, 14).is_none()); // plain parameter
-        let line2: String = b.lines[2].iter().collect();
+        let line2: String = b.row(2).iter().collect();
         assert!(style_at(&hl, 2, line2.find("format").unwrap()).is_some()); // call head
         assert!(style_at(&hl, 2, line2.find(" t ").unwrap() + 1).is_some()); // t constant
         assert!(style_at(&hl, 2, line2.find('~').unwrap()).is_some()); // ~a directive
@@ -2652,7 +2652,7 @@ mod tests {
     #[test]
     fn scratch_buffer_has_no_highlighting() {
         let mut b = Buffer::new();
-        b.lines = vec!["fn main() {}".chars().collect()];
+        b.set_rows(vec!["fn main() {}".chars().collect()]);
         let mut hl = Highlighter::new();
         hl.refresh(&b);
         assert!(hl.style_at(Pos { row: 0, col: 0 }).is_none());
@@ -2677,12 +2677,12 @@ mod tests {
         hl.refresh(&b);
         // Delete line 1 char-by-char, re-parsing after every keystroke.
         let line = 1;
-        while !b.lines[line].is_empty() {
-            b.lines[line].pop();
+        while !b.row(line).is_empty() {
+            b.row_mut(line).pop();
             hl.refresh(&b);
         }
         // Grow it again to exercise the other direction too.
-        b.lines[line].extend("x=1".chars());
+        b.row_mut(line).extend("x=1".chars());
     }
 }
 
@@ -4000,7 +4000,7 @@ mod markdown_tests {
                 ));
             }
             let mut buf = Buffer::new();
-            buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+            buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
             buf.name = Some(std::path::PathBuf::from("x.md"));
             buf
         };
@@ -4015,14 +4015,14 @@ mod markdown_tests {
         };
         let small = build(300);
         let big = build(1_200);
-        assert!(big.lines.len() == small.lines.len() * 4);
+        assert!(big.row_count() == small.row_count() * 4);
         let (a, b) = (time(&small), time(&big));
         println!(
             "markdown refresh: {:.1} ms at {} lines, {:.1} ms at {} lines ({:.1}× for 4×)",
             a * 1e3,
-            small.lines.len(),
+            small.row_count(),
             b * 1e3,
-            big.lines.len(),
+            big.row_count(),
             b / a
         );
         // 4× the document: quadratic would be 16×, so a bound of 8× separates
@@ -4211,7 +4211,7 @@ fn main() {}
     /// The style at the character `off` chars past `text` on `row`.
     fn style_in(src: &str, row: usize, text: &str, off: usize) -> Option<Style> {
         let mut buf = Buffer::new();
-        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from("x.md"));
         let mut hl = Highlighter::new();
         hl.refresh(&buf);
@@ -4329,7 +4329,7 @@ fn main() {}
         // identical lines looked different. The rule is gone.
         let src = "- **A:** first line\n  continued here\n- **B:** another\n  also continued\n";
         let mut buf = Buffer::new();
-        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from("x.md"));
         let mut hl = Highlighter::new();
         hl.refresh(&buf);
@@ -4440,7 +4440,7 @@ mod window_tests {
             ));
         }
         let mut buf = Buffer::new();
-        buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+        buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from("big.rs"));
 
         let mut full = Highlighter::new();
@@ -4457,7 +4457,7 @@ mod window_tests {
             );
             let mut styled = 0usize;
             for row in first..=last {
-                let line = &buf.lines[row];
+                let line = buf.row(row);
                 for col in 0..line.len() {
                     let p = Pos { row, col };
                     assert_eq!(
@@ -4504,17 +4504,17 @@ mod window_tests {
             .map(|i| format!("function f{i}(a,b){{return a+b}}"))
             .collect();
         let mut buf = Buffer::new();
-        buf.lines = vec![row.chars().collect()];
+        buf.set_rows(vec![row.chars().collect()]);
         buf.name = Some(std::path::PathBuf::from("bundle.js"));
-        assert_eq!(buf.lines.len(), 1, "the document is one row");
-        assert!(buf.lines[0].len() > 500_000, "and a big one");
+        assert_eq!(buf.row_count(), 1, "the document is one row");
+        assert!(buf.row(0).len() > 500_000, "and a big one");
 
         let mut full = Highlighter::new();
         full.refresh(&buf);
 
         // A window over 2,000 characters of it, 100,000 in.
         let win = Window::cols(0, 100_000, 102_000);
-        assert!(win.char_count(buf.lines.len(), |r| buf.lines[r].len()) < 2_100);
+        assert!(win.char_count(buf.row_count(), |r| buf.row(r).len()) < 2_100);
         let mut hl = Highlighter::new();
         hl.refresh_window(&buf, win);
         assert_eq!(hl.styled_window(), Some(win));
@@ -4568,7 +4568,7 @@ mod window_tests {
                 src.push_str(&format!("pub fn f{i}(x: usize) -> usize {{ x + {i} }}\n"));
             }
             let mut buf = Buffer::new();
-            buf.lines = src.lines().map(|l| l.chars().collect()).collect();
+            buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
             buf.name = Some(std::path::PathBuf::from("big.rs"));
             buf
         };
@@ -4582,7 +4582,7 @@ mod window_tests {
             for _ in 0..5 {
                 hl.refresh_window(buf, Window::rows(1_000, 1_060));
             }
-            t.elapsed().div_f64(5.0).as_secs_f64() / buf.lines.len() as f64
+            t.elapsed().div_f64(5.0).as_secs_f64() / buf.row_count() as f64
         };
         let a = time_window(&small);
         let b = time_window(&large);

@@ -130,8 +130,8 @@ pub struct BufferState {
 impl BufferState {
     pub(crate) fn new(buf: Buffer) -> Self {
         let mut buf = buf;
-        if buf.lines.is_empty() {
-            buf.lines.push(Vec::new());
+        if buf.rows_is_empty() {
+            buf.push_row(Vec::new());
         }
         let bs = Self {
             buf,
@@ -405,9 +405,9 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
             let mut text = String::new();
             io::Read::read_to_string(&mut io::stdin(), &mut text)?;
             let mut b = Buffer::new();
-            b.lines = text.lines().map(|l| l.chars().collect()).collect();
-            if b.lines.is_empty() {
-                b.lines.push(Vec::new());
+            b.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+            if b.rows_is_empty() {
+                b.push_row(Vec::new());
             }
             b
         }
@@ -425,7 +425,7 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
     let mut hl = syntax::Highlighter::new();
     hl.refresh(&buf);
     let style_of = |p: Pos| hl.style_at(p);
-    let out = export::render(&buf.lines, 8, &title, fmt, &style_of);
+    let out = export::render(buf.lines_slice(), 8, &title, fmt, &style_of);
     // Written, not `print!`ed: a closed pipe is the normal end of
     // `rano --export ansi f.rs | head`, not a panic. `println!` aborts the
     // process with a broken-pipe message when the reader goes away.
@@ -582,9 +582,9 @@ mod ed_tests {
 
     fn test_ed(text: &str) -> Editor {
         let mut buf = Buffer::new();
-        buf.lines = text.lines().map(|l| l.chars().collect()).collect();
-        if buf.lines.is_empty() {
-            buf.lines.push(Vec::new());
+        buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+        if buf.rows_is_empty() {
+            buf.push_row(Vec::new());
         }
         let mut ed = Editor::new(buf, config::Config::default());
         ed.text_w = 80;
@@ -606,12 +606,7 @@ mod ed_tests {
     }
 
     fn lines(ed: &Editor) -> Vec<String> {
-        ed.bs()
-            .buf
-            .lines
-            .iter()
-            .map(|l| l.iter().collect())
-            .collect()
+        ed.bs().buf.rows().map(|l| l.iter().collect()).collect()
     }
 
     struct TempDir(PathBuf);
@@ -1303,8 +1298,7 @@ mod ed_tests {
         let bs = back.buf.expect("single-buffer swap stores the state");
         assert_eq!(
             bs.buf
-                .lines
-                .iter()
+                .rows()
                 .map(|l| l.iter().collect::<String>())
                 .collect::<Vec<_>>(),
             vec!["fn a() {}"]
@@ -1442,7 +1436,7 @@ mod ed_tests {
     fn syntax_error_diag_without_lsp() {
         let mut buf = Buffer::new();
         buf.name = Some(std::path::PathBuf::from("t.rs"));
-        buf.lines = vec!["fn main() {".chars().collect()];
+        buf.set_rows(vec!["fn main() {".chars().collect()]);
         let mut ed = Editor::new(buf, config::Config::default());
         ed.edit_invalidate();
         // Diagnostics are a WHOLE-document parse now, debounced the way the
@@ -1455,7 +1449,9 @@ mod ed_tests {
             !ed.bs().syntax_diags.is_empty(),
             "unclosed fn block must yield a tree-sitter diagnostic"
         );
-        ed.bs_mut().buf.lines = vec!["fn main() {}".chars().collect()];
+        ed.bs_mut()
+            .buf
+            .set_rows(vec!["fn main() {}".chars().collect()]);
         ed.edit_invalidate();
         ed.ensure_highlight();
         ed.diag_flush(after_the_pause);
@@ -1477,7 +1473,7 @@ mod ed_tests {
     fn jump_next_diag_includes_syntax_diags() {
         let mut buf = Buffer::new();
         buf.name = Some(std::path::PathBuf::from("t.rs"));
-        buf.lines = vec!["fn broken(".chars().collect()];
+        buf.set_rows(vec!["fn broken(".chars().collect()]);
         let mut ed = Editor::new(buf, config::Config::default());
         ed.edit_invalidate();
         ed.jump_next_diag();
@@ -1983,8 +1979,7 @@ mod ed_tests {
         // Now the row arrives.
         ed.bs_mut()
             .buf
-            .lines
-            .extend((0..1_000_000).map(|i| format!("r{i}").chars().collect()));
+            .extend_rows((0..1_000_000).map(|i| format!("r{i}").chars().collect()));
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(ed.bs().cursor.row, 999_999);
@@ -2031,7 +2026,7 @@ mod ed_tests {
         ed.ensure_wrap_prefix();
 
         for batch in 0..8 {
-            let was = ed.bs().buf.lines.len();
+            let was = ed.bs().buf.row_count();
             let added: Vec<Vec<char>> = (0..7)
                 .map(|i| {
                     format!("b{batch}r{i}{}", "x".repeat(i * 5))
@@ -2039,7 +2034,7 @@ mod ed_tests {
                         .collect()
                 })
                 .collect();
-            ed.bs_mut().buf.lines.extend(added);
+            ed.bs_mut().buf.extend_rows(added);
             // What the loader does: only the first batch overlaps the seed.
             ed.bs_mut().wrap_extend_from = Some(if was <= 1 { 0 } else { was });
             ed.bs_mut().edit_gen = ed.bs().edit_gen.wrapping_add(1);
@@ -2064,7 +2059,7 @@ mod ed_tests {
             );
             assert_eq!(
                 ed.bs().wrap_prefix.len(),
-                ed.bs().buf.lines.len() + 1,
+                ed.bs().buf.row_count() + 1,
                 "batch {batch}: prefix length"
             );
         }
@@ -2163,7 +2158,7 @@ mod ed_tests {
         assert!(
             rows < 500,
             "the window must be the viewport plus a margin, got {rows} rows of {}",
-            ed.bs().buf.lines.len()
+            ed.bs().buf.row_count()
         );
         assert!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }).is_some());
 
@@ -2343,7 +2338,7 @@ mod ed_tests {
     #[test]
     fn config_tab_width_used() {
         let mut buf = Buffer::new();
-        buf.lines = vec!["a\tb".chars().collect()];
+        buf.set_rows(vec!["a\tb".chars().collect()]);
         let cfg = config::Config {
             tab_width: 4,
             ..config::Config::default()
@@ -2376,7 +2371,7 @@ mod ed_tests {
     #[test]
     fn auto_indent_copies_indent() {
         let mut buf = Buffer::new();
-        buf.lines = vec!["    foo".chars().collect()];
+        buf.set_rows(vec!["    foo".chars().collect()]);
         let cfg = config::Config {
             auto_indent: true,
             ..config::Config::default()
@@ -2711,7 +2706,7 @@ mod ed_tests {
 
     fn buf_with(text: &str) -> Buffer {
         let mut b = Buffer::new();
-        b.lines = text.lines().map(|l| l.chars().collect()).collect();
+        b.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         b
     }
 

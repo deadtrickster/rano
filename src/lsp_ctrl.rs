@@ -45,7 +45,7 @@ impl Editor {
             }
             return;
         };
-        let first_line = bs.buf.lines.first().map(|l| l.iter().collect::<String>());
+        let first_line = bs.buf.row_opt(0).map(|l| l.iter().collect::<String>());
         let Some(lang) = syntax::detect(Some(&name), first_line.as_deref()) else {
             if bs.lsp.take().is_some() {
                 bs.lsp_diags.clear();
@@ -148,7 +148,7 @@ impl Editor {
             match e {
                 lsp::LspEvent::Diagnostics { mut diags, .. } => {
                     let bs = self.bs_mut();
-                    widen_zero_width(&mut diags, &bs.buf.lines);
+                    widen_zero_width(&mut diags, bs.buf.lines_slice());
                     bs.lsp_diags = diags;
                     dirty = true;
                 }

@@ -10,7 +10,11 @@ pub struct Pos {
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    pub lines: Vec<Vec<char>>,
+    /// The rows. Private: everything outside this module goes through the
+    /// accessors below, so the storage can become a chunked, lazily-decoded
+    /// store (TODO.md §16.3) without touching a caller. Nothing enforced that
+    /// before this migration — the field was `pub`, and 216 sites read it.
+    lines: Vec<Vec<char>>,
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
@@ -86,6 +90,130 @@ impl Buffer {
 
     pub fn row_count(&self) -> usize {
         self.lines.len()
+    }
+
+    pub fn rows_is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    // ---------- row access ----------
+    //
+    // Everything outside this module reads rows through these rather than the
+    // `lines` field, so that the field can become a chunked, lazily-decoded
+    // store (TODO.md §16.3) without touching the callers. They are one line
+    // each today, delegating to `Vec<Vec<char>>`; the point is that the callers
+    // stop caring which it is.
+    //
+    // The TYPE is `&Vec<char>` rather than `&[char]` on purpose: it makes every
+    // existing read site a rename rather than a rewrite, because `Vec<char>`
+    // derefs to `[char]` so `.len()`, `.iter()`, `[c]`, `==` and every slice
+    // method carry over unchanged.
+
+    /// Row `r`. Panics when out of range, exactly as the `lines[r]` it replaced
+    /// did, so that migrating a call site cannot change which inputs panic.
+    /// Use `row_opt` where the old code used `lines.get(r)`.
+    pub fn row(&self, r: usize) -> &Vec<char> {
+        &self.lines[r]
+    }
+
+    /// Row `r` if it exists — the `lines.get(r)` half of the same story.
+    pub fn row_opt(&self, r: usize) -> Option<&Vec<char>> {
+        self.lines.get(r)
+    }
+
+    /// Row `r` for writing. Panics out of range, as `lines[r] = …` did.
+    pub fn row_mut(&mut self, r: usize) -> &mut Vec<char> {
+        &mut self.lines[r]
+    }
+
+    /// All rows, in order.
+    pub fn rows(&self) -> impl Iterator<Item = &Vec<char>> {
+        self.lines.iter()
+    }
+
+    /// The rows as a slice — for the callers that pass the whole set to
+    /// something (the highlighter's error walk, the export renderer).
+    pub fn lines_slice(&self) -> &[Vec<char>] {
+        &self.lines
+    }
+
+    /// The rows as a mutable slice — for the in-place whole-set operations
+    /// (sort a marked region, justify a paragraph) that reorder rows without
+    /// changing how many there are.
+    pub fn rows_mut_slice(&mut self) -> &mut [Vec<char>] {
+        &mut self.lines
+    }
+
+    /// Replace row `r`. Out of range is a no-op, like every other row operation
+    /// here (`insert_char` tolerates a stale index rather than panicking).
+    pub fn set_row(&mut self, r: usize, chars: Vec<char>) {
+        if r < self.lines.len() {
+            self.lines[r] = chars;
+        }
+    }
+
+    /// Insert `chars` as a new row `at`, clamped to the end.
+    pub fn insert_row(&mut self, at: usize, chars: Vec<char>) {
+        self.lines.insert(at.min(self.lines.len()), chars);
+    }
+
+    /// Append `chars` as the last row.
+    pub fn push_row(&mut self, chars: Vec<char>) {
+        self.lines.push(chars);
+    }
+
+    /// Append every row of `rows`, leaving it empty — `Vec::append`'s contract,
+    /// which the loader relies on so it can hand off its batch and keep going.
+    pub fn append_rows(&mut self, rows: &mut Vec<Vec<char>>) {
+        self.lines.append(rows);
+    }
+
+    /// Append every row of `rows`.
+    pub fn extend_rows(&mut self, rows: impl IntoIterator<Item = Vec<char>>) {
+        self.lines.extend(rows);
+    }
+
+    /// Replace rows in `range` with `items` — a `Vec::splice` that callers can
+    /// name. Both `start..end` and `a..=b` are accepted.
+    pub fn splice_rows<I>(&mut self, range: impl std::ops::RangeBounds<usize>, items: I)
+    where
+        I: IntoIterator<Item = Vec<char>>,
+    {
+        self.lines.splice(range, items);
+    }
+
+    /// Drop every row. The buffer is momentarily not a valid buffer; every
+    /// caller refills it in the same breath.
+    pub fn clear_rows(&mut self) {
+        self.lines.clear();
+    }
+
+    /// Take the rows out, leaving this buffer empty — for handing a whole
+    /// document to another buffer without copying it.
+    pub fn take_rows(&mut self) -> Vec<Vec<char>> {
+        std::mem::take(&mut self.lines)
+    }
+
+    /// Replace every row outright — the "assign a whole document" operation,
+    /// which `from_text` and the test helpers use.
+    pub fn set_rows(&mut self, rows: Vec<Vec<char>>) {
+        self.lines = rows;
+    }
+
+    /// Remove row `r`, returning it (empty when out of range).
+    pub fn remove_row(&mut self, r: usize) -> Vec<char> {
+        if r < self.lines.len() {
+            self.lines.remove(r)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A copy of every row. The escape hatch for the O(document) callers —
+    /// sort, justify, save, export, a whole-buffer search — which need the rows
+    /// as a plain value rather than as a view.
+    pub fn to_lines(&self) -> Vec<Vec<char>> {
+        self.lines.clone()
     }
 
     pub fn clamp(&self, p: Pos) -> Pos {

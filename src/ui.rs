@@ -259,7 +259,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // F4: line-number gutter shrinks the text viewport; E3: scroll_x is the
     // left edge of the text window in display cols.
     let g = if ed.show_line_numbers {
-        gutter_width(bs.buf.lines.len())
+        gutter_width(bs.buf.row_count())
     } else {
         0
     };
@@ -278,7 +278,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         let mut out = Vec::with_capacity(text_h);
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
         let mut first = true;
-        while out.len() < text_h && r < bs.buf.lines.len() {
+        while out.len() < text_h && r < bs.buf.row_count() {
             // Segment count from the cached wrap table (rebuilt once per
             // edit/resize by ensure_wrap_prefix) instead of re-scanning the
             // whole line every frame — a 500k-char line must not cost 500k
@@ -355,7 +355,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         for (i, (r, seg)) in vis.iter().enumerate() {
             // The number sits on the first wrap segment of a row only;
             // continuation rows stay blank (nano).
-            let s = if *r < bs.buf.lines.len() && *seg == 0 {
+            let s = if *r < bs.buf.row_count() && *seg == 0 {
                 format!("{:>w$} ", r + 1, w = g - 1)
             } else {
                 " ".repeat(g)
@@ -384,7 +384,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
     for (i, (r, seg)) in vis.iter().enumerate() {
         let (a, b) = diag_range[i];
-        match bs.buf.lines.get(*r) {
+        match bs.buf.row_opt(*r) {
             Some(chars) => {
                 let line = match ed.row_is_simple(*r) {
                     // A simple row: display col == char index, so the
@@ -465,7 +465,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             word_pane - vis_i
         };
         if y0 >= 1 && y0 + vis_i - 1 <= text_h as i64 {
-            let line = bs.buf.lines.get(p.row).map(Vec::as_slice).unwrap_or(&[]);
+            let line = bs.buf.row_opt(p.row).map(Vec::as_slice).unwrap_or(&[]);
             let disp = display_col(line, p.col, ed.tab_width);
             let x = if ed.wrap {
                 // Offset within the word's own visual row, not modulo the
@@ -616,8 +616,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 // within the wrap segment's own row) → plus gutter
                 let line = bs
                     .buf
-                    .lines
-                    .get(bs.cursor.row)
+                    .row_opt(bs.cursor.row)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 let disp = match ed.row_is_simple(bs.cursor.row) {
@@ -706,7 +705,7 @@ mod tests {
     fn ed(text: &str) -> Editor {
         let mut buf = Buffer::new();
         if !text.is_empty() {
-            buf.lines = text.lines().map(|l| l.chars().collect()).collect();
+            buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         }
         let mut ed = Editor::new(buf, crate::config::Config::default());
         // draw() assumes the run loop has kept the soft-wrap table fresh
@@ -723,7 +722,7 @@ mod tests {
     /// highlighter runs — the draw tests need coloured cells.
     fn ed_named(name: &str, text: &str) -> Editor {
         let mut buf = Buffer::new();
-        buf.lines = text.lines().map(|l| l.chars().collect()).collect();
+        buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from(name));
         let mut ed = Editor::new(buf, crate::config::Config::default());
         ed.ensure_wrap_prefix();

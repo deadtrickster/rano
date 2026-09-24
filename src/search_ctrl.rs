@@ -76,7 +76,7 @@ impl Editor {
         } else {
             search::Matcher::literal(&query, self.search_case_sensitive)
         };
-        let all = matcher.find_all(&self.bs().buf.lines);
+        let all = matcher.find_all(self.bs().buf.lines_slice());
         let bs = self.bs_mut();
         bs.search.query = query;
         bs.search_matches = Some(all);

@@ -100,7 +100,7 @@ impl Editor {
         }
         let mark = self.bs().mark.expect("start_filter guarantees mark");
         let (a, b) = normalize(mark, self.bs().cursor);
-        let input: String = self.bs().buf.lines[a.row..=b.row]
+        let input: String = self.bs().buf.lines_slice()[a.row..=b.row]
             .iter()
             .map(|l| l.iter().collect::<String>())
             .collect::<Vec<_>>()
@@ -156,7 +156,7 @@ impl Editor {
         }
         let n = lines.len();
         self.begin_action(ActionKind::Filter, a.row, b.row + 1);
-        self.bs_mut().buf.lines.splice(a.row..=b.row, lines);
+        self.bs_mut().buf.splice_rows(a.row..=b.row, lines);
         self.bs_mut().cursor = Pos { row: a.row, col: 0 };
         self.bs_mut().mark = None;
         self.finish_step();

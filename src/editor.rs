@@ -52,7 +52,7 @@ pub(crate) struct UndoStep {
     pub after: Vec<Vec<char>>,  // post-edit rows (may be empty → pure deletion)
     pub cur_before: Pos,
     pub cur_after: Pos,
-    len_at_begin: usize, // buf.lines.len() when the step began
+    len_at_begin: usize, // buf.row_count() when the step began
 }
 
 pub struct Editor {
@@ -300,7 +300,7 @@ impl Editor {
         if bs.cursor.row >= bs.scroll + text_h {
             bs.scroll = bs.cursor.row - text_h + 1;
         }
-        let max_scroll = bs.buf.lines.len().saturating_sub(text_h);
+        let max_scroll = bs.buf.row_count().saturating_sub(text_h);
         bs.scroll = bs.scroll.min(max_scroll);
     }
 
@@ -314,7 +314,7 @@ impl Editor {
             return;
         }
         let gutter = if self.show_line_numbers {
-            ui::gutter_width(self.bs().buf.lines.len())
+            ui::gutter_width(self.bs().buf.row_count())
         } else {
             0
         };
@@ -324,11 +324,11 @@ impl Editor {
             .bs()
             .cursor
             .row
-            .min(self.bs().buf.lines.len().saturating_sub(1));
+            .min(self.bs().buf.row_count().saturating_sub(1));
         // A simple row (fresh wrap table): display col == char index.
         let simple = self.row_is_simple(row) == Some(true);
         let bs = self.bs_mut();
-        let line = &bs.buf.lines[row];
+        let line = bs.buf.row(row);
         let disp = if simple {
             bs.cursor.col.min(line.len())
         } else {
@@ -361,7 +361,7 @@ impl Editor {
     /// Width of the text viewport in display cols (gutter excluded).
     pub(crate) fn view_w(&self) -> usize {
         let g = if self.show_line_numbers {
-            ui::gutter_width(self.bs().buf.lines.len())
+            ui::gutter_width(self.bs().buf.row_count())
         } else {
             0
         };
@@ -387,13 +387,13 @@ impl Editor {
         let vw = self.view_w();
         let key = (self.bs().edit_gen, vw);
         let fresh = self.bs().wrap_key == key
-            && self.bs().wrap_prefix.len() == self.bs().buf.lines.len() + 1
-            && self.bs().wrap_rows.len() == self.bs().buf.lines.len();
+            && self.bs().wrap_prefix.len() == self.bs().buf.row_count() + 1
+            && self.bs().wrap_rows.len() == self.bs().buf.row_count();
         if fresh {
             return;
         }
         let tw = self.tab_width.max(1);
-        let n = self.bs().buf.lines.len();
+        let n = self.bs().buf.row_count();
         // An APPEND: rows `[0, k)` are untouched and only `[k, n)` are new.
         //
         // This is the loader's path, and without it a load is quadratic in
@@ -413,10 +413,10 @@ impl Editor {
                 bs.wrap_rows.truncate(k);
                 bs.wrap_prefix.truncate(k + 1);
                 for r in k..n {
-                    let row_wrap = Self::row_wrap_of_line(&bs.buf.lines[r], tw, vw);
+                    let row_wrap = Self::row_wrap_of_line(bs.buf.row(r), tw, vw);
                     let segs = match &row_wrap.segs {
                         Some(s) => s.len(),
-                        None => bs.buf.lines[r].len().div_ceil(vw).max(1),
+                        None => bs.buf.row(r).len().div_ceil(vw).max(1),
                     };
                     bs.wrap_prefix.push(bs.wrap_prefix[r] + segs);
                     bs.wrap_rows.push(row_wrap);
@@ -435,7 +435,7 @@ impl Editor {
             && let Some(row) = self.bs().wrap_dirty_row
             && row < n
         {
-            let row_wrap = Self::row_wrap_of_line(&self.bs().buf.lines[row], tw, vw);
+            let row_wrap = Self::row_wrap_of_line(self.bs().buf.row(row), tw, vw);
             let bs = self.bs_mut();
             bs.wrap_rows[row] = row_wrap;
             // Re-sum from the edited row to the end. Pure arithmetic over
@@ -443,7 +443,7 @@ impl Editor {
             for i in row..n {
                 let segs = match &bs.wrap_rows[i].segs {
                     Some(s) => s.len(),
-                    None => bs.buf.lines[i].len().div_ceil(vw).max(1),
+                    None => bs.buf.row(i).len().div_ceil(vw).max(1),
                 };
                 bs.wrap_prefix[i + 1] = bs.wrap_prefix[i] + segs;
             }
@@ -456,7 +456,7 @@ impl Editor {
         let mut prefix = Vec::with_capacity(n + 1);
         let mut rows = Vec::with_capacity(n);
         prefix.push(0);
-        for line in &self.bs().buf.lines {
+        for line in self.bs().buf.rows() {
             let row_wrap = Self::row_wrap_of_line(line, tw, vw);
             let segs = match &row_wrap.segs {
                 Some(s) => s.len(),
@@ -506,7 +506,7 @@ impl Editor {
     /// to scanning the line.
     fn row_wrap(&self, r: usize) -> Option<&RowWrap> {
         let bs = self.bs();
-        if bs.wrap_key != (bs.edit_gen, self.view_w()) || bs.wrap_rows.len() != bs.buf.lines.len() {
+        if bs.wrap_key != (bs.edit_gen, self.view_w()) || bs.wrap_rows.len() != bs.buf.row_count() {
             return None;
         }
         bs.wrap_rows.get(r)
@@ -586,7 +586,7 @@ impl Editor {
             // the segment's first char.
             return col.min(self.line_len(r)).saturating_sub(lo);
         }
-        let line = &self.bs().buf.lines[r];
+        let line = self.bs().buf.row(r);
         ui::display_col(line, col, self.tab_width)
             .saturating_sub(self.seg_disp(r, self.seg_of_col(r, col)).0)
     }
@@ -599,18 +599,18 @@ impl Editor {
             return (lo + within).min(hi);
         }
         let (d0, _) = self.seg_disp(r, seg);
-        let line = &self.bs().buf.lines[r];
+        let line = self.bs().buf.row(r);
         ui::char_at_display(line, d0 + within, self.tab_width).clamp(lo, hi)
     }
 
     fn line_len(&self, r: usize) -> usize {
-        self.bs().buf.lines.get(r).map(Vec::len).unwrap_or(0)
+        self.bs().buf.row_opt(r).map(Vec::len).unwrap_or(0)
     }
 
     /// Visual row containing position `p` (wrap on only).
     pub(crate) fn visual_pos(&self, p: Pos) -> usize {
         let bs = self.bs();
-        let r = p.row.min(bs.buf.lines.len().saturating_sub(1));
+        let r = p.row.min(bs.buf.row_count().saturating_sub(1));
         bs.wrap_prefix.get(r).copied().unwrap_or(0) + self.seg_of_col(r, p.col)
     }
 
@@ -632,7 +632,7 @@ impl Editor {
         // for the rows it was built from, and a caller holding a stale one
         // must get a sane row rather than an index past its end.
         let r = r
-            .min(bs.buf.lines.len().saturating_sub(1))
+            .min(bs.buf.row_count().saturating_sub(1))
             .min(bs.wrap_prefix.len().saturating_sub(2));
         (r, v - bs.wrap_prefix[r])
     }
@@ -647,7 +647,7 @@ impl Editor {
         // after the first frame. Waiting is the whole point — clamping to what
         // has arrived would open the file at the wrong place and look like the
         // feature was broken.
-        if p.row >= self.bs().buf.lines.len() {
+        if p.row >= self.bs().buf.row_count() {
             return;
         }
         let bs = self.bs_mut();
@@ -695,7 +695,7 @@ impl Editor {
     /// the visible columns plus a margin.
     fn highlight_window(&self, text_h: usize) -> syntax::Window {
         let bs = self.bs();
-        let last_row = bs.buf.lines.len().saturating_sub(1);
+        let last_row = bs.buf.row_count().saturating_sub(1);
         // Visual row → buffer row, when the wrap table is fresh. The scroll
         // position is in visual rows (M-\), so a deep scroll into a long line
         // still lands on the right buffer row.
@@ -712,13 +712,13 @@ impl Editor {
         let (first, last) = (first.min(last), last);
         // Column bounds, for the long-row case. Only meaningful on the first
         // and last row of the window; every other row is taken whole.
-        let from = if bs.buf.lines[first_vis].len() > Self::LONG_ROW {
+        let from = if bs.buf.row(first_vis).len() > Self::LONG_ROW {
             let (lo, _) = self.seg_chars(first_vis, first_seg);
             lo.saturating_sub(Self::COL_MARGIN)
         } else {
             0
         };
-        let to = if bs.buf.lines[last_vis].len() > Self::LONG_ROW {
+        let to = if bs.buf.row(last_vis).len() > Self::LONG_ROW {
             let (_, hi) = self.seg_chars(last_vis, last_seg);
             hi.saturating_add(Self::COL_MARGIN)
         } else {
@@ -872,7 +872,7 @@ impl Editor {
     /// indents with tabs, otherwise the common leading-space width (the GCD,
     /// so mixed 4/8 comes out as 4). Falls back to a tab for flat buffers.
     pub fn indent_unit(&self) -> String {
-        let lines = &self.bs().buf.lines;
+        let lines = self.bs().buf.lines_slice();
         if lines.iter().any(|l| l.first() == Some(&'\t')) {
             return "\t".to_string();
         }
@@ -940,11 +940,11 @@ impl Editor {
     ) {
         let bs = self.bs_mut();
         bs.redo.clear();
-        let len = bs.buf.lines.len();
+        let len = bs.buf.row_count();
         let first = first_row.min(len);
         let last = last_row_exclusive.min(len);
         let before = if first < last {
-            bs.buf.lines[first..last].to_vec()
+            bs.buf.lines_slice()[first..last].to_vec()
         } else {
             Vec::new()
         };
@@ -1029,13 +1029,13 @@ impl Editor {
         before_len: usize,
         len_at_begin: usize,
     ) -> Vec<Vec<char>> {
-        let delta = self.bs().buf.lines.len() as isize - len_at_begin as isize;
+        let delta = self.bs().buf.row_count() as isize - len_at_begin as isize;
         let count = (before_len as isize + delta).max(0) as usize;
-        let end = (after_start + count).min(self.bs().buf.lines.len());
+        let end = (after_start + count).min(self.bs().buf.row_count());
         if after_start >= end {
             Vec::new()
         } else {
-            self.bs().buf.lines[after_start..end].to_vec()
+            self.bs().buf.lines_slice()[after_start..end].to_vec()
         }
     }
 
@@ -1058,11 +1058,11 @@ impl Editor {
     pub(crate) fn undo(&mut self) {
         if let Some(step) = self.bs_mut().undo.pop_back() {
             let bs = self.bs_mut();
-            let start = step.after_start.min(bs.buf.lines.len());
+            let start = step.after_start.min(bs.buf.row_count());
             let end = (step.after_start + step.after.len())
-                .min(bs.buf.lines.len())
+                .min(bs.buf.row_count())
                 .max(start);
-            bs.buf.lines.splice(start..end, step.before.iter().cloned());
+            bs.buf.splice_rows(start..end, step.before.iter().cloned());
             bs.cursor = step.cur_before;
             bs.last_kind = None;
             self.edit_invalidate();
@@ -1074,11 +1074,11 @@ impl Editor {
     pub(crate) fn redo(&mut self) {
         if let Some(step) = self.bs_mut().redo.pop_back() {
             let bs = self.bs_mut();
-            let start = step.start.min(bs.buf.lines.len());
+            let start = step.start.min(bs.buf.row_count());
             let end = (step.start + step.before.len())
-                .min(bs.buf.lines.len())
+                .min(bs.buf.row_count())
                 .max(start);
-            bs.buf.lines.splice(start..end, step.after.iter().cloned());
+            bs.buf.splice_rows(start..end, step.after.iter().cloned());
             bs.cursor = step.cur_after;
             bs.last_kind = None;
             self.edit_invalidate();
@@ -1132,7 +1132,8 @@ impl Editor {
     /// Closes the popup when the cursor leaves completion context.
     pub(crate) fn maybe_request_completion(&mut self) {
         let cur = self.bs().cursor;
-        let Some((prefix, start)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col)
+        let Some((prefix, start)) =
+            completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
         else {
             self.completion = None;
             self.completion_q.clear();
@@ -1150,7 +1151,7 @@ impl Editor {
             bs.lsp_last_send = Instant::now();
         }
         let uri = l.doc_uri.clone().unwrap_or_default();
-        let line = bs.buf.lines.get(cur.row).cloned().unwrap_or_default();
+        let line = bs.buf.row_opt(cur.row).cloned().unwrap_or_default();
         l.request_completion(&uri, cur.row as u64, lsp::utf16_col(&line, cur.col) as u64);
         self.completion_q.push_back((cur.row, prefix));
         if self.completion_q.len() > 8 {
@@ -1184,7 +1185,8 @@ impl Editor {
             return;
         };
         let cur = self.bs().cursor;
-        let Some((prefix, _)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col) else {
+        let Some((prefix, _)) = completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
+        else {
             self.completion = None;
             self.completion_q.clear();
             return;
@@ -1196,7 +1198,7 @@ impl Editor {
         // super::) means the server has not finished scanning the crate
         // yet — member lists never contain those. Park the popup and
         // re-request shortly instead of flashing fallback junk.
-        let dot_ctx = cur.col > 0 && self.bs().buf.lines[cur.row].get(cur.col - 1) == Some(&'.');
+        let dot_ctx = cur.col > 0 && self.bs().buf.row(cur.row).get(cur.col - 1) == Some(&'.');
         if dot_ctx
             && self.completion_retries < 40
             && items.iter().any(|it| {
@@ -1289,7 +1291,7 @@ impl Editor {
             self.completion_retries = 0;
             return;
         }
-        if completion_prefix(&self.bs().buf.lines, cur.row, cur.col).is_none() {
+        if completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col).is_none() {
             self.completion_retries = 0;
             self.completion = None;
             return;
@@ -1311,7 +1313,8 @@ impl Editor {
         if cur.row != p.row {
             return;
         }
-        let Some((prefix, _)) = completion_prefix(&self.bs().buf.lines, cur.row, cur.col) else {
+        let Some((prefix, _)) = completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
+        else {
             return;
         };
         match item.insert.strip_prefix(prefix.as_str()) {
@@ -1346,7 +1349,7 @@ impl Editor {
             bs.lsp_last_send = Instant::now();
         }
         let uri = l.doc_uri.clone().unwrap_or_default();
-        let line = bs.buf.lines.get(cur.row).cloned().unwrap_or_default();
+        let line = bs.buf.row_opt(cur.row).cloned().unwrap_or_default();
         let loc = match l.definition(
             &uri,
             cur.row as u64,
@@ -1409,7 +1412,7 @@ impl Editor {
             self.lsp_sync();
         }
         let row = loc.line as usize;
-        let line = self.bs().buf.lines.get(row).cloned().unwrap_or_default();
+        let line = self.bs().buf.row_opt(row).cloned().unwrap_or_default();
         let col = lsp::utf16_to_char(&line, loc.character as usize);
         self.bs_mut().cursor = Pos { row, col };
         self.completion_close();
@@ -1460,11 +1463,11 @@ impl Editor {
         } else {
             (pane_row as usize - 1 + bs.scroll, 0)
         };
-        if row >= bs.buf.lines.len() {
+        if row >= bs.buf.row_count() {
             return None;
         }
         let g = if self.show_line_numbers {
-            ui::gutter_width(bs.buf.lines.len())
+            ui::gutter_width(bs.buf.row_count())
         } else {
             0
         };
@@ -1478,7 +1481,7 @@ impl Editor {
         } else {
             bs.scroll_x + (x - g)
         };
-        let line = &bs.buf.lines[row];
+        let line = bs.buf.row(row);
         Some(Pos {
             row,
             col: ui::char_at_display(line, disp, self.tab_width),
@@ -1548,7 +1551,7 @@ impl Editor {
             return true;
         }
         let bs = self.bs_mut();
-        let max_scroll = bs.buf.lines.len().saturating_sub(text_h);
+        let max_scroll = bs.buf.row_count().saturating_sub(text_h);
         let scroll = (bs.scroll as i64 + delta).clamp(0, max_scroll as i64) as usize;
         bs.scroll = scroll;
         if bs.cursor.row < scroll {
@@ -1591,13 +1594,16 @@ impl Editor {
         // (up to the cursor) onto the new row. Electric: an opening brace at
         // the end of the line puts the cursor one indent unit deeper.
         let indent: Vec<char> = if self.config.auto_indent {
-            let mut ind: Vec<char> = self.bs().buf.lines[row]
+            let mut ind: Vec<char> = self
+                .bs()
+                .buf
+                .row(row)
                 .iter()
                 .take(col)
                 .take_while(|c| c.is_whitespace())
                 .copied()
                 .collect();
-            let opens = self.bs().buf.lines[row][..col]
+            let opens = self.bs().buf.row(row)[..col]
                 .iter()
                 .rev()
                 .find(|c| !c.is_whitespace())
@@ -1617,7 +1623,7 @@ impl Editor {
             };
         } else {
             let n = indent.len();
-            self.bs_mut().buf.lines[row + 1].splice(0..0, indent);
+            self.bs_mut().buf.row_mut(row + 1).splice(0..0, indent);
             self.bs_mut().cursor = Pos {
                 row: row + 1,
                 col: n,
@@ -1656,7 +1662,7 @@ impl Editor {
             // Soft tabs: on leading whitespace, backspace eats a whole
             // indent unit down to the previous boundary, not one space.
             let unit = self.indent_unit();
-            let line = self.bs().buf.lines[c.row].clone();
+            let line = self.bs().buf.row(c.row).clone();
             let on_indent =
                 unit != "\t" && c.col <= line.len() && line[..c.col].iter().all(|ch| *ch == ' ');
             let n = if on_indent {
@@ -1668,7 +1674,7 @@ impl Editor {
             for _ in 0..n {
                 // buf.backspace removes a row it empties; stop before the
                 // row index goes stale and let clamp_cursor settle it.
-                if bs.cursor.col == 0 || bs.buf.lines.get(c.row).is_none() {
+                if bs.cursor.col == 0 || bs.buf.row_opt(c.row).is_none() {
                     break;
                 }
                 bs.buf.backspace(c.row, bs.cursor.col);
@@ -1700,7 +1706,7 @@ impl Editor {
         let c = self.bs().cursor;
         let sel = self.sel_span();
         let can_delete =
-            c.col < self.bs().buf.line_len(c.row) || c.row + 1 < self.bs().buf.lines.len();
+            c.col < self.bs().buf.line_len(c.row) || c.row + 1 < self.bs().buf.row_count();
         if sel.is_none() && !can_delete {
             return;
         }
@@ -1763,12 +1769,12 @@ impl Editor {
         if c.col == l {
             let (line, empty) = {
                 let bs = self.bs_mut();
-                let line = bs.buf.lines.remove(c.row);
-                let empty = bs.buf.lines.is_empty();
+                let line = bs.buf.remove_row(c.row);
+                let empty = bs.buf.rows_is_empty();
                 (line, empty)
             };
             if empty {
-                self.bs_mut().buf.lines.push(Vec::new());
+                self.bs_mut().buf.push_row(Vec::new());
             }
             if self.cut_line {
                 self.cut.push(line);
@@ -1780,12 +1786,12 @@ impl Editor {
         } else {
             let (frag, gone) = {
                 let bs = self.bs_mut();
-                let frag: Vec<char> = bs.buf.lines[c.row].drain(c.col..).collect();
-                let gone = bs.buf.lines[c.row].is_empty() && bs.buf.lines.len() > 1;
+                let frag: Vec<char> = bs.buf.row_mut(c.row).drain(c.col..).collect();
+                let gone = bs.buf.row(c.row).is_empty() && bs.buf.row_count() > 1;
                 (frag, gone)
             };
             if gone {
-                self.bs_mut().buf.lines.remove(c.row);
+                self.bs_mut().buf.remove_row(c.row);
             }
             self.cut = vec![frag];
             self.cut_line = false;
@@ -1882,7 +1888,7 @@ impl Editor {
             }
         }
         let c = self.bs().cursor;
-        let line = self.bs().buf.lines[c.row].clone();
+        let line = self.bs().buf.row(c.row).clone();
         self.cut = vec![line];
         self.cut_line = true;
     }
@@ -1893,7 +1899,7 @@ impl Editor {
             self.begin_action(ActionKind::Delete, c.row, c.row + 1);
             let ch = {
                 let bs = self.bs_mut();
-                let ch = bs.buf.lines[c.row][c.col];
+                let ch = bs.buf.row(c.row)[c.col];
                 bs.buf.delete_at(c.row, c.col);
                 ch
             };
@@ -1923,7 +1929,7 @@ impl Editor {
         let c = self.bs().cursor;
         if c.col < self.bs().buf.line_len(c.row) {
             self.bs_mut().cursor.col += 1;
-        } else if c.row + 1 < self.bs().buf.lines.len() {
+        } else if c.row + 1 < self.bs().buf.row_count() {
             let bs = self.bs_mut();
             bs.cursor.row += 1;
             bs.cursor.col = 0;
@@ -1967,7 +1973,7 @@ impl Editor {
             }
             return;
         }
-        if self.bs().cursor.row + 1 < self.bs().buf.lines.len() {
+        if self.bs().cursor.row + 1 < self.bs().buf.row_count() {
             let bs = self.bs_mut();
             bs.cursor.row += 1;
             bs.cursor.col = bs.cursor.col.min(bs.buf.line_len(bs.cursor.row));
@@ -2020,7 +2026,7 @@ impl Editor {
             return;
         }
         let bs = self.bs_mut();
-        bs.cursor.row = (bs.cursor.row + step).min(bs.buf.lines.len().saturating_sub(1));
+        bs.cursor.row = (bs.cursor.row + step).min(bs.buf.row_count().saturating_sub(1));
         bs.cursor.col = bs.cursor.col.min(bs.buf.line_len(bs.cursor.row));
     }
 
@@ -2038,15 +2044,15 @@ impl Editor {
                 c = self.bs().buf.line_len(r);
                 continue;
             }
-            if self.bs().buf.lines[r][c - 1].is_whitespace() {
+            if self.bs().buf.row(r)[c - 1].is_whitespace() {
                 c -= 1;
                 continue;
             }
             break;
         }
         c -= 1;
-        if is_word(self.bs().buf.lines[r][c]) {
-            while c > 0 && is_word(self.bs().buf.lines[r][c - 1]) {
+        if is_word(self.bs().buf.row(r)[c]) {
+            while c > 0 && is_word(self.bs().buf.row(r)[c - 1]) {
                 c -= 1;
             }
         }
@@ -2066,7 +2072,7 @@ impl Editor {
         let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
         let mut r = self.bs().cursor.row;
         let mut c = self.bs().cursor.col;
-        let nlines = self.bs().buf.lines.len();
+        let nlines = self.bs().buf.row_count();
         loop {
             let len = self.bs().buf.line_len(r);
             if c >= len {
@@ -2077,15 +2083,15 @@ impl Editor {
                 c = 0;
                 continue;
             }
-            if self.bs().buf.lines[r][c].is_whitespace() {
+            if self.bs().buf.row(r)[c].is_whitespace() {
                 c += 1;
                 continue;
             }
             break;
         }
         let len = self.bs().buf.line_len(r);
-        if is_word(self.bs().buf.lines[r][c]) {
-            while c < len && is_word(self.bs().buf.lines[r][c]) {
+        if is_word(self.bs().buf.row(r)[c]) {
+            while c < len && is_word(self.bs().buf.row(r)[c]) {
                 c += 1;
             }
         } else {
@@ -2102,7 +2108,7 @@ impl Editor {
         // Copy the at-cursor chars out of the buffer so the search below can
         // borrow it mutably-free while we still test them.
         let window: Vec<char> = {
-            let line = &self.bs().buf.lines[start.row];
+            let line = self.bs().buf.row(start.row);
             (0..5)
                 .map(|o| start.col.saturating_add(o))
                 .take_while(|&i| i < line.len())
@@ -2131,8 +2137,8 @@ impl Editor {
     /// Find the position of `target` matching the bracket at (row, col),
     /// scanning the whole buffer. `dir` is 1 (forward) or -1 (backward).
     fn find_matching(&self, row: usize, col: usize, target: char, dir: i64) -> Option<Pos> {
-        let start_ch = self.bs().buf.lines[row][col];
-        let nlines = self.bs().buf.lines.len() as i64;
+        let start_ch = self.bs().buf.row(row)[col];
+        let nlines = self.bs().buf.row_count() as i64;
         let mut depth: i32 = 0;
         let mut r = row as i64;
         let mut c = col as i64;
@@ -2140,14 +2146,14 @@ impl Editor {
             if r < 0 || r >= nlines {
                 return None;
             }
-            let line = &self.bs().buf.lines[r as usize];
+            let line = self.bs().buf.row(r as usize);
             let llen = line.len() as i64;
             if c < 0 {
                 r -= 1;
                 if r < 0 {
                     return None;
                 }
-                c = self.bs().buf.lines[r as usize].len() as i64 - 1;
+                c = self.bs().buf.row(r as usize).len() as i64 - 1;
                 continue;
             }
             if c >= llen {
@@ -2197,7 +2203,7 @@ impl Editor {
     pub(crate) fn do_goto(&mut self, text: &str) {
         let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
         let n: usize = digits.parse().unwrap_or(1);
-        let n = n.clamp(1, self.bs().buf.lines.len());
+        let n = n.clamp(1, self.bs().buf.row_count());
         self.bs_mut().cursor = Pos { row: n - 1, col: 0 };
         self.loc_until = Some(Instant::now() + Duration::from_secs(2));
     }
@@ -2302,18 +2308,18 @@ impl Editor {
             return;
         }
         match Buffer::from_file(Path::new(&expand_tilde(&name))) {
-            Ok(read) => {
+            Ok(mut read) => {
                 // The whole read comes from `Buffer::from_file`, so `^R` gets
                 // the same encoding detection as startup and remembers what it
                 // found for the eventual save.
-                let lines = read.lines;
+                let lines = read.take_rows();
                 let count = lines.len();
                 self.bs_mut().buf.crlf = read.crlf;
                 self.bs_mut().buf.encoding = read.encoding;
                 assert!(!lines.is_empty(), "from_file always yields one row");
-                if self.bs().buf.lines.len() == 1 && self.bs().buf.lines[0].is_empty() {
+                if self.bs().buf.row_count() == 1 && self.bs().buf.row(0).is_empty() {
                     self.begin_action(ActionKind::ReadFile, 0, 1);
-                    self.bs_mut().buf.lines = lines;
+                    self.bs_mut().buf.set_rows(lines);
                     self.bs_mut().cursor = Pos { row: 0, col: 0 };
                 } else {
                     let c = self.bs().cursor;
@@ -2347,7 +2353,7 @@ impl Editor {
                 return false;
             }
         };
-        let count = buf.lines.len();
+        let count = buf.row_count();
         if self.config.multibuffer {
             self.buffers.push(BufferState::new(buf));
             self.cur = self.buffers.len() - 1;
@@ -2484,16 +2490,16 @@ impl Editor {
         let width = self.text_w.saturating_sub(2).max(20);
         let c = self.bs().cursor.row;
         let mut top = c;
-        while top > 0 && !self.bs().buf.lines[top - 1].is_empty() {
+        while top > 0 && !self.bs().buf.row(top - 1).is_empty() {
             top -= 1;
         }
         let mut bot = c;
-        while bot + 1 < self.bs().buf.lines.len() && !self.bs().buf.lines[bot + 1].is_empty() {
+        while bot + 1 < self.bs().buf.row_count() && !self.bs().buf.row(bot + 1).is_empty() {
             bot += 1;
         }
         let mut words: Vec<String> = Vec::new();
         for r in top..=bot {
-            let s: String = self.bs().buf.lines[r].iter().collect();
+            let s: String = self.bs().buf.row(r).iter().collect();
             words.extend(s.split_whitespace().map(|w| w.to_string()));
         }
         let mut new_lines: Vec<Vec<char>> = Vec::new();
@@ -2518,8 +2524,7 @@ impl Editor {
         self.begin_action(ActionKind::Justify, top, bot + 1);
         self.bs_mut()
             .buf
-            .lines
-            .splice(top..=bot, new_lines.iter().cloned());
+            .splice_rows(top..=bot, new_lines.iter().cloned());
         self.bs_mut().cursor = Pos { row: top, col: 0 };
         self.bs_mut().mark = None;
         self.finish_step();
@@ -2532,10 +2537,10 @@ impl Editor {
                 let (a, b) = normalize(mark, self.bs().cursor);
                 (a.row, b.row)
             }
-            None => (0, self.bs().buf.lines.len().saturating_sub(1)),
+            None => (0, self.bs().buf.row_count().saturating_sub(1)),
         };
         self.begin_action(ActionKind::Sort, top, bot + 1);
-        let region: &mut [Vec<char>] = &mut self.bs_mut().buf.lines[top..=bot];
+        let region: &mut [Vec<char>] = &mut self.bs_mut().buf.rows_mut_slice()[top..=bot];
         region.sort_by_cached_key(|l| l.iter().collect::<String>().to_lowercase());
         self.bs_mut().mark = None;
         self.finish_step();
@@ -2597,7 +2602,7 @@ pub(crate) fn plural(n: usize) -> &'static str {
 pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
     bs.syntax_diags = bs
         .hl
-        .syntax_errors(&bs.buf.lines)
+        .syntax_errors(bs.buf.lines_slice())
         .into_iter()
         .map(|(line, col, end_col, message)| lsp::Diagnostic {
             line,
@@ -2607,7 +2612,7 @@ pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
             severity: 1,
         })
         .collect();
-    widen_zero_width(&mut bs.syntax_diags, &bs.buf.lines);
+    widen_zero_width(&mut bs.syntax_diags, bs.buf.lines_slice());
 }
 
 /// rust-analyzer reports many syntax errors as zero-width insertion points,

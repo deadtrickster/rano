@@ -1704,3 +1704,74 @@ fn bench_threshold_cliff() {
     println!(" column is `hl.refresh`, which only the export path and the tests call now.)");
     println!();
 }
+
+/// Load throughput: how fast rows arrive, and where the time goes.
+///
+/// This exists because a load was quadratic in disguise and nothing measured
+/// it. Each adopted batch bumped `edit_gen`, invalidating the wrap table, and
+/// the next frame re-measured EVERY row so far — ~800M row measurements across
+/// a 2.6M-line file, which showed up as 315k rows/s against a page-cached read
+/// of 17 GB/s. Extending the table from the join instead of rebuilding it is
+/// what the number below is checking: it should now be a small multiple of the
+/// raw read, not thousands of times it.
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn bench_load_throughput() {
+    let path =
+        std::env::var("RANO_PROFILE_FILE").unwrap_or_else(|_| "/tmp/ranoperf/huge200.log".into());
+    let p = Path::new(&path);
+    if !p.exists() {
+        eprintln!("{path} is not here; set RANO_PROFILE_FILE");
+        return;
+    }
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+    // A raw read, for the ceiling.
+    let t = Instant::now();
+    let bytes = fs::read(p).expect("read");
+    let raw = t.elapsed();
+    let raw_bytes = bytes.len();
+    drop(bytes);
+
+    // The whole editor loop: adopt, highlight the window, extend the wrap
+    // table, draw — which is what the run loop does while a file arrives.
+    let t = Instant::now();
+    let mut ed = Editor::new(Buffer::new(), config::Config::default());
+    ed.text_w = 120;
+    ed.text_h = 36;
+    ed.start_load(p).expect("start load");
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+    let mut frames = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while ed.loading() {
+        assert!(Instant::now() < deadline, "load did not finish");
+        ed.load_poll();
+        ed.apply_startup_pos();
+        ed.adjust_scroll(ed.text_h);
+        ed.adjust_scroll_x();
+        ed.ensure_highlight();
+        terminal.draw(|f| ui::draw(f, &ed)).expect("draw");
+        frames += 1;
+    }
+    let loaded = t.elapsed();
+    let rows = ed.bs().buf.lines.len();
+    println!("\nload throughput — {path}\n");
+    println!("  {:<28} {}", "file", human(size));
+    println!("  {:<28} {}", "rows", rows);
+    println!("  {:<28} {}", "raw fs::read", ms(raw.as_micros() as f64));
+    println!(
+        "  {:<28} {}  ({}k rows/s, {} frames)",
+        "load + highlight + draw",
+        ms(loaded.as_micros() as f64),
+        rows as f64 / loaded.as_secs_f64() / 1000.0,
+        frames
+    );
+    println!(
+        "  {:<28} {:.1}x the read, {:.1} MB/s through the loop",
+        "",
+        loaded.as_secs_f64() / raw.as_secs_f64(),
+        raw_bytes as f64 / 1e6 / loaded.as_secs_f64()
+    );
+    assert!(rows > 0, "the load produced nothing");
+    println!();
+}

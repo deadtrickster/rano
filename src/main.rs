@@ -111,6 +111,11 @@ pub struct BufferState {
     /// a paste of many lines) and costs O(document), so the hot paths (typing)
     /// name their row and pay O(row) instead.
     pub(crate) wrap_dirty_row: Option<usize>,
+    /// An append changed the buffer: the first `k` rows are untouched and the
+    /// table can be EXTENDED from `k` instead of rebuilt. Set by the loader,
+    /// which only ever appends; `None` means "unknown, rebuild". See
+    /// `Editor::ensure_wrap_prefix`.
+    pub(crate) wrap_extend_from: Option<usize>,
     /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
     /// A file still arriving from disk; `None` once it has (or a normal,
@@ -153,6 +158,7 @@ impl BufferState {
             wrap_key: (0, 0),
             wrap_lines: 0,
             wrap_dirty_row: None,
+            wrap_extend_from: None,
             edit_gen: 0,
             load: None,
             undo: VecDeque::new(),
@@ -235,48 +241,118 @@ impl Editor {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "usage: rano [file]\n\
-             \n\
-             editing keys are nano's; ^G in the editor lists them.\n\
-             \n\
-             exporting (no terminal needed):\n\
-             \x20 rano --export {} [file]     write it to stdout\n\
-             \x20                              {}",
-            export::Format::NAMES,
-            if export::Format::NAMES.is_empty() {
-                ""
-            } else {
-                "formats: html (colourised document), ansi (SGR for `less -R`),\n\
-                 \x20                              markdown (a fenced block), text (plain)"
+/// The command line, parsed.
+///
+/// Hand-rolled rather than a parser crate: one optional file, a handful of
+/// flags, and no subcommands. What it must get right is that a flag's VALUE is
+/// not mistaken for the file — `rano --line 42 main.rs` — which the positional
+/// `args.first()` it replaced did get wrong.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Args {
+    file: Option<String>,
+    /// 1-based, as a person reads them and as `Ln` in the status bar counts.
+    /// Converted to 0-based before the editor sees them.
+    line: Option<usize>,
+    col: Option<usize>,
+    export: Option<export::Format>,
+    help: bool,
+    version: bool,
+}
+
+/// Split `--opt=value` into `("--opt", Some("value"))`.
+fn split_eq(a: &str) -> (&str, Option<&str>) {
+    match a.split_once('=') {
+        Some((k, v)) => (k, Some(v)),
+        None => (a, None),
+    }
+}
+
+fn parse_num(flag: &str, v: &str) -> Result<usize, String> {
+    v.parse::<usize>()
+        .map_err(|_| format!("{flag} needs a number, got {v:?}"))
+}
+
+fn parse_args(args: &[String]) -> Result<Args, String> {
+    let mut out = Args::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        let (key, inline) = split_eq(&args[i]);
+        // A flag that takes a value reads it from `=` or the next word.
+        let mut value = |name: &str| -> Result<String, String> {
+            if let Some(v) = inline {
+                return Ok(v.to_string());
             }
-        );
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match key {
+            "-h" | "--help" => out.help = true,
+            "-V" | "--version" => out.version = true,
+            "-l" | "--line" => out.line = Some(parse_num("--line", &value("--line")?)?),
+            "-c" | "--col" | "--column" => {
+                out.col = Some(parse_num("--column", &value("--column")?)?)
+            }
+            "--export" => {
+                let v = value("--export")?;
+                out.export = Some(export::Format::parse(&v).ok_or_else(|| {
+                    format!(
+                        "unknown export format {v:?} (expected {})",
+                        export::Format::NAMES
+                    )
+                })?);
+            }
+            other if other.len() > 1 && other.starts_with('-') => {
+                return Err(format!("unknown option {other}"));
+            }
+            other => {
+                if out.file.is_some() {
+                    return Err(format!("only one file, got {other:?} as well"));
+                }
+                out.file = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+const USAGE: &str = "\
+usage: rano [options] [file]
+
+  -l, --line N      put the cursor on line N (1-based) and centre it
+  -c, --column N    put the cursor on column N (1-based)
+  -h, --help        this
+  -V, --version     the version
+
+exporting (no terminal needed):
+  --export FORMAT [file]   write the file to stdout and exit
+                           formats: html, ansi, markdown, text";
+
+fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let args = match parse_args(&argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("rano: {e}");
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    if args.help {
+        println!("{USAGE}");
         return;
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") {
+    if args.version {
         println!("rano {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // `--export FORMAT`: read, colourise, write, exit. No terminal is touched,
-    // which is what makes it usable in a pipe and as a way to measure the
-    // highlighter without the UI in the way.
-    if let Some(i) = args.iter().position(|a| a == "--export") {
-        let Some(name) = args.get(i + 1) else {
-            eprintln!("rano: --export needs a format ({})", export::Format::NAMES);
-            std::process::exit(2);
-        };
-        let Some(fmt) = export::Format::parse(name) else {
-            eprintln!(
-                "rano: unknown export format {name:?} (expected {})",
-                export::Format::NAMES
-            );
-            std::process::exit(2);
-        };
-        let path = args.get(i + 2).cloned();
-        if let Err(e) = export_to_stdout(path, fmt) {
+    // `--export`: read, colourise, write, exit. No terminal is touched, which is
+    // what makes it usable in a pipe and as a way to measure the highlighter
+    // without the UI in the way.
+    if let Some(fmt) = args.export {
+        if let Err(e) = export_to_stdout(args.file.clone(), fmt) {
             eprintln!("rano: {e}");
             std::process::exit(1);
         }
@@ -287,7 +363,7 @@ fn main() {
     // even ^C — for 575 ms at 184 MB and about six seconds at 2 GB. The run
     // loop starts a loader instead and adopts rows as they arrive; see
     // `load_ctrl.rs` and `loader.rs`.
-    let file = args.first().cloned();
+    let file = args.file.clone();
     let mut buf = Buffer::new();
     let mut load: Option<PathBuf> = None;
     if let Some(f) = &file {
@@ -300,8 +376,13 @@ fn main() {
         }
     }
 
+    // 1-based on the command line, 0-based internally; a missing column is 0.
+    let pos = args.line.map(|l| crate::buffer::Pos {
+        row: l.saturating_sub(1),
+        col: args.col.unwrap_or(1).saturating_sub(1),
+    });
     let cfg = config::load();
-    if let Err(e) = run(buf, load, cfg) {
+    if let Err(e) = run(buf, load, pos, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -359,7 +440,12 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
     Ok(())
 }
 
-fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()> {
+fn run(
+    buf: Buffer,
+    load: Option<PathBuf>,
+    pos: Option<crate::buffer::Pos>,
+    cfg: config::Config,
+) -> io::Result<()> {
     // Panic guard: restore the terminal, then report the panic normally.
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -373,6 +459,9 @@ fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut ed = Editor::new(buf, cfg);
+    // 0-based, once, here: `--line 1` is the first row, and the editor's own
+    // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
+    ed.startup_pos = pos;
     if let Some(path) = load
         && let Err(e) = ed.start_load(&path)
     {
@@ -397,6 +486,11 @@ fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()
             ed.text_h = (size.height as usize).saturating_sub(4);
             dirty = true;
         }
+        // Before the scroll: `--line` CENTRES the target, and centring sets
+        // the scroll. Running `adjust_scroll` first would then pull the view
+        // back to the nearest edge, which is the opposite of centring. It is
+        // also why this waits for the row — see `apply_startup_pos`.
+        ed.apply_startup_pos();
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
         if dirty {
@@ -423,7 +517,19 @@ fn run(buf: Buffer, load: Option<PathBuf>, cfg: config::Config) -> io::Result<()
         // it, or the text appears in 200 ms lumps and the load looks like a
         // stutter rather than a stream. 8 ms is a frame at 120 Hz; otherwise the
         // idle wait is the long one, because a keystroke is what ends it.
-        let wait = if ed.loading() { 8 } else { 200 };
+        //
+        // And when the loader is SATURATED — it filled the adoption budget, so
+        // more was ready — wait not at all: the budget is what keeps one
+        // iteration short, not what paces the load. Without this the loop slept
+        // 8 ms per 4096 rows and a 2.6M-line file took ten seconds instead of
+        // one, with the disk idle in between.
+        let wait = if ed.load_saturated {
+            0
+        } else if ed.loading() {
+            8
+        } else {
+            200
+        };
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
@@ -1709,6 +1815,259 @@ mod ed_tests {
         ed.insert_char('c'); // "aaaabc" — 6 cols, two visual rows
         ed.ensure_wrap_prefix();
         assert_eq!(ed.bs().wrap_prefix, vec![0, 2]);
+    }
+
+    // ---------- the command line ----------
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_flag_value_is_not_mistaken_for_the_file() {
+        // The bug the positional `args.first()` had: `--line 42 main.rs` made
+        // "42" the file.
+        let a = parse_args(&argv(&["--line", "42", "main.rs"])).expect("parse");
+        assert_eq!(a.file.as_deref(), Some("main.rs"));
+        assert_eq!(a.line, Some(42));
+        assert_eq!(a.col, None);
+        // And in the other order.
+        let a = parse_args(&argv(&["main.rs", "--line", "42"])).expect("parse");
+        assert_eq!(a.file.as_deref(), Some("main.rs"));
+        assert_eq!(a.line, Some(42));
+    }
+
+    #[test]
+    fn the_value_forms_are_accepted() {
+        let a = parse_args(&argv(&["--line=42", "--col=7", "f.rs"])).expect("equals form");
+        assert_eq!(
+            (a.line, a.col, a.file.as_deref()),
+            (Some(42), Some(7), Some("f.rs"))
+        );
+        let a = parse_args(&argv(&["-l", "42", "-c", "7", "f.rs"])).expect("short form");
+        assert_eq!((a.line, a.col), (Some(42), Some(7)));
+        let a = parse_args(&argv(&["--column", "3", "f.rs"])).expect("long column");
+        assert_eq!(
+            (a.line, a.col),
+            (None, Some(3)),
+            "a column alone leaves the row at 0"
+        );
+    }
+
+    #[test]
+    fn bad_arguments_are_refused_rather_than_guessed() {
+        // Each of these is a mistake the user wants told about, not silently
+        // reinterpreted.
+        for (args, why) in [
+            (argv(&["--line"]), "a flag with no value"),
+            (argv(&["--line", "abc"]), "a non-number"),
+            (argv(&["--line", "-1"]), "a negative line"),
+            (argv(&["--nope", "f.rs"]), "an unknown option"),
+            (argv(&["a.rs", "b.rs"]), "two files"),
+            (argv(&["--export", "pdf", "f.rs"]), "an unknown format"),
+        ] {
+            assert!(parse_args(&args).is_err(), "{why}: {args:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn help_and_version_win_over_a_file() {
+        // `rano --help file.rs` prints usage rather than opening the file.
+        let a = parse_args(&argv(&["--help", "file.rs"])).expect("parse");
+        assert!(a.help && a.file.is_some());
+        let a = parse_args(&argv(&["-V"])).expect("parse");
+        assert!(a.version);
+    }
+
+    // ---------- opening at a position ----------
+
+    fn ed_with_lines(n: usize) -> Editor {
+        let text: String = (1..=n).map(|i| format!("line {i}\n")).collect();
+        test_ed(&text)
+    }
+
+    #[test]
+    fn a_startup_position_is_centred() {
+        // 500 lines in a 20-row viewport. The target is a line with room above
+        // AND below it, which is what makes centring mean anything — with the
+        // file's end in view the clamp wins instead, which
+        // `centring_clamps_at_both_ends` pins.
+        let mut ed = ed_with_lines(500);
+        ed.text_h = 20;
+        ed.show_line_numbers = false;
+        ed.text_w = 40;
+        ed.startup_pos = Some(Pos { row: 249, col: 0 });
+        ed.ensure_wrap_prefix();
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().cursor, Pos { row: 249, col: 0 });
+        assert_eq!(ed.startup_pos, None, "applied once");
+        // Centred: text_h/2 = 10 rows above, so the target is on pane row 11.
+        assert_eq!(ed.bs().scroll, 239, "249 - text_h/2");
+        let vis = ed.visual_pos(Pos { row: 249, col: 0 });
+        assert_eq!(
+            vis - ed.bs().scroll,
+            10,
+            "the target's offset into the viewport"
+        );
+    }
+
+    #[test]
+    fn centring_clamps_at_both_ends() {
+        // Near the start there is nothing above to show, so the target is not
+        // centred — it is as centred as the file allows, which is the top.
+        let mut ed = ed_with_lines(100);
+        ed.text_h = 20;
+        ed.startup_pos = Some(Pos { row: 1, col: 0 });
+        ed.ensure_wrap_prefix();
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().scroll, 0, "no blank space above the first line");
+        // And near the end, the last screenful.
+        let mut ed = ed_with_lines(100);
+        ed.text_h = 20;
+        ed.startup_pos = Some(Pos { row: 99, col: 0 });
+        ed.ensure_wrap_prefix();
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().scroll, 80, "100 rows - 20 visible");
+    }
+
+    #[test]
+    fn centring_counts_visual_rows_when_wrapped() {
+        // One long line above the target occupies several visual rows, and the
+        // scroll is counted in those — so a buffer row and a visual row differ
+        // and the centring has to use the visual one.
+        // A long line first, then enough short ones that the target can
+        // actually be centred (there has to be something below it).
+        let tail: String = (0..40).map(|i| format!("tail {i}\n")).collect();
+        let mut ed = test_ed(&format!("{}\ntarget\n{tail}", "x".repeat(120)));
+        ed.text_h = 10;
+        ed.text_w = 20;
+        ed.show_line_numbers = false;
+        ed.ensure_wrap_prefix();
+        let seg = ed.seg_count(0);
+        assert!(seg >= 6, "the long line wraps into {seg} rows");
+        ed.startup_pos = Some(Pos { row: 20, col: 0 });
+        ed.apply_startup_pos();
+        let vis = ed.visual_pos(Pos { row: 20, col: 0 });
+        // The target's BUFFER row is 20, but its VISUAL row is much further down
+        // because the long line above it occupies `seg` rows. Centring uses the
+        // visual one — using the buffer row would put the view `seg` rows off.
+        assert_eq!(
+            vis,
+            seg + 19,
+            "the long line's segments plus the rows between"
+        );
+        assert_eq!(ed.bs().scroll, vis - 5, "centred in VISUAL rows");
+    }
+
+    #[test]
+    fn a_position_waits_for_its_row_to_arrive() {
+        // With the loader a row a million lines in arrives long after the first
+        // frame. Clamping to what had arrived would open the file at the wrong
+        // place and look like the feature was broken, so it waits.
+        let mut ed = ed_with_lines(10);
+        ed.text_h = 10;
+        ed.startup_pos = Some(Pos {
+            row: 999_999,
+            col: 0,
+        });
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 }, "not moved");
+        assert_eq!(
+            ed.startup_pos,
+            Some(Pos {
+                row: 999_999,
+                col: 0
+            }),
+            "still pending"
+        );
+        // Now the row arrives.
+        ed.bs_mut()
+            .buf
+            .lines
+            .extend((0..1_000_000).map(|i| format!("r{i}").chars().collect()));
+        ed.ensure_wrap_prefix();
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().cursor.row, 999_999);
+        assert_eq!(ed.startup_pos, None);
+        assert_eq!(
+            ed.bs().scroll,
+            999_999 - 5,
+            "centred once the row was there"
+        );
+    }
+
+    #[test]
+    fn a_column_is_clamped_to_the_line() {
+        let mut ed = ed_with_lines(10);
+        ed.text_h = 10;
+        ed.startup_pos = Some(Pos { row: 2, col: 999 });
+        ed.ensure_wrap_prefix();
+        ed.apply_startup_pos();
+        assert_eq!(
+            ed.bs().cursor,
+            Pos { row: 2, col: 6 },
+            "\"line 3\" is 6 chars"
+        );
+    }
+
+    #[test]
+    fn no_position_leaves_the_editor_alone() {
+        let mut ed = ed_with_lines(50);
+        ed.text_h = 10;
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
+        assert_eq!(ed.bs().scroll, 0);
+    }
+
+    #[test]
+    fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
+        // The loader APPENDS rows, and the table is extended from the join
+        // rather than rebuilt. A wrong prefix is wrong scrolling, so this drives
+        // both paths over the same sequence of appends and compares — the same
+        // form as the single-row test above, for the same reason.
+        let mut ed = test_ed("seed");
+        ed.show_line_numbers = false;
+        ed.text_w = 12;
+        ed.ensure_wrap_prefix();
+
+        for batch in 0..8 {
+            let was = ed.bs().buf.lines.len();
+            let added: Vec<Vec<char>> = (0..7)
+                .map(|i| {
+                    format!("b{batch}r{i}{}", "x".repeat(i * 5))
+                        .chars()
+                        .collect()
+                })
+                .collect();
+            ed.bs_mut().buf.lines.extend(added);
+            // What the loader does: only the first batch overlaps the seed.
+            ed.bs_mut().wrap_extend_from = Some(if was <= 1 { 0 } else { was });
+            ed.bs_mut().edit_gen = ed.bs().edit_gen.wrapping_add(1);
+            ed.ensure_wrap_prefix();
+            let extended_prefix = ed.bs().wrap_prefix.clone();
+            let extended_rows = ed.bs().wrap_rows.clone();
+
+            // Now the same buffer, forced down the full-rebuild path.
+            ed.bs_mut().wrap_extend_from = None;
+            ed.bs_mut().wrap_lines = 0;
+            ed.bs_mut().wrap_dirty_row = None;
+            ed.ensure_wrap_prefix();
+            assert_eq!(
+                ed.bs().wrap_prefix,
+                extended_prefix,
+                "batch {batch}: the extended table disagrees with a full rebuild"
+            );
+            assert_eq!(
+                ed.bs().wrap_rows,
+                extended_rows,
+                "batch {batch}: row geometry differs"
+            );
+            assert_eq!(
+                ed.bs().wrap_prefix.len(),
+                ed.bs().buf.lines.len() + 1,
+                "batch {batch}: prefix length"
+            );
+        }
     }
 
     #[test]

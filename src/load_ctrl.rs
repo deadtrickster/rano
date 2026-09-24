@@ -8,7 +8,7 @@
 
 use crate::buffer::Buffer;
 use crate::editor::Editor;
-use crate::loader::{Adopted, LoadJob};
+use crate::loader::{ADOPT_BUDGET as budget, Adopted, LoadJob};
 use std::path::Path;
 
 impl Editor {
@@ -43,16 +43,21 @@ impl Editor {
     ///
     /// Never waits: an idle job returns `false` immediately, which is what
     /// keeps the loop's iteration short and the keyboard live while a 184 MB
-    /// file is still arriving.
+    /// file is still arriving. When the budget is exhausted it says so, so the
+    /// loop can skip its idle wait and keep going — see `load_saturated`.
     pub(crate) fn load_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().load.as_mut() else {
             return false;
         };
         let mut rows = Vec::new();
         let outcome = job.poll(&mut rows);
+        self.load_saturated = matches!(outcome, Adopted::Rows(_)) && rows.len() >= budget;
         let mut dirty = !rows.is_empty();
         if !rows.is_empty() {
             let bs = self.bs_mut();
+            // An append, not an edit: tell the wrap table it can extend from
+            // where it already is rather than re-measuring the whole file.
+            let was = bs.buf.lines.len();
             // The buffer starts with one empty row. The first batch replaces
             // it rather than following it, so a file does not appear to begin
             // with a blank line.
@@ -60,6 +65,15 @@ impl Editor {
                 bs.buf.lines.clear();
             }
             bs.buf.lines.append(&mut rows);
+            // The first batch replaces the seed row, so the table has to move
+            // its start; after that every batch is a pure append.
+            bs.wrap_extend_from = Some(
+                if was == 1 && bs.buf.lines.len() > 1 && bs.wrap_rows.len() <= 1 {
+                    0
+                } else {
+                    was.min(bs.wrap_rows.len())
+                },
+            );
             bs.edit_gen = bs.edit_gen.wrapping_add(1);
             self.highlight_dirty = true;
         }
@@ -96,6 +110,7 @@ impl Editor {
                 dirty = true;
             }
             Adopted::Finished { crlf, .. } => {
+                self.load_saturated = false;
                 let rows = {
                     let bs = self.bs_mut();
                     bs.load = None;
@@ -113,6 +128,7 @@ impl Editor {
                 dirty = true;
             }
             Adopted::Failed(e) => {
+                self.load_saturated = false;
                 self.bs_mut().load = None;
                 self.flash(&format!("Read failed: {e}"));
                 dirty = true;

@@ -116,6 +116,23 @@ pub struct Editor {
     pub(crate) completion_retries: u8,
     /// Where M-, returns to, one entry per definition jump (stacked).
     pub def_back: Vec<DefBack>,
+    /// Where to put the cursor once the buffer has that row, and centre it.
+    ///
+    /// `--line`/`--column` on the command line. It lives here rather than being
+    /// applied at parse time because three things have to be true first and none
+    /// of them is known then: the terminal's size (to know what "centre" means),
+    /// the wrap table (a visual row is not a buffer row when wrap is on), and —
+    /// with the async loader — the arrival of the row itself. A huge file
+    /// delivers rows in batches, so a position a million rows in is applied when
+    /// it lands rather than being clamped to whatever had arrived.
+    pub(crate) startup_pos: Option<Pos>,
+    /// The loader filled its adoption budget on the last poll, so more is
+    /// ready and the loop should come straight back for it. This is what keeps
+    /// the load at disk speed: the budget bounds one ITERATION so the keyboard
+    /// stays live, and without this flag the loop would sleep its idle wait
+    /// before asking again — a 2.6M-line file then took ~10 s to arrive
+    /// instead of ~1, with the disk idle in between.
+    pub(crate) load_saturated: bool,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
     pub(crate) highlight_dirty: bool,
@@ -223,6 +240,8 @@ impl Editor {
             completion_retry: None,
             completion_retries: 0,
             def_back: Vec::new(),
+            startup_pos: None,
+            load_saturated: false,
             highlight_dirty: true,
             diag_dirty: true,
             diag_last_edit: Instant::now(),
@@ -374,9 +393,42 @@ impl Editor {
             return;
         }
         let tw = self.tab_width.max(1);
+        let n = self.bs().buf.lines.len();
+        // An APPEND: rows `[0, k)` are untouched and only `[k, n)` are new.
+        //
+        // This is the loader's path, and without it a load is quadratic in
+        // disguise: each adopted batch bumped `edit_gen`, the table was
+        // invalidated, and the next frame re-measured EVERY row so far. On a
+        // 2.6M-line file that is ~800M row measurements across the load —
+        // measured at 315k rows/s against a page-cached read of 17 GB/s and a
+        // 3.9M rows/s decode in Python. Extending instead of rebuilding took it
+        // to disk speed; see `bench_load_throughput`.
+        if let Some(k) = self.bs().wrap_extend_from {
+            let k = k.min(n).min(self.bs().wrap_rows.len());
+            let usable = k > 0
+                && self.bs().wrap_rows.len() <= n
+                && self.bs().wrap_prefix.len() == self.bs().wrap_rows.len() + 1;
+            if usable {
+                let bs = self.bs_mut();
+                bs.wrap_rows.truncate(k);
+                bs.wrap_prefix.truncate(k + 1);
+                for r in k..n {
+                    let row_wrap = Self::row_wrap_of_line(&bs.buf.lines[r], tw, vw);
+                    let segs = match &row_wrap.segs {
+                        Some(s) => s.len(),
+                        None => bs.buf.lines[r].len().div_ceil(vw).max(1),
+                    };
+                    bs.wrap_prefix.push(bs.wrap_prefix[r] + segs);
+                    bs.wrap_rows.push(row_wrap);
+                }
+                bs.wrap_key = key;
+                bs.wrap_lines = n;
+                bs.wrap_extend_from = None;
+                return;
+            }
+        }
         // The cheap path: same rows, one of them edited. `wrap_prefix` and
         // `wrap_rows` keep their length, so nothing has to move.
-        let n = self.bs().buf.lines.len();
         if self.bs().wrap_lines == n
             && self.bs().wrap_rows.len() == n
             && self.bs().wrap_prefix.len() == n + 1
@@ -397,6 +449,7 @@ impl Editor {
             }
             bs.wrap_key = key;
             bs.wrap_dirty_row = None;
+            bs.wrap_extend_from = None;
             return;
         }
         // The full rebuild: rows moved, or the edit could not name its row.
@@ -418,6 +471,7 @@ impl Editor {
         bs.wrap_key = key;
         bs.wrap_lines = n;
         bs.wrap_dirty_row = None;
+        bs.wrap_extend_from = None;
     }
 
     /// One row's wrap geometry. Shared by the incremental and the full rebuild
@@ -581,6 +635,36 @@ impl Editor {
             .min(bs.buf.lines.len().saturating_sub(1))
             .min(bs.wrap_prefix.len().saturating_sub(2));
         (r, v - bs.wrap_prefix[r])
+    }
+
+    /// Wait until the buffer has `p.row`, then put the cursor there and centre
+    /// the line. No-op once applied.
+    pub(crate) fn apply_startup_pos(&mut self) {
+        let Some(p) = self.startup_pos else {
+            return;
+        };
+        // Not yet: with the loader, a row a million lines in arrives minutes
+        // after the first frame. Waiting is the whole point — clamping to what
+        // has arrived would open the file at the wrong place and look like the
+        // feature was broken.
+        if p.row >= self.bs().buf.lines.len() {
+            return;
+        }
+        let bs = self.bs_mut();
+        bs.cursor = bs.buf.clamp(p);
+        // Centred, which needs the wrap table: with soft wrap a long line above
+        // the target occupies several visual rows, and the scroll is counted in
+        // those.
+        self.ensure_wrap_prefix();
+        let text_h = self.text_h;
+        let cv = self.visual_pos(self.bs().cursor);
+        let total = self.bs().wrap_prefix.last().copied().unwrap_or(0);
+        let half = text_h / 2;
+        let max_scroll = total.saturating_sub(text_h);
+        let bs = self.bs_mut();
+        bs.scroll = cv.saturating_sub(half).min(max_scroll);
+        self.startup_pos = None;
+        self.adjust_scroll_x();
     }
 
     /// Rows either side of the viewport that a large buffer's highlight

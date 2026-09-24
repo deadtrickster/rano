@@ -9,19 +9,35 @@ syntax highlighting and a minimal LSP client.
 
 ```sh
 cargo build --release
-./target/release/rano [file]
+rano [options] [file]
 ```
 
 ## Usage
 
 ```
-rano [file]
-rano --version
+rano [options] [file]
+
+  -l, --line N      put the cursor on line N (1-based) and centre it
+  -c, --column N    put the cursor on column N (1-based)
+  -h, --help        usage
+  -V, --version     the version
+
+  --export FORMAT [file]   colourise to stdout and exit, no terminal needed
+                           (html, ansi, markdown, text)
 ```
 
 Opens `file` if it exists, otherwise starts a new buffer that will be saved
-under that name. No arguments starts an empty buffer. `--version` / `-V`
-prints the version; `--help` / `-h` prints usage.
+under that name. No arguments starts an empty buffer.
+
+`--line` and `--column` open at a position, which is what makes `rano` usable
+as somebody else's `$EDITOR`: a compiler error, a grep hit or a stack trace
+gives you a line, and the line is centred rather than at the top edge so you can
+see its context. Both accept `=` (`--line=42`) and short forms (`-l 42`).
+
+For a big file the position is applied when that row arrives, not at startup —
+rows stream in, so `--line 1000000 huge.log` waits for line 1000000 rather than
+opening at whatever had been read. A bad flag or an unreadable file prints a
+message and exits non-zero, so a caller can tell what happened.
 
 ## Keys
 

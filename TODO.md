@@ -1815,3 +1815,45 @@ and it is the change a user notices.
   one that has not. Mitigated by the row API returning `&[char]` either way —
   the store hides which case it is — and by test 1 decoding *after* edits as
   well as before.
+
+### 16.0b Opening at a position, and a quadratic load
+
+Added 2026-09-22, on the operator's request for `--line`/`--column`.
+
+**The command line is parsed properly now.** `-l/--line N`, `-c/--column N`,
+`=value` forms, `--export`, `--help`, `--version`, and a real parser instead of
+`args.first()`. That positional form had a latent bug: `rano --line 42 main.rs`
+would have made `"42"` the file. Bad input is refused with a message and exit 2
+rather than guessed — a missing value, a non-number, a negative line, an unknown
+option, two files, an unknown export format.
+
+**A position is applied when its row arrives**, not at startup. With the loader a
+row a million lines in exists long after the first frame, so clamping to what
+had arrived would open the file at the wrong place and look like the feature was
+broken. Verified on the 193 MB log: `--line 1000000` waits, then centres on
+`Ln 1000000`.
+
+**Centring is in VISUAL rows**, because with soft wrap a long line above the
+target occupies several — using the buffer row would put the view off by exactly
+that. And it cannot invent blank space: centring the last line of a 500-line file
+in a 20-row viewport clamps to the end, which is the correct answer rather than a
+failure.
+
+**And making it work found a quadratic load**, which is the part worth keeping.
+Every adopted batch bumped `edit_gen`, invalidating the wrap table, and the next
+frame rebuilt it over EVERY row so far — ~800M row measurements across a 2.6M-line
+file. Diagnosed by measuring rather than guessing: the file is page-cached at
+**17 GB/s** and Python decodes it in 0.66 s, so the ~8 s it was taking was
+obviously not I/O. The table now EXTENDS from the join for an append
+(`BufferState::wrap_extend_from`, set by the loader, which only ever appends),
+with `the_extended_wrap_table_agrees_with_a_full_rebuild` proving extend ≡
+rebuild across eight batches — a wrong prefix is wrong scrolling, so that test
+matters more than the speed.
+
+    before:  315k rows/s   (sleep-paced, and rebuilding the table per batch)
+    after:   5.6M rows/s   (184 MB / 2.6M rows in 461 ms, 419 MB/s through the
+                            loop, against 42 ms for a bare read — 10.9x the read)
+
+Two other fixes fell out: the loop's 8 ms idle wait was PACING the load (a
+saturated loader now waits 0, so the budget bounds one iteration rather than the
+throughput), and `bench_load_throughput` exists so this cannot regress unnoticed.

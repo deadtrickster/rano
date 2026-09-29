@@ -19,4 +19,8 @@ pub mod encoding;
 // not use is dead code by the compiler's reckoning — correctly.
 pub mod rows;
 pub mod syntax;
+// Likewise lib-only for now: the editor has no todo UI yet, and the first
+// consumer is leticl embedding this — which is why it must NOT live behind
+// `main.rs`.
+pub mod todo;
 pub mod width;

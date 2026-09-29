@@ -5,17 +5,115 @@ on:
     branches: [master, main]
   pull_request:
 
+# A superseded push is not worth finishing. Without this, three quick commits
+# leave three runs queueing over the same code.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
+    name: fmt, clippy, test, release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
       - name: Format
         run: cargo fmt --all -- --check
+
+      # `-D warnings` on every target, which is the same gate the work is done
+      # under locally — the point being that a warning never reaches a commit,
+      # so it never needs fixing later under time pressure.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # Deliberately WITHOUT `--ignored`. The ignored set is not "tests we
+      # forgot to enable": it is the rust-analyzer e2e (slow, and it needs a
+      # server on PATH) plus the benchmark measurements, and two of those
+      # (`per_push_cost_stays_flat`, `inline_pass_cost_stays_flat`) are
+      # DOCUMENTED FAILURES that state a criterion the platform does not meet.
+      # Running them here would fail the build for a finding, not a regression.
+      - name: Test
+        run: cargo test
+
+      # The release profile is a separate gate: it is what users run, and it
+      # is where a lint-free debug build can still fail (or where the C
+      # grammars link differently). Cheap once the cache is warm.
+      - name: Release build
+        run: cargo build --release
+
+      # The binary is the deliverable, so something has to run it. `--export`
+      # is the non-interactive path, and it exercises the whole pipeline:
+      # open, detect the language, colour the document, write it out.
+      - name: Smoke test the binary
+        run: |
+          set -eu
+          printf 'fn main() { let x = 1; }\n' > /tmp/smoke.rs
+          printf 'a\r\nb\r\n' > /tmp/smoke.txt
+          ./target/release/rano --version
+          ./target/release/rano --help > /dev/null
+          ./target/release/rano --export text /tmp/smoke.rs
+          ./target/release/rano --export html /tmp/smoke.rs > /dev/null
+          ./target/release/rano --export markdown /tmp/smoke.txt > /dev/null
+          ./target/release/rano --export ansi /tmp/smoke.rs | head -1 > /dev/null
+          # A bad flag must be refused, not guessed at, and exit non-zero.
+          if ./target/release/rano --line abc 2>/dev/null; then
+            echo "a non-numeric --line was accepted" >&2
+            exit 1
+          fi
+          # A file that is not UTF-8 must still open — the cp1252 rung of the
+          # encoding ladder. \351 is the ONE byte 0xE9 and is written as an
+          # octal escape on purpose: `printf 'caf\xe9'` is not portable (a
+          # POSIX shell emits the literal characters `\xE9`), which would make
+          # this fixture plain ASCII and the assertion below pass while testing
+          # nothing. Both halves are checked by BYTE, because a shell comparing
+          # non-ASCII strings is a locale question and this is not one.
+          printf 'caf\351\n' > /tmp/smoke-latin1.txt
+          od -An -tx1 /tmp/smoke-latin1.txt | grep -q ' e9' ||
+            { echo "the latin1 fixture is not latin1" >&2; exit 1; }
+          ./target/release/rano --export text /tmp/smoke-latin1.txt > /tmp/smoke-out.txt
+          # 0xC3 0xA9 is `é` in UTF-8: the cp1252 byte became the character.
+          od -An -tx1 /tmp/smoke-out.txt | grep -q 'c3 a9' ||
+            { echo "the cp1252 byte was not decoded to a character" >&2; exit 1; }
+
+      # The installer is the documented way in, so it is tested rather than
+      # assumed. It finds this checkout and builds it, so the build is already
+      # warm and this costs seconds.
+      - name: Installer
+        run: |
+          set -eu
+          RANO_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          test -x "$RUNNER_TEMP/bin/rano"
+          "$RUNNER_TEMP/bin/rano" --version
+
+  # Linux-only CI would not notice a break in the C grammar build or the
+  # platform-specific link-arg path in build.rs (`libtree_sitter_dockerfile.a`
+  # on this side vs `.lib` on MSVC). macOS is a terminal a person uses.
+  macos:
+    name: build + smoke (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Smoke test the binary
+        run: |
+          set -eu
+          printf 'fn main() { let x = 1; }\n' > /tmp/smoke.rs
+          ./target/release/rano --version
+          ./target/release/rano --export text /tmp/smoke.rs
+          ./target/release/rano --export html /tmp/smoke.rs > /dev/null
+
       - name: Test
         run: cargo test

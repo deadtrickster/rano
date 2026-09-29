@@ -203,5 +203,17 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, and tests on every push and
-pull request.
+CI (`.github/workflows/ci.yml`) runs on every push and pull request: fmt,
+clippy with `-D warnings` on every target, the tests, a release build, and a
+smoke test that actually runs the built binary — `--version`, `--help`, every
+`--export` format, a flag that must be refused, and a file that is not UTF-8
+(the cp1252 rung, asserted by byte so the fixture cannot quietly become ASCII).
+It also runs `install.sh` and checks the binary it installs. A second job does
+the build and smoke test on macOS, where `build.rs` takes its other link path.
+
+The `#[ignore]`d tests are deliberately **not** run there. That set is the slow
+rust-analyzer e2e plus the benchmark measurements, and two of them
+(`per_push_cost_stays_flat`, `inline_pass_cost_stays_flat`) are *documented
+failures* that state a criterion this platform does not meet — running them
+would fail the build for a finding rather than a regression. They are run by
+hand, with `cargo test --release --ignored --nocapture`.

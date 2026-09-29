@@ -1,0 +1,219 @@
+# rano
+
+A nano clone for the terminal, written in Rust. Built on
+[crossterm](https://crates.io/crates/crossterm) (raw mode, key events) and
+[ratatui](https://crates.io/crates/ratatui) (rendering), with tree-sitter
+syntax highlighting and a minimal LSP client.
+
+![rano editing a markdown file](screenshot.png)
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/deadtrickster/rano/master/install.sh | sh
+```
+
+One line, and it builds rano and puts the binary in `~/.local/bin` — set
+`RANO_INSTALL_DIR` to put it somewhere else, `RANO_VERSION` to build a tag or
+branch instead of the default branch. The script is [`install.sh`](install.sh)
+in this repo: it is short, and worth reading before you pipe a URL into a shell.
+It says the installed version when it is done, so a binary that cannot run is
+reported as a failure rather than a success.
+
+There are no prebuilt binaries yet, so it builds from source, which needs
+[Rust](https://rustup.rs) and a C compiler — the tree-sitter grammars are C, and
+`build.rs` compiles them. The script checks for both and names the one that is
+missing rather than letting the build fail in cargo's words. If a prebuilt asset
+ever is published for your platform it is used instead, which is why the
+download is attempted first.
+
+If you already have Rust, the same thing in one command:
+
+```sh
+cargo install --git https://github.com/deadtrickster/rano.git
+```
+
+## Build
+
+From a checkout:
+
+```sh
+cargo build --release
+./target/release/rano [options] [file]
+```
+
+## Usage
+
+```
+rano [options] [file]
+
+  -l, --line N      put the cursor on line N (1-based) and centre it
+  -c, --column N    put the cursor on column N (1-based)
+  -h, --help        usage
+  -V, --version     the version
+
+  --export FORMAT [file]   colourise to stdout and exit, no terminal needed
+                           (html, ansi, markdown, text)
+```
+
+Opens `file` if it exists, otherwise starts a new buffer that will be saved
+under that name. No arguments starts an empty buffer.
+
+`--line` and `--column` open at a position, which is what makes `rano` usable
+as somebody else's `$EDITOR`: a compiler error, a grep hit or a stack trace
+gives you a line, and the line is centred rather than at the top edge so you can
+see its context. Both accept `=` (`--line=42`) and short forms (`-l 42`).
+
+For a big file the position is applied when that row arrives, not at startup —
+rows stream in, so `--line 1000000 huge.log` waits for line 1000000 rather than
+opening at whatever had been read. A bad flag or an unreadable file prints a
+message and exits non-zero, so a caller can tell what happened.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| `^G` / `F1` | Help page |
+| `^O` / `F2` | Write out (save) |
+| `^R` / `F5` | Read a file into the buffer |
+| `^F` / `F3` | Where is (search); `^B` searches backwards |
+| `M-B` / `M-F` | Jump to previous / next match |
+| `M-C` / `M-R` | In the search prompt: toggle case sensitivity / regex |
+| `^\` / `F4` | Replace (y/n/a/q per match; `a` replaces from the cursor on) |
+| `^T` / `F6` | Execute shell command (stdout inserted async on success) |
+| `M-\|` | Filter the marked region through a shell command |
+| `M-U` | Undo (runs of the same action coalesce into one step) |
+| `M-E` | Redo |
+| `^K` | Cut line / marked region (repeat to cut more lines) |
+| `^U` | Paste (nano's "Un-Cut") |
+| `M-6` | Copy current line / marked region to the cutbuffer (no delete) |
+| `^D` | Delete char (remembered for `^U`) |
+| `M-A` / `^A` | Set/unset mark (selection) |
+| `M-]` | Jump to matching bracket |
+| `^/` / `F11` | Go to line |
+| `M-D` | Jump to next diagnostic (wraps) |
+| `M-.` | Jump to definition (LSP) |
+| `M-,` | Jump back (stacked — one press per jump) |
+| `M-N` | Toggle line-number gutter |
+| `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
+| `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
+| `M-<` / `M->` | Previous / next buffer |
+| `F9` | Sort lines (whole buffer, or marked region) |
+| `^J` / `F10` | Justify current paragraph |
+| `F7` | Make backup (`file~`) |
+| `^C` | Show line/column |
+| `^X` | Exit (asks to save each modified buffer in turn) |
+
+Movement: arrows, `Home`, `End`, `PgUp`, `PgDn`, `^P`/`^N` (line), `^E` (end
+of line), `Alt+Left`/`Alt+Right` or `Ctrl+Left`/`Ctrl+Right` (word), `◂`/`▸`
+for back/forward in prompts. Mouse: left click moves the cursor (and starts
+a selection), left drag extends it, the wheel scrolls the view (the cursor
+stays put unless the scroll would push it out of sight). Editing: `Enter`,
+`Backspace`, `Delete`, `Tab`.
+`Tab` follows the buffer's own indent style: space-indented files get spaces
+up to the next unit boundary (the unit is detected from the file — e.g.
+rano's own 4-space source), tab-indented files get a tab char; `Backspace`
+on leading whitespace eats a whole unit. `Esc` clears an active mark or
+cancels a prompt (`^G` also cancels prompts).
+
+Prompts: `Up`/`Down` cycle history (search, exec, and filename prompts keep
+separate histories), `Tab` completes file names, `~` expands to `$HOME` in
+filename prompts, `M-b`/`M-f` move by word.
+
+Bracketed paste is supported: multi-line pastes arrive as a single undoable
+edit.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/rano/config.toml` (falling back to `~/.config/rano/config.toml`):
+
+```toml
+tab_width = 8      # 1..=16, tab rendering + horizontal scrolling
+auto_indent = true
+line_numbers = true
+multibuffer = false # F8 pushes a new buffer instead of replacing the current one
+wrap = true         # soft line wrap (M-\ toggles at runtime)
+```
+
+Unknown keys are ignored; out-of-range values fall back to the defaults.
+
+## Notes
+
+- The look follows nano's default theme: an inverted title bar (name,
+  centered file name + ` *` when modified, `[i/n]` buffer position), an
+  inverted status line (centered messages, right-aligned prompts, and the
+  cursor's `Ln X, Col Y` at the right edge when idle), and a two-line
+  inverted function bar. The bar, the help overlay, and their key labels
+  are all generated from one binding table, so they cannot drift.
+- Syntax highlighting via tree-sitter for Rust, Go, Bash, Python, C, JSON,
+  Common Lisp, JavaScript, TypeScript (+TSX), Markdown, TOML, YAML, HTML,
+  CSS, Lua, Ruby, PHP, Java, Make, Dockerfile, INI-style configs, diffs,
+  Elisp, Scheme, SQL and Clojure — detected by file extension, by
+  conventional file names (`Makefile`, `Dockerfile`, `.gitconfig`), and by
+  shebangs for extension-less scripts.
+  Scratch buffers are not highlighted. Search
+  matches, the selection, and diagnostics take priority over highlight
+  colors (diagnostics underline the offending range in red/yellow/blue; the
+  line-number gutter colors diagnostic rows the same way).
+- Syntax errors are visible without a language server: tree-sitter `ERROR`
+  and missing nodes become red diagnostics on every re-parse. Zero-width
+  LSP diagnostics (rust-analyzer's insertion-point errors) are widened to
+  one visible column. Language servers only fully engage inside a supported
+  project (e.g. a `Cargo.toml` for rust-analyzer); standalone files get
+  tree-sitter feedback only.
+- Live completion (LSP): typing an identifier, or `.` / `::` after one,
+  requests `textDocument/completion` and shows a popup below the word
+  (above it near the bottom). The server's own filtered, relevance-ordered
+  list is shown as-is in an 8-row scrolling window — fuzzy matches keep
+  the server's ranking. `Up`/`Down` or `^P`/`^N` pick, `Enter` or `Tab`
+  insert, `Esc` dismisses; typing and Backspace keep it open. The document
+  is synced to the server before each request, each response is matched to
+  the keystroke that asked for it (late answers for older typing are
+  dropped), and snippet placeholders are flattened to plain text.
+- LSP: when a language server is on `$PATH` (rust-analyzer, gopls,
+  bash-language-server, pylsp, clangd, vscode-json-language-server, cl-lsp,
+  typescript-language-server, marksman, taplo, yaml-language-server,
+  vscode-html-language-server, vscode-css-language-server,
+  lua-language-server, ruby-lsp, intelephense, jdtls, sqls, clojure-lsp),
+  rano
+  starts it in the background, syncs changes with 300 ms debounce, and shows
+  publishDiagnostics. The handshake never blocks the UI. Languages rano has
+  no server for (Make, Dockerfile, INI, diff, Elisp, Scheme) run with
+  tree-sitter feedback only, without a spawn attempt.
+- Undo keeps up to 500 steps as region-based edits; runs of the same action
+  (typed words, backspace runs, repeated `^K`, replace-all) coalesce into a
+  single step. Redo is exact (each undo step is its own inverse).
+- Atomic saves: writes go to `file.tmp` + rename. CRLF line endings are
+  detected on load and preserved on save.
+- Executed commands run asynchronously; their stdout is inserted below the
+  cursor when they finish, with one undo step. Failing commands insert
+  nothing and show the exit code.
+- Long lines wrap at the viewport edge by default (nano-style; `M-\` toggles,
+  `wrap` in the config). Scrolling, arrow/Home/End/PgUp/PgDn motion, the
+  mouse and the cursor all work in visual rows, and the line-number gutter
+  numbers only the first segment of a wrapped line. With wrap off, long lines
+  scroll horizontally instead (display-column aware, so tabs behave).
+
+## Development
+
+```sh
+cargo test            # unit tests (the slow rust-analyzer e2e is #[ignore]d)
+cargo test -- --ignored   # includes the LSP end-to-end flow
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request: fmt,
+clippy with `-D warnings` on every target, the tests, a release build, and a
+smoke test that actually runs the built binary — `--version`, `--help`, every
+`--export` format, a flag that must be refused, and a file that is not UTF-8
+(the cp1252 rung, asserted by byte so the fixture cannot quietly become ASCII).
+It also runs `install.sh` and checks the binary it installs. A second job does
+the build and smoke test on macOS, where `build.rs` takes its other link path.
+
+The `#[ignore]`d tests are deliberately **not** run there. That set is the slow
+rust-analyzer e2e plus the benchmark measurements, and two of them
+(`per_push_cost_stays_flat`, `inline_pass_cost_stays_flat`) are *documented
+failures* that state a criterion this platform does not meet — running them
+would fail the build for a finding rather than a regression. They are run by
+hand, with `cargo test --release --ignored --nocapture`.

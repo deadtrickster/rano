@@ -4123,34 +4123,62 @@ mod markdown_tests {
         );
     }
 
-    /// The same invariant on the real document that exposed the bug — the one
-    /// the operator had open. Skipped when it is not on this machine, so the
-    /// suite stays self-contained.
-    #[test]
-    fn the_pass_is_per_node_on_the_parity_document() {
-        let path = "/home/dead/Projects/head-parity-2026-09-21.md";
-        let Ok(src) = std::fs::read_to_string(path) else {
-            eprintln!("{path} is not here; skipping");
-            return;
-        };
-        assert_pass_is_per_node(&src);
-        // And no row is painted as one long code span OUTSIDE a code block.
-        // The symptom was 300-odd cyan rows: everything from a stray backtick
-        // to the end of the file. Code blocks are the legitimate case, and
-        // there are two of them: indented, and fenced.
-        //
-        // This check was too narrow when it only excused indented rows — it
-        // failed on the first fenced line of a document revised after the test
-        // was written, which is a test bug rather than a highlighting one. The
-        // fence state is tracked here the way the block grammar sees it.
+    /// The markdown corpus: a checked-in document, so this runs everywhere.
+    ///
+    /// This used to read a path outside the tree — the document that exposed the
+    /// bug — and return early when it was absent, which is not a self-contained
+    /// test: the most interesting markdown case never ran in CI, and it went red
+    /// on this machine the moment that file was edited, which is a fixture
+    /// problem rather than a highlighting one. The corpus is in the repo now
+    /// (`tests/fixtures/markdown-corpus.md`, a copy of rano's own README as of
+    /// 055d257) and the construct that broke it has its own test below, so
+    /// neither the breadth nor the specific case depends on a file outside the
+    /// tree.
+    fn corpus() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/markdown-corpus.md");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// Whether `line` carries a fence marker once the prefixes CommonMark allows
+    /// in front of one are removed: leading spaces, any depth of blockquote
+    /// marker, a list bullet. **A fence inside a blockquote (`> ``` `) is still
+    /// a fence**, and missing exactly that is what made the check below flaky:
+    /// it read the quoted code block's rows as prose and objected that they were
+    /// all `text.literal`, which is what a quoted log inside a fence looks like.
+    fn fence_at(line: &str) -> bool {
+        let mut s = line.trim_start();
+        loop {
+            let t = s.strip_prefix('>').map(str::trim_start).unwrap_or(s);
+            let t = t
+                .strip_prefix("- ")
+                .or_else(|| t.strip_prefix("* "))
+                .or_else(|| t.strip_prefix("+ "))
+                .map(str::trim_start)
+                .unwrap_or(t);
+            if t == s {
+                break;
+            }
+            s = t;
+        }
+        s.starts_with("```") || s.starts_with("~~~")
+    }
+
+    /// No row is painted as one long code span OUTSIDE a code block.
+    ///
+    /// The symptom: 300-odd cyan rows, everything from a stray backtick to the
+    /// end of the file. Code blocks are the legitimate case, and there are two
+    /// shapes of them — indented, and fenced — so the fence state is tracked here
+    /// the way the block grammar sees it, through [`fence_at`]. Shared by the big
+    /// document and the focused case so both run the same assertion.
+    fn assert_no_runaway_code_span(src: &str) {
         let mut hl = Highlighter::new();
-        let grid = hl.classes(&src, Lang::Markdown);
+        let grid = hl.classes(src, Lang::Markdown);
         let mut in_fence = false;
         for (r, line) in src.split('\n').enumerate() {
             let Some(row) = grid.get(r) else { continue };
-            let fence_marker = line.trim_start().starts_with("```");
             let was_in_fence = in_fence;
-            if fence_marker {
+            if fence_at(line) {
                 in_fence = !in_fence;
             }
             let len = line.chars().count();
@@ -4168,6 +4196,54 @@ mod markdown_tests {
                 &line[..line.len().min(50)]
             );
         }
+    }
+
+    /// On a real document: the inline pass stays per-node, and nothing runs away.
+    #[test]
+    fn a_real_document_has_no_runaway_code_span() {
+        let src = corpus();
+        assert!(
+            src.lines().count() > 100,
+            "the corpus should be a substantial document, got {} lines",
+            src.lines().count()
+        );
+        assert_pass_is_per_node(&src);
+        assert_no_runaway_code_span(&src);
+    }
+
+    /// The construct that made the corpus check flaky, on its own: a fenced block
+    /// **inside a blockquote**, which is what a quoted test log looks like.
+    ///
+    /// This is also the case the old tracker let through — it tested
+    /// `line.trim_start().starts_with("```")`, which is false for `> ``` ` — so
+    /// the test and the tracker guard each other.
+    #[test]
+    fn a_fence_inside_a_blockquote_is_a_fence() {
+        let src = "\
+> **What this pins.** A quoted block, with a fenced log inside it:
+>
+> ```
+> test a_take_back_drops_the_issuing_heads_queued_prompts_only ... ok
+> test a_take_back_does_not_drop_a_prompt_sent_after_it ... FAILED
+> ```
+>
+> and prose after the quoted fence, which is not code.
+";
+        let quoted_fence = src
+            .split('\n')
+            .find(|l| l.contains("```"))
+            .expect("a fence");
+        assert!(
+            fence_at(quoted_fence),
+            "a fence inside a blockquote is still a fence: {quoted_fence:?}"
+        );
+        // The old tracker, stated as the thing that is now wrong: this is the
+        // check that went flaky, and it must see the quoted log as code.
+        assert!(
+            !quoted_fence.trim_start().starts_with("```"),
+            "the naff check this replaced would have missed it"
+        );
+        assert_no_runaway_code_span(src);
     }
 
     #[test]

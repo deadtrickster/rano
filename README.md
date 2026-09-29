@@ -13,27 +13,27 @@ syntax highlighting and a minimal LSP client.
 curl -fsSL https://raw.githubusercontent.com/deadtrickster/rano/master/install.sh | sh
 ```
 
-One line, and it builds rano and puts the binary in `~/.local/bin` — set
-`RANO_INSTALL_DIR` to put it somewhere else, `RANO_VERSION` to build a tag or
-branch instead of the default branch. The script is [`install.sh`](install.sh)
-in this repo: it is short, and worth reading before you pipe a URL into a shell.
-It says the installed version when it is done, so a binary that cannot run is
-reported as a failure rather than a success.
+One line. It downloads the prebuilt binary for your platform from the
+[latest release](https://github.com/deadtrickster/rano/releases/latest) and puts
+it in `~/.local/bin` — no toolchain needed. Prebuilt for Linux x86_64/aarch64 and
+macOS arm64/x86_64.
 
-There are no prebuilt binaries yet, so it builds from source, which needs
-[Rust](https://rustup.rs) and a C compiler — the tree-sitter grammars are C, and
-`build.rs` compiles them. The script checks for both and names the one that is
-missing rather than letting the build fail in cargo's words. If a prebuilt asset
-ever is published for your platform it is used instead, which is why the
-download is attempted first.
+If there is no asset for your platform it falls back to building from source,
+which needs [Rust](https://rustup.rs) and a C compiler (the tree-sitter grammars
+are C). It says which one is missing rather than letting cargo fail in its own
+words. `RANO_INSTALL_DIR` puts the binary elsewhere; `RANO_FROM_SOURCE` skips the
+download and always builds; `RANO_VERSION` selects a tag.
 
-If you already have Rust, the same thing in one command:
+The script is [`install.sh`](install.sh) in this repo — short, and worth reading
+before you pipe a URL into a shell.
+
+If you already have Rust, the same thing from source in one command:
 
 ```sh
 cargo install --git https://github.com/deadtrickster/rano.git
 ```
 
-## Build
+### Build
 
 From a checkout:
 

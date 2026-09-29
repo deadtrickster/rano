@@ -3,22 +3,28 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/deadtrickster/rano/master/install.sh | sh
 #
-# There are no prebuilt binaries yet, so this builds from source: you need Rust
-# (https://rustup.rs) and a C compiler, because the tree-sitter grammars are C
-# and build.rs compiles them. A prebuilt release asset is used when one exists
-# for your platform, which is why the download is attempted first and quietly
-# skipped when it 404s.
+# Downloads the prebuilt binary for this platform from the latest GitHub release
+# and puts it in ~/.local/bin. Fallback order, so the one-liner works on a
+# platform with no published asset as well as on one with:
+#
+#   1. the release asset for this platform (no toolchain needed)
+#   2. a build from a checkout, if this script is being run from one
+#   3. a clone of the default branch, built from source
+#
+# For (2) and (3) you need Rust (https://rustup.rs) and a C compiler, because the
+# tree-sitter grammars are C and build.rs compiles them. The script checks for
+# both and names the one that is missing rather than letting cargo fail in its
+# own words.
 #
 # Environment:
 #   RANO_INSTALL_DIR   where the binary goes   (default: ~/.local/bin)
 #   RANO_VERSION       tag or branch to build   (default: the default branch)
-#   RANO_FROM_SOURCE   set to anything to build from source, skipping the download
+#   RANO_FROM_SOURCE   set to anything to skip the download and build instead
 #
 # `cargo install --git https://github.com/deadtrickster/rano.git` also works and
-# is shorter, but it installs to ~/.cargo/bin whether or not that is on your
-# PATH, and when the build fails it says so in cargo's words rather than naming
-# what is missing. This script exists to put the binary where you asked and to
-# say plainly what it needs.
+# is shorter, but it always builds from source, installs to ~/.cargo/bin whether
+# or not that is on your PATH, and on failure says so in cargo's words rather
+# than naming what is missing.
 
 set -eu
 
@@ -48,8 +54,13 @@ local_checkout() {
     fi
 }
 
-# A prebuilt release asset for this platform, extracted, or nothing. Returning
-# non-zero here is the expected case today, not an error.
+# The prebuilt release asset for this platform, extracted, or nothing.
+#
+# Returning non-zero is a normal outcome, not an error: a platform with no
+# published asset falls through to the source build. The assets are named by
+# `scripts/make-dist.sh` from the triple below, and `scripts/check-dist-names.sh`
+# keeps this case arm and the release workflow's matrix in step — so a rename on
+# one side fails in CI rather than silently degrading every install to a build.
 try_prebuilt() {
     tmp="$1"
     case "$(uname -s)/$(uname -m)" in

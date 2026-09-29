@@ -1,0 +1,162 @@
+name: Release
+
+# Assets, built on a tag. This is what install.sh downloads:
+#
+#   curl -fsSL https://raw.githubusercontent.com/deadtrickster/rano/master/install.sh | sh
+#
+# asks for `rano-<triple>.tar.gz` at `releases/latest/download/`, with `rano` at
+# the archive root. `scripts/make-dist.sh` produces exactly that, and both this
+# workflow and `scripts/check-dist-names.sh` pin the names to install.sh's, so an
+# asset cannot be published under a name the installer does not ask for.
+#
+# No cross toolchains except where a runner would otherwise be needed:
+#   - Linux x86_64 and aarch64 build natively on GitHub's own ARM runner.
+#   - macOS arm64 builds natively; macOS x86_64 is cross-built from arm64,
+#     because Rust cross-compiles it in one step and Intel macOS runners are
+#     being retired. That keeps the release off a deprecated image.
+
+on:
+  push:
+    tags: ['v*']
+  # Build the assets without publishing, to test a change to this file.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every triple here must be one install.sh asks for. Runs first and cheaply, so
+  # a mismatch fails before four runners are spent.
+  names:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The names must be the ones install.sh asks for
+        run: sh scripts/check-dist-names.sh
+
+  build:
+    needs: names
+    runs-on: ${{ matrix.runs }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+          - runs: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - runs: macos-latest
+            triple: aarch64-apple-darwin
+          - runs: macos-latest
+            triple: x86_64-apple-darwin
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.triple }}
+
+      # The triple is a claim about the binary. Check it against the toolchain's
+      # own host rather than trusting the runner image: a silent change to what
+      # `ubuntu-latest` means would otherwise publish an x86_64 binary named
+      # aarch64, which install.sh would download and then fail to execute.
+      #
+      # Skipped for the cross build, whose host is deliberately a different one.
+      - name: The runner must be the architecture we are claiming
+        if: ${{ !matrix.cross }}
+        run: |
+          set -eu
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          echo "runner host: $host, claiming: ${{ matrix.triple }}"
+          if [ "$host" != "${{ matrix.triple }}" ]; then
+            echo "::error::this runner is $host, not ${{ matrix.triple }}"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          set -eu
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cargo build --release --target ${{ matrix.triple }}
+          else
+            cargo build --release
+          fi
+
+      # The binary has to run before it is packaged — for a cross build this is
+      # the only proof it is the right architecture, since the host check above
+      # was skipped. macOS can execute an x86_64 binary under Rosetta, and a
+      # wrong-arch binary fails here rather than on a user's machine.
+      - name: The binary must run
+        run: |
+          set -eu
+          bin="target/release/rano"
+          [ -x "$bin" ] || bin="target/${{ matrix.triple }}/release/rano"
+          "$bin" --version
+          printf 'fn main() { let x = 1; }\n' > /tmp/smoke.rs
+          "$bin" --export text /tmp/smoke.rs
+
+      - name: Package
+        run: sh scripts/make-dist.sh ${{ matrix.triple }} dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rano-${{ matrix.triple }}
+          # The whole dist directory, so the asset name is make-dist.sh's to
+          # decide and this file does not restate it.
+          path: dist/rano-${{ matrix.triple }}.tar.gz
+          if-no-files-found: error
+
+  # Publishes the assets as a release, which is what makes `releases/latest`
+  # resolve. Separate from `build` so a failure to publish does not look like a
+  # failure to compile.
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -la dist/
+
+      # The same manifest check the installer will do, run once here so a bad
+      # archive is caught at publish time rather than by the first user.
+      - name: Every asset must extract to a runnable `rano`
+        run: |
+          set -eu
+          for f in dist/*.tar.gz; do
+            d=$(mktemp -d)
+            tar -xzf "$f" -C "$d"
+            if [ ! -x "$d/rano" ]; then
+              echo "::error::$f does not contain an executable rano at its root"
+              exit 1
+            fi
+            rm -rf "$d"
+          done
+          echo "$(ls dist/*.tar.gz | wc -l) assets, all extracting to rano"
+
+      # `gh` rather than a release action: it is already on the runner, so this
+      # is one less third-party action to trust in the path that publishes
+      # binaries people download and run.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz --clobber
+          else
+            gh release create "$tag" --title "$tag" --generate-notes dist/*.tar.gz
+          fi
+          gh release view "$tag" --json assets --jq '.assets[].name'

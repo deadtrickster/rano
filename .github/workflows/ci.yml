@@ -93,6 +93,27 @@ jobs:
           test -x "$RUNNER_TEMP/bin/rano"
           "$RUNNER_TEMP/bin/rano" --version
 
+      # The release assets are a CONTRACT between three files that never run
+      # together: install.sh, the release workflow, and make-dist.sh. Each is
+      # checked here so a mismatch fails on this push rather than on a user's
+      # install.
+      - name: Release asset names must be the ones install.sh asks for
+        run: sh scripts/check-dist-names.sh
+
+      - name: Packaging produces an archive install.sh can use
+        run: |
+          set -eu
+          sh scripts/make-dist.sh x86_64-unknown-linux-gnu dist-check
+          tar -tzf dist-check/rano-x86_64-unknown-linux-gnu.tar.gz
+          d=$(mktemp -d)
+          tar -xzf dist-check/rano-x86_64-unknown-linux-gnu.tar.gz -C "$d"
+          test -x "$d/rano" || { echo "no executable rano in the archive"; exit 1; }
+          "$d/rano" --version
+          # And the archive must extract to exactly one top-level entry, so a
+          # stray file cannot ride along into a published release.
+          n=$(tar -tzf dist-check/rano-x86_64-unknown-linux-gnu.tar.gz | wc -l)
+          test "$n" -eq 1 || { echo "archive holds $n entries, expected 1"; exit 1; }
+
   # Linux-only CI would not notice a break in the C grammar build or the
   # platform-specific link-arg path in build.rs (`libtree_sitter_dockerfile.a`
   # on this side vs `.lib` on MSVC). macOS is a terminal a person uses.

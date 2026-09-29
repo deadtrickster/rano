@@ -5,6 +5,9 @@ pinned by tests that run (`tests/markdown_grammar.rs`, 10 tests).
 Written 2026-09-29. Scope narrowed by the operator: *"when i say orgmodish - i
 mainly think of hierarchy and auto done for the whole subtree."*
 
+The one boundary this design does NOT close is authorship against the wire's
+`TodoEntry` — see Decision 3, which is stated as unclean on purpose.
+
 ## Scope, and what that rules out
 
 **In:** hierarchy (headings and nested bullets), and marking a subtree done in
@@ -118,25 +121,82 @@ the half with the whole cost.
 a diagnostic naming the character and offset — never coerced to Pending, which
 is precisely what the grammar already does and is the bug.
 
-## Decision 3 — the boundary with harnessd's `TodoEntry`: MATCH
+## Decision 3 — the boundary with harnessd's `TodoEntry`: UNCLEAN, and it does not close
 
-Read at `letibot-profiles/crates/sessionlog/src/event.rs:88`:
+The wire carries a THIRD axis this schema cannot model: **authorship**. Read at
+`letibot/wt-resume-chain/crates/sessionlog/src/event.rs:99` and `:105-114`:
 
 ```rust
-pub enum TodoStatus { Pending, InProgress, Completed }
-pub struct TodoEntry { pub content: String, pub status: TodoStatus }
+pub enum TodoBy { #[default] Model, Operator }
+
+pub struct TodoEntry {
+    pub content: String,
+    pub status: TodoStatus,
+    #[serde(default)]
+    pub by: TodoBy,
+}
 ```
 
-**Correction to the brief: there is no `by` field.** `TodoEntry` is
-`{content, status}`; the `by: String` fields in that file (179, 677, 787) belong
-to other events. If "operator's rows vs the model's" matters it is elsewhere and
-should be pointed at before anything relies on it.
+The storage twin is `letibot_tokencore::store::TodoItem::by`, the same two
+variants with the same default, and the reason is in its own comment: the two
+authors *"share one list and a format, and this field is the whole of the
+difference between them."*
 
-That leaves a clean answer: rano's three states **are** the wire's three states,
-same names, same meaning. Matching, not extending. This is the one reason the
-third state stays in the schema even though the cascade does not need it — a
-two-state checkbox cannot express `InProgress` and would force a keyword
-extension.
+So:
+
+- **Status: MATCH, and that part is clean.** My three names are the wire's three
+  names with the same meaning. This remains the one reason the third state stays
+  in the schema even though a cascade only needs two.
+- **Authorship: ABSENT, and it cannot be added.** A `[ ]` line in a markdown
+  file says nothing about who wrote it. There is no org convention for it and no
+  place in a checkbox to put it. Consequences, stated rather than discovered
+  later:
+  - **markdown → wire:** every row's `by` must be assigned by the sync layer as
+    a *policy* ("the file is the operator's"), not read as a fact. The file does
+    not hold that fact.
+  - **wire → markdown:** `by` is lost. If the model's rows and the operator's
+    rows both live in `TODO.md`, they become one indistinguishable list — and
+    `set_operator_todos`'s "replace the operator's half and leave the model's
+    alone" has nothing to key on.
+- **Two variants are already insufficient for the operator's own design**, before
+  this schema adds anything: a third writer — their `$EDITOR`, a `git pull`,
+  another agent — is neither `Model` nor `Operator`. Not mine to solve; recorded
+  so whoever builds the sync knows which axis they are missing.
+
+**The boundary, honestly stated: this schema is a VIEW of a file, and it carries
+what the file carries.** The wire needs one thing the file does not have, so the
+sync is lossy in one direction and invented in the other, and the design that
+reconciles that is upstream of this module. Stating it as "clean" would have
+hidden exactly the work somebody else has to do.
+
+### The failed search, filed
+
+My previous message claimed the opposite — *"there is no `by` field; `TodoEntry`
+is `{content, status}`"* — and it was wrong. Filing it, because an absence claim
+is worth exactly the search that failed and nothing more:
+
+- **Search:** `grep -rn "TodoEntry" ~/Projects --include=*.rs -l | head -10`, then
+  `sed -n '75,115p'` on ONE hit,
+  `letibot-profiles/crates/sessionlog/src/event.rs` — and the claim was made from
+  that one file.
+- **What it found:** in *that* worktree `TodoEntry` really is `{content, status}`.
+  The claim was true of the file I read.
+- **Why it failed — the scope, not the pattern:** `letibot` is a multi-worktree
+  repo (`letibot-profiles`, `wt-todo`, `wt-resume-chain`, `wt-edit`, `wt-cat`)
+  whose worktrees sit on different branches, and the field exists on exactly one
+  of them. Counted: `TodoBy` occurs 3 times in `wt-resume-chain` and **0 times in
+  each of the other four**. I read one worktree's copy and generalised to "the
+  wire".
+- **A refinement worth keeping, because it changes what to guard against.** The
+  first diagnosis I was given was that the search missed the field because `by`
+  is typed `TodoBy` rather than `String`, so a pattern looking for `by: String`
+  could not match it. That is not what happened: my pattern was `pub by`, which
+  *does* match `pub by: TodoBy`, and re-running it in `letibot-profiles` still
+  returns only the three unrelated `by: String` fields — because in that file
+  they are all there is. **The load-bearing scope was the branch, and a worktree
+  looks exactly like the repo.** That is harder to notice than a grep pattern: a
+  pattern is visible in the command you wrote, and a checkout is not visible at
+  all.
 
 ## The API, and where it must live
 
@@ -218,6 +278,9 @@ assumed.
 
 ## What is deliberately absent
 
+- **Authorship.** The schema carries no `by` and cannot: a markdown file does not
+  record who wrote a line. This is a property of the medium rather than a choice
+  to defer, and Decision 3 states what it costs the sync in both directions.
 - No renderer, no inverse function. That is the design, not a gap.
 - No second parser for markdown; every range is from a query or a validated read
   at a grammar-anchored offset.

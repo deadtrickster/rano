@@ -5,11 +5,41 @@ A nano clone for the terminal, written in Rust. Built on
 [ratatui](https://crates.io/crates/ratatui) (rendering), with tree-sitter
 syntax highlighting and a minimal LSP client.
 
+![rano editing a markdown file](screenshot.png)
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/deadtrickster/rano/master/install.sh | sh
+```
+
+One line, and it builds rano and puts the binary in `~/.local/bin` — set
+`RANO_INSTALL_DIR` to put it somewhere else, `RANO_VERSION` to build a tag or
+branch instead of the default branch. The script is [`install.sh`](install.sh)
+in this repo: it is short, and worth reading before you pipe a URL into a shell.
+It says the installed version when it is done, so a binary that cannot run is
+reported as a failure rather than a success.
+
+There are no prebuilt binaries yet, so it builds from source, which needs
+[Rust](https://rustup.rs) and a C compiler — the tree-sitter grammars are C, and
+`build.rs` compiles them. The script checks for both and names the one that is
+missing rather than letting the build fail in cargo's words. If a prebuilt asset
+ever is published for your platform it is used instead, which is why the
+download is attempted first.
+
+If you already have Rust, the same thing in one command:
+
+```sh
+cargo install --git https://github.com/deadtrickster/rano.git
+```
+
 ## Build
+
+From a checkout:
 
 ```sh
 cargo build --release
-rano [options] [file]
+./target/release/rano [options] [file]
 ```
 
 ## Usage

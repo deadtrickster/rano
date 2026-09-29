@@ -132,6 +132,11 @@ pub struct Editor {
     /// stays live, and without this flag the loop would sleep its idle wait
     /// before asking again — a 2.6M-line file then took ~10 s to arrive
     /// instead of ~1, with the disk idle in between.
+    /// The startup update check: one background request, and the offer it may
+    /// produce. Off unless enabled — see `crate::update::enabled`, which reads
+    /// the config and `RANO_AUTOUPDATE`. Nothing here runs in tests, because
+    /// `Editor::new` does not start the check; `run()` does.
+    pub(crate) update: crate::update_ctrl::UpdateCheck,
     pub(crate) load_saturated: bool,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
@@ -239,6 +244,7 @@ impl Editor {
             completion_q: VecDeque::new(),
             completion_retry: None,
             completion_retries: 0,
+            update: crate::update_ctrl::UpdateCheck::default(),
             def_back: Vec::new(),
             startup_pos: None,
             load_saturated: false,

@@ -19,6 +19,9 @@ pub mod encoding;
 // not use is dead code by the compiler's reckoning — correctly.
 pub mod rows;
 pub mod syntax;
+// The version check and self-update. lib-only: the binary reads it, but so
+// could an embedder that wants to offer the same thing.
+pub mod update;
 // Likewise lib-only for now: the editor has no todo UI yet, and the first
 // consumer is leticl embedding this — which is why it must NOT live behind
 // `main.rs`.

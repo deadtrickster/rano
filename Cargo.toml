@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 crossterm = "0.29.0"
+# gzip, for reading a release asset. Pure Rust (miniz_oxide): a decompressor that
+# cannot deadlock, which is not true of shelling out to `gzip` and pumping its
+# pipes by hand. See `update::extract_binary` for what that cost twice.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ratatui = "0.30.2"
 tree-sitter = "0.27"
 tree-sitter-language = "0.1"
@@ -39,3 +43,24 @@ tree-sitter-clojure-orchard = "0.2.8"
 
 [build-dependencies]
 cc = "1"
+
+# What the release assets are built with. The binary is large because of what is
+# IN it rather than because of how it was built: 28 tree-sitter grammars compiled
+# from C, each a few hundred KB of static parse tables, plus the Rust std. So this
+# is about not carrying weight that buys nothing:
+#
+#   strip           symbols, for a binary nobody debugs. Measured alone: ~1 MB.
+#   lto             cross-crate inlining — and for a program that is mostly a few
+#                   large dependency crates, it is also a size win.
+#   codegen-units=1 one codegen unit for the whole crate, so lto can actually see
+#                   everything. It costs build time and buys both speed and size.
+#
+# Deliberately NOT `opt-level = "z"`: this editor's release profile is the one the
+# §16.0 work was measured on (typing at 0.1 µs on a 193 MB file, 139 µs frames),
+# and trading that for a smaller download would be trading the point of the
+# project for the size of an archive. `abort` is not set either: the panic hook
+# that restores the terminal is cheaper to keep than to reason about.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

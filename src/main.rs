@@ -16,6 +16,8 @@ mod search;
 mod search_ctrl;
 mod syntax;
 mod ui;
+mod update;
+mod update_ctrl;
 mod width;
 
 #[cfg(test)]
@@ -459,6 +461,10 @@ fn run(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut ed = Editor::new(buf, cfg);
+    // One request at startup, off the main thread. `run` rather than
+    // `Editor::new` because it is a property of RUNNING, not of being — no test
+    // makes a network call by constructing an editor.
+    ed.start_update_check();
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.startup_pos = pos;
@@ -554,6 +560,7 @@ fn run(
         dirty |= ed.lsp_flush(Instant::now());
         ed.completion_retry_poll();
         dirty |= ed.exec_poll();
+        dirty |= ed.update_poll();
     };
     disable_raw_mode()?;
     execute!(
@@ -562,6 +569,16 @@ fn run(
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
+    // The update offer is announced HERE, on the way out, and that is deliberate.
+    // Installing replaces the running executable, so it takes effect on the next
+    // start — and a notice that had to be caught before the screen was torn down
+    // would be a notice nobody reads. Printed after the terminal is restored, so
+    // it lands in the shell's scrollback and survives.
+    if let Some(u) = &ed.update.found
+        && ed.update_installable_on_exit()
+    {
+        println!("{}", u.message());
+    }
     result
 }
 

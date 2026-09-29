@@ -77,7 +77,13 @@ try_prebuilt() {
         url="https://github.com/$REPO/releases/latest/download/$name"
     fi
     need curl || return 1
-    curl -fsSL -o "$tmp/$name" "$url" 2>/dev/null || return 1
+    # `-q` FIRST, and it is not cosmetic: curl reads ~/.curlrc, so a single
+    # `insecure` line there turns certificate verification off for every curl the
+    # user runs — measured, with a self-signed host: exit 0 with the curlrc, exit
+    # 60 with `-q`. Downloading a binary that is then executed is not a place to
+    # inherit someone's debugging shortcuts. `--proto`/`--proto-redir` keep both
+    # hops on HTTPS. The same flags are used in src/update.rs.
+    curl -q -fsSL --proto '=https' --proto-redir '=https' -o "$tmp/$name" "$url" 2>/dev/null || return 1
     tar -xzf "$tmp/$name" -C "$tmp" 2>/dev/null || return 1
     [ -x "$tmp/rano" ] || return 1
     printf '%s' "$tmp/rano"

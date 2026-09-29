@@ -85,6 +85,10 @@ impl Editor {
                 KeyCode::Char(',') => self.jump_back(),
                 // M-| : filter the marked rows through a shell command.
                 KeyCode::Char('|') => self.start_filter(),
+                // M-V: install the newer release the startup check found.
+                // One keystroke, user-initiated: the status line has already
+                // named the version, so this IS the confirmation.
+                KeyCode::Char('v') => self.update_install(),
                 // M-N: toggle the line-number gutter.
                 KeyCode::Char('n') => self.show_line_numbers = !self.show_line_numbers,
                 // M-\ : toggle soft line wrap (nano).

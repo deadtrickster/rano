@@ -11,6 +11,10 @@ pub struct Config {
     pub line_numbers: bool,
     pub multibuffer: bool,
     pub wrap: bool,
+    /// Check GitHub for a newer release at startup: `Some(false)` off,
+    /// `Some(true)` on, `None` not set — and `None` is what lets the
+    /// `RANO_AUTOUPDATE` environment variable decide. See `crate::update`.
+    pub autoupdate: Option<bool>,
 }
 
 impl Default for Config {
@@ -21,6 +25,7 @@ impl Default for Config {
             line_numbers: true,
             multibuffer: false,
             wrap: true,
+            autoupdate: None,
         }
     }
 }
@@ -95,6 +100,11 @@ fn parse_config(text: &str) -> Config {
                     cfg.wrap = b;
                 }
             }
+            "autoupdate" => {
+                if let Some(b) = parse_bool(value) {
+                    cfg.autoupdate = Some(b);
+                }
+            }
             _ => {}
         }
     }
@@ -135,6 +145,17 @@ mod tests {
         assert_eq!(cfg.tab_width, 8);
         assert!(cfg.auto_indent, "auto-indent defaults to on");
         assert!(!cfg.multibuffer);
+    }
+
+    #[test]
+    fn autoupdate_is_unset_by_default_and_parseable() {
+        // None, not Some(true): unset is what lets RANO_AUTOUPDATE decide, and
+        // what makes the config "not saying" rather than "saying yes".
+        assert_eq!(Config::default().autoupdate, None);
+        assert_eq!(parse_config("autoupdate = false").autoupdate, Some(false));
+        assert_eq!(parse_config("autoupdate = true").autoupdate, Some(true));
+        // A bad value leaves it unset rather than guessing.
+        assert_eq!(parse_config("autoupdate = yes").autoupdate, None);
     }
 
     #[test]

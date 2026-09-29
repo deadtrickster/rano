@@ -94,6 +94,7 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-D` | Jump to next diagnostic (wraps) |
 | `M-.` | Jump to definition (LSP) |
 | `M-,` | Jump back (stacked — one press per jump) |
+| `M-V` | Install the newer release the startup check found |
 | `M-N` | Toggle line-number gutter |
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
@@ -133,9 +134,42 @@ auto_indent = true
 line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
 wrap = true         # soft line wrap (M-\ toggles at runtime)
+autoupdate = true   # check GitHub for a newer release at startup
 ```
 
 Unknown keys are ignored; out-of-range values fall back to the defaults.
+
+`autoupdate` is a switch rather than a value: unset means "decide by
+`RANO_AUTOUPDATE`", and with neither it is **on**, as update checks are in normal
+software. Set `autoupdate = false`, or `RANO_AUTOUPDATE=0` in the environment, to
+turn it off.
+
+### A note on the download size
+
+The binary is ~19 MB on disk, ~3.4 MB as the release archive. **Three quarters of
+it is the 28 tree-sitter grammars** — 14.5 MB of `ts_parse_table` /
+`ts_small_parse_table` symbols, measured with `nm`. Those are `const` C arrays, so
+no compiler flag shrinks them and stripping saves only ~5%; the size IS the
+language support. The release profile does what it honestly can (`strip`, `lto`,
+`codegen-units = 1`: 20.3 MB → 18.7 MB, measured, with typing speed unchanged at
+0.1 µs on a 193 MB file). If the size ever matters more than the languages, the
+lever is dropping grammars — a feature decision, not a build one.
+
+### Updates
+
+With it on, rano makes one request to the GitHub releases API at startup, on a
+background thread, and compares the tag with its own version. If there is a
+newer release it says so, and `M-V` installs it — replacing the binary in place,
+which takes effect on the next start. Nothing is downloaded until you press it.
+
+The request is off-thread, so a slow or absent network costs a frame nothing. A
+failed check is silent: an unreachable GitHub is not an editor's problem.
+
+Downloads are HTTPS-only and certificate verification is **not** negotiable —
+curl is run with `-q`, which stops `~/.curlrc` being read at all, because a
+single `insecure` line there would otherwise turn verification off for every
+download. Both the request and any redirect must be HTTPS. `install.sh` uses the
+same flags.
 
 ## Notes
 

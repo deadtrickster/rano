@@ -1,271 +1,227 @@
-# S9 — A todo schema in bare rano (org-ish, over markdown)
+# S9 — A todo schema over markdown: hierarchy and cascade
 
-Status: design, for ruling. Not implemented.
-Written 2026-09-29, off a conversation the operator had about leticl's todos pane.
+Status: design, for ruling. Schema not implemented; the grammar facts below are
+pinned by tests that run (`tests/markdown_grammar.rs`, 10 tests).
+Written 2026-09-29. Scope narrowed by the operator: *"when i say orgmodish - i
+mainly think of hierarchy and auto done for the whole subtree."*
 
-## What this is for, stated as the constraint it must satisfy
+## Scope, and what that rules out
 
-leticl wants the repo's `TODO.md` editable in its head. It stopped because
-`read-todo-md` is lossy — it parses lines into rows and re-renders from those
-rows, so a save would reformat prose, `Deps:` indentation, wrapping and
-trailing whitespace on a file other people have open.
+**In:** hierarchy (headings and nested bullets), and marking a subtree done in
+one act.
 
-**The design answer is that there is no re-render, because there is no inverse
-function.** Nothing here turns a model back into markdown. The document is the
-only source text that exists; the schema holds *byte ranges into it*, and every
-operation produces an `Edit` — a single `(range, replacement)` splice that the
-caller applies. Prose between items, indentation shape, wrapping and trailing
-whitespace are not represented and therefore cannot be lost. That is not a
-promise about care; it is a consequence of there being no code that writes a
-document.
+**Out, deliberately, and not as options to be picked up later:** priorities
+(`[#A]`), scheduling and deadlines (`SCHEDULED:`), tags (`:work:`), TODO/DONE
+keywords on headings, agenda, clocking. The operator's narrowing removed them
+from the ask, and each is its own namespace with its own precedence questions.
+Recorded here only so nobody reads their absence as an oversight.
 
-Corollary, and it is the architectural line: **the file is the source of truth
-and the wire is a projection.** `TodoEntry` is flat (`content`, `status`) and
-cannot carry a heading tree or prose, so markdown → wire is total and wire →
-markdown is not attempted. Anyone who tries to round-trip the wire back into a
-file will reproduce the bug leticl stopped to avoid.
+## The grammar: no new dependency, and none should be added
 
-## The measurements this rests on
+`tree-sitter-md` is already in `Cargo.toml` and already parses every markdown
+file rano opens. **`tree-sitter-org` must not be taken**: it would be a second
+grammar and a second file format for one job, and the file the operator actually
+wants edited is the repo's `TODO.md`, which is markdown.
 
-Taken in this tree, 2026-09-29, `cargo test --test markdown_grammar -- --nocapture`.
+What the grammar gives, read from its node types and then pinned by test:
 
-**1. The grammar already models everything structural.** One query string gets
-headings, sections, items and checkbox states with exact byte ranges:
+- **Checkbox state is a node type**, not a pattern: `task_list_marker_checked`
+  and `task_list_marker_unchecked`. No regex, no line scanning.
+- **Hierarchy is native, in two shapes that nest into each other.** `section`
+  contains `section` (heading depth as a real tree, not a count of `#`);
+  `list_item` contains `list` (nested bullets as a real tree). So "the subtree"
+  is one node's range, whichever shape the checklist is written in.
+- **`[X]` is checked** — the capital X is not a different state.
+- **All four bullet styles hold a marker**: `list_marker_minus`, `_star`,
+  `_plus`, `_dot`.
 
-```
-(atx_heading) @heading
-(list_item) @item
-(task_list_marker_checked) @checked
-(task_list_marker_unchecked) @unchecked
-```
+So the cascade is range surgery over query results: find each
+`task_list_marker_*` inside the subtree's range, rewrite its own three bytes.
 
-`Stream::captures(query)` (`syntax.rs:1807`) runs it and returns
-`Capture { name, start, end }` — byte offsets. On a sample document:
+**Byte-identical by construction**, and that is not a claim about care — it is
+that every edit lands inside a range the tree handed us, every state is exactly
+three bytes, and no code writes a document. leticl had to hand-build source-line
+tracking to *approximate* this.
 
-```
-  heading    0..10   "# Project\n"
-  heading   49..56   "## Now\n"
-     item   57..73   "- [ ] open item\n"
-unchecked   59..62   "[ ]"
-     item   73..89   "- [x] done item\n"
-  checked   75..78   "[x]"
-```
+There is no renderer here and no inverse function: prose, indentation, wrapping
+and trailing whitespace are not represented, so they cannot be lost. The file is
+the source of truth; the wire is a projection.
 
-The **marker range is exact and 3 bytes** — that is the whole toggle.
+### The finding: a query cannot express an unknown marker
 
-**2. `section` nests and carries the subtree span**, which makes folding and
-subtree move free rather than specified:
+`- [-]`, `- [~]` and `- []` parse as **ordinary list items** — no ERROR node, no
+missing node, no capture, `has_error == false`. A typo'd marker renders as a
+plain row and nothing anywhere reports it.
 
-```
-document [0..235]
-  section [0..235]
-    atx_heading [0..10]
-    paragraph [11..48]
-    section [49..189]           <- ## Now, and everything under it
-      atx_heading [49..56]
-      list [57..126]
-      section [126..189]        <- ### Deep, nested inside
-    section [189..235]
-```
+So the schema needs `check()` with a diagnostic, and this is the one place it
+reads bytes at a grammar-anchored offset instead of a captured range: a marker
+would have begun exactly at the item's `paragraph.start`, which is where to look.
+Reported as a finding rather than routed around with a hand-rolled line scan.
 
-A fold is `section.start..section.end` and changes **zero bytes**. A subtree
-move is a cut of exactly that range and an insert elsewhere. Neither needs a
-"find where the heading's body ends" scan, and no line-counting.
+(Org's third state `[-]` is not expressible as a query for the same reason. It
+is kept in the schema for wire parity — see below — but **it is not part of this
+feature**: a cascade needs only done and not-done.)
 
-**3. [X] is recognised, and all three bullet styles are.**
+## Decision 1 — down is a command, up is a derived fact, never written
 
-```
-task_list_marker_checked   2..5   "[X]"     (from "- [X] capital")
-list_marker_star           0..2   "* "
-list_marker_dot            0..3   "1. "
-```
+Agreed with the ruling, and the reasoning holds: storing `up` lets the file
+disagree with itself (a parent `[x]` above an unchecked child) and re-marks a
+line the operator just unmarked.
 
-**4. THE FINDING — the grammar is SILENT about a marker it does not know, and
-this is the whole reason the schema is not just a query.** `- [-] partial` and
-`- [~] whatever` parse as ordinary list items: no ERROR node, no missing node,
-no capture, `has_error == false`.
+**What I measured that sharpens it.** The open question was the cost of
+computing `up`. It cannot be per frame:
 
-```
-- [-] partial
-  list_item     0..14   "- [-] partial\n"
-    list_marker_minus  0..2  "- "
-    paragraph          2..14 "[-] partial\n"
-      inline            2..13
-        [               2..3
-        -               3..4
-        ]               4..5
-```
+| document | parse + query |
+|---|---|
+| 200 items, 11 KB | **2.13 ms** |
+| 1 000 items, 56 KB | 9.10 ms |
+| 4 000 items, 229 KB | 35.17 ms |
 
-Read that as the failure mode it is: a typo'd marker renders as an ordinary row
-and **nothing anywhere reports it**. This is exactly the "a set which silently
-accepts an unknown member is the expensive failure" case, except the silent
-acceptance is in the *grammar*, not in a table of ours — so the schema is the
-only thing that can catch it, and a diagnostic is not optional.
+Against rano's measured frame cost of **139 µs**, the smallest of those is 15× a
+whole frame, and it grows linearly with the document — which is the §16.0 sin
+this project has spent two phases removing.
 
-It also means a query **cannot** express the third state. There is no node to
-capture. That is the one place where the schema reads bytes the grammar did not
-hand it a node for, and it reads them at a position the grammar *did* give
-(`paragraph.start` is exactly where a marker would have been), then validates
-the shape. Reported as a finding rather than routed around: **a query cannot
-express `[-]`.**
+**So: computed per edit, cached, and read by the renderer. Never per frame.**
+A toggle is one keystroke; 2.13 ms there is imperceptible, and it is the same
+order as the 2.5 ms keystroke already measured on a 2 MB file. The 4 000-item
+case (35 ms per edit) is a real cost and is named rather than hidden; bounding
+it means recomputing only the ancestor chain of the edited line, which needs the
+previous parse for ancestry and is deferred until something is slow.
 
-## Decisions
+### Decision 1a — and this is the part that is easy to get wrong
 
-### 1. How much org-mode
+**Derived progress must not be rendered in the checkbox.** If `up` is displayed
+where the stored marker lives, then a parent whose children are all done reads
+`[x]` on screen while the file says `[ ]` — and the operator has the same
+"editor fighting me" symptom the ruling exists to prevent, moved from storage
+into rendering. Worse, it is invisible: the file and the screen disagree and
+only one of them is real.
 
-**In** — the three that the tree above makes cheap or free:
+Org's own answer is two affordances: the checkbox is the stored state, the
+cookie (`[2/3]`, `[/]`) is the derived progress, and they are in different
+places.
 
-- **Three-state checkbox**, org's own: `[ ]` pending, `[-]` in progress, `[X]`
-  done. The three states are not a coincidence of org; see the wire decision
-  below.
-- **Heading fold** — `section` range, zero bytes.
-- **Subtree move** — the same range, one splice.
+Cheapest good place for ours: **the line-number gutter**, which already renders
+one fact per row (diagnostic severity, by colour) and costs no document bytes
+at all. A subtree's progress marker on the heading's row is the same shape as
+what the gutter already does. Cost to name: the cached progress has to reach
+`ui.rs`, which means it lives in `BufferState` or is passed into `draw`.
 
-**Out, with the price stated:**
+If that is not wanted, the fallback is simpler and costs nothing: **do not
+render `up` at all** and compute nothing per frame. `down` alone is the whole
+of "auto done for the whole subtree"; `up` is a convenience on top, and it is
+the half with the whole cost.
 
-- **TODO/DONE keywords on headings** (`## TODO fix this`). This is the one that
-  looks free and is not. It is a *second* status vocabulary in the same file, so
-  it needs a precedence rule the moment a heading says `DONE` and an item under
-  it says `[ ]` — and org has a real answer (`TODO` keywords are on the
-  *heading*, checkboxes are on the *item*, and a parent with children is
-  computed from them). That computation is a spec, and the wire carries one
-  status per entry, so the two vocabularies would have to be reconciled before
-  sync. Left out until something consumes it.
-- **Scheduled dates / deadlines** (`SCHEDULED: <2026-09-29>`). Not free: needs a
-  timestamp type, a reader for org's time syntax, and answers to timezone and
-  repeat questions. Nothing in this repo or in the daemon's todo shape has a
-  place to put a date.
-- **Tags** (`:work:urgent:`) and **priority** (`[#A]`). Cheap to read, but each
-  is a namespace with its own precedence questions and no consumer. Deferred
-  rather than refused.
-
-### 2. The set is closed, and an unknown member is refused by name
+## Decision 2 — the set is closed; an unknown member is refused by name
 
 `{ Pending, InProgress, Completed }`. An unrecognised marker character produces
-a diagnostic that **names the character and the byte offset**. No coercion to
-Pending, no "treat as a plain item" — that is precisely what the grammar already
-does, and it is the bug.
+a diagnostic naming the character and offset — never coerced to Pending, which
+is precisely what the grammar already does and is the bug.
 
-### 3. The boundary with harnessd's `TodoEntry`: MATCH
+## Decision 3 — the boundary with harnessd's `TodoEntry`: MATCH
 
-Read in `letibot-profiles/crates/sessionlog/src/event.rs:88`:
+Read at `letibot-profiles/crates/sessionlog/src/event.rs:88`:
 
 ```rust
 pub enum TodoStatus { Pending, InProgress, Completed }
 pub struct TodoEntry { pub content: String, pub status: TodoStatus }
 ```
 
-**Correction to the brief I was given: there is no `by` field.** `TodoEntry` is
-`{content, status}`. (There are `by: String` fields in that file, at lines 179,
-677 and 787, but they belong to other events — `Decider`-carrying ones.) So the
-"distinguishes the operator's rows from the model's" distinction is not in this
-struct, and if it is needed it lives somewhere else and should be pointed at
-before this design leans on it.
+**Correction to the brief: there is no `by` field.** `TodoEntry` is
+`{content, status}`; the `by: String` fields in that file (179, 677, 787) belong
+to other events. If "operator's rows vs the model's" matters it is elsewhere and
+should be pointed at before anything relies on it.
 
-That leaves a clean answer: **rano's three states ARE the wire's three states**,
-same names, same meaning. Matching, not extending. This is why org's `[-]`
-matters — it is the third state that makes a 1:1 map possible at all; a
-two-state checkbox (`[ ]`/`[x]`, which is all the grammar gives you) cannot
-express `InProgress` and would force a keyword extension.
+That leaves a clean answer: rano's three states **are** the wire's three states,
+same names, same meaning. Matching, not extending. This is the one reason the
+third state stays in the schema even though the cascade does not need it — a
+two-state checkbox cannot express `InProgress` and would force a keyword
+extension.
 
-## The API
+## The API, and where it must live
 
-New module `src/todo.rs`, exported from `lib.rs` — **this is the requirement
-that shapes the placement.** `lib.rs` exports `buffer encoding rows syntax
-width`; `editor`, `ui`, `keys` and `bindings` are binary-only. A schema that
-landed behind `main.rs` would be unreachable from leticl and the entire reason
-for the work would evaporate. So: no `Buffer`, no `Editor`, no crossterm, no
-`Frame`. `&str` in, ranges and edits out.
+New module `src/todo.rs`, exported from `lib.rs`.
+
+**This placement is a hard requirement, not a preference.** `lib.rs` exports
+`buffer encoding rows syntax width`; `editor`, `ui`, `keys` and `bindings` are
+binary-only. A schema behind `main.rs` is unreachable from leticl, and the reason
+for the work evaporates. So: no `Buffer`, no `Editor`, no crossterm, no `Frame`.
+`&str` in, ranges and edits out.
 
 ```rust
 pub enum State { Pending, InProgress, Completed }
 
 pub struct Item {
     pub state: State,
-    pub marker: Range<usize>,      // the exact 3 bytes, "[ ]" / "[x]" / "[-]"
+    pub marker: Range<usize>,      // the exact 3 bytes
     pub item: Range<usize>,        // the whole list_item
-    pub text: Range<usize>,        // content after the marker
     pub heading: Option<usize>,    // index into headings
-    pub line: usize,               // 0-based, for a diagnostic
-    pub col: usize,                // char col, for a diagnostic
+    pub line: usize, pub col: usize,
 }
 
-pub struct Heading {
-    pub level: usize,              // '#' count
-    pub line: usize,
-    pub title: Range<usize>,
-    pub section: Range<usize>,     // the whole subtree, nested sections included
-}
+pub struct Heading { pub level: usize, pub line: usize,
+                     pub section: Range<usize> }   // the whole subtree
 
-pub struct Doc { src: String, items: Vec<Item>, headings: Vec<Heading> }
+pub struct Doc { /* src, items, headings, cached progress */ }
 
 /// One splice. The ONLY way anything here changes a document.
-pub struct Edit { pub range: Range<usize>, pub replacement: String }
+pub struct Edit { pub range: Range<usize>, pub replacement: &'static str }
 impl Edit { pub fn apply(&self, src: &str) -> String; }
 
 impl Doc {
     pub fn parse(src: &str) -> Doc;
-    pub fn items(&self) -> &[Item];
-    pub fn headings(&self) -> &[Heading];
 
-    /// The primitive: set an item's state. A 3-byte splice, always.
-    pub fn set_state(&self, i: usize, s: State) -> Edit;
-    /// The common case: Pending <-> Completed.
-    pub fn toggle(&self, i: usize) -> Edit;
-    /// Cycle Pending -> InProgress -> Completed -> Pending (org's C-c C-t).
-    pub fn cycle(&self, i: usize) -> Edit;
-    /// Nothing to change: a fold is a range, not an edit.
-    pub fn fold_span(&self, h: usize) -> Range<usize>;
-    /// Move a heading's subtree. One cut, one insert.
-    pub fn move_subtree(&self, h: usize, to: usize) -> Edit;
-    /// Schema violations, in the shape `syntax_errors` already returns so the
-    /// existing gutter can render them: (line, col, end_col, message).
+    /// DOWN: mark a subtree done. One Edit per marker that CHANGES — a
+    /// cascade over an already-done subtree returns an empty vec, which is
+    /// what makes it idempotent and keeps the undo stack honest.
+    pub fn set_subtree_done(&self, span: Range<usize>, s: State) -> Vec<Edit>;
+
+    /// UP, as a fact: done/total under this node. Never written.
+    pub fn progress(&self, span: Range<usize>) -> (usize, usize);
+
+    /// The subtree of the item or heading at `line`, for a key binding.
+    pub fn subtree_at(&self, line: usize) -> Option<Range<usize>>;
+
+    /// Schema violations, in the shape `syntax_errors` already returns, so the
+    /// existing gutter renders them: (line, col, end_col, message).
     pub fn check(&self) -> Vec<(usize, usize, usize, String)>;
 }
 ```
 
-`check` reports, at minimum: an unknown marker character, and (if the schema
-requires it) a checkbox under no heading. Neither is reported by the grammar.
+## The tests, written before the implementation
 
-## The test that must be written first
+The hard requirement was that the first test not be "the toggle worked" but "the
+file after equals the file before except for the bytes I meant to change" — run
+twice. Those exist and pass, against the real grammar:
 
-Not "the toggle worked". **"The file after equals the file before except for the
-bytes I meant to change."**
+- `a_cascade_changes_only_marker_bytes` — asserts the containment the cascade
+  rides on (nested items inside the parent's range, the next section's outside),
+  then checks **every differing byte index is inside a marker range** and every
+  other byte is identical.
+- `a_cascade_is_idempotent` — a second cascade over the result produces **no
+  edits at all**.
+- `a_section_is_a_cascade_target_too` — the same over a heading's subtree.
+- `the_marker_is_exactly_three_bytes_at_a_grammar_given_offset`,
+  `every_bullet_style_can_hold_a_marker`, `a_capital_x_is_checked`,
+  `a_section_is_the_whole_subtree`, `a_heading_carries_its_level_marker`,
+  `an_unknown_marker_is_silent_in_the_grammar`.
 
-```
-fn a_toggle_changes_exactly_three_bytes()      // and nothing else, anywhere
-fn every_state_change_is_a_three_byte_splice() // Pending/InProgress/Completed, all 9 ordered pairs
-fn a_fold_changes_no_bytes()                   // the span is returned, the text is not
-fn a_subtree_move_is_the_sections_lines()      // cut == section range, byte for byte
-fn parse_apply_reparse_agrees()                // the edit did what it claimed in the model too
-fn an_unknown_marker_is_refused_by_name()      // [-], [~], [x ] each named, none coerced
-fn prose_indentation_and_trailing_space_survive_untouched()
-```
+Writing these first paid twice, and both times the test was right and I was
+wrong: the cascade helper returned every marker in the span rather than the ones
+it would rewrite, so a second run emitted three no-op edits — **the edit set is
+part of the contract, not an implementation detail**. That is now asserted.
 
-The last one is leticl's actual complaint and should carry a fixture with
-deliberately awkward content — two spaces after a period, a `Deps:` block,
-hard-wrapped lines, trailing whitespace — so the assertion is that they come out
-identical rather than that nobody happened to touch them.
+Still to write when the module exists: `prose_indentation_and_trailing_space_survive_untouched`,
+over a fixture with two spaces after a period, a `Deps:` block, hard-wrapped
+lines and trailing whitespace — leticl's actual complaint, asserted rather than
+assumed.
 
-## On reusing the tree, and one place I am not
+## What is deliberately absent
 
-`Stream::captures` re-parses: `Stream` is its own document and its own tree.
-The editor's `Highlighter` has the file's tree already but exposes no arbitrary
-query (`classes` runs the language's fixed query). So `todo::Doc` currently
-costs one extra parse of the todo file.
-
-That is fine and should be said out loud rather than discovered later: a
-TODO.md is kilobytes, and the schema is needed on **open, save and toggle** —
-not per keystroke. If it is ever wanted on the editing hot path, the right move
-is to add a query method to `Highlighter` so it uses the tree it already has,
-not to parse twice per frame. Deliberately not doing that now: it would put a
-second consumer inside the frame path for a case nobody has asked for.
-
-## What is deliberately not here
-
-- No renderer. See the top: there is no inverse function, which is the point.
-- No second parser for markdown. Every range comes from a query or from a
-  validated read at a grammar-anchored offset (the one `[-]` case).
-- No editor integration in this step. `ui.rs`/`editor.rs` know nothing about
-  todos yet; the schema has to exist and be reachable from the library first,
-  and leticl is the first consumer.
+- No renderer, no inverse function. That is the design, not a gap.
+- No second parser for markdown; every range is from a query or a validated read
+  at a grammar-anchored offset.
+- No editor integration yet. `ui.rs`/`editor.rs` know nothing about todos; the
+  schema exists and is reachable from the library first, and leticl is the first
+  consumer.
+- `up` rendering is proposed (gutter) but not required; `down` stands alone.

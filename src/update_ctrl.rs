@@ -112,9 +112,22 @@ impl crate::editor::Editor {
         self.update = UpdateCheck::start(on);
     }
 
-    /// Collect the check's answer. Returns whether anything visible changed.
+    /// Collect the check's answer, and SAY SO. Returns whether anything visible
+    /// changed.
+    ///
+    /// Flashing here is the whole point of the poller: without it the notice was
+    /// only printed on exit, so the session said nothing and `M-V` was
+    /// undiscoverable — found by running the binary and watching the status line
+    /// stay empty, not by reading the code.
     pub(crate) fn update_poll(&mut self) -> bool {
-        self.update.poll()
+        if !self.update.poll() {
+            return false;
+        }
+        if let Some(u) = &self.update.found {
+            let msg = u.message();
+            self.flash(&msg);
+        }
+        true
     }
 
     /// Whether the exit notice should be printed. Separate from `found` so the

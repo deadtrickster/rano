@@ -34,6 +34,29 @@ jobs:
       - name: The names must be the ones install.sh asks for
         run: sh scripts/check-dist-names.sh
 
+      # **The tag and the compiled version must agree, and this is the check that
+      # would have caught v0.1.1.** It was tagged with `Cargo.toml` still saying
+      # 0.1.0, so the "0.1.1" assets contained a binary that reported 0.1.0 — and
+      # since the update check compares the release TAG against the version
+      # compiled in, every 0.1.0 install would be offered 0.1.1 forever, install
+      # it, and still report 0.1.0. An update loop, from a one-line omission.
+      #
+      # Only on a tag: a branch build has no version to agree with.
+      - name: The tag must match Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag: $GITHUB_REF_NAME (=$tag), Cargo.toml: $manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest"
+            echo "The binary would report $manifest, and the update check compares"
+            echo "the tag against it — so this release would offer an update to"
+            echo "itself, forever."
+            exit 1
+          fi
+
   build:
     needs: names
     runs-on: ${{ matrix.runs }}

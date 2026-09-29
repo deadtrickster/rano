@@ -153,11 +153,60 @@ impl Doc {
 }
 ```
 
+## The second caller: the model completing a task
+
+The write-back ruling means the surgical toggle gains a caller that is not a
+keystroke. Measured in `tests/todo_writeback.rs` rather than assumed:
+
+**The non-interactive path needs no interactive state.** `src/todo.rs` contains
+no cursor, viewport, scroll, `Buffer`, `Editor`, `Frame`, `ui::`, `editor::`,
+`Instant` or `now()` — one `&str` in, one `String` out. So nothing has to be
+faked to call it from harnessd.
+
+**But addressing is a real gap, and it is the caller's to solve.** The API
+addresses a task by **index into `items`**, and a wire `TodoEntry` carries a
+`content` string. So a non-interactive caller must map content → index itself,
+and two things make that worse than it looks:
+
+- **The file's text is not the wire's content.** Measured: the raw text of
+  `- [ ] Add readme file with newline #example` is
+  `" Add readme file with newline #example"` — leading space, and the whole
+  metadata tail still attached. A wire content is a trimmed title with the tail
+  split off. `trim()` alone is not enough.
+- **It is ambiguous.** Two tasks with the same title give two hits, and the
+  module cannot know which the model meant. Taking the first is a silent wrong
+  write.
+
+Neither is fixed here, deliberately: `content → item` is a *policy* question
+(which of two identical titles, and how to strip a tail whose format is the
+spec's, not ours), and the module is right to know only about the file. What the
+finding gives the caller is the shape of the problem and a test that pins the
+caveats.
+
+**Two bugs the second-caller tests found in this module, both real:**
+
+1. **`Item::text` covered the subtree, not the line.** For a parent it returned
+   `" Parent ~3d …\n  - [ ] sub one\n  - [x] sub two\n\n"`. The field is
+   documented as the task's own text and was nothing of the kind — and for a
+   content-matching caller it was worse than useless, since a blob containing the
+   children matches almost anything. Now it ends at the item's own newline; the
+   subtree stays available as `Item::item`, which is what a cascade needs.
+2. **`derive_up` ran on the parsed states, not the produced ones.** Measured:
+   completing a parent's last child left the parent **open**, because the derived
+   pass still saw the child as it had been. `set_subtree` now computes both passes
+   against the states the cascade would produce. This is precisely why
+   `set_subtree` exists rather than being a documented two-call sequence — the
+   doc comment claimed the right thing and the code did the other.
+
+Both were found by driving the operation the way a non-interactive caller would,
+which is the argument for having written the file at all.
+
 ## Size
 
-**~250 → ~1 000 lines.** `src/todo.rs` is 563 lines (360 non-comment) and
-`tests/todo_schema.rs` is 422; `tests/markdown_grammar.rs` (525) came earlier and
-pins the grammar facts both the schema and the highlighter depend on.
+**~250 → ~1 200 lines.** `src/todo.rs` is 605 lines (about 390 non-comment),
+`tests/todo_schema.rs` 422 and `tests/todo_writeback.rs` 169; the earlier
+`tests/markdown_grammar.rs` (525) pins the grammar facts that both the schema and
+the highlighter depend on.
 
 The growth over the original estimate is the spec being fixed rather than
 invented — the third state, the validated read for it, sections, the diagnostic

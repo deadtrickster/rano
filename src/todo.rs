@@ -94,10 +94,18 @@ pub struct Item {
     pub marker: Range<usize>,
     /// The whole `list_item`, nested sub-tasks included.
     pub item: Range<usize>,
-    /// The task's own text: from the marker's end to the line's.
+    /// The task's own text: from the marker's end to the end of its own line.
     ///
-    /// Kept as a range, not a string, because this module never rewrites it —
-    /// the `~3d #tag @name` tail is where future metadata would go.
+    /// **Ends at the newline, not at the item's end.** A `list_item` range covers
+    /// its nested children too, so using it here made a *parent's* text swallow
+    /// every sub-task — measured, not theorised: the first version returned
+    /// `" Parent ~3d …\n  - [ ] sub one\n  - [x] sub two\n\n"`. That is wrong for
+    /// the field's own purpose (it is a title) and actively dangerous for a
+    /// caller matching a wire `content` against it, since a blob containing the
+    /// children matches almost anything.
+    ///
+    /// Kept as a range, not a string, because this module never rewrites it — the
+    /// `~3d #tag @name` tail is where future metadata would go.
     pub text: Range<usize>,
     /// The nearest enclosing task, when this is a sub-task.
     pub parent: Option<usize>,
@@ -274,6 +282,13 @@ impl Doc {
     /// whose bytes actually change: **a marker already at `state` yields no
     /// edit at all**, which is what keeps a toggle from dirtying the whole path
     /// to the root and makes a second cascade a no-op.
+    ///
+    /// The `up` pass is computed from the states the cascade **produced**, not
+    /// from the ones parsed. That distinction is the whole reason this method
+    /// exists rather than being two calls: deriving from the parsed states left
+    /// the parent open after its last child was completed, because it still saw
+    /// the child as it had been. Measured by
+    /// `a_partly_done_parent_is_open_not_done`.
     pub fn set_subtree(&self, item: Option<usize>, state: State) -> Vec<Edit> {
         let span = match item {
             Some(i) => match self.items.get(i) {
@@ -283,13 +298,20 @@ impl Doc {
             None => 0..self.src.len(),
         };
 
-        let mut edits = Vec::new();
-        for it in &self.items {
+        // The states the document WOULD have, so the two passes agree about what
+        // they are looking at.
+        let mut effective: Vec<State> = self.items.iter().map(|it| it.state).collect();
+        for (i, it) in self.items.iter().enumerate() {
             if it.item.start >= span.start && it.item.end <= span.end {
-                self.push_state(&mut edits, it, state);
+                effective[i] = state;
             }
         }
-        edits.extend(self.derive_up());
+
+        let mut edits = Vec::new();
+        for (i, it) in self.items.iter().enumerate() {
+            self.push_state(&mut edits, it, effective[i]);
+        }
+        edits.extend(self.derive_from(&effective));
         dedup(&mut edits);
         edits
     }
@@ -308,22 +330,34 @@ impl Doc {
     /// The mixed case resolving to *open* is deliberate: a parent with one done
     /// child and one open child is open, and the alternative — leaving the
     /// parent `[x]` above an unchecked child — is the file disagreeing with
-    /// itself. Declining a parent is therefore done as a [`Self::set_subtree`]
-    /// cascade, so its children move with it and this rule does not fight it.
+    /// itself. Declining a parent is done as a [`Self::set_subtree`] cascade, so
+    /// its children move with it and this rule does not fight it.
     pub fn derive_up(&self) -> Vec<Edit> {
+        let parsed: Vec<State> = self.items.iter().map(|it| it.state).collect();
+        self.derive_from(&parsed)
+    }
+
+    /// The `up` pass over a given set of states.
+    ///
+    /// A child scan per parent, so O(tasks²) in the number of tasks. Fine for a
+    /// todo file (hundreds of lines) and kept obvious rather than indexed; if it
+    /// ever shows up, the children can be grouped once in `parse`.
+    fn derive_from(&self, states: &[State]) -> Vec<Edit> {
         let mut edits = Vec::new();
         for (i, it) in self.items.iter().enumerate() {
-            let mut kids = self.items.iter().filter(|k| k.parent == Some(i)).peekable();
-            if kids.peek().is_none() {
+            let kids: Vec<usize> = (0..self.items.len())
+                .filter(|&j| self.items[j].parent == Some(i))
+                .collect();
+            let Some(&first_kid) = kids.first() else {
                 continue;
-            }
-            let kids: Vec<&Item> = kids.collect();
-            let want = if kids.iter().all(|k| k.state == State::Done) {
-                State::Done
-            } else if kids.iter().all(|k| k.state == State::Declined) {
-                State::Declined
-            } else {
-                State::Open
+            };
+            let first = states[first_kid];
+            let uniform = kids.iter().all(|&j| states[j] == first);
+            let want = match (uniform, first) {
+                (true, State::Done) => State::Done,
+                (true, State::Declined) => State::Declined,
+                // Uniformly open, or mixed: open either way.
+                _ => State::Open,
             };
             self.push_state(&mut edits, it, want);
         }
@@ -530,11 +564,19 @@ fn item_of(n: &Node, src: &str) -> Option<Item> {
         (State::of_marker(candidate)?, at..at + 3)
     };
 
+    let text_start = marker.end;
+    // The task's own line, not the whole item: `n.end` includes nested children
+    // for a parent, so a title taken from `n.end` would contain the subtree.
+    let text_end = src[text_start.min(n.end)..n.end]
+        .find('\n')
+        .map(|o| text_start + o)
+        .unwrap_or(n.end);
+
     Some(Item {
         state,
         marker: marker.clone(),
         item: n.start..n.end,
-        text: marker.end..n.end,
+        text: text_start..text_end,
         parent: None,
         depth: 0,
         line: 0,

@@ -1,130 +1,282 @@
-# S9 — A todo schema over markdown: hierarchy and cascade
+# S9 — A todo schema over markdown: hierarchy, cascade, and a written `up`
 
-Status: design, for ruling. Schema not implemented; the grammar facts below are
-pinned by tests that run (`tests/markdown_grammar.rs`, 10 tests).
+Status: design, for ruling. Schema not implemented; the grammar facts are pinned
+by tests that run (`tests/markdown_grammar.rs`, 11 tests).
 Written 2026-09-29. Scope narrowed by the operator: *"when i say orgmodish - i
 mainly think of hierarchy and auto done for the whole subtree."*
 
-The one boundary this design does NOT close is authorship against the wire's
-`TodoEntry` — see Decision 3, which is stated as unclean on purpose.
+`up` is IN and it is WRITTEN to the file. The file is the transport: harnessd's
+state follows the file, so a fact that lives only in a renderer never crosses the
+wire. The rule is not "never write" but **"never leave it wrong"**.
 
-## Scope, and what that rules out
+The boundary against the wire's `TodoEntry` does not close (authorship) — see
+Decision 3, stated as unclean on purpose.
 
-**In:** hierarchy (headings and nested bullets), and marking a subtree done in
-one act.
+## Scope
 
-**Out, deliberately, and not as options to be picked up later:** priorities
-(`[#A]`), scheduling and deadlines (`SCHEDULED:`), tags (`:work:`), TODO/DONE
-keywords on headings, agenda, clocking. The operator's narrowing removed them
-from the ask, and each is its own namespace with its own precedence questions.
-Recorded here only so nobody reads their absence as an oversight.
+**In:** hierarchy (headings and nested bullets); marking a subtree done in one
+act; and a derived progress value written into the file.
 
-## The grammar: no new dependency, and none should be added
+**Out, by the operator's narrowing:** priorities (`[#A]`), scheduling and
+deadlines, tags, TODO/DONE keywords on headings, agenda, clocking. Recorded only
+so nobody reads their absence as an oversight.
 
-`tree-sitter-md` is already in `Cargo.toml` and already parses every markdown
-file rano opens. **`tree-sitter-org` must not be taken**: it would be a second
-grammar and a second file format for one job, and the file the operator actually
-wants edited is the repo's `TODO.md`, which is markdown.
+**Out by decision, this turn:** any staleness apparatus. A stale cookie is *out
+of date, not invalid* — org does not defend against a hand-edited file either,
+and neither does any text format. `check()` is for what the format **cannot
+express**, not for what somebody typed wrong.
 
-What the grammar gives, read from its node types and then pinned by test:
+## The grammar: no new dependency
 
-- **Checkbox state is a node type**, not a pattern: `task_list_marker_checked`
-  and `task_list_marker_unchecked`. No regex, no line scanning.
-- **Hierarchy is native, in two shapes that nest into each other.** `section`
-  contains `section` (heading depth as a real tree, not a count of `#`);
-  `list_item` contains `list` (nested bullets as a real tree). So "the subtree"
-  is one node's range, whichever shape the checklist is written in.
-- **`[X]` is checked** — the capital X is not a different state.
-- **All four bullet styles hold a marker**: `list_marker_minus`, `_star`,
-  `_plus`, `_dot`.
+`tree-sitter-md` is already in `Cargo.toml`. **`tree-sitter-org` must not be
+taken** — a second grammar and a second file format for a job whose subject is a
+markdown `TODO.md`. Pinned by test:
 
-So the cascade is range surgery over query results: find each
-`task_list_marker_*` inside the subtree's range, rewrite its own three bytes.
+- **Checkbox state is a node type**: `task_list_marker_checked`,
+  `task_list_marker_unchecked`. No regex, no line scanning.
+- **Hierarchy is native in two shapes that nest into each other.** `section`
+  contains `section`; `list_item` contains `list`. A subtree is one node range in
+  either shape.
+- **`[X]` is checked**; all four bullet styles hold a marker.
 
-**Byte-identical by construction**, and that is not a claim about care — it is
-that every edit lands inside a range the tree handed us, every state is exactly
-three bytes, and no code writes a document. leticl had to hand-build source-line
-tracking to *approximate* this.
+The marker is exactly three bytes at a grammar-given offset. That is the toggle,
+and it is why a cascade is byte-identical **by construction** rather than by
+care: every edit lands inside a range the tree handed us, and no code writes a
+document. leticl had to hand-build source-line tracking to approximate this.
 
-There is no renderer here and no inverse function: prose, indentation, wrapping
-and trailing whitespace are not represented, so they cannot be lost. The file is
-the source of truth; the wire is a projection.
+### The finding: a query cannot express a marker the grammar does not know
 
-### The finding: a query cannot express an unknown marker
+`- [-]`, `- [~]`, `- []` parse as **ordinary list items** — no ERROR node, no
+missing node, no capture, `has_error == false`. A typo renders as a plain row and
+nothing reports it. So `check()` is required, and it is the one place the schema
+reads bytes at a grammar-anchored offset (a marker would begin exactly at the
+item's `paragraph.start`).
 
-`- [-]`, `- [~]` and `- []` parse as **ordinary list items** — no ERROR node, no
-missing node, no capture, `has_error == false`. A typo'd marker renders as a
-plain row and nothing anywhere reports it.
+With `up` written this is structural rather than a gap, and for a precise reason:
+the schema now has states the grammar cannot name. A **container's** partiality
+is the cookie's job (`[2/3]`); an **item's** in-progress state is `[-]`'s, and it
+is what maps onto the wire's `InProgress`. Those are two levels, not one, and
+`[-]` is needed for the item level.
 
-So the schema needs `check()` with a diagnostic, and this is the one place it
-reads bytes at a grammar-anchored offset instead of a captured range: a marker
-would have begun exactly at the item's `paragraph.start`, which is where to look.
-Reported as a finding rather than routed around with a hand-rolled line scan.
+## Decision 1 — `up` is written, as a COOKIE on the heading, and never auto-`[x]`
 
-(Org's third state `[-]` is not expressible as a query for the same reason. It
-is kept in the schema for wire parity — see below — but **it is not part of this
-feature**: a cascade needs only done and not-done.)
+This reverses the earlier "never written" recommendation. The operator's reason
+stands: the file is how anything downstream finds out.
 
-## Decision 1 — down is a command, up is a derived fact, never written
+**What the file actually looks like, measured.** `rano/TODO.md`: **49 headings,
+67 checkbox items, items flat directly under headings** — and a heading carries
+no marker of its own:
 
-Agreed with the ruling, and the reasoning holds: storing `up` lets the file
-disagree with itself (a parent `[x]` above an unchecked child) and re-marks a
-line the operator just unmarked.
+```
+## 1. Crash bugs
+- [x] Prompt input panics on multibyte text: ...
+- [x] `move_left` at BOL sets cursor past EOL: ...
+```
 
-**What I measured that sharpens it.** The open question was the cost of
-computing `up`. It cannot be per frame:
+So "auto-`[x]` on the parent" has no parent checkbox to write. On this shape it
+would mean inventing a checkbox on the heading line, and **GitHub renders
+task-list checkboxes only on list items, never on a heading** — so `## X [x]`
+shows literal text, the same visual class as `[3/3]`, while being a poorer
+answer: it cannot say *two of three*, and a derived `[x]` on a parent is a state
+that looks toggleable and is not (unchecking it is re-derived on the next child
+edit).
 
-| document | parse + query |
-|---|---|
-| 200 items, 11 KB | **2.13 ms** |
-| 1 000 items, 56 KB | 9.10 ms |
-| 4 000 items, 229 KB | 35.17 ms |
+**Chosen: the cookie, org's form, `[done/total]`, at the end of the heading.**
 
-Against rano's measured frame cost of **139 µs**, the smallest of those is 15× a
-whole frame, and it grows linearly with the document — which is the §16.0 sin
-this project has spent two phases removing.
+1. **It never lies about a partial subtree.** `[2/3]` is honest; a derived `[x]`
+   on a partly-done parent is either wrong or `[ ]`, and `[ ]` hides progress.
+2. **It presents no false affordance** — nobody tries to click `[2/3]`.
+3. **It maps onto the wire's three states exactly**: `[0/n]` → `Pending`,
+   partial → `InProgress`, `[n/n]` → `Completed`. That is the operator's actual
+   requirement — the file carries the fact harnessd needs, in a form that
+   projects onto `TodoStatus`.
+4. **It costs the renderer nothing.** The cookie is text on the heading row and
+   rano already draws that line; there is **no gutter work**. (This corrects the
+   direction I was given: `up` being in moves the estimate, but *down* in
+   `todo.rs` — not up in `ui.rs`.)
 
-**So: computed per edit, cached, and read by the renderer. Never per frame.**
-A toggle is one keystroke; 2.13 ms there is imperceptible, and it is the same
-order as the 2.5 ms keystroke already measured on a 2 MB file. The 4 000-item
-case (35 ms per edit) is a real cost and is named rather than hidden; bounding
-it means recomputing only the ancestor chain of the edited line, which needs the
-previous parse for ancestry and is deferred until something is slow.
+**What the option I dropped would have bought**, honestly: for a checklist
+written as **nested bullets** rather than under headings, auto-`[x]` on the
+parent genuinely wins — a `- [x] parent` renders as a ticked box in GitHub and
+most editors, where `[2/3]` is only text, and the parent marker already exists so
+nothing has to be invented. That is a real case and a detectable one (which
+container the item sits in). It is not *this* file, so the cookie is the design's
+answer and the nested-bullet case is recorded as where the other one wins.
 
-### Decision 1a — and this is the part that is easy to get wrong
+### The insert rule: update-if-present, NEVER insert
 
-**Derived progress must not be rendered in the checkbox.** If `up` is displayed
-where the stored marker lives, then a parent whose children are all done reads
-`[x]` on screen while the file says `[ ]` — and the operator has the same
-"editor fighting me" symptom the ruling exists to prevent, moved from storage
-into rendering. Worse, it is invisible: the file and the screen disagree and
-only one of them is real.
+A cookie is maintained on a heading that already has one, and is never added to a
+heading that does not.
 
-Org's own answer is two affordances: the checkbox is the stored state, the
-cookie (`[2/3]`, `[/]`) is the derived progress, and they are in different
-places.
+The number that decides it: `rano/TODO.md` has **49 headings and no cookies**. If
+a toggle inserted a cookie, the first `[x]` on a shared, committed file would
+rewrite **49 heading lines** — the exact diff-nobody-asked-for that leticl
+stopped before building to avoid. With update-if-present, a first toggle on an
+uncookied file produces **exactly one edit**, identical to the pre-`up`
+behaviour, and adopting the feature is a deliberate act: write `[2/3]` once and
+it stays right from then on.
 
-Cheapest good place for ours: **the line-number gutter**, which already renders
-one fact per row (diagnostic severity, by colour) and costs no document bytes
-at all. A subtree's progress marker on the heading's row is the same shape as
-what the gutter already does. Cost to name: the cached progress has to reach
-`ui.rs`, which means it lives in `BufferState` or is passed into `draw`.
+This is org's posture too — the file declares what it wants maintained.
 
-If that is not wanted, the fallback is simpler and costs nothing: **do not
-render `up` at all** and compute nothing per frame. `down` alone is the whole
-of "auto done for the whole subtree"; `up` is a convenience on top, and it is
-the half with the whole cost.
+## Decision 1a — nobody double-renders the cookie
 
-## Decision 2 — the set is closed; an unknown member is refused by name
+`leticl`'s pane **already computes and displays this value**, at
+`src/panes.lisp:922-927`: `:mark (%todo-rollup marks)` with
+`:text "~a  [~a/~a]"`. And `%todo-rollup` (`:876-881`) is org's rule verbatim,
+in their own words — *"every child done makes the parent done; any child started
+makes it started; otherwise open"* — over their three marks `:open`/`:doing`/
+`:done`, which are the wire's three states.
 
-`{ Pending, InProgress, Completed }`. An unrecognised marker character produces
-a diagnostic naming the character and offset — never coerced to Pending, which
-is precisely what the grammar already does and is the bug.
+Two consequences, and the second is a bug report for the letibot side:
 
-## Decision 3 — the boundary with harnessd's `TodoEntry`: UNCLEAN, and it does not close
+- Writing the cookie makes the pane's render-time rollup **persistable** rather
+  than a coincidence: file and pane agree by construction.
+- But if the pane keeps *generating* the cookie text while the file also
+  contains one, it renders **`Section [2/3]  [2/3]`**. leticl must read the
+  cookie out of the heading text instead of appending its own. Flagged here
+  because a divergence between two implementations of one convention is exactly
+  what both ends are being asked to catch early.
 
-The wire carries a THIRD axis this schema cannot model: **authorship**. Read at
-`letibot/wt-resume-chain/crates/sessionlog/src/event.rs:99` and `:105-114`:
+## The byte-identity assertion, restated
+
+The hard requirement was *"the file after equals the file before except the bytes
+I meant to change."* With `up` written, a child toggle **legitimately rewrites its
+ancestor chain**, so the assertion becomes:
+
+> **only the bytes the rule required changed, and nothing else in the file moved.**
+
+The intended set is now `{the toggled marker} ∪ {ancestor cookies whose text
+changes}`, and both halves are named rather than counted.
+
+**The no-op rule becomes more load-bearing, not less.** An ancestor whose cookie
+is already correct must produce **no edit at all**, or every child toggle dirties
+the whole path to the root, the undo stack fills with steps that change nothing,
+and a byte-identical save rewrites the file. Asserted, not assumed.
+
+## The API
+
+New module `src/todo.rs`, exported from `lib.rs`.
+
+**Placement is a hard requirement.** `lib.rs` exports `buffer encoding rows
+syntax width`; `editor`, `ui`, `keys`, `bindings` are binary-only, so a schema
+behind `main.rs` is unreachable from leticl and the reason for the work
+evaporates. No `Buffer`, no `Editor`, no crossterm, no `Frame`: `&str` in,
+ranges and edits out.
+
+```rust
+pub enum State { Pending, InProgress, Completed }
+
+pub struct Item {
+    pub state: State,
+    pub marker: Range<usize>,      // the exact 3 bytes
+    pub item: Range<usize>,        // the whole list_item
+    pub line: usize, pub col: usize,
+}
+
+/// A statistics cookie on a heading: `[2/3]`. Only ever maintained, never added.
+pub struct Cookie { pub span: Range<usize>, pub done: usize, pub total: usize }
+
+pub struct Heading {
+    pub level: usize,
+    pub line: usize,
+    pub section: Range<usize>,     // the whole subtree, nested sections included
+    pub cookie: Option<Cookie>,    // as found in the file, if the file has one
+}
+
+/// One splice. The ONLY way anything here changes a document.
+pub struct Edit { pub range: Range<usize>, pub replacement: String }
+
+pub struct Doc { /* src, items, headings, cached progress */ }
+
+impl Doc {
+    pub fn parse(src: &str) -> Doc;
+
+    /// DOWN, plus the ancestor cookies it implies. Every edit in the returned
+    /// vec changes bytes: a marker already at the target state, and an ancestor
+    /// cookie already correct, produce NOTHING.
+    pub fn set_subtree_done(&self, span: Range<usize>, s: State) -> Vec<Edit>;
+
+    /// UP as a fact: done/total under this node.
+    pub fn progress(&self, span: Range<usize>) -> (usize, usize);
+
+    /// The subtree of the item or heading at `line`, for a key binding.
+    pub fn subtree_at(&self, line: usize) -> Option<Range<usize>>;
+
+    /// What the format cannot express: an unknown marker character, a checkbox
+    /// with no list, the `[-]` the grammar cannot name. Same tuple shape
+    /// `syntax_errors` already returns, so the existing gutter renders it.
+    /// NOT for a cookie that disagrees with its children — that is arithmetic
+    /// that is behind, and doing the arithmetic fixes it.
+    pub fn check(&self) -> Vec<(usize, usize, usize, String)>;
+}
+```
+
+## The tests
+
+Already written and passing against the real grammar (the first three):
+
+- `a_cascade_changes_only_marker_bytes` — asserts the containment the cascade
+  rides on, then that **every differing byte index is inside a marker range** and
+  every other byte is identical.
+- `a_cascade_is_idempotent` — a second cascade over the result yields **no
+  edits at all**.
+- `a_section_is_a_cascade_target_too`.
+- `the_marker_is_exactly_three_bytes_at_a_grammar_given_offset`,
+  `every_bullet_style_can_hold_a_marker`, `a_capital_x_is_checked`,
+  `a_section_is_the_whole_subtree`, `a_heading_carries_its_level_marker`,
+  `an_unknown_marker_is_silent_in_the_grammar`,
+  `a_cookie_sits_inside_the_heading_range` — the assumption Decision 1 rests on:
+  `[2/3]` is inside the heading's own range (so it is findable by looking at the
+  heading, not by scanning lines) and the grammar gives it no node, which is why
+  reading it is a validated read at a grammar-anchored offset.
+
+Required before the module is done:
+
+- `a_toggle_on_an_uncookied_file_is_one_edit` — the 49-heading property: no
+  cookie is ever inserted, so the first toggle edits one marker and nothing else.
+- `a_toggle_updates_only_the_ancestor_cookies_that_change` — three levels, one
+  number moves; the second ancestor's cookie is already right and yields no edit.
+- `an_ancestor_cookie_already_correct_produces_no_edit` — the no-op rule, which
+  is what keeps a toggle from dirtying the path to the root.
+- `prose_indentation_and_trailing_space_survive_untouched` — over a fixture with
+  two spaces after a period, a `Deps:` block, hard-wrapped lines and trailing
+  whitespace. leticl's actual complaint, asserted rather than assumed.
+- `a_fence_inside_a_blockquote_is_a_fence` exists already on the grammar side and
+  guards the fixture that started this.
+
+Writing these first has already paid twice, both times with the test right and me
+wrong: the cascade helper returned every marker in the span rather than the ones
+it would rewrite, so a second run emitted three no-op edits. **The edit set is
+part of the contract.**
+
+## Revised size
+
+The old estimate was ~250 lines. **Revised: ~350-450 in `src/todo.rs`**, plus the
+five tests above.
+
+The growth is cookie support — parsing an existing cookie off a heading line,
+computing done/total for its section, and assembling ancestor edits only where
+the text changes — and it is all in the **schema**, not the renderer. The gutter
+work I expected to be implied by `up` does **not** exist: the cookie is text on a
+line rano already draws.
+
+## What is deliberately absent
+
+- **Authorship.** The schema carries no `by` and cannot: a markdown file does not
+  record who wrote a line. Decision 3 states what that costs the sync.
+- **Staleness apparatus.** Out of date is not invalid; the next touch fixes it.
+- No renderer and no inverse function. That is the design, not a gap.
+- No second parser; every range is a query result or a validated read at a
+  grammar-anchored offset.
+- No editor integration yet: the schema exists and is reachable from the library
+  first, and leticl is the first consumer.
+- Auto-`[x]` on a list-item parent. Recorded above as the better choice *only*
+  where the checklist is nested bullets rather than under headings.
+
+## Decision 3 — the boundary with the wire's `TodoEntry`: UNCLEAN
+
+Read at `letibot/wt-resume-chain/crates/sessionlog/src/event.rs:99` and
+`:105-114`, confirmed verbatim:
 
 ```rust
 pub enum TodoBy { #[default] Model, Operator }
@@ -137,154 +289,44 @@ pub struct TodoEntry {
 }
 ```
 
-The storage twin is `letibot_tokencore::store::TodoItem::by`, the same two
-variants with the same default, and the reason is in its own comment: the two
-authors *"share one list and a format, and this field is the whole of the
-difference between them."*
+The storage twin is `letibot_tokencore::store::TodoItem::by`, whose own comment
+gives the reason: the two authors *"share one list and a format, and this field is
+the whole of the difference between them."*
 
-So:
+- **Status: MATCH.** My three names are the wire's three, same meaning — and the
+  cookie projects onto them (`[0/n]`/partial/`[n/n]`).
+- **Authorship: ABSENT and not addable.** A `[ ]` line records nothing about who
+  wrote it. **markdown → wire** must assign `by` as a *policy*, not read it as a
+  fact. **wire → markdown** loses it, and `set_operator_todos`'s "replace the
+  operator's half and leave the model's alone" then has nothing to key on.
+- **Two variants cannot express the third writer** the operator's own design now
+  has: their `$EDITOR`, a `git pull`, another agent. Not mine to solve; recorded
+  so the sync builder knows which axis is missing.
 
-- **Status: MATCH, and that part is clean.** My three names are the wire's three
-  names with the same meaning. This remains the one reason the third state stays
-  in the schema even though a cascade only needs two.
-- **Authorship: ABSENT, and it cannot be added.** A `[ ]` line in a markdown
-  file says nothing about who wrote it. There is no org convention for it and no
-  place in a checkbox to put it. Consequences, stated rather than discovered
-  later:
-  - **markdown → wire:** every row's `by` must be assigned by the sync layer as
-    a *policy* ("the file is the operator's"), not read as a fact. The file does
-    not hold that fact.
-  - **wire → markdown:** `by` is lost. If the model's rows and the operator's
-    rows both live in `TODO.md`, they become one indistinguishable list — and
-    `set_operator_todos`'s "replace the operator's half and leave the model's
-    alone" has nothing to key on.
-- **Two variants are already insufficient for the operator's own design**, before
-  this schema adds anything: a third writer — their `$EDITOR`, a `git pull`,
-  another agent — is neither `Model` nor `Operator`. Not mine to solve; recorded
-  so whoever builds the sync knows which axis they are missing.
-
-**The boundary, honestly stated: this schema is a VIEW of a file, and it carries
-what the file carries.** The wire needs one thing the file does not have, so the
-sync is lossy in one direction and invented in the other, and the design that
-reconciles that is upstream of this module. Stating it as "clean" would have
-hidden exactly the work somebody else has to do.
+This schema is a **view** of a file and carries what the file carries. The wire
+needs one thing the file does not have, and the design that reconciles that is
+upstream of this module.
 
 ### The failed search, filed
 
-My previous message claimed the opposite — *"there is no `by` field; `TodoEntry`
-is `{content, status}`"* — and it was wrong. Filing it, because an absence claim
-is worth exactly the search that failed and nothing more:
+An earlier message claimed the opposite — *"there is no `by` field"* — and was
+wrong. Filed because an absence claim is worth exactly the search that failed:
 
 - **Search:** `grep -rn "TodoEntry" ~/Projects --include=*.rs -l | head -10`, then
-  `sed -n '75,115p'` on ONE hit,
-  `letibot-profiles/crates/sessionlog/src/event.rs` — and the claim was made from
+  `sed -n '75,115p'` on **one** hit,
+  `letibot-profiles/crates/sessionlog/src/event.rs`, and the claim was made from
   that one file.
 - **What it found:** in *that* worktree `TodoEntry` really is `{content, status}`.
   The claim was true of the file I read.
 - **Why it failed — the scope, not the pattern:** `letibot` is a multi-worktree
-  repo (`letibot-profiles`, `wt-todo`, `wt-resume-chain`, `wt-edit`, `wt-cat`)
-  whose worktrees sit on different branches, and the field exists on exactly one
-  of them. Counted: `TodoBy` occurs 3 times in `wt-resume-chain` and **0 times in
-  each of the other four**. I read one worktree's copy and generalised to "the
-  wire".
-- **A refinement worth keeping, because it changes what to guard against.** The
-  first diagnosis I was given was that the search missed the field because `by`
-  is typed `TodoBy` rather than `String`, so a pattern looking for `by: String`
-  could not match it. That is not what happened: my pattern was `pub by`, which
-  *does* match `pub by: TodoBy`, and re-running it in `letibot-profiles` still
-  returns only the three unrelated `by: String` fields — because in that file
-  they are all there is. **The load-bearing scope was the branch, and a worktree
-  looks exactly like the repo.** That is harder to notice than a grep pattern: a
-  pattern is visible in the command you wrote, and a checkout is not visible at
-  all.
-
-## The API, and where it must live
-
-New module `src/todo.rs`, exported from `lib.rs`.
-
-**This placement is a hard requirement, not a preference.** `lib.rs` exports
-`buffer encoding rows syntax width`; `editor`, `ui`, `keys` and `bindings` are
-binary-only. A schema behind `main.rs` is unreachable from leticl, and the reason
-for the work evaporates. So: no `Buffer`, no `Editor`, no crossterm, no `Frame`.
-`&str` in, ranges and edits out.
-
-```rust
-pub enum State { Pending, InProgress, Completed }
-
-pub struct Item {
-    pub state: State,
-    pub marker: Range<usize>,      // the exact 3 bytes
-    pub item: Range<usize>,        // the whole list_item
-    pub heading: Option<usize>,    // index into headings
-    pub line: usize, pub col: usize,
-}
-
-pub struct Heading { pub level: usize, pub line: usize,
-                     pub section: Range<usize> }   // the whole subtree
-
-pub struct Doc { /* src, items, headings, cached progress */ }
-
-/// One splice. The ONLY way anything here changes a document.
-pub struct Edit { pub range: Range<usize>, pub replacement: &'static str }
-impl Edit { pub fn apply(&self, src: &str) -> String; }
-
-impl Doc {
-    pub fn parse(src: &str) -> Doc;
-
-    /// DOWN: mark a subtree done. One Edit per marker that CHANGES — a
-    /// cascade over an already-done subtree returns an empty vec, which is
-    /// what makes it idempotent and keeps the undo stack honest.
-    pub fn set_subtree_done(&self, span: Range<usize>, s: State) -> Vec<Edit>;
-
-    /// UP, as a fact: done/total under this node. Never written.
-    pub fn progress(&self, span: Range<usize>) -> (usize, usize);
-
-    /// The subtree of the item or heading at `line`, for a key binding.
-    pub fn subtree_at(&self, line: usize) -> Option<Range<usize>>;
-
-    /// Schema violations, in the shape `syntax_errors` already returns, so the
-    /// existing gutter renders them: (line, col, end_col, message).
-    pub fn check(&self) -> Vec<(usize, usize, usize, String)>;
-}
-```
-
-## The tests, written before the implementation
-
-The hard requirement was that the first test not be "the toggle worked" but "the
-file after equals the file before except for the bytes I meant to change" — run
-twice. Those exist and pass, against the real grammar:
-
-- `a_cascade_changes_only_marker_bytes` — asserts the containment the cascade
-  rides on (nested items inside the parent's range, the next section's outside),
-  then checks **every differing byte index is inside a marker range** and every
-  other byte is identical.
-- `a_cascade_is_idempotent` — a second cascade over the result produces **no
-  edits at all**.
-- `a_section_is_a_cascade_target_too` — the same over a heading's subtree.
-- `the_marker_is_exactly_three_bytes_at_a_grammar_given_offset`,
-  `every_bullet_style_can_hold_a_marker`, `a_capital_x_is_checked`,
-  `a_section_is_the_whole_subtree`, `a_heading_carries_its_level_marker`,
-  `an_unknown_marker_is_silent_in_the_grammar`.
-
-Writing these first paid twice, and both times the test was right and I was
-wrong: the cascade helper returned every marker in the span rather than the ones
-it would rewrite, so a second run emitted three no-op edits — **the edit set is
-part of the contract, not an implementation detail**. That is now asserted.
-
-Still to write when the module exists: `prose_indentation_and_trailing_space_survive_untouched`,
-over a fixture with two spaces after a period, a `Deps:` block, hard-wrapped
-lines and trailing whitespace — leticl's actual complaint, asserted rather than
-assumed.
-
-## What is deliberately absent
-
-- **Authorship.** The schema carries no `by` and cannot: a markdown file does not
-  record who wrote a line. This is a property of the medium rather than a choice
-  to defer, and Decision 3 states what it costs the sync in both directions.
-- No renderer, no inverse function. That is the design, not a gap.
-- No second parser for markdown; every range is from a query or a validated read
-  at a grammar-anchored offset.
-- No editor integration yet. `ui.rs`/`editor.rs` know nothing about todos; the
-  schema exists and is reachable from the library first, and leticl is the first
-  consumer.
-- `up` rendering is proposed (gutter) but not required; `down` stands alone.
+  repo whose worktrees sit on different branches, and the field exists on exactly
+  one. `TodoBy` occurs 3 times in `wt-resume-chain` and **0 times in each of the
+  other four**. I read one worktree's copy and generalised to "the wire".
+- **A refinement, because it changes what to guard against.** The proposed
+  diagnosis was that a pattern looking for `by: String` could not match a field
+  typed `TodoBy`. That is not what happened: my pattern was `pub by`, which *does*
+  match `pub by: TodoBy`, and re-running it in `letibot-profiles` still returns
+  only the three unrelated fields — because there they are all there is. **The
+  load-bearing scope was the branch, and a worktree looks exactly like the
+  repo.** Harder to notice than a pattern: a pattern is visible in the command
+  you wrote, a checkout is not visible at all.

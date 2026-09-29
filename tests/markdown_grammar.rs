@@ -334,6 +334,51 @@ fn measure_the_cost_of_a_current_tree() {
     }
 }
 
+/// **The cookie is inside the heading's own range**, so the schema can find it by
+/// looking at the heading rather than by scanning lines. This is the assumption
+/// Decision 1 rests on: `[2/3]` is plain text to the grammar, so it has no node of
+/// its own, and the only thing that makes it findable is that the heading's range
+/// covers it.
+#[test]
+fn a_cookie_sits_inside_the_heading_range() {
+    let src = "## Now [2/3]\n\n- [x] one\n- [ ] two\n- [x] three\n";
+    let root = tree(src);
+    let mut heads = Vec::new();
+    fn go<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+        if n.kind == "atx_heading" {
+            out.push(n);
+        }
+        for c in &n.children {
+            go(c, out);
+        }
+    }
+    go(&root, &mut heads);
+    let h = heads.first().expect("a heading");
+    let cookie_at = src.find("[2/3]").expect("the cookie");
+    assert!(
+        h.start <= cookie_at && cookie_at + 5 <= h.end,
+        "the cookie at {cookie_at}..{} must lie inside the heading's {}..{}: {:?}",
+        cookie_at + 5,
+        h.start,
+        h.end,
+        &src[h.start..h.end]
+    );
+    // And it has no node of its own — it is text inside `inline`, which is why
+    // reading it is a validated read at a grammar-anchored offset, not a capture.
+    let mut kinds = Vec::new();
+    node_kinds(h, &mut kinds);
+    assert!(
+        !kinds.iter().any(|k| k.contains("cookie")),
+        "if the grammar grew a cookie node, this design should capture it instead: {kinds:?}"
+    );
+    // The heading's text still parses, and the items are still items.
+    assert_eq!(
+        markers(src).len(),
+        3,
+        "the cookie must not disturb marker parsing"
+    );
+}
+
 /// `[X]` is a checkbox; a capital X is not a different state.
 #[test]
 fn a_capital_x_is_checked() {

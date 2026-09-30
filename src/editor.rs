@@ -954,7 +954,9 @@ impl Editor {
     /// indents with tabs, otherwise the common leading-space width (the GCD,
     /// so mixed 4/8 comes out as 4). Falls back to a tab for flat buffers.
     pub fn indent_unit(&self) -> String {
-        let lines = self.bs().buf.lines_slice();
+        // `rows()` rather than a copied slice: this only walks the rows, so the
+        // chunked store serves it directly and nothing is materialised.
+        let lines: Vec<&Vec<char>> = self.bs().buf.rows().collect();
         if lines.iter().any(|l| l.first() == Some(&'\t')) {
             return "\t".to_string();
         }
@@ -1026,7 +1028,7 @@ impl Editor {
         let first = first_row.min(len);
         let last = last_row_exclusive.min(len);
         let before = if first < last {
-            bs.buf.lines_slice()[first..last].to_vec()
+            bs.buf.rows_range(first, last)
         } else {
             Vec::new()
         };
@@ -1117,7 +1119,7 @@ impl Editor {
         if after_start >= end {
             Vec::new()
         } else {
-            self.bs().buf.lines_slice()[after_start..end].to_vec()
+            self.bs().buf.rows_range(after_start, end)
         }
     }
 
@@ -1144,7 +1146,7 @@ impl Editor {
             let end = (step.after_start + step.after.len())
                 .min(bs.buf.row_count())
                 .max(start);
-            bs.buf.splice_rows(start..end, step.before.iter().cloned());
+            bs.buf.splice_rows(start, end, step.before.iter().cloned());
             bs.cursor = step.cur_before;
             bs.last_kind = None;
             self.edit_invalidate();
@@ -1160,7 +1162,7 @@ impl Editor {
             let end = (step.start + step.before.len())
                 .min(bs.buf.row_count())
                 .max(start);
-            bs.buf.splice_rows(start..end, step.after.iter().cloned());
+            bs.buf.splice_rows(start, end, step.after.iter().cloned());
             bs.cursor = step.cur_after;
             bs.last_kind = None;
             self.edit_invalidate();
@@ -1214,8 +1216,7 @@ impl Editor {
     /// Closes the popup when the cursor leaves completion context.
     pub(crate) fn maybe_request_completion(&mut self) {
         let cur = self.bs().cursor;
-        let Some((prefix, start)) =
-            completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
+        let Some((prefix, start)) = completion_prefix(&self.bs().buf.rows_vec(), cur.row, cur.col)
         else {
             self.completion = None;
             self.completion_q.clear();
@@ -1267,7 +1268,7 @@ impl Editor {
             return;
         };
         let cur = self.bs().cursor;
-        let Some((prefix, _)) = completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
+        let Some((prefix, _)) = completion_prefix(&self.bs().buf.rows_vec(), cur.row, cur.col)
         else {
             self.completion = None;
             self.completion_q.clear();
@@ -1373,7 +1374,7 @@ impl Editor {
             self.completion_retries = 0;
             return;
         }
-        if completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col).is_none() {
+        if completion_prefix(&self.bs().buf.rows_vec(), cur.row, cur.col).is_none() {
             self.completion_retries = 0;
             self.completion = None;
             return;
@@ -1395,7 +1396,7 @@ impl Editor {
         if cur.row != p.row {
             return;
         }
-        let Some((prefix, _)) = completion_prefix(self.bs().buf.lines_slice(), cur.row, cur.col)
+        let Some((prefix, _)) = completion_prefix(&self.bs().buf.rows_vec(), cur.row, cur.col)
         else {
             return;
         };
@@ -2606,7 +2607,7 @@ impl Editor {
         self.begin_action(ActionKind::Justify, top, bot + 1);
         self.bs_mut()
             .buf
-            .splice_rows(top..=bot, new_lines.iter().cloned());
+            .splice_rows(top, bot + 1, new_lines.iter().cloned());
         self.bs_mut().cursor = Pos { row: top, col: 0 };
         self.bs_mut().mark = None;
         self.finish_step();
@@ -2622,8 +2623,10 @@ impl Editor {
             None => (0, self.bs().buf.row_count().saturating_sub(1)),
         };
         self.begin_action(ActionKind::Sort, top, bot + 1);
-        let region: &mut [Vec<char>] = &mut self.bs_mut().buf.rows_mut_slice()[top..=bot];
-        region.sort_by_cached_key(|l| l.iter().collect::<String>().to_lowercase());
+        self.bs_mut().buf.sort_rows_by(top, bot + 1, |a, b| {
+            let key = |l: &Vec<char>| l.iter().collect::<String>().to_lowercase();
+            key(a).cmp(&key(b))
+        });
         self.bs_mut().mark = None;
         self.finish_step();
         self.edit_invalidate();
@@ -2684,7 +2687,7 @@ pub(crate) fn plural(n: usize) -> &'static str {
 pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
     bs.syntax_diags = bs
         .hl
-        .syntax_errors(bs.buf.lines_slice())
+        .syntax_errors(&bs.buf.rows_vec())
         .into_iter()
         .map(|(line, col, end_col, message)| lsp::Diagnostic {
             line,
@@ -2694,7 +2697,7 @@ pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
             severity: 1,
         })
         .collect();
-    widen_zero_width(&mut bs.syntax_diags, bs.buf.lines_slice());
+    widen_zero_width(&mut bs.syntax_diags, &bs.buf.rows_vec());
 }
 
 /// rust-analyzer reports many syntax errors as zero-width insertion points,

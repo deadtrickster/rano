@@ -1,4 +1,5 @@
 use crate::encoding::{self, Encoding, Scope};
+use crate::rows::Rows;
 use std::fs;
 use std::path::PathBuf;
 
@@ -10,11 +11,20 @@ pub struct Pos {
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    /// The rows. Private: everything outside this module goes through the
-    /// accessors below, so the storage can become a chunked, lazily-decoded
-    /// store (TODO.md §16.3) without touching a caller. Nothing enforced that
-    /// before this migration — the field was `pub`, and 216 sites read it.
-    lines: Vec<Vec<char>>,
+    /// The rows, in chunks.
+    ///
+    /// Private, and it has been since the accessor layer landed: everything
+    /// outside this module goes through the methods below, which is what made
+    /// this swap a change to one file plus the fifteen callers that wanted a
+    /// contiguous `&[Vec<char>]`.
+    ///
+    /// **Stage A of TODO.md §16.3**: chunked, and every row resident. A
+    /// structural edit shifts one chunk instead of every row header below it —
+    /// 1.3 ms per line insert at 2.6M rows was the number. The lazy half (a
+    /// row decoded from the file on demand) is stage B: it is what saves the
+    /// 835 MB, and it is the half that can silently blank a row, so it goes
+    /// second and behind an API that cannot lie about a missing row.
+    lines: Rows,
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
@@ -28,7 +38,7 @@ pub struct Buffer {
 impl Buffer {
     pub fn new() -> Self {
         Self {
-            lines: vec![Vec::new()],
+            lines: Rows::from_vec(vec![Vec::new()]),
             name: None,
             modified: false,
             crlf: false,
@@ -76,7 +86,7 @@ impl Buffer {
             lines.push(Vec::new());
         }
         Self {
-            lines,
+            lines: Rows::from_vec(lines),
             name,
             modified: false,
             crlf,
@@ -131,17 +141,33 @@ impl Buffer {
         self.lines.iter()
     }
 
-    /// The rows as a slice — for the callers that pass the whole set to
-    /// something (the highlighter's error walk, the export renderer).
-    pub fn lines_slice(&self) -> &[Vec<char>] {
-        &self.lines
+    /// A copy of rows `[a, b)`.
+    ///
+    /// This replaces a `&[Vec<char>]` slice: the rows live in chunks, so there
+    /// is no contiguous range to lend out. Every caller of the slice it replaced
+    /// was O(document) already — a whole-buffer search, an export, the undo
+    /// region capture — so the copy is the same order as the work around it.
+    pub fn rows_range(&self, a: usize, b: usize) -> Vec<Vec<char>> {
+        self.lines.range(a, b)
     }
 
-    /// The rows as a mutable slice — for the in-place whole-set operations
-    /// (sort a marked region, justify a paragraph) that reorder rows without
-    /// changing how many there are.
-    pub fn rows_mut_slice(&mut self) -> &mut [Vec<char>] {
-        &mut self.lines
+    /// Every row, as a flat `Vec`.
+    ///
+    /// For the callers that want the whole document and never did anything but
+    /// iterate it (the highlighter's error walk, the search matcher, export).
+    pub fn rows_vec(&self) -> Vec<Vec<char>> {
+        self.lines.to_vec()
+    }
+
+    /// Sort rows `[a, b)` in place.
+    ///
+    /// Replaces handing out a `&mut [Vec<char>]` to `sort_lines`: the rows are
+    /// copied out, sorted, and copied back, which is the same order as the sort.
+    pub fn sort_rows_by<F>(&mut self, a: usize, b: usize, f: F)
+    where
+        F: FnMut(&Vec<char>, &Vec<char>) -> std::cmp::Ordering,
+    {
+        self.lines.sort_range_by(a, b, f);
     }
 
     /// Replace row `r`. Out of range is a no-op, like every other row operation
@@ -173,13 +199,16 @@ impl Buffer {
         self.lines.extend(rows);
     }
 
-    /// Replace rows in `range` with `items` — a `Vec::splice` that callers can
-    /// name. Both `start..end` and `a..=b` are accepted.
-    pub fn splice_rows<I>(&mut self, range: impl std::ops::RangeBounds<usize>, items: I)
+    /// Replace rows `[start, end)` with `items`.
+    ///
+    /// Takes explicit bounds rather than a range, because callers use both
+    /// `start..end` and `a..=b` and converting the second at the call site is
+    /// one character where guessing inside would be a bug.
+    pub fn splice_rows<I>(&mut self, start: usize, end: usize, items: I)
     where
         I: IntoIterator<Item = Vec<char>>,
     {
-        self.lines.splice(range, items);
+        self.lines.splice(start, end, items);
     }
 
     /// Drop every row. The buffer is momentarily not a valid buffer; every
@@ -191,13 +220,13 @@ impl Buffer {
     /// Take the rows out, leaving this buffer empty — for handing a whole
     /// document to another buffer without copying it.
     pub fn take_rows(&mut self) -> Vec<Vec<char>> {
-        std::mem::take(&mut self.lines)
+        self.lines.to_vec()
     }
 
     /// Replace every row outright — the "assign a whole document" operation,
     /// which `from_text` and the test helpers use.
     pub fn set_rows(&mut self, rows: Vec<Vec<char>>) {
-        self.lines = rows;
+        self.lines = Rows::from_vec(rows);
     }
 
     /// Remove row `r`, returning it (empty when out of range).
@@ -213,7 +242,7 @@ impl Buffer {
     /// sort, justify, save, export, a whole-buffer search — which need the rows
     /// as a plain value rather than as a view.
     pub fn to_lines(&self) -> Vec<Vec<char>> {
-        self.lines.clone()
+        self.lines.to_vec()
     }
 
     pub fn clamp(&self, p: Pos) -> Pos {
@@ -232,7 +261,7 @@ impl Buffer {
     /// cheap on a file that is enormous.
     pub fn is_at_least(&self, cap: usize) -> bool {
         let mut n = 0usize;
-        for l in &self.lines {
+        for l in self.lines.iter() {
             // +1 for the newline `text()` puts after each line.
             n += l.len() + 1;
             if n >= cap {
@@ -356,7 +385,7 @@ impl Buffer {
         let r = a.row + 1 - first_removed;
         let end = b.row - 1 - first_removed; // inclusive
         if r <= end {
-            out.extend(self.lines.drain(r..=end));
+            out.extend(self.lines.drain(r, end + 1));
         }
         // b's row now sits right after everything that remains above it.
         let b_row = a.row + 1 - first_removed;
@@ -472,7 +501,7 @@ mod tests {
             lines
         };
         Buffer {
-            lines,
+            lines: Rows::from_vec(lines),
             name: None,
             modified: false,
             crlf: false,

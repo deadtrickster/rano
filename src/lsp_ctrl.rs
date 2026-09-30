@@ -148,7 +148,7 @@ impl Editor {
             match e {
                 lsp::LspEvent::Diagnostics { mut diags, .. } => {
                     let bs = self.bs_mut();
-                    widen_zero_width(&mut diags, bs.buf.lines_slice());
+                    widen_zero_width(&mut diags, &bs.buf.rows_vec());
                     bs.lsp_diags = diags;
                     dirty = true;
                 }

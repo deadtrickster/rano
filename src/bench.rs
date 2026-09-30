@@ -263,7 +263,7 @@ fn bench_breakdown() {
         let (t, _) = time(3, || {
             let bs = e.bs_mut();
             let r = bs.cursor.row;
-            std::hint::black_box(bs.buf.lines_slice()[r..r + 1].to_vec());
+            std::hint::black_box(bs.buf.rows_range(r, r + 1));
         });
         println!("    {:>22}  {}", "undo row clone", ms(t));
         // The buffer's own insert: a Vec<char> splice, O(row).

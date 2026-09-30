@@ -12,6 +12,17 @@ mod loader;
 mod lsp;
 mod lsp_ctrl;
 mod prompt;
+// The chunked row store (§16.3). Declared here now because the binary's
+// `Buffer` is built on it — the library-only note in `lib.rs` said this would
+// happen when the migration landed.
+//
+// `allow(dead_code)` because the binary uses only the first half of this file.
+// `Rows` is stage A and has a caller; `RowStore` is stage B — the lazy decode,
+// which saves 835 MB on a 184 MB file and is the half that can silently blank a
+// row, so it waits for an API that cannot lie about a missing row. The library
+// exports both (`pub mod rows`), where nothing here is dead.
+#[allow(dead_code)]
+mod rows;
 mod search;
 mod search_ctrl;
 mod syntax;
@@ -434,7 +445,7 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
     let mut hl = syntax::Highlighter::new();
     hl.refresh(&buf);
     let style_of = |p: Pos| hl.style_at(p);
-    let out = export::render(buf.lines_slice(), 8, &title, fmt, &style_of);
+    let out = export::render(&buf.rows_vec(), 8, &title, fmt, &style_of);
     // Written, not `print!`ed: a closed pipe is the normal end of
     // `rano --export ansi f.rs | head`, not a panic. `println!` aborts the
     // process with a broken-pipe message when the reader goes away.

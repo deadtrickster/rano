@@ -1855,7 +1855,7 @@ the model to a single row, where the per-step comparison passes 2,000 times and
 exercises nothing, so the mix is bounded to realistic sizes and the model is
 topped back up between steps.
 
-#### Stage B: the precondition is done, and the rest is BLOCKED on a conflict
+#### Stage B: the precondition is done, and the path is decided
 
 **Done 2026-09-30.** `RowStore::row` no longer returns `&[]` for a row it has not
 decoded; it panics, with a message that says which of the two cases it is
@@ -1871,47 +1871,75 @@ un-decoded row is a blank line **written to the file**; `begin_action` captures
 rows the same way, so it is a blank row **in the undo record**. Silent, and in
 the artefact rather than on the screen.
 
-**But the rest of stage B is blocked, and the blocker is not effort — it is a
-conflict with something already shipped.** Found by sizing the work:
+#### Stage B decision: **(A) the loader becomes a byte-range indexer** — decided 2026-09-30
 
-1. **The loader decodes what the lazy store wants to leave encoded.**
-   `loader.rs` reads the file itself in 64 KiB chunks, splits it on byte
-   newlines, and hands over `LoadMsg::Rows(Vec<Vec<char>>)` — decoded rows.
-   That is the streaming open §14.6 bought: first frame before the file is read,
-   rows adopted in batches, 5.6M rows/s. A lazy store wants the opposite: keep
-   the byte range, decode when read. The two cannot both be the answer to
-   "open a big file".
-2. **The loader owns and closes the `File`.** `std::thread::spawn(move ||
-   read_all(file, …))` — the reader takes the file and it drops when the thread
-   ends. `RowStore` needs that same file held open for every later read.
-3. **And the read side is 46 `&self` sites** (editor.rs 37, todo_ctrl.rs 5,
-   ui.rs 2, main.rs 1, lsp_ctrl.rs 1) which under prepare-then-read need an
-   `ensure` before them. That is tractable — it is what the design intends — but
-   it is not a mechanical edit, because "is this window resident?" has to be
-   answerable at each one.
+Made on measurement, not preference. Same 193 MB file (`huge200.log`, 2.6M rows),
+same machine, peak RSS from `VmHWM`:
 
-**So the decision that has to be made first is which open path survives:**
+| path | open | peak RSS |
+|---|---|---|
+| eager — every row decoded into a `Vec<char>` (what ships today) | 547.0 ms | **1301 MiB** |
+| lazy — `RowStore::open` + a viewport read | **84.3 ms** | **121 MiB** |
 
-- **A. The loader becomes an indexer.** It sends byte ranges instead of decoded
-  rows — `LoadMsg::Rows` becomes ranges — and hands the `File` back (or keeps it
-  in the buffer). Streaming is preserved and actually improves: it no longer
-  decodes 2.6M rows to show the first frame. Cost: rewriting a module that took
-  a whole phase (§14.6) and has its own throughput tests and bench.
-- **B. `Buffer::from_file` uses `RowStore::open` and the loader is bypassed** for
-  that path. Much smaller, and it loses the streaming open — the thing §14.6
-  exists for: *"the screen is never a dead blank"*, first frame before the read.
-- **C. Both paths, chosen by size** — which is the "two modes, and a threshold"
-  shape §16.0 explicitly removed: *"No size threshold anywhere: there is no 'too
-  big' mode."*
+**6.5× faster and 10.7× less memory**, and the lazy path read a viewport correctly
+(4050 chars from the first 60 rows). The 1301 MiB is also worse than the 835 MB
+this section had been quoting, so the cost was understated.
 
-This is a design decision about a phase that is already shipped, not a piece of
-work, and guessing it would mean rewriting `loader.rs` twice. Recorded here so it
-is made deliberately rather than discovered halfway through.
+**Why A over B.** B (`from_file` uses `RowStore::open`, bypass the loader) is
+smaller and gives the same memory win, but `RowStore::open` is **not free**: it
+scans the file's bytes for newlines, measured at **2186 MB/s**. That is O(bytes),
+so:
+
+    a 1 GB file indexes in ~469 ms   — a dead screen
+    a 2 GB file indexes in ~937 ms   — a dead screen
+
+which is precisely what §14.6 exists to prevent (*"the screen is never a dead
+blank"*, first frame before the read). B would trade the memory win for the thing
+the streaming open was built for. C is forbidden by §16.0: *"No size threshold
+anywhere: there is no 'too big' mode."*
+
+**Why A is also less work than it looks.** The loader's scan is *already* the
+index scan — it walks the bytes looking for `b'\n'` to split rows. What makes it
+cost 1301 MiB is the line after that: `decode_row` allocates a `Vec<char>` per
+row. So A **deletes** work from the loader (no decode, no per-row allocation) and
+hands the store the byte ranges it was computing anyway.
+
+The shape:
+
+- `LoadMsg::Rows(Vec<Vec<char>>)` → `LoadMsg::Ranges(Vec<(u64, u64)>)`. The scan,
+  `CHUNK`, `BATCH` and `ADOPT_BUDGET` stay as they are — the budgets are about
+  rows either way.
+- The store gains a way to be built from a stream of ranges, appending as they
+  arrive, and opens its own `File` handle. **That removes the ownership problem
+  entirely** rather than solving it: nothing has to hand the `File` back.
+- The 46 `&self` read sites (editor 37, todo_ctrl 5, ui 2, main 1, lsp_ctrl 1) get
+  their `ensure`. That is what prepare-then-read intends, and it is not
+  mechanical: each one has to answer "is this window resident?".
+
+**The one behaviour change to handle, found while checking the design.** Today a
+file that is not valid UTF-8 fails during the load with `LoadMsg::Failed` — a
+message, before any rows. With ranges there is no decode in the loader, so the
+same file fails on the **first read of that row**: `read_row` returns
+`io::Error(InvalidData)`, which arrives on the reading path rather than the load
+path. The sniffed prefix decides the encoding, so this is the case where the
+first 64 KiB is valid UTF-8 and a later byte is not. Broken either way, and seen
+at a different moment, so the render path has to be able to say so instead of
+treating it as a missing row. Worth naming because it is the kind of thing that
+looks like a bug in the new code.
+
+**Not started in the same turn as the decision, deliberately:** a half-rewritten
+`loader.rs` fails the same way a half-migrated `Buffer` would, and that module has
+its own tests and its throughput bench (`bench_load_throughput`, 422 MB/s) which
+are the proof the streaming still works. The decision is recorded so the rewrite
+has a target; doing it is the next item, not a footnote to this one.
 
 **Worth noting what is NOT blocked:** stage A already delivered §16.0's actual
-promise — size does not influence editability — for the edit the section is
-about (1.3 ms → 0.7 µs at 2.6M rows). What stage B adds is memory: 835 MB
-resident for a 184 MB file. Real, and a cost rather than a latency.
+promise — size does not influence editability — for the edit the section is about
+(1.3 ms → 0.7 µs at 2.6M rows). What stage B adds is **memory**: measured today
+at **1301 MiB resident for a 193 MB file**, against 121 MiB for the lazy path.
+Real, and it is a cost rather than a latency — which is why it was worth staging
+behind the API that could not lie, and why the open path had to be decided before
+rather than during.
 
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 

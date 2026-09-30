@@ -701,23 +701,34 @@ impl Editor {
     /// produces.
     pub(crate) const LONG_ROW: usize = 8_000;
 
-    /// The window a highlight should cover for the current viewport: the
-    /// visible rows plus a margin, and for a row too long to hand over whole,
-    /// the visible columns plus a margin.
-    fn highlight_window(&self, text_h: usize) -> syntax::Window {
+    /// The buffer rows the viewport shows, with the wrap segments of the first
+    /// and last — the CORE of [`Self::highlight_window`], before any margin.
+    ///
+    /// Split out because "does the style grid still cover what is on screen?" is
+    /// a question about the viewport, not about the margined window, and
+    /// answering it with the margined window would re-parse on every single row
+    /// scrolled.
+    fn viewport_core(&self, text_h: usize) -> (usize, usize, usize, usize) {
         let bs = self.bs();
-        let last_row = bs.buf.row_count().saturating_sub(1);
         // Visual row → buffer row, when the wrap table is fresh. The scroll
         // position is in visual rows (M-\), so a deep scroll into a long line
         // still lands on the right buffer row.
-        let (first_vis, last_vis, first_seg, last_seg) = if self.wrap && !bs.wrap_prefix.is_empty()
-        {
+        if self.wrap && !bs.wrap_prefix.is_empty() {
             let (r0, s0) = self.buf_row_of_visual(bs.scroll);
             let (r1, s1) = self.buf_row_of_visual(bs.scroll + text_h.max(1));
             (r0, r1, s0, s1)
         } else {
             (bs.scroll, bs.scroll + text_h, 0, 0)
-        };
+        }
+    }
+
+    /// The window a highlight should cover for the current viewport: the visible
+    /// rows plus a margin, and for a row too long to hand over whole, the visible
+    /// columns plus a margin.
+    fn highlight_window(&self, text_h: usize) -> syntax::Window {
+        let bs = self.bs();
+        let last_row = bs.buf.row_count().saturating_sub(1);
+        let (first_vis, last_vis, first_seg, last_seg) = self.viewport_core(text_h);
         let first = first_vis.saturating_sub(Self::HIGHLIGHT_MARGIN);
         let last = (last_vis + Self::HIGHLIGHT_MARGIN).min(last_row);
         let (first, last) = (first.min(last), last);
@@ -741,6 +752,44 @@ impl Editor {
         }
     }
 
+    /// Whether the refreshed style grid still covers what the viewport shows.
+    ///
+    /// **The window is a viewport, so it has to follow the viewport.** It is
+    /// computed from the scroll position, and until this existed nothing
+    /// recomputed it when the view scrolled: `highlight_dirty` is set by edits
+    /// and loads and by no scroll path, so `ensure_highlight` returned early for
+    /// ever after the first frame. Measured on this repo's own `TODO.md` —
+    /// opened at the top in a 59-row pane, scrolled to line 229, and every row
+    /// below ~260 was PLAIN while a fresh open of the same file coloured it.
+    /// `style_at` answers nothing outside the window, and nothing is what the
+    /// renderer draws.
+    ///
+    /// Compared against the CORE (`viewport_core`), not the margined window: the
+    /// window is viewport ± `HIGHLIGHT_MARGIN`, so asking whether the *margined*
+    /// window is still covered would come out false after one row of scroll and
+    /// re-parse on every row. Against the core it refreshes when the viewport
+    /// approaches the edge of what was parsed — every ~200 rows of scrolling —
+    /// which is what the margin is for.
+    fn highlight_covers_viewport(&self) -> bool {
+        let Some(have) = self.bs().hl.styled_window() else {
+            // No window means the last refresh covered the whole document, which
+            // covers the viewport too.
+            return true;
+        };
+        let (r0, r1, _, _) = self.viewport_core(self.text_h);
+        let last_row = self.bs().buf.row_count().saturating_sub(1);
+        let (r0, r1) = (r0.min(last_row), r1.min(last_row));
+        if r0 < have.rows.0 || r1 > have.rows.1 {
+            return false;
+        }
+        // Columns too, for a row too long to have been handed over whole: those
+        // are what horizontal scrolling moves through, and the same staleness
+        // applies. `highlight_window` computes them from the visible segments, so
+        // they only shift when the horizontal position does.
+        let want = self.highlight_window(self.text_h);
+        want.cols.0 >= have.cols.0 && want.cols.1 <= have.cols.1
+    }
+
     /// Whether the style grid is behind the buffer and the frame should
     /// re-highlight before painting.
     ///
@@ -749,7 +798,12 @@ impl Editor {
     /// per keystroke — and it is what lets a huge file open at all, since the
     /// first highlight is then the viewport window rather than the document.
     pub(crate) fn ensure_highlight(&mut self) {
-        if !self.highlight_dirty {
+        // The wrap table first: `highlight_covers_viewport` reads the viewport in
+        // VISUAL rows when wrap is on, so a stale table would answer the question
+        // about the wrong rows. `highlight_now` already did this; the check now
+        // needs it too. It is a no-op when the table is fresh.
+        self.ensure_wrap_prefix();
+        if !self.highlight_dirty && self.highlight_covers_viewport() {
             return;
         }
         self.highlight_dirty = false;

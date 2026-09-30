@@ -2145,6 +2145,60 @@ mod ed_tests {
         assert_eq!(ed.bs().wrap_prefix, vec![0, 1, 2], "5 cols → 1 visual row");
     }
 
+    /// **Scrolling must re-highlight.** The style grid is a WINDOW over the
+    /// viewport, and until now nothing recomputed it when the view scrolled:
+    /// `highlight_dirty` is set by edits and loads and by no scroll path, so
+    /// `ensure_highlight` returned early for ever after the first frame and every
+    /// newly revealed row was drawn plain.
+    ///
+    /// Found by comparing the operator's window (rano's own `TODO.md`, scrolled
+    /// to line 229) against a fresh open of the same file: everything above
+    /// ~row 260 was coloured, everything below was plain, and the boundary was
+    /// `first viewport + text_h + HIGHLIGHT_MARGIN`.
+    #[test]
+    fn scrolling_far_re_highlights_the_new_viewport() {
+        let text: String = (0..600)
+            .map(|i| format!("## Section {i}\n\n- [ ] task {i}\n\n"))
+            .collect();
+        let mut ed = named_ed(&text, "TODO.md");
+        ed.show_line_numbers = false;
+        ed.text_w = 60;
+        ed.text_h = 20;
+        ed.ensure_wrap_prefix();
+        // The frame at the top of the file.
+        ed.ensure_highlight();
+        // Row 4 is `## Section 1` — the `##` is a keyword, so an answer here is
+        // the grid actually being built. (`row 5` is the blank line after it,
+        // where `None` is the correct answer and asserting on it would have been
+        // a test that could not fail.)
+        assert!(
+            ed.bs().hl.style_at(Pos { row: 4, col: 0 }).is_some(),
+            "the first viewport is highlighted"
+        );
+
+        // Scroll a long way WITHOUT touching the buffer, which is what PgDn and
+        // the wheel do — no edit, so `highlight_dirty` stays false.
+        let far = 1500;
+        ed.bs_mut().scroll = far;
+        ed.bs_mut().cursor = Pos { row: far, col: 0 };
+        ed.ensure_wrap_prefix();
+        ed.ensure_highlight();
+
+        // The window must cover the viewport. This is the assertion that fails
+        // without the fix: the window would still be the one built for the top.
+        let win = ed
+            .bs()
+            .hl
+            .styled_window()
+            .expect("a window, not a whole-document refresh");
+        assert!(
+            win.rows.0 <= far && far + ed.text_h <= win.rows.1 + 1,
+            "the highlight window {win:?} does not cover the viewport at \
+             {far}..{} — those rows would be drawn plain",
+            far + ed.text_h
+        );
+    }
+
     #[test]
     fn an_edit_highlights_on_the_frame_not_per_key() {
         // The open cost, and the reason a burst of typing costs one highlight

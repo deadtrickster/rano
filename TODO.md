@@ -2031,3 +2031,60 @@ children**, which reads better for a checklist than hiding it outright.
 The sha/hash/mtime of the shared file at copy time, if it is kept, has no home
 yet: it belongs in the ask the model reads, or in the scratchpad's text, or both.
 Noted as unplaced rather than invented.
+
+## 18. The highlight window did not follow the scroll
+
+Added 2026-09-30, found by the operator: *"look at the dbg byobu window - we have
+a markdown rendering problem again"*. It was not the markdown passes — it was the
+WINDOW they run inside.
+
+- [x] `ensure_highlight` also refreshes when the viewport has left the
+  highlighted window (`Editor::highlight_covers_viewport`).
+
+### 18.1 What it looked like, and why it was not the two grammars
+
+The pane was rano on this file, scrolled to line 229. Everything above ~row 260
+was coloured; everything below was **plain**. The text matched the file byte for
+byte, so the passes were fine — the styling was simply absent, and the boundary
+was suspiciously round.
+
+It was `0 + text_h + HIGHLIGHT_MARGIN`: the window was built for the FIRST
+viewport and never rebuilt. `highlight_dirty` is set by `Editor::new`, by edits
+and by loads — **by no scroll path** — and `ensure_highlight` returns early when
+it is false. So the grid was computed once when the file opened and the rest of
+the file stayed uncoloured for the life of the session. Typing anything fixed it,
+which is exactly why it looked intermittent.
+
+The renderer draws `None` as plain, and `style_at` answers nothing outside the
+window, so "no window covers this row" and "this row has no captures" are the
+same picture — which is why it reads as a markdown bug rather than a scroll bug.
+
+### 18.2 The measurement
+
+Same file, same 210x63 pane, 23 × PgDn, then count how many of the visible rows
+carry any style:
+
+    old published v0.2.0   rows 1277..1335    0/46 coloured
+    new                    rows 1277..1335   21/46 coloured
+
+And in a unit test, without the fix the window is `rows: (0, 220)` while the
+viewport is at `1500..1520` — 220 being `text_h 20 + margin 200`, which is the
+same arithmetic as the 59-row pane's 259.
+
+### 18.3 The fix, and the part that is easy to get wrong
+
+`ensure_highlight` now refreshes when `!highlight_covers_viewport()`. The
+comparison is against the **viewport core**, not the margined window: the window
+is viewport ± 200, so asking whether the *margined* window is still covered comes
+out false after one row of scroll and would re-parse on every row. Against the
+core it refreshes when the viewport nears the edge of what was parsed — every
+~200 rows — which is what the margin is for. `ViewportCore` is split out of
+`highlight_window` so the two questions cannot drift apart.
+
+Columns are checked too, for a row too long to hand over whole: those are what
+horizontal scrolling moves through, and the same staleness applied.
+
+**This bug predates the todo work** — it is in every version since the windowed
+highlight landed, including the published v0.2.0. It is invisible on a file
+smaller than the margin, which is most files, and only shows on a long one you
+scroll.

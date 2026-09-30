@@ -1753,6 +1753,71 @@ prepare-then-read reference, and the O(document) callers (`to_lines`,
 `lines_slice`, `rows_mut_slice`) become `materialize_all` first. The accessors
 are the seam that makes that a one-file change plus the `ensure` discipline.
 
+#### Commit 2, surveyed: what breaks, and the defect to fix first
+
+Surveyed by reading, 2026-09-30. The blocker is not the store — `src/rows.rs` is
+complete with 12 tests — but two things this survey found.
+
+**The accessors, and which survive a chunked store.**
+
+| accessor | a chunked store can serve it? |
+|---|---|
+| `row -> &[char]` | yes, with `&self` — but see the defect below |
+| `row_opt -> Option<&[char]>` | yes |
+| `rows -> impl Iterator<Item = &[char]>` | yes — flatten the chunks |
+| `row_mut -> &mut Vec<char>` | **no** — `RowStore` has `set_row`, not a mutable row |
+| `lines_slice -> &[Vec<char>]` | **no** — a `Vec<Chunk>` is not contiguous |
+| `rows_mut_slice -> &mut [Vec<char>]` | **no** — ditto, and it is sorted in place |
+
+Three of six work directly and three need a decision. The three that do not have
+**15 call sites**, and every one is an O(document) operation, which is why the
+design already calls them `materialize_all` first:
+
+    editor.rs     indent_unit (walks every row)      sort_lines (in place!)
+                  begin_action / current_after (undo region capture)
+                  completion_prefix x3 (reads one row, wants the whole set)
+                  syntax_errors, widen_zero_width
+    exec_ctrl.rs  build input from a row range
+    lsp_ctrl.rs   widen_zero_width
+    search_ctrl   matcher.find_all
+    main.rs       export::render
+    bench.rs      the measurement
+
+**The defect, and the reason this is not a mechanical migration.**
+`RowStore::row` returns `&[]` for a row that has not been decoded, and its
+comment calls that "visible and harmless (the renderer draws a blank row)". That
+is wrong, and it is not only a rendering bug:
+
+- `Buffer::text()` maps every row to a `String` and joins it — an un-decoded row
+  contributes an **empty line to the file a save writes**.
+- `begin_action` captures `lines_slice()[first..last].to_vec()` — an un-decoded
+  row becomes an **empty row in the undo record**, so undo restores a hole.
+
+An empty slice is visible on screen and **invisible in the saved file**. The
+contract makes a missed `ensure` silent data loss, and the tests we have would
+not all catch it: they were written against an eager store, where no row is ever
+undecoded. "`ensure` is always the caller's first step" is a contract spread
+across ~200 call sites, and one miss loses a line.
+
+**So commit 2 is staged, and the order is not the obvious one.**
+
+- **Stage A — chunked, eager.** `RowStore` with no `File` rows: every row is
+  `Decoded` or `Edited`, which is what the store already does for a scratch
+  buffer and for `from_lines`. It delivers **the edit-scaling win**
+  (`insert`/`remove` shift one `CHUNK`, not the whole `Vec`) and it **cannot
+  silently blank a row**, so there is no `ensure` discipline to get wrong. The
+  memory win is not in this stage.
+- **Stage B — lazy decode**, with the `ensure` discipline, and only once `row()`
+  cannot lie: either it takes `&mut self` and decodes, or an un-resident row is a
+  **loud failure** instead of an empty slice. The memory win (a 193 MB file in
+  ~20 MB) is real, and it is the half that can lose data, so it goes second and
+  alone.
+
+Stage A is the piece worth doing next: bounded, provable by the existing 416
+tests (behaviour must be identical), and it removes the `Vec<Vec<char>>`
+tail-shift that `bench_edit_scaling` measures at 1.3 ms per line insert on a
+2.6M-row file.
+
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 
 **Deliverable.** Scrolling far and back is cheap; `^W` works on a file too big

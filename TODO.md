@@ -1888,3 +1888,146 @@ matters more than the speed.
 Two other fixes fell out: the loop's 8 ms idle wait was PACING the load (a
 saturated loader now waits 0, so the budget bounds one iteration rather than the
 throughput), and `bench_load_throughput` exists so this cannot regress unnoticed.
+
+## 17. Todo mode: `TODO.md`, org-ish
+
+Added 2026-09-30, on the operator's request — *"it would be awesome to have this
+todo schema in bare rano. something orgmodish"* — narrowed when asked to
+*"hierarchy and auto done for the whole subtree"*.
+
+**That narrowing is what made it small.** Scheduling, deadlines, tags, priorities,
+agenda and clocking are all out of scope and none of them is missed. What is in is
+the hierarchy and the cascade, and both turned out to be nearly free because the
+grammar already models them.
+
+- [x] `src/todo.rs` — the schema: three states, sections, a subtree cascade, the
+  upward derivation, and `check()`. **Library-only** (`lib.rs`), because the first
+  consumer is leticl embedding it; a schema behind `main.rs` would be unreachable
+  and the reason for the work would evaporate.
+- [x] `src/todo_ctrl.rs` — the editor half: the keys, and the byte↔row mapping.
+- [x] `M-T` ticks the task on the line, `M-C` the section (or a task's subtree),
+  `M-X` declines. Diagnostics reach the gutter `M-D`/`M-]` already use.
+
+### 17.1 The format is not invented, and `[-]` is not "in progress"
+
+Two repos call themselves TODO.md and they disagree, so both were read:
+
+- `todomd/todo.md` — two states, checkboxes OPTIONAL, columns as sections.
+- `todo-md/todo-md` — **three states**, and this is the target: *"the tasks
+  themself are one liners that start with either `'- [ ] '`, `'- [-] '` or
+  `'- [x] '`"*.
+
+**`[-]` means DECLINED.** The standard's four states are *"open / declined / done /
+deleted (removed from the document)"*. The usual reading of a third checkbox state
+is in-progress — Obsidian uses `[/]` for that and `[-]` for cancelled — so this
+was worth reading rather than assuming, and getting it backwards would have made
+the feature read as broken to anyone who knows org.
+
+### 17.2 The finding: the format has a state the grammar cannot name
+
+`tree-sitter-md` has TWO marker node types. The standard has THREE. `- [-]` is not
+an error to markdown and is not captured: it parses as an ordinary list item whose
+paragraph happens to begin with brackets, `has_error == false`. **A declined task
+is invisible to every query** — found by trying the query, which is the only way it
+could have been found.
+
+`Doc::check()` is therefore not optional, and it is required by the FORMAT rather
+than by the cascade. The declined marker is read with a validated read at a
+grammar-anchored offset: a list item's own `list_marker` node ends exactly where a
+task marker would begin. That is the one place the schema reads bytes the grammar
+gave it no node for, and it is reported rather than routed around with a
+hand-rolled line scan.
+
+### 17.3 No re-render, because there is no inverse function
+
+The document is the only source text; the schema holds **byte ranges into it** and
+every operation yields an edit — one `(range, replacement)` splice. Nothing here
+turns a model back into markdown, so prose, the `~3d #tag @name` tails, wrapping
+and trailing whitespace are not parsed, not modelled, and **cannot be lost**. That
+is not a promise about care; it is that there is no code that writes a document.
+
+The byte-identity property was the first test written, before any implementation:
+*the file after equals the file before except for the bytes I meant to change*.
+Measured through the real UI: `M-C` on a section changed two lines, the diff was
+those two lines, and the file stayed 140 bytes.
+
+**No-op edits are the part that makes it hold.** A marker already at the target
+state yields no edit at all, so a toggle cannot dirty a whole path to the root and
+a second cascade is a no-op — asserted, not assumed. This is the byte-identity rule
+enforced one level deeper than it was stated.
+
+### 17.4 Up is written, because the file is the transport
+
+The operator: *"if a todo was lifted from shared todo.md — then of course"*. The
+rule is not "never write" but **"never leave it wrong"**, and a parent left `[x]`
+above an open child is the file disagreeing with itself.
+
+- all sub-tasks done → the parent is done
+- all sub-tasks declined → the parent is declined
+- otherwise → the parent is open
+
+**Ticking a task that has children therefore carries them**, which is a
+consequence rather than a choice: the parent's marker is a function of its
+children, so setting it alone would be undone by the next derivation. Measured and
+asserted so it cannot become a surprise.
+
+**`M-C` targets a HEADING's section**, because that is the shape these files have
+— this file is 49 headings over 67 flat items, so the hierarchy IS the headings
+and no single item owns it. On a task line it targets that task's subtree instead;
+`set_subtree` is now a thin wrapper over `set_span`.
+
+### 17.5 Off the frame path, on the existing rails
+
+- [x] `Doc::parse` is **2.13 ms** on a 200-item file (measured, and linear: 9.1 ms
+  at 1 000, 35.2 ms at 4 000). Against a **139 µs** frame that is 15x a frame, so
+  the todo parse rides the existing 300 ms diagnostic debounce and never the
+  render path — the same discipline as the highlight window.
+- [x] `check()` output goes into `todo_diags`, which `all_diags()` merges, so the
+  gutter, the severity colours and diagnostic navigation work on it unchanged.
+- [x] A load re-runs diagnostics once when it FINISHES, so what is reported is the
+  document rather than whatever had arrived at the 300 ms mark.
+
+### 17.6 Two bugs found by looking at the screen
+
+- The title bar said `"rano 0.1.0"` as a **hardcoded literal** and had been lying
+  through two releases. It is composed from `CARGO_PKG_VERSION` now, and its test
+  asserts against that same source rather than a literal that agreed with the
+  constant and with no release.
+- The same test suite's `title_line_left_center_right` asserted the literal, which
+  is *why* the drift was invisible: the test and the constant agreed with each
+  other and with nothing else.
+
+### 17.7 OPEN: heading navigation, and whether to fold
+
+- [ ] Decide and build: **hide-rows fold** or **jump-to-next-heading motion**.
+
+The motion is small: it reads `Doc::headings()` (already built and tested) and
+moves the cursor. No renderer change at all. If the want is to move around a
+49-heading file quickly, that is most of the value for a fraction of the cost.
+
+A real fold is larger, and the size is in one place: **the renderer and the scroll
+arithmetic assume every buffer row is visible.** `wrap_prefix`, `visual_pos`,
+`adjust_scroll`, the gutter and the mouse-to-row mapping each need to know about a
+row set that is not contiguous. The fold itself changes zero bytes and is
+`section.start..section.end`; the cost is entirely that the row set stops being a
+range.
+
+A middle option worth naming: **collapse a section to its heading and its direct
+children**, which reads better for a checklist than hiding it outright.
+
+### 17.8 The boundary against the wire is not clean
+
+`TodoEntry` is `{content, status, by}` with
+`TodoBy { Model, Operator }`. Two axes, and neither closes:
+
+- **Status maps two of three, with a gap on both sides.** The file has
+  `open`/`declined`/`done`; the wire has `Pending`/`InProgress`/`Completed`. So
+  `Declined` has no wire state and `InProgress` has no file state.
+- **Authorship is absent and cannot be added.** A markdown line records nothing
+  about who wrote it. (The spec's `@USERNAME` is *assignment* — who a task is for
+  — a different axis.) And two variants cannot express the third writer the
+  operator's own design now has: their `$EDITOR`, a `git pull`, another agent.
+
+The sha/hash/mtime of the shared file at copy time, if it is kept, has no home
+yet: it belongs in the ask the model reads, or in the scratchpad's text, or both.
+Noted as unplaced rather than invented.

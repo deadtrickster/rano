@@ -1855,14 +1855,63 @@ the model to a single row, where the per-step comparison passes 2,000 times and
 exercises nothing, so the mix is bounded to realistic sizes and the model is
 topped back up between steps.
 
-#### Stage B, next
+#### Stage B: the precondition is done, and the rest is BLOCKED on a conflict
 
-Lazy decode, and only once `row()` cannot lie. It is where the 835 MB -> ~20 MB
-comes from on a 184 MB file, and it is the half that can lose data, so it needs
-the API change first: either `row` takes `&mut self` and decodes, or an
-un-resident row is a loud failure instead of an empty slice.
-`RowStore::materialize_lines` already names what it does rather than pretending
-to be a cheap `to_lines`.
+**Done 2026-09-30.** `RowStore::row` no longer returns `&[]` for a row it has not
+decoded; it panics, with a message that says which of the two cases it is
+("is not resident: call ensure(r, r) before reading it" / "is out of range"), and
+`try_row` is the explicit `Option` form. Two `#[should_panic]` tests pin both
+messages, and the test that used to assert the empty-slice behaviour now asserts
+`try_row(0) == None` — that assertion was pinning the defect.
+
+The old comment was the whole argument for the old behaviour — *"an empty slice
+is visible and harmless (the renderer draws a blank row)"* — and blank on screen
+is the smallest part of it. `Buffer::text()` maps every row to a `String`, so an
+un-decoded row is a blank line **written to the file**; `begin_action` captures
+rows the same way, so it is a blank row **in the undo record**. Silent, and in
+the artefact rather than on the screen.
+
+**But the rest of stage B is blocked, and the blocker is not effort — it is a
+conflict with something already shipped.** Found by sizing the work:
+
+1. **The loader decodes what the lazy store wants to leave encoded.**
+   `loader.rs` reads the file itself in 64 KiB chunks, splits it on byte
+   newlines, and hands over `LoadMsg::Rows(Vec<Vec<char>>)` — decoded rows.
+   That is the streaming open §14.6 bought: first frame before the file is read,
+   rows adopted in batches, 5.6M rows/s. A lazy store wants the opposite: keep
+   the byte range, decode when read. The two cannot both be the answer to
+   "open a big file".
+2. **The loader owns and closes the `File`.** `std::thread::spawn(move ||
+   read_all(file, …))` — the reader takes the file and it drops when the thread
+   ends. `RowStore` needs that same file held open for every later read.
+3. **And the read side is 46 `&self` sites** (editor.rs 37, todo_ctrl.rs 5,
+   ui.rs 2, main.rs 1, lsp_ctrl.rs 1) which under prepare-then-read need an
+   `ensure` before them. That is tractable — it is what the design intends — but
+   it is not a mechanical edit, because "is this window resident?" has to be
+   answerable at each one.
+
+**So the decision that has to be made first is which open path survives:**
+
+- **A. The loader becomes an indexer.** It sends byte ranges instead of decoded
+  rows — `LoadMsg::Rows` becomes ranges — and hands the `File` back (or keeps it
+  in the buffer). Streaming is preserved and actually improves: it no longer
+  decodes 2.6M rows to show the first frame. Cost: rewriting a module that took
+  a whole phase (§14.6) and has its own throughput tests and bench.
+- **B. `Buffer::from_file` uses `RowStore::open` and the loader is bypassed** for
+  that path. Much smaller, and it loses the streaming open — the thing §14.6
+  exists for: *"the screen is never a dead blank"*, first frame before the read.
+- **C. Both paths, chosen by size** — which is the "two modes, and a threshold"
+  shape §16.0 explicitly removed: *"No size threshold anywhere: there is no 'too
+  big' mode."*
+
+This is a design decision about a phase that is already shipped, not a piece of
+work, and guessing it would mean rewriting `loader.rs` twice. Recorded here so it
+is made deliberately rather than discovered halfway through.
+
+**Worth noting what is NOT blocked:** stage A already delivered §16.0's actual
+promise — size does not influence editability — for the edit the section is
+about (1.3 ms → 0.7 µs at 2.6M rows). What stage B adds is memory: 835 MB
+resident for a 184 MB file. Real, and a cost rather than a latency.
 
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 

@@ -305,18 +305,50 @@ impl RowStore {
         Ok(decoded)
     }
 
-    /// Row `r`. **Make it resident first** — see `ensure`.
+    /// Row `r`, when it is resident. **Make it resident first** — see `ensure`.
     ///
-    /// A file-backed row is returned as an empty slice rather than decoded
-    /// here: this is the borrowing half of prepare-then-read, and a `&self`
-    /// method cannot fill a cache. An empty slice is visible and harmless
-    /// (the renderer draws a blank row) and `ensure` is always the caller's
-    /// first step, so it is a contract the tests pin rather than a trap.
-    pub fn row(&self, r: usize) -> &[char] {
+    /// `None` rather than an empty slice, because an empty slice is not a
+    /// smaller answer, it is a wrong one: an un-decoded row that reads as `&[]`
+    /// reaches `Buffer::text()` as a blank line and is written to the saved
+    /// file, and reaches `begin_action` as a blank row in the undo record. A
+    /// missing row is a state a caller can see and handle; a row that silently
+    /// reads as empty is data loss waiting for a missed `ensure`.
+    ///
+    /// Use [`Self::row`] where the row is known to be resident (the frame's
+    /// path, after `ensure`) — it panics rather than lying.
+    pub fn try_row(&self, r: usize) -> Option<&[char]> {
         match self.row_slot(r) {
-            Some(Row::Decoded { chars, .. }) | Some(Row::Edited(chars)) => chars,
-            _ => &[],
+            Some(Row::Decoded { chars, .. }) | Some(Row::Edited(chars)) => Some(chars),
+            _ => None,
         }
+    }
+
+    /// Row `r`. **Panics if it is not resident**, and if it is out of range.
+    ///
+    /// The previous version returned `&[]` for both, and its comment called that
+    /// "visible and harmless (the renderer draws a blank row)". That was wrong,
+    /// and worth spelling out because the comment was the whole argument: blank
+    /// on screen is the *smallest* part of it. `Buffer::text()` maps every row to
+    /// a `String`, so an un-decoded row is a blank line **written to the file**;
+    /// `begin_action` captures rows the same way, so it is a blank row **in the
+    /// undo record**. Silent, and in the artefact rather than on the screen.
+    ///
+    /// So the contract is now enforced instead of documented. A missed `ensure`
+    /// is a loud panic naming the fix, and the panic is the *good* outcome: the
+    /// alternative is a save that quietly loses lines.
+    pub fn row(&self, r: usize) -> &[char] {
+        if r >= self.rows {
+            panic!(
+                "row {r} is out of range: the store holds {} rows",
+                self.rows
+            );
+        }
+        self.try_row(r).unwrap_or_else(|| {
+            panic!(
+                "row {r} is not resident: call ensure({r}, {r}) before reading it. \
+                 Reading it as empty would write a blank line to the saved file."
+            )
+        })
     }
 
     /// Replace row `r` with its edited content, promoting it.
@@ -657,9 +689,12 @@ mod tests {
         let t = Temp::new("plain.txt", b"one\ntwo\nthree\n");
         let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
         assert_eq!(s.rows(), 3);
-        // Not decoded yet: reading a row before `ensure` is empty, and the byte
-        // lengths are known from the index alone.
-        assert_eq!(text(&s, 0), "", "not resident yet");
+        // **Not resident, and it says so rather than reading as empty.** This
+        // assertion used to be `assert_eq!(text(&s, 0), "", "not resident")`,
+        // which pinned the defect: an un-decoded row that reads as `&[]` is a
+        // blank line in the saved file and a blank row in the undo record. The
+        // byte lengths are known from the index alone and need no decode.
+        assert_eq!(s.try_row(0), None, "not resident yet");
         assert_eq!(s.byte_len(0), 3, "but its length is known from bytes");
         assert_eq!(s.byte_len(2), 5);
         // `ensure` decodes at CHUNK granularity — a chunk is the unit of
@@ -670,6 +705,45 @@ mod tests {
         // Asking again is free.
         assert_eq!(s.ensure(0, 0).expect("already resident"), 0);
         assert_eq!(all(&mut s), ["one", "two", "three"]);
+    }
+
+    /// **A row that is not resident must not read as empty, and must not read as
+    /// wrong either.** The old contract returned `&[]`, and that empty row does
+    /// not stay on screen — `Buffer::text()` writes it to the file and
+    /// `begin_action` records it in the undo step.
+    ///
+    /// So it panics, naming the fix. A missed `ensure` is a panic for a
+    /// developer; the alternative is a save that quietly loses lines for a user.
+    #[test]
+    #[should_panic(expected = "is not resident")]
+    fn reading_an_unresident_row_panics_rather_than_lying() {
+        let t = Temp::new("unres.txt", b"one\ntwo\n");
+        let s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
+        // No `ensure`: this must not hand back an empty slice.
+        let _ = s.row(0);
+    }
+
+    /// The same rule for a row that does not exist at all, and the message says
+    /// which of the two it is — "not resident" and "out of range" want
+    /// different fixes, and a caller debugging one should not be told the other.
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn reading_a_missing_row_panics_with_the_other_message() {
+        let s = RowStore::new();
+        let _ = s.row(7);
+    }
+
+    /// `ensure` then `row` is the working path, so the panic above is only ever
+    /// reached by a mistake.
+    #[test]
+    fn ensure_then_read_is_the_working_path() {
+        let t = Temp::new("ens.txt", b"one\ntwo\n");
+        let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
+        assert!(s.try_row(0).is_none());
+        s.ensure(0, 1).expect("ensure");
+        assert_eq!(text(&s, 0), "one");
+        assert_eq!(text(&s, 1), "two");
+        assert!(s.try_row(0).is_some());
     }
 
     #[test]

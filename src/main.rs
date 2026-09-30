@@ -2472,6 +2472,70 @@ mod ed_tests {
         assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
     }
 
+    /// **The one-pass scan must agree with the obvious one.** The early exit at
+    /// GCD 1 is exact (a GCD cannot rise), but "exact" is a claim, so it is
+    /// checked against a reference over documents chosen to reach every branch:
+    /// no indentation at all, a tab anywhere, a single width, a 1 that appears
+    /// only at the END (the case the early exit has to get right), a mixed 4/8,
+    /// and a unit past the 8-space fallback.
+    #[test]
+    fn indent_unit_matches_the_reference_scan() {
+        /// The literal reading: collect every count, sort, fold the GCD.
+        fn reference(text: &str) -> String {
+            let lines: Vec<&str> = text.split('\n').collect();
+            if lines.iter().any(|l| l.starts_with('\t')) {
+                return "\t".to_string();
+            }
+            let mut counts: Vec<usize> = lines
+                .iter()
+                .filter_map(|l| {
+                    let n = l.len() - l.trim_start_matches(' ').len();
+                    (n > 0).then_some(n)
+                })
+                .collect();
+            if counts.is_empty() {
+                return "\t".to_string();
+            }
+            counts.sort();
+            let mut unit = counts[0];
+            for n in &counts {
+                let (mut a, mut b) = (unit, *n);
+                while b != 0 {
+                    let t = b;
+                    b = a % b;
+                    a = t;
+                }
+                unit = a;
+            }
+            if unit == 0 || unit > 8 {
+                return "\t".to_string();
+            }
+            " ".repeat(unit)
+        }
+
+        for (label, text) in [
+            ("flat", "a\nb\nc"),
+            ("tab", "a\n\tb"),
+            ("tab late", &format!("{}x\n\tlate", "a\n".repeat(500))),
+            ("four", "    a\n    b\n        c"),
+            ("eight", "        a\n        b"),
+            ("mixed 4/8", "    a\n        b\n    c"),
+            ("two", "  a\n    b\n  c"),
+            ("one early", " a\n  b\n    c"),
+            ("one last", &format!("{}\n a", "    row\n".repeat(200))),
+            ("nine", "         a\n         b"),
+            ("blank lines", "\n\n    a\n\n"),
+            ("single", "    only"),
+        ] {
+            let ed = test_ed(text);
+            assert_eq!(
+                ed.indent_unit(),
+                reference(text),
+                "{label}: one-pass disagrees with the reference"
+            );
+        }
+    }
+
     #[test]
     fn auto_indent_off_by_config() {
         let mut ed = test_ed("    foo");

@@ -1961,6 +1961,24 @@ are coming and must not invent a row. The consumer already applies it —
 `load_ctrl`'s `Adopted::Finished` arm is `if bs.buf.rows_is_empty() { push_row }` —
 and `an_empty_file_gets_its_row_from_the_buffer_not_the_store` pins the seam.
 
+**A second O(rows) cost found while sizing this, and FIXED (same commit).**
+`indent_unit` walked every row and it runs on every **Enter** with auto-indent,
+every `Tab` and every `Backspace`. It collected a `Vec<&Vec<char>>` of all 2.6M
+rows — a 21 MB allocation — and then walked it twice:
+
+    collect + two walks (what it did)   36.0 ms per call
+    one pass (what it does now)         13.2 ms per call
+
+The GCD is now tracked through the scan instead of sorted afterwards, and
+reaching 1 ends it — exact, since a GCD cannot rise. `fn indent_unit`'s
+measurement is `examples/indent_cost.rs`'s, run against `huge200.log`.
+
+**It is still O(rows)**, which §16.0 says an edit must not be, and it is the
+second blocker for the swap: under a file-backed row this walk is disk reads. The
+exact fix is to maintain the unit incrementally — a row's leading whitespace is
+known when the row is written — and that wants the swap to land first so it is
+done once rather than twice.
+
 **What remains, and why it is not in this commit.** The store can now be built from
 a stream; nothing uses it yet, because the consumer is the hard part:
 

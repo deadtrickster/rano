@@ -111,6 +111,12 @@ impl Editor {
             }
             Adopted::Finished { crlf, .. } => {
                 self.load_saturated = false;
+                // Once the file is whole, re-run the diagnostics so what is
+                // reported is the document rather than whatever had arrived at
+                // the 300 ms mark. Deliberately here and not per batch: a
+                // whole-document parse every 300 ms through a large load is the
+                // cost §16 exists to avoid, and a todo file is kilobytes.
+                self.diag_dirty = true;
                 let rows = {
                     let bs = self.bs_mut();
                     bs.load = None;

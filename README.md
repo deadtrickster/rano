@@ -95,6 +95,9 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-.` | Jump to definition (LSP) |
 | `M-,` | Jump back (stacked — one press per jump) |
 | `M-V` | Install the newer release the startup check found |
+| `M-T` | Tick the task on this line (`[ ]` ↔ `[x]`) |
+| `M-C` | Tick every task in this section — or in this task's subtree |
+| `M-X` | Decline the task on this line (`[-]`), or un-decline it |
 | `M-N` | Toggle line-number gutter |
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
@@ -124,6 +127,41 @@ filename prompts, `M-b`/`M-f` move by word.
 Bracketed paste is supported: multi-line pastes arrive as a single undoable
 edit.
 
+## Todos
+
+Open a file named `TODO.md` and the checkboxes are live. It is the
+[todo-md](https://github.com/todo-md/todo-md) markdown standard: three states,
+`- [ ]`, `- [-]`, `- [x]`, and subheaders as sections.
+
+| key | what it does |
+|---|---|
+| `M-T` | Tick the task on this line. `[ ]` → `[x]`, and back. |
+| `M-C` | Tick every task in the section the cursor is in — or, on a task line, in that task's subtree. Press again to clear. |
+| `M-X` | Decline: `[-]`. Press again to un-decline. |
+
+**`[-]` means declined, not "in progress".** That is the standard's own word —
+its states are *"open / declined / done / deleted"* — and it is why it has its
+own key: the everyday press never passes through it by accident.
+
+**A parent follows its children.** Completing the last sub-task completes the
+parent, and un-completing one opens it again, because the file is the thing
+other tools read and a parent left `[x]` above an open child is the file
+disagreeing with itself. That is also why `M-T` on a task that *has* children
+carries them: `[x]` on the parent would otherwise be a state the file cannot
+keep.
+
+**Nothing but markers is ever written.** A tick rewrites three bytes and leaves
+every other byte of the file alone — the prose between tasks, your metadata
+tails (`~3d #feat @john 2020-03-20`), wrapping and trailing whitespace are not
+parsed, not modelled, and not rewritten. Verified on a real file: ticking two
+tasks in a section changes exactly those two lines and the file stays the same
+size.
+
+**A marker the standard does not define is reported**, in the gutter, in the
+same red an error gets: `- [/]` is not one of the three, and neither the grammar
+nor a plain markdown reader will tell you. In a file that is not `TODO.md` the
+editor stays out of it — `[-]` in somebody else's markdown is theirs to write.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/rano/config.toml` (falling back to `~/.config/rano/config.toml`):
@@ -136,6 +174,9 @@ multibuffer = false # F8 pushes a new buffer instead of replacing the current on
 wrap = true         # soft line wrap (M-\ toggles at runtime)
 autoupdate = true   # check GitHub for a newer release at startup
 ```
+
+The todo keys need no configuration: they act on a line that has a task marker,
+in any markdown file. Checking and reporting are scoped to `TODO.md` by name.
 
 Unknown keys are ignored; out-of-range values fall back to the defaults.
 

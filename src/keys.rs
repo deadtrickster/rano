@@ -85,6 +85,15 @@ impl Editor {
                 KeyCode::Char(',') => self.jump_back(),
                 // M-| : filter the marked rows through a shell command.
                 KeyCode::Char('|') => self.start_filter(),
+                // M-T: tick the task on this line. Ancestors follow (a parent
+                // whose children are all done is done), children do not.
+                KeyCode::Char('t') => self.todo_toggle(),
+                // M-C: the same state over the whole subtree — "auto done for
+                // the whole subtree", as one command.
+                KeyCode::Char('c') => self.todo_cascade(),
+                // M-X: declined, the standard's third state. On its own key so
+                // the common toggle never passes through it.
+                KeyCode::Char('x') => self.todo_decline(),
                 // M-V: install the newer release the startup check found.
                 // One keystroke, user-initiated: the status line has already
                 // named the version, so this IS the confirmation.

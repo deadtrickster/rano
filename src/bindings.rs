@@ -12,7 +12,7 @@ pub struct Binding {
 /// rows are reserved for features whose wiring lands with later items
 /// (diagnostics, line numbers, wrap, filter, buffer switching).
 #[rustfmt::skip]
-    pub static BAR: [Binding; 32] = [
+    pub static BAR: [Binding; 35] = [
     Binding { key: "^G", label: "Help" },
     Binding { key: "^X", label: "Exit" },
     Binding { key: "^O", label: "Write Out" },
@@ -45,6 +45,9 @@ pub struct Binding {
     Binding { key: "M-|", label: "Filter" },
     Binding { key: "M-<", label: "Prev Buffer" },
     Binding { key: "M->", label: "Next Buffer" },
+    Binding { key: "M-T", label: "Todo Tick" },
+    Binding { key: "M-C", label: "Todo Section" },
+    Binding { key: "M-X", label: "Todo Decline" },
 ];
 
 /// One help-grid cell: readable "key label" pair padded to a fixed column
@@ -136,9 +139,17 @@ mod tests {
 
     #[test]
     fn bar_count_and_reserved_rows() {
-        assert_eq!(BAR.len(), 32);
+        // The trailing rows are the features whose wiring landed later
+        // (diagnostics, line numbers, wrap, filter, buffers, todos). The count is
+        // asserted rather than derived so that ADDING one is a deliberate edit
+        // here — the bar only shows as many as the terminal width fits, so a
+        // forgotten append would be invisible on a wide screen and missing on a
+        // narrow one.
+        assert_eq!(BAR.len(), 35);
         let keys: Vec<&str> = BAR.iter().map(|b| b.key).collect();
-        for k in ["M-D", "M-.", "M-,", "M-N", "M-\\", "M-|", "M-<", "M->"] {
+        for k in [
+            "M-D", "M-.", "M-,", "M-N", "M-\\", "M-|", "M-<", "M->", "M-T", "M-C", "M-X",
+        ] {
             assert!(keys.contains(&k), "reserved row {} missing", k);
         }
     }

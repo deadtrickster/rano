@@ -201,6 +201,30 @@ caveats.
 Both were found by driving the operation the way a non-interactive caller would,
 which is the argument for having written the file at all.
 
+## Editor integration (landed 2026-09-30)
+
+`src/todo_ctrl.rs`, binary-side, and the mapping it owns:
+
+- `todo` speaks **byte offsets into `Buffer::text()`**; the editor speaks
+  `(row, char col)`. Those differ the moment a line holds a multibyte character,
+  so `row_chars` converts by walking the row rather than by adding, and it is
+  asserted through the real `Editor`.
+- The conversion is computed **once, before any edit**, which is sound only
+  because every edit is three ASCII bytes for three. `apply_todo_edits` still
+  applies descending by offset, so a future non-length-preserving edit cannot
+  silently corrupt the ones after it.
+- Each action is **one undo step** (`ActionKind::Todo`), including a section
+  cascade that rewrote dozens of markers.
+- `check()` rides the existing 300 ms diagnostic debounce, so the todo parse
+  (2.1 ms on a 200-item file) is never on the frame path — the same discipline
+  the highlight window uses.
+- The binary uses the **library's** `todo` module rather than compiling a second
+  copy, so there is one implementation of the format.
+
+Measured on a real file through the real UI: `M-C` on a `## Now` heading ticked
+its two tasks and nothing else, the diff was those two lines, the file stayed
+140 bytes, and the `- [/]` line was reported in red in the gutter.
+
 ## Size
 
 **~250 → ~1 200 lines.** `src/todo.rs` is 605 lines (about 390 non-comment),
@@ -220,7 +244,11 @@ that only `check()` can produce, and the ancestor pass.
 - **No staleness apparatus.** Out of date is not invalid; the next touch fixes
   it. `check()` is for what the format *cannot express*, not for what somebody
   typed wrong.
-- **No editor integration yet.** `ui.rs`/`editor.rs` know nothing about todos;
-  leticl is the first consumer.
+- ~~No editor integration yet.~~ **Landed**: `src/todo_ctrl.rs` wires the schema
+  into the editor — M-T ticks the task on the line, M-C the section (or the
+  task's subtree), M-X declines — and `check()` feeds the gutter that already
+  renders diagnostics. The byte-to-row mapping is the binary-side half and is
+  asserted directly (`pos_of_byte`), because it is the one place the two
+  coordinate systems could disagree silently.
 - **No second parser.** Every range is a grammar node or a validated read at a
   grammar-given offset.

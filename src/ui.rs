@@ -37,7 +37,15 @@ fn prompt_text(p: &Prompt, width: usize) -> (String, usize) {
     (format!("{}{}", label, shown), label_len + (cur - start))
 }
 
-const TITLE_LEFT: &str = "  rano 0.1.0";
+/// The title bar's left label — `nano`'s corner banner.
+///
+/// Composed rather than a literal, because the literal it replaced said
+/// `"rano 0.1.0"` and stayed saying it through two releases: the title bar was
+/// advertising a version the binary was not. Anything a user reads has to come
+/// from the one place the version is written down.
+fn title_left() -> String {
+    format!("  rano {}", env!("CARGO_PKG_VERSION"))
+}
 
 /// Bottom bar items. Ordered to match nano's column-major pairing: item `2c`
 /// renders in the top bar row and item `2c+1` in the bottom bar row, so the
@@ -662,8 +670,9 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
 /// remaining space (minus a right-hand flag area), " *" after the name when
 /// modified, state flags near the right edge.
 fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
+    let left = title_left();
     let mut s = vec![' '; width as usize];
-    for (i, c) in TITLE_LEFT.chars().enumerate() {
+    for (i, c) in left.chars().enumerate() {
         if i < s.len() {
             s[i] = c;
         }
@@ -671,9 +680,9 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
     if !name.is_empty() {
         let nl = name.chars().count();
         let region_end = s.len().saturating_sub(8);
-        let mut pos = (TITLE_LEFT.len() + region_end - nl) / 2;
-        if pos < TITLE_LEFT.len() {
-            pos = TITLE_LEFT.len();
+        let mut pos = (left.len() + region_end - nl) / 2;
+        if pos < left.len() {
+            pos = left.len();
         }
         let take = nl.min(region_end.saturating_sub(pos));
         for (i, c) in name.chars().take(take).enumerate() {
@@ -913,14 +922,21 @@ mod tests {
 
     #[test]
     fn title_line_left_center_right() {
+        // Against the COMPILED version, not a literal. The assertion used to say
+        // `"  rano 0.1.0"`, which is what made the drift invisible: the test and
+        // the constant agreed with each other and with no release.
+        let banner = format!("  rano {}", env!("CARGO_PKG_VERSION"));
         let t = title_line(80, "foo.rs", true, "auto");
-        assert!(t.starts_with("  rano 0.1.0"));
+        assert!(t.starts_with(&banner), "{t:?}");
         assert!(t.contains("foo.rs"));
         assert!(t.contains('*'));
         assert!(t.trim_end().ends_with("auto"));
         let t = title_line(80, "", false, "");
-        assert!(t.starts_with("  rano 0.1.0"));
+        assert!(t.starts_with(&banner), "{t:?}");
         assert!(!t.contains('*'));
+        // A narrow terminal truncates the banner rather than panicking.
+        let t = title_line(3, "x", false, "");
+        assert_eq!(t.chars().count(), 3);
     }
 
     #[test]

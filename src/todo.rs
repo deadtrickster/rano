@@ -297,7 +297,22 @@ impl Doc {
             },
             None => 0..self.src.len(),
         };
+        self.set_span(span, state)
+    }
 
+    /// **Down over an arbitrary span** — every task whose own extent lies inside
+    /// it, then the ancestors.
+    ///
+    /// The span is what makes a HEADING a target: a `section` range covers all the
+    /// tasks under it, so the same operation that ticks a task's subtree ticks a
+    /// whole `## section`, which is how a checklist written under headings is
+    /// marked. There is no separate concept for it.
+    ///
+    /// The `up` pass is what makes this correct rather than merely convenient: a
+    /// parent inside the span whose children did not all change is brought into
+    /// line by [`Self::derive_from`], so the file cannot end up saying `[x]` above
+    /// an open child.
+    pub fn set_span(&self, span: Range<usize>, state: State) -> Vec<Edit> {
         // The states the document WOULD have, so the two passes agree about what
         // they are looking at.
         let mut effective: Vec<State> = self.items.iter().map(|it| it.state).collect();
@@ -314,6 +329,15 @@ impl Doc {
         edits.extend(self.derive_from(&effective));
         dedup(&mut edits);
         edits
+    }
+
+    /// The section of the heading on `line`, as a span — or `None` when there is
+    /// no heading there.
+    pub fn section_at(&self, line: usize) -> Option<Range<usize>> {
+        self.headings
+            .iter()
+            .find(|h| h.line == line)
+            .map(|h| h.section.clone())
     }
 
     /// **Up, written to the file.** Every task that has sub-tasks has its own

@@ -15,6 +15,7 @@ mod prompt;
 mod search;
 mod search_ctrl;
 mod syntax;
+mod todo_ctrl;
 mod ui;
 mod update;
 mod update_ctrl;
@@ -69,6 +70,11 @@ pub struct BufferState {
     /// Syntax errors from the tree-sitter parse (recomputed per edit), so
     /// deliberate mistakes are visible even without a language server.
     pub syntax_diags: Vec<lsp::Diagnostic>,
+    /// TODO.md markers the format cannot express — an unknown state such as
+    /// `[/]` — in the same shape as `syntax_diags`, so the gutter, the
+    /// severity colours and M-D all work on them unchanged. Only for a buffer
+    /// named `TODO.md`: `[-]` in somebody else's markdown is theirs to write.
+    pub todo_diags: Vec<lsp::Diagnostic>,
     /// didChange pending since the last flush (D4 debounce).
     pub lsp_dirty: bool,
     pub lsp_last_send: Instant,
@@ -141,6 +147,7 @@ impl BufferState {
             lsp: None,
             lsp_diags: Vec::new(),
             syntax_diags: Vec::new(),
+            todo_diags: Vec::new(),
             lsp_dirty: false,
             lsp_last_send: Instant::now(),
             lsp_starting: None,

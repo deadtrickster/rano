@@ -41,6 +41,11 @@ pub enum ActionKind {
     Filter,
     Exec,
     ReadFile,
+    /// A TODO.md state change: one or more three-byte markers rewritten. Its own
+    /// kind rather than a reuse of `Replace` so a toggle is one undo step that
+    /// coalesces with nothing — pressing M-T twice must undo twice, not merge
+    /// into one.
+    Todo,
 }
 
 #[derive(Debug)]
@@ -766,14 +771,30 @@ impl Editor {
             return false;
         }
         self.diag_dirty = false;
-        let before = self.bs().syntax_diags.len();
+        let before = self.bs().syntax_diags.len() + self.bs().todo_diags.len();
+        // The todo check rides the same debounce as the syntax parse, and for
+        // the same reason: `Doc::parse` is 2.1 ms on a 200-item file, which is
+        // nothing once per pause and a liability per keystroke. It is also the
+        // same KIND of thing — what the format cannot express, reported where
+        // the format's own errors go.
+        let todo = self.todo_check();
         // `refresh_syntax_diags` takes `&mut`, so the borrow has to be mutable
         // even though only the diagnostics field changes.
         let bs = self.bs_mut();
         if bs.hl.parse_for_diagnostics(&bs.buf) {
             refresh_syntax_diags(bs);
         }
-        bs.syntax_diags.len() != before
+        bs.todo_diags = todo
+            .into_iter()
+            .map(|(line, col, end_col, message)| lsp::Diagnostic {
+                line,
+                col,
+                end_col,
+                message,
+                severity: 1,
+            })
+            .collect();
+        bs.syntax_diags.len() + bs.todo_diags.len() != before
     }
 
     /// Re-highlight for the current viewport — always a window.
@@ -869,6 +890,7 @@ impl Editor {
     pub fn all_diags(&self) -> Vec<lsp::Diagnostic> {
         let bs = self.bs();
         let mut out = bs.syntax_diags.clone();
+        out.extend(bs.todo_diags.iter().cloned());
         out.extend(bs.lsp_diags.iter().cloned());
         out.sort_by_key(|d| (d.line, d.col, d.end_col));
         out

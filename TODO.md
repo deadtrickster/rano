@@ -1976,8 +1976,16 @@ measurement is `examples/indent_cost.rs`'s, run against `huge200.log`.
 **It is still O(rows)**, which §16.0 says an edit must not be, and it is the
 second blocker for the swap: under a file-backed row this walk is disk reads. The
 exact fix is to maintain the unit incrementally — a row's leading whitespace is
-known when the row is written — and that wants the swap to land first so it is
-done once rather than twice.
+known when the row is written.
+
+**And there is an apparent circularity here that is worth resolving before
+anyone starts.** (1) is a prerequisite for (3), yet (1) "wants (3) first so it is
+written once rather than twice" — done in `Rows` it would be written again in
+`RowStore`. The way out is the ACCESSOR: express it as the leading width of a
+row, maintain a per-chunk histogram of those widths, and keep the histogram in
+whichever store owns the rows. Then one implementation serves both, and (1) can
+go first. That is the same move the accessor layer made for `lines` in commit 1,
+and it is why this is written down rather than left to be rediscovered.
 
 **What remains, and why it is not in this commit.** The store can now be built from
 a stream; nothing uses it yet, because the consumer is the hard part:

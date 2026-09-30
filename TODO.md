@@ -1878,12 +1878,24 @@ same machine, peak RSS from `VmHWM`:
 
 | path | open | peak RSS |
 |---|---|---|
-| eager — every row decoded into a `Vec<char>` (what ships today) | 547.0 ms | **1301 MiB** |
+| `Buffer::from_file` — the EXPORT path: bytes, the decode, and every row | 547.0 ms | 1301 MiB |
+| **the EDITOR's path (the loader)** — measured on the running binary | — | **977 MiB** |
 | lazy — `RowStore::open` + a viewport read | **84.3 ms** | **121 MiB** |
 
-**6.5× faster and 10.7× less memory**, and the lazy path read a viewport correctly
-(4050 chars from the first 60 rows). The 1301 MiB is also worse than the 835 MB
-this section had been quoting, so the cost was understated.
+**Corrected 2026-09-30, and the correction matters.** The first version of this
+table gave 1301 MiB as "what ships today" — but that is `from_file`, which holds
+the file's bytes, its decode AND every decoded row at once, and which is the
+**export** path. The editor streams through the loader and peaks at **977 MiB**
+(`VmRSS` of the running binary, steady, on the same 193 MB file). So the real win
+for the editor is **977 → 121 MiB, 8.1×**, not 10.7× — still large, and the number
+that should have been quoted. Both are far above the 835 MB this section used to
+say.
+
+**And it is a limit, not just a cost.** Every adopted row stays resident, so RSS
+grows with the file whatever the loader does: a 2 GB file needs roughly 10 GB to
+open today. The streaming open made the first frame fast; it did not make the file
+smaller. That is the case for stage B, and it is about sizes where "open it
+anyway" stops being an option rather than about a slow path.
 
 **Why A over B.** B (`from_file` uses `RowStore::open`, bypass the loader) is
 smaller and gives the same memory win, but `RowStore::open` is **not free**: it
@@ -1927,11 +1939,42 @@ at a different moment, so the render path has to be able to say so instead of
 treating it as a missing row. Worth naming because it is the kind of thing that
 looks like a bug in the new code.
 
-**Not started in the same turn as the decision, deliberately:** a half-rewritten
-`loader.rs` fails the same way a half-migrated `Buffer` would, and that module has
-its own tests and its throughput bench (`bench_load_throughput`, 422 MB/s) which
-are the proof the streaming still works. The decision is recorded so the rewrite
-has a target; doing it is the next item, not a footnote to this one.
+**Landed 2026-09-30 — the first clause of the item, the additive half.**
+
+- `RowStore::begin(path, encoding)` — opens the file and holds it, with no chunks.
+  This is the piece that **removes the `File`-ownership problem rather than
+  solving it**: nothing has to be handed back, because the store opened its own.
+- `RowStore::ingest(&[(u64, u64)])` — appends file-backed rows for byte ranges, in
+  order, chunked to `CHUNK` so the shape matches `open`'s and the two cannot
+  disagree about row numbering. O(ranges), two `u64` per row, against the loader's
+  `Vec<char>` of four bytes per character.
+- Three tests: streaming equals indexing, row for row, across every file shape the
+  suite already cares about (trailing newline, none, blank lines, a 5 000-char row,
+  multibyte); batching does not matter (ragged pieces, straddling a `CHUNK`
+  boundary); and a begun-but-unfed store is an empty frame, not a panic.
+
+**A seam the equality test found, now stated rather than papered over.** An empty
+file indexes to **1** row via `open` and **0** via `begin` + no ranges. Both are
+right: the one-row invariant belongs to the *buffer*, and `open` applies it because
+it is constructing a whole document, while a store cannot know that no more ranges
+are coming and must not invent a row. The consumer already applies it —
+`load_ctrl`'s `Adopted::Finished` arm is `if bs.buf.rows_is_empty() { push_row }` —
+and `an_empty_file_gets_its_row_from_the_buffer_not_the_store` pins the seam.
+
+**What remains, and why it is not in this commit.** The store can now be built from
+a stream; nothing uses it yet, because the consumer is the hard part:
+
+    53   `self.lines` uses inside buffer.rs, several of them in-place mutation
+         (`self.lines[r].remove(c)`) where `RowStore` has `set_row`, not a mutable row
+    58   `buf.row()` / `buf.row_opt()` reads needing an `ensure` before them
+     8   `buf.rows()` — an iterator over EVERY row, which a lazy store cannot yield
+         at all, since a non-resident row has nothing to borrow
+     3   `buf.row_mut()`
+
+That is ~120 sites and a `loader.rs` rewrite that must land together: `Buffer::lines`
+is one field, so a half-swapped tree does not compile. It is its own session, and
+the tree is left working rather than half-migrated — which is the same call that was
+right for stage A, and the reason stage A is provable by the existing suite.
 
 **Worth noting what is NOT blocked:** stage A already delivered §16.0's actual
 promise — size does not influence editability — for the edit the section is about

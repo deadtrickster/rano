@@ -190,6 +190,63 @@ impl RowStore {
         }
     }
 
+    /// A store over `path`, **empty and ready to ingest**: the streaming open.
+    ///
+    /// [`Self::open`] indexes the whole file in one pass, which is O(bytes) at
+    /// ~2.2 GB/s — 84 ms for a 193 MB file, but ~470 ms for 1 GB and ~940 ms for
+    /// 2 GB. That is a dead screen at the sizes this editor exists for, and it is
+    /// what §14.6's scheduled loader avoids. So the two halves are separated:
+    /// this opens the file and holds it, and [`Self::ingest`] takes byte ranges as
+    /// they are found — which is what the loader is already computing when it
+    /// scans for newlines to split rows.
+    ///
+    /// The file is opened HERE rather than handed in, which is the other half of
+    /// why this exists: the loader used to own the `File` and drop it when its
+    /// reader thread ended (TODO.md §16.3, option A). Nothing has to hand it back
+    /// now — the store opened its own.
+    pub fn begin(path: &Path, encoding: Encoding) -> io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        Ok(Self {
+            file: Some(file),
+            path: Some(path.to_path_buf()),
+            encoding,
+            chunks: Vec::new(),
+            base: Vec::new(),
+            rows: 0,
+            tick: 0,
+            budget: DEFAULT_BUDGET,
+            resident: 0,
+        })
+    }
+
+    /// Append rows for `ranges`, in file order, as file-backed rows.
+    ///
+    /// Nothing is decoded — the ranges are the whole of what this needs, and the
+    /// byte lengths they carry are enough for the wrap table to work without
+    /// producing a row. That is the point: ingest is O(ranges) and allocates two
+    /// `u64` per row, where the loader's decode allocated a `Vec<char>` of four
+    /// bytes per character.
+    ///
+    /// Chunks fill to [`CHUNK`] before a new one starts, so the shape is the same
+    /// as [`Self::open`]'s, which is why the two cannot disagree about row
+    /// numbering.
+    pub fn ingest(&mut self, ranges: &[(u64, u64)]) {
+        for &(start, end) in ranges {
+            if self.chunks.last().is_none_or(|c| c.rows.len() >= CHUNK) {
+                self.base.push(self.rows);
+                self.chunks.push(Chunk {
+                    rows: Vec::with_capacity(CHUNK),
+                    used: 0,
+                });
+            }
+            // `last_mut` cannot be `None`: the branch above guarantees one.
+            if let Some(c) = self.chunks.last_mut() {
+                c.rows.push(Row::File { start, end });
+                self.rows += 1;
+            }
+        }
+    }
+
     /// A store over a file, indexed but not decoded.
     ///
     /// One pass over the bytes finds every newline — cheap because in UTF-8 a
@@ -705,6 +762,172 @@ mod tests {
         // Asking again is free.
         assert_eq!(s.ensure(0, 0).expect("already resident"), 0);
         assert_eq!(all(&mut s), ["one", "two", "three"]);
+    }
+
+    /// **The streaming open must agree with the whole-file one, row for row.**
+    ///
+    /// `open` indexes the file in one pass; `begin` + `ingest` takes ranges as a
+    /// loader finds them. They are two ways to build the same index, so they are
+    /// asserted equal on every file shape the suite already cares about —
+    /// including the ones with a trailing newline, no trailing newline, and
+    /// multibyte characters, which is where a byte range can be off by one.
+    #[test]
+    fn ingesting_ranges_equals_indexing_the_whole_file() {
+        // **Not the empty file**: it is the one shape where the two paths
+        // deliberately differ, and `an_empty_file_gets_its_row_from_the_buffer`
+        // below pins where that row comes from. Every file WITH content must
+        // agree exactly.
+        for (name, body) in [
+            ("s_basic.txt", b"one\ntwo\nthree\n".to_vec()),
+            ("s_notrail.txt", b"a\nb".to_vec()),
+            ("s_onlynl.txt", b"\n".to_vec()),
+            ("s_blank.txt", b"\n\n\n".to_vec()),
+            (
+                "s_long.txt",
+                format!("{}\nshort\n", "x".repeat(5_000)).into_bytes(),
+            ),
+            (
+                "s_multibyte.txt",
+                "caf\u{e9} \u{4e2d}\u{6587}\n\u{1f600}tail\n"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ] {
+            let t = Temp::new(name, &body);
+            // The whole-file index.
+            let mut whole = RowStore::open(&t.0, Encoding::Utf8).expect("open");
+            // The same index, from ranges — computed here the way the loader
+            // computes them: scan the bytes, and every newline ends a row.
+            let mut ranges: Vec<(u64, u64)> = Vec::new();
+            let mut start = 0u64;
+            for (i, b) in body.iter().enumerate() {
+                if *b == b'\n' {
+                    let mut end = i as u64;
+                    // `\r\n`: the CR is not content, which is what the loader
+                    // does too.
+                    if end > start && body[end as usize - 1] == b'\r' {
+                        end -= 1;
+                    }
+                    ranges.push((start, end));
+                    start = i as u64 + 1;
+                }
+            }
+            if start < body.len() as u64 {
+                ranges.push((start, body.len() as u64));
+            }
+            let mut streamed = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+            streamed.ingest(&ranges);
+
+            assert_eq!(
+                streamed.rows(),
+                whole.rows(),
+                "{name}: {} rows streamed vs {} indexed",
+                streamed.rows(),
+                whole.rows()
+            );
+            // And the content agrees, read row by row through the same API a
+            // caller uses.
+            whole.materialize_all().expect("materialize");
+            streamed.materialize_all().expect("materialize");
+            for r in 0..whole.rows() {
+                assert_eq!(
+                    text(&streamed, r),
+                    text(&whole, r),
+                    "{name}: row {r} differs"
+                );
+            }
+        }
+    }
+
+    /// **The one-row invariant belongs to the BUFFER, not to the store.**
+    ///
+    /// Found by this file's own equality test disagreeing on the empty file:
+    /// `open` yields 1 row (it is constructing a whole document, so it applies
+    /// the invariant) while `begin` + no ranges yields 0 — and the store cannot
+    /// know that no more ranges are coming, so it must not invent a row.
+    ///
+    /// The consumer applies it, and already did before this existed:
+    /// `load_ctrl`'s `Adopted::Finished` arm is
+    /// `if bs.buf.rows_is_empty() { bs.buf.push_row(Vec::new()) }`.
+    ///
+    /// So the seam is stated rather than papered over: a begun-but-unfed or
+    /// genuinely empty file is 0 rows from the store, and 1 row from the buffer.
+    #[test]
+    fn an_empty_file_gets_its_row_from_the_buffer_not_the_store() {
+        let t = Temp::new("s_empty2.txt", b"");
+        let indexed = RowStore::open(&t.0, Encoding::Utf8).expect("open");
+        assert_eq!(
+            indexed.rows(),
+            1,
+            "`open` builds a whole document, so it applies the one-row invariant"
+        );
+        let streamed = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+        assert_eq!(
+            streamed.rows(),
+            0,
+            "the store cannot know more ranges are not coming, so it must not \
+             invent a row — the buffer's `Adopted::Finished` arm adds it"
+        );
+
+        // And a store that ingests an empty range list stays at zero rather than
+        // growing a phantom row.
+        let mut fed = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+        fed.ingest(&[]);
+        assert_eq!(fed.rows(), 0, "no ranges, no rows");
+    }
+
+    /// Batching must not matter: the loader hands over ranges in `BATCH`-sized
+    /// pieces, and the index cannot depend on where the pieces fell.
+    #[test]
+    fn the_batching_of_ranges_does_not_matter() {
+        let body: Vec<u8> = (0..3_000)
+            .map(|i| format!("row {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let t = Temp::new("s_batch.txt", &body);
+        let ranges: Vec<(u64, u64)> = {
+            let mut v = Vec::new();
+            let mut start = 0u64;
+            for (i, b) in body.iter().enumerate() {
+                if *b == b'\n' {
+                    v.push((start, i as u64));
+                    start = i as u64 + 1;
+                }
+            }
+            v
+        };
+        // All at once.
+        let mut one = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+        one.ingest(&ranges);
+        // In ragged pieces, as a loader would.
+        let mut many = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+        for piece in ranges.chunks(7) {
+            many.ingest(piece);
+        }
+        assert_eq!(one.rows(), ranges.len());
+        assert_eq!(many.rows(), one.rows(), "batching changed the row count");
+
+        // And an ingest that straddles a CHUNK boundary still numbers right.
+        assert!(ranges.len() > CHUNK, "the fixture must span chunks");
+        one.materialize_all().expect("materialize");
+        many.materialize_all().expect("materialize");
+        for r in [0, CHUNK - 1, CHUNK, CHUNK + 1, ranges.len() - 1] {
+            assert_eq!(text(&many, r), text(&one, r), "row {r}");
+        }
+    }
+
+    /// A store that has been begun but not fed is empty and operable — the state
+    /// the first frame of a load is drawn from.
+    #[test]
+    fn a_begun_but_unfed_store_is_an_empty_frame_not_a_panic() {
+        let t = Temp::new("s_unfed.txt", b"a\nb\n");
+        let s = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
+        assert_eq!(s.rows(), 0, "no rows until ranges arrive");
+        assert!(s.try_row(0).is_none());
+        // And reading past it is the "out of range" panic, not the "not
+        // resident" one — a caller debugging an empty first frame should be told
+        // it has no rows, not that it forgot an ensure.
+        assert_eq!(s.rows(), 0);
     }
 
     /// **A row that is not resident must not read as empty, and must not read as

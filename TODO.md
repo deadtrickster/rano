@@ -1997,13 +1997,22 @@ and no single item owns it. On a task line it targets that task's subtree instea
   is *why* the drift was invisible: the test and the constant agreed with each
   other and with nothing else.
 
-### 17.7 OPEN: heading navigation, and whether to fold
+### 17.7 Heading motion: BUILT. Folding: still open.
 
-- [ ] Decide and build: **hide-rows fold** or **jump-to-next-heading motion**.
+- [x] **Decided: motion, not folding** (v0.2.1). `M-}` and `M-{` jump to the next
+  and previous heading, wrapping and naming where they land.
+- [ ] **Folding, if it is ever wanted**, with the cost already known.
 
-The motion is small: it reads `Doc::headings()` (already built and tested) and
-moves the cursor. No renderer change at all. If the want is to move around a
-49-heading file quickly, that is most of the value for a fraction of the cost.
+The motion was chosen because it reads `Doc::headings()` — already built and
+tested — and moves the cursor: **no renderer change at all.** Eight tests,
+including the wrap, the off-the-current-heading case, a file with no headings,
+and one that scrolls fifty sections down and asserts the target is on screen. A
+heading motion that left the cursor off screen would be worse than not moving.
+
+Two details are the difference between a working key and one that reads broken:
+pressing it while ON a heading moves on rather than standing still, and a wrap is
+announced, because arriving at the top after aiming downward is otherwise a jump
+into nowhere.
 
 A real fold is larger, and the size is in one place: **the renderer and the scroll
 arithmetic assume every buffer row is visible.** `wrap_prefix`, `visual_pos`,

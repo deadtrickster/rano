@@ -1818,6 +1818,52 @@ tests (behaviour must be identical), and it removes the `Vec<Vec<char>>`
 tail-shift that `bench_edit_scaling` measures at 1.3 ms per line insert on a
 2.6M-row file.
 
+#### Stage A: LANDED 2026-09-30 (`ae203ae`)
+
+`Buffer::lines` is a chunked store (`rows::Rows`). The measurement, before and
+after, same machine and same benchmark:
+
+    insert a line, 30 MB  (400k rows)     193.4 µs  ->  0.3 µs
+    insert a line, 193 MB (2.6M rows)       1.3 ms  ->  0.7 µs
+    delete a line, 193 MB                   1.9 ms  ->  0.7 µs
+    join lines, 193 MB                      1.1 ms  ->  0.7 µs
+
+**And it tracks the chunk, not the file**: 6.5× the rows costs 2.3×, which is
+the index's binary search rather than the line count. That is §16.0's principle
+holding for the edit that the section is about — until now it held for typing
+(0.1 µs) and undo (0.1 µs) but not for Enter.
+
+Behaviour is unchanged, and the existing suite is the proof: 154 lib + 408 bin +
+46 integration, all green, **none of them edited**. Load 422 MB/s (was 419),
+scroll 113 µs (was 113), and `--export` round-trips three real files at exact
+line counts — measured, not assumed.
+
+What made it small is the accessor layer (commit 1). `Rows` implements `Index`,
+`IndexMut`, `get`, `get_mut`, `iter`, `last`, `push`, so most of `buffer.rs`'s 53
+`self.lines` uses did not change. Four did, plus the three accessors a chunked
+store cannot serve as slices:
+
+    lines_slice()    -> rows_range(a, b) / rows_vec()     (15 call sites)
+    rows_mut_slice() -> sort_rows_by(a, b, f)
+
+**Proven by a differential test against `Vec<Vec<char>>`**: 2,000 pseudo-random
+operations — insert, remove, drain, splice, set — biased so inserts land on chunk
+boundaries and drains cross them, comparing the whole document after every step.
+A hand-written script tests the boundaries its author thought of; that one does
+not. That test found two things while being written: an unbounded drain shrinks
+the model to a single row, where the per-step comparison passes 2,000 times and
+exercises nothing, so the mix is bounded to realistic sizes and the model is
+topped back up between steps.
+
+#### Stage B, next
+
+Lazy decode, and only once `row()` cannot lie. It is where the 835 MB -> ~20 MB
+comes from on a 184 MB file, and it is the half that can lose data, so it needs
+the API change first: either `row` takes `&mut self` and decodes, or an
+un-resident row is a loud failure instead of an empty slice.
+`RowStore::materialize_lines` already names what it does rather than pretending
+to be a cheap `to_lines`.
+
 ### 16.4 Phase 4 — eviction, windowed search, incremental index (§15.3)
 
 **Deliverable.** Scrolling far and back is cheap; `^W` works on a file too big

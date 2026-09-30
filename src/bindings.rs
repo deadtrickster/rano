@@ -12,7 +12,7 @@ pub struct Binding {
 /// rows are reserved for features whose wiring lands with later items
 /// (diagnostics, line numbers, wrap, filter, buffer switching).
 #[rustfmt::skip]
-    pub static BAR: [Binding; 35] = [
+    pub static BAR: [Binding; 37] = [
     Binding { key: "^G", label: "Help" },
     Binding { key: "^X", label: "Exit" },
     Binding { key: "^O", label: "Write Out" },
@@ -48,6 +48,8 @@ pub struct Binding {
     Binding { key: "M-T", label: "Todo Tick" },
     Binding { key: "M-C", label: "Todo Section" },
     Binding { key: "M-X", label: "Todo Decline" },
+    Binding { key: "M-}", label: "Next Heading" },
+    Binding { key: "M-{", label: "Prev Heading" },
 ];
 
 /// One help-grid cell: readable "key label" pair padded to a fixed column
@@ -145,10 +147,11 @@ mod tests {
         // here — the bar only shows as many as the terminal width fits, so a
         // forgotten append would be invisible on a wide screen and missing on a
         // narrow one.
-        assert_eq!(BAR.len(), 35);
+        assert_eq!(BAR.len(), 37);
         let keys: Vec<&str> = BAR.iter().map(|b| b.key).collect();
         for k in [
-            "M-D", "M-.", "M-,", "M-N", "M-\\", "M-|", "M-<", "M->", "M-T", "M-C", "M-X",
+            "M-D", "M-.", "M-,", "M-N", "M-\\", "M-|", "M-<", "M->", "M-T", "M-C", "M-X", "M-}",
+            "M-{",
         ] {
             assert!(keys.contains(&k), "reserved row {} missing", k);
         }

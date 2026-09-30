@@ -277,6 +277,74 @@ impl Editor {
         self.apply_todo_edits(&edits, &label);
     }
 
+    /// M-}: move the cursor to the next heading, M-{. **Both wrap**, because a
+    /// file is a loop when you are reading it: reaching the end and pressing
+    /// again should take you to the top rather than say there is nothing there.
+    /// The wrap is announced, so it cannot look like a jump into nowhere.
+    ///
+    /// Heading motion rather than folding, chosen deliberately: it reads
+    /// `headings()`, which the schema already builds and tests, and needs no
+    /// renderer change at all. Folding is the expensive half — see §17.7 — and it
+    /// is navigation, not hiding, that a 58-heading file actually wants.
+    ///
+    /// Works in any markdown file, not only a `TODO.md`: headings are markdown's,
+    /// not the todo standard's.
+    pub(crate) fn todo_next_heading(&mut self) {
+        self.heading_motion(true);
+    }
+
+    pub(crate) fn todo_prev_heading(&mut self) {
+        self.heading_motion(false);
+    }
+
+    fn heading_motion(&mut self, forward: bool) {
+        let row = self.bs().cursor.row;
+        let doc = self.todo_doc();
+        let lines: Vec<usize> = doc.headings().iter().map(|h| h.line).collect();
+        if lines.is_empty() {
+            self.flash("No headings in this file");
+            return;
+        }
+        // Deliberately strict: `>` and `<` rather than `>=`, so pressing the key
+        // while sitting ON a heading moves to the next one instead of standing
+        // still. Staying put reads as a broken key.
+        let next = if forward {
+            lines.iter().find(|l| **l > row).copied()
+        } else {
+            lines.iter().rev().find(|l| **l < row).copied()
+        };
+        let (target, wrapped) = match next {
+            Some(l) => (l, false),
+            None => {
+                if forward {
+                    (lines[0], true)
+                } else {
+                    (lines[lines.len() - 1], true)
+                }
+            }
+        };
+        let bs = self.bs_mut();
+        bs.cursor = crate::buffer::Pos {
+            row: target,
+            col: 0,
+        };
+        let text_h = self.text_h;
+        self.adjust_scroll(text_h);
+        self.adjust_scroll_x();
+        // Named, so a silent jump to a line you were not looking at cannot be
+        // mistaken for a scroll accident.
+        let n = doc.headings().iter().position(|h| h.line == target);
+        let title = n
+            .map(|i| {
+                doc.src()[doc.headings()[i].title.clone()]
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let where_ = if wrapped { " (wrapped)" } else { "" };
+        self.flash(&format!("{title}{where_}"));
+    }
+
     /// The task diagnostics for this buffer: its `check()` output, in the same
     /// tuple shape a tree-sitter error arrives in, so the gutter that already
     /// renders those renders these.
@@ -669,6 +737,114 @@ A description  with two spaces.
         assert_eq!(r[6], "- [ ] one");
         assert_eq!(r[8], "- [ ] parent");
         assert_eq!(r[9], "  - [ ] child a");
+    }
+
+    /// **M-} / M-{ — heading motion.** The navigation half of §17.7, built
+    /// because it needs no renderer change: `headings()` is already there.
+    #[test]
+    fn heading_motion_walks_the_outline() {
+        let mut ed = ed(DOC);
+        // DOC's headings are at rows 0 ("# TODO"), 4 ("## Now") and 12 ("## Later").
+        at(&mut ed, 0);
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 4, "next heading");
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 12);
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 0, "wraps to the top");
+        ed.todo_prev_heading();
+        assert_eq!(ed.bs().cursor.row, 12, "and back to the bottom");
+        ed.todo_prev_heading();
+        assert_eq!(ed.bs().cursor.row, 4);
+    }
+
+    /// Pressing it while ON a heading moves on, rather than standing still —
+    /// which is the difference between a working key and one that reads broken.
+    #[test]
+    fn heading_motion_moves_off_the_current_heading() {
+        let mut ed = ed(DOC);
+        at(&mut ed, 4); // exactly on "## Now"
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 12, "not 4 again");
+        ed.todo_prev_heading();
+        assert_eq!(ed.bs().cursor.row, 4);
+    }
+
+    /// It lands at the START of the heading line, and says which one — a jump
+    /// with no label is indistinguishable from a scroll accident.
+    #[test]
+    fn heading_motion_lands_on_the_line_and_names_it() {
+        let mut ed = ed(DOC);
+        at(&mut ed, 0);
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor, Pos { row: 4, col: 0 });
+        let st = ed.status_text().unwrap_or_default();
+        assert!(st.contains("Now"), "the heading's own text: {st:?}");
+    }
+
+    /// A wrap says so, because arriving at the top after aiming downward is
+    /// otherwise a jump into nowhere.
+    #[test]
+    fn heading_motion_announces_a_wrap() {
+        let mut ed = ed(DOC);
+        at(&mut ed, 14); // past the last heading
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 0);
+        let st = ed.status_text().unwrap_or_default();
+        assert!(st.contains("wrapped"), "{st:?}");
+    }
+
+    /// A file with no headings says that rather than doing nothing silently.
+    #[test]
+    fn heading_motion_without_headings_says_so() {
+        let mut ed = ed("just prose\nand more prose\n");
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 0, "did not move");
+        assert!(
+            ed.status_text().unwrap_or_default().contains("No headings"),
+            "{:?}",
+            ed.status_text()
+        );
+    }
+
+    /// Headings are markdown's, not the todo standard's, so this works in any
+    /// markdown file — no `TODO.md` name gate, unlike `check()`.
+    #[test]
+    fn heading_motion_works_outside_a_todo_file() {
+        let mut ed = ed_named("notes.md", "# One\n\ntext\n\n## Two\n\nmore\n");
+        at(&mut ed, 0);
+        ed.todo_next_heading();
+        assert_eq!(ed.bs().cursor.row, 4);
+    }
+
+    /// **The scrolling follows the cursor.** A heading motion without an
+    /// `adjust_scroll` would move the cursor off screen, which is worse than not
+    /// moving at all — the file's whole point is that you jump to read.
+    #[test]
+    fn heading_motion_scrolls_the_view_to_follow() {
+        let mut body = String::from("# TODO\n\n");
+        for i in 0..200 {
+            body.push_str(&format!("## Section {i}\n\n- [ ] item\n\n"));
+        }
+        let mut ed = ed(&body);
+        ed.text_h = 10;
+        ed.show_line_numbers = false;
+        ed.text_w = 40;
+        ed.ensure_wrap_prefix();
+        // Rows: 0 "# TODO", 1 blank, then each section is 4 rows, so section k's
+        // heading is at 2 + 4k. Fifty presses from row 0 land on k = 49.
+        at(&mut ed, 0);
+        for _ in 0..50 {
+            ed.todo_next_heading();
+        }
+        assert_eq!(ed.bs().cursor.row, 2 + 4 * 49, "50 sections along");
+        let vis = ed.visual_pos(ed.bs().cursor);
+        let scroll = ed.bs().scroll;
+        assert!(
+            vis >= scroll && vis < scroll + ed.text_h,
+            "the target must be on screen: visual {vis}, scroll {scroll}, height {}",
+            ed.text_h
+        );
     }
 
     /// A line that is not a task says so rather than doing something surprising.

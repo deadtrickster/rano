@@ -94,6 +94,11 @@ impl Editor {
                 // M-X: declined, the standard's third state. On its own key so
                 // the common toggle never passes through it.
                 KeyCode::Char('x') => self.todo_decline(),
+                // M-} / M-{ : jump to the next / previous heading. Headings are
+                // what the hierarchy in a todo file IS, so this is how you move
+                // around one.
+                KeyCode::Char('}') => self.todo_next_heading(),
+                KeyCode::Char('{') => self.todo_prev_heading(),
                 // M-V: install the newer release the startup check found.
                 // One keystroke, user-initiated: the status line has already
                 // named the version, so this IS the confirmation.

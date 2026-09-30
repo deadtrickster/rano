@@ -98,6 +98,8 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-T` | Tick the task on this line (`[ ]` ↔ `[x]`) |
 | `M-C` | Tick every task in this section — or in this task's subtree |
 | `M-X` | Decline the task on this line (`[-]`), or un-decline it |
+| `M-}` | Jump to the next heading |
+| `M-{` | Jump to the previous heading |
 | `M-N` | Toggle line-number gutter |
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
@@ -156,6 +158,11 @@ tails (`~3d #feat @john 2020-03-20`), wrapping and trailing whitespace are not
 parsed, not modelled, and not rewritten. Verified on a real file: ticking two
 tasks in a section changes exactly those two lines and the file stays the same
 size.
+
+**Heading motion** (`M-}` / `M-{`) walks the outline, wrapping at the ends and
+saying so. Headings are markdown's, not the todo standard's, so it works in any
+markdown file — heading motion is not gated on the file name the way the marker
+check is.
 
 **A marker the standard does not define is reported**, in the gutter, in the
 same red an error gets: `- [/]` is not one of the three, and neither the grammar

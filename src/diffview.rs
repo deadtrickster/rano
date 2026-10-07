@@ -15,7 +15,6 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rano::conflict::{Compare, Take};
 use rano::diff::DiffConfig;
 use rano::sidediff::{EditView, edit_view, render_edit_view};
@@ -217,91 +216,87 @@ impl Editor {
         }
     }
 
-    pub(crate) fn handle_diff_key(&mut self, mut v: DiffView, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
+    /// One action in the diff view, from a command (see `commands.rs`, whose
+    /// keymaps say which key does what in each kind of view).
+    pub(crate) fn diff_act(&mut self, act: DiffAct) {
+        let Some(mut v) = self.diff_view.take() else {
+            return;
+        };
         let page = body_rows(self.text_h);
         let last = v.lines.len().saturating_sub(page);
-        if let Some(act) = conflict_action(&v, key) {
-            self.conflict_act(v, act);
-            return;
-        }
-        // Leaving: back to the save question, or back to the text.
-        let leave = |ed: &mut Editor, v: &DiffView| {
-            if v.answers_save() {
-                ed.reask_external();
-            }
-        };
-        match key.code {
-            KeyCode::Char(c @ ('y' | 'Y' | 'n' | 'N')) if !ctrl && !alt && v.answers_save() => {
-                self.answer_external(c);
+        match act {
+            DiffAct::Conflict(a) => return self.conflict_act(v, a),
+            DiffAct::Answer(c) => {
+                if v.answers_save() {
+                    self.answer_external(c);
+                } else {
+                    self.diff_view = Some(v);
+                }
                 return;
             }
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') if !ctrl && !alt => {
-                leave(self, &v);
+            // Leaving: back to the save question, or back to the text.
+            DiffAct::Close => {
+                if v.answers_save() {
+                    self.reask_external();
+                }
                 return;
             }
-            KeyCode::Char('d') if !ctrl && !alt && v.answers_save() => {
-                leave(self, &v);
-                return;
-            }
-            // The key that opened it closes it.
-            KeyCode::Char('p' | 'P') if alt && !v.answers_save() => return,
-            KeyCode::Char('g' | 'c') if ctrl => {
-                leave(self, &v);
-                return;
-            }
-            // s: split ↔ unified, remembered for the next diff.
-            KeyCode::Char('s') | KeyCode::Tab if !ctrl && !alt => {
+            // Split ↔ unified, remembered for the next diff.
+            DiffAct::ToggleSplit => {
                 v.split = !v.split;
                 self.diff_split = v.split;
                 v.top = 0;
                 v.render(self.text_w);
             }
-            KeyCode::Up => v.top = v.top.saturating_sub(1),
-            KeyCode::Char('p') if ctrl => v.top = v.top.saturating_sub(1),
-            KeyCode::Down => v.top += 1,
-            KeyCode::Char('n') if ctrl => v.top += 1,
-            KeyCode::PageUp => v.top = v.top.saturating_sub(page),
-            KeyCode::PageDown | KeyCode::Char(' ') => v.top += page,
-            KeyCode::Home => v.top = 0,
-            KeyCode::End => v.top = last,
-            _ => {}
+            DiffAct::Scroll(d) => v.top = (v.top as isize + d).max(0) as usize,
+            DiffAct::Page(d) => v.top = (v.top as isize + d * page as isize).max(0) as usize,
+            DiffAct::Top => v.top = 0,
+            DiffAct::Bottom => v.top = last,
         }
         // Never so far down that the last page is short.
-        let last = v.lines.len().saturating_sub(page);
         v.top = v.top.min(last);
         self.diff_view = Some(v);
     }
+
+    /// Which kind of diff is open, for choosing its keymap.
+    pub(crate) fn diff_kind(&self) -> Option<DiffKind> {
+        self.diff_view.as_ref().map(|v| match v.source {
+            Source::Save { .. } => DiffKind::Save,
+            Source::Patch { .. } => DiffKind::Patch,
+            Source::Conflict { .. } => DiffKind::Conflict,
+        })
+    }
 }
 
-/// What a key does in the conflict view, beyond scrolling.
-enum ConflictAct {
+/// What a command does in a diff view.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DiffAct {
+    ToggleSplit,
+    Scroll(isize),
+    Page(isize),
+    Top,
+    Bottom,
+    Close,
+    /// `y` / `n` to the save question the view was opened from.
+    Answer(char),
+    Conflict(ConflictAct),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffKind {
+    Save,
+    Patch,
+    Conflict,
+}
+
+/// What a command does in the conflict view, beyond scrolling.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ConflictAct {
     /// Make conflict `current + delta` current and scroll to it.
     Move(isize),
     /// The next comparison (ours/theirs → base/ours → base/theirs).
     Compare,
     Take(Take),
-}
-
-fn conflict_action(v: &DiffView, key: KeyEvent) -> Option<ConflictAct> {
-    if !matches!(v.source, Source::Conflict { .. })
-        || key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    {
-        return None;
-    }
-    Some(match key.code {
-        KeyCode::Char('n' | ']') => ConflictAct::Move(1),
-        KeyCode::Char('p' | '[') => ConflictAct::Move(-1),
-        KeyCode::Char('c') => ConflictAct::Compare,
-        KeyCode::Char('o') => ConflictAct::Take(Take::Ours),
-        KeyCode::Char('t') => ConflictAct::Take(Take::Theirs),
-        KeyCode::Char('b') => ConflictAct::Take(Take::OursThenTheirs),
-        KeyCode::Char('B') => ConflictAct::Take(Take::TheirsThenOurs),
-        _ => return None,
-    })
 }
 
 impl Editor {

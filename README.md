@@ -79,9 +79,32 @@ message and exits non-zero, so a caller can tell what happened.
 
 ## Keys
 
+### Finding a command
+
+There are too many keys to remember, so rano helps you find them, the emacs way:
+
+- **`M-x`** runs any command by name. Type a few letters of what you want, in
+  any order (`wri out` finds Write Out). Recently run commands come first, and
+  every row shows the command's key, so the palette also teaches the keys.
+- **`^G`** (or `F1`) is the help prefix, and its card shows as soon as you
+  press it: `?` (or `^G` again) for the help page, `k` then any key to see
+  what that key runs, `b` for every key in effect, `x` for `M-x`.
+- **Prefix keys** show a card of what can follow if you pause after them:
+  `M-t` for todo lists, and the help prefix at once. `Esc` abandons a prefix.
+- **The bottom bar follows what you're doing.** In the text it shows the
+  main keys; in a list, a diff, a help page or `M-x`, it shows that view's
+  keys; after a prefix, what can follow it.
+
+Every key's meaning is written down once, in a table of named commands and the
+keymaps that reach them (`src/commands.rs`, and `rano::keymap` for the
+keymaps), and the bar, the help pages, `M-x` and the cards all read from it.
+Keys are written emacs-style by default (`C-x`, `M-p`); `key_notation = nano` in
+the config writes them nano's way (`^X`, `M-P`).
+
 | Key | Action |
 |---|---|
-| `^G` / `F1` | Help page |
+| `M-X` | Run a command by name |
+| `^G` / `F1` | Help prefix: `?` help page, `k` describe a key, `b` every key, `x` run a command |
 | `^O` / `F2` | Write out (save) |
 | `^R` / `F5` | Read a file into the buffer |
 | `^F` / `F3` | Where is (search); `^B` searches backwards |
@@ -104,11 +127,11 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-?` | Find usages (LSP references): list them, Enter jumps to one |
 | `M-,` | Jump back (stacked — one press per jump, from a definition or a usage) |
 | `M-V` | Install the newer release the startup check found |
-| `M-T` | Tick the task on this line (`[ ]` ↔ `[x]`) |
-| `M-C` | Tick every task in this section — or in this task's subtree |
-| `M-X` | Decline the task on this line (`[-]`), or un-decline it |
-| `M-}` | Jump to the next heading |
-| `M-{` | Jump to the previous heading |
+| `M-T T` | Tick the task on this line (`[ ]` ↔ `[x]`) |
+| `M-T C` | Tick every task in this section — or in this task's subtree |
+| `M-T X` | Decline the task on this line (`[-]`), or un-decline it |
+| `M-}` / `M-T ]` | Jump to the next heading |
+| `M-{` / `M-T [` | Jump to the previous heading |
 | `M-N` | Toggle line-number gutter |
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current — unless it has unsaved edits, which keeps it); `name:line[:col]` jumps there |
@@ -211,11 +234,13 @@ Open a file named `TODO.md` and the checkboxes are live. It is the
 [todo-md](https://github.com/todo-md/todo-md) markdown standard: three states,
 `- [ ]`, `- [-]`, `- [x]`, and subheaders as sections.
 
+The todo keys are under the `M-T` prefix (pause after it to see them):
+
 | key | what it does |
 |---|---|
-| `M-T` | Tick the task on this line. `[ ]` → `[x]`, and back. |
-| `M-C` | Tick every task in the section the cursor is in — or, on a task line, in that task's subtree. Press again to clear. |
-| `M-X` | Decline: `[-]`. Press again to un-decline. |
+| `M-T T` | Tick the task on this line. `[ ]` → `[x]`, and back. |
+| `M-T C` | Tick every task in the section the cursor is in — or, on a task line, in that task's subtree. Press again to clear. |
+| `M-T X` | Decline: `[-]`. Press again to un-decline. |
 
 **`[-]` means declined, not "in progress".** That is the standard's own word —
 its states are *"open / declined / done / deleted"* — and it is why it has its
@@ -224,7 +249,7 @@ own key: the everyday press never passes through it by accident.
 **A parent follows its children.** Completing the last sub-task completes the
 parent, and un-completing one opens it again, because the file is the thing
 other tools read and a parent left `[x]` above an open child is the file
-disagreeing with itself. That is also why `M-T` on a task that *has* children
+disagreeing with itself. That is also why `M-T T` on a task that *has* children
 carries them: `[x]` on the parent would otherwise be a state the file cannot
 keep.
 

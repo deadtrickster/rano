@@ -47,18 +47,6 @@ fn title_left() -> String {
     format!("  rano {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Bottom bar items. Ordered to match nano's column-major pairing: item `2c`
-/// renders in the top bar row and item `2c+1` in the bottom bar row, so the
-/// bar reads exactly like nano's (Help/Exit, WriteOut/ReadFile, ...). The
-/// entries come from bindings::BAR so the bar and the help overlay can never
-/// disagree about which key does what.
-fn bar_items() -> Vec<(&'static str, &'static str)> {
-    crate::bindings::BAR
-        .iter()
-        .map(|b| (b.key, b.label))
-        .collect()
-}
-
 /// Gutter columns for a buffer of `rows` lines: right-aligned number plus one
 /// trailing space, minimum two digits.
 /// Short type tag for a completion row, from the LSP CompletionItemKind.
@@ -681,7 +669,9 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     //   itemwidth = COLS / per_row
     // filled column-major: item i -> row (i % 2), col (i / 2) * itemwidth.
     // The last column absorbs the leftover (COLS % itemwidth) slack.
-    let items = bar_items();
+    // What is in effect decides the bar (`Editor::bar_items`): the global
+    // keys, a mode's own, or what can follow a pending prefix.
+    let items = ed.bar_items();
     let total = items.len().min(((width as usize) + 40) / 20 * 2);
     if total > 0 {
         let per_row = total.div_ceil(2);
@@ -697,7 +687,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                         itemw
                     };
                     if i < total {
-                        let (k, l) = items[i];
+                        let (k, l) = (&items[i].0, &items[i].1);
                         // nano post_one_key: the key combo is reversed, the
                         // separator space and the tag stay in the terminal's
                         // default colors; the tag is skipped when fewer than
@@ -727,7 +717,10 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // ---- cursor ----
     // None over the list overlay (the selection is the reversed row) or over
     // the diff, which has nothing to point at.
-    if !ed.help && ed.picker.is_none() && ed.diff_view.is_none() {
+    if let Some(p) = &ed.palette {
+        let col = 4 + p.query.chars().count();
+        f.set_cursor_position(((col as u16).min(width.saturating_sub(1)), status_row));
+    } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
         if let Some(p) = &ed.prompt {
             // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);
@@ -761,28 +754,106 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         }
     }
 
-    // ---- help overlay ----
-    if ed.help {
-        // Single source of truth: bindings::help_lines() (matches the bar).
-        let text: Vec<String> = crate::bindings::help_lines();
-        let lines: Vec<Line> = text
+    // ---- help pages (over the text, like the list) ----
+    if let Some(v) = &ed.info {
+        let area_text = Rect::new(0, 1, width, text_h as u16);
+        f.render_widget(Clear, area_text);
+        let header = format!(
+            " {}   q: close  \u{2191}\u{2193} PgUp PgDn: scroll",
+            v.title
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(header)).style(rev()),
+            Rect::new(0, 1, width, 1),
+        );
+        let rows = crate::diffview::body_rows(text_h);
+        for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
+            f.render_widget(
+                Paragraph::new(l.clone()),
+                Rect::new(0, 2 + k as u16, width, 1),
+            );
+        }
+    }
+
+    // ---- M-x: the query on the status row, candidates above it ----
+    if let Some(p) = &ed.palette {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    "M-x {:<w$}",
+                    p.query,
+                    w = (width as usize).saturating_sub(4)
+                ),
+                rev(),
+            ))),
+            Rect::new(0, status_row, width, 1),
+        );
+        let rows = text_h.min(14).min(p.items.len().max(1));
+        let top = status_row.saturating_sub(rows as u16);
+        f.render_widget(Clear, Rect::new(0, top, width, rows as u16));
+        if p.items.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "  no command matches",
+                    Style::new().add_modifier(Modifier::DIM),
+                )),
+                Rect::new(0, top, width, 1),
+            );
+        }
+        let start = (p.sel + 1).saturating_sub(rows);
+        let tw = p
+            .items
             .iter()
-            .map(|l| {
-                if l.is_empty() {
-                    Line::default()
-                } else if l.starts_with("  Press any key") {
-                    Line::from(Span::styled(
-                        l.to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                } else {
-                    Line::from(Span::raw(l.to_string()))
+            .filter_map(|n| crate::commands::command(n))
+            .map(|c| c.title.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (k, name) in p.items.iter().skip(start).take(rows).enumerate() {
+            let Some(c) = crate::commands::command(name) else {
+                continue;
+            };
+            let keys = ed.keys_for(name);
+            let mut spans = vec![
+                Span::raw(format!(" {:<tw$}  ", c.title)),
+                Span::styled(format!("{keys:<14} "), Style::new().fg(Color::Cyan)),
+                Span::styled(c.doc.to_string(), Style::new().add_modifier(Modifier::DIM)),
+            ];
+            if start + k == p.sel {
+                for s in &mut spans {
+                    s.style = s.style.patch(rev());
                 }
-            })
-            .collect();
-        f.render_widget(Paragraph::new(lines), area);
+            }
+            let mut line = Line::from(spans);
+            if start + k == p.sel {
+                line = line.style(rev());
+            }
+            f.render_widget(Paragraph::new(line), Rect::new(0, top + k as u16, width, 1));
+        }
+    }
+
+    // ---- which-key: a pending prefix's card, above the status row ----
+    if let Some((m, keys)) = ed.pending_card() {
+        let nano = ed.config.nano_keys;
+        let entries = crate::commands::entries_of(m, nano);
+        let rows = crate::help::card_rows(&entries, width as usize, Style::new().fg(Color::Cyan));
+        let n = rows.len().min(text_h.saturating_sub(1));
+        let top = status_row.saturating_sub(n as u16 + 1);
+        f.render_widget(Clear, Rect::new(0, top, width, n as u16 + 1));
+        let title = format!(
+            " {} {}-   ESC: cancel",
+            m.name,
+            crate::help::notation(nano, &keys)
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(title)).style(rev()),
+            Rect::new(0, top, width, 1),
+        );
+        for (k, l) in rows.into_iter().take(n).enumerate() {
+            f.render_widget(
+                Paragraph::new(l),
+                Rect::new(0, top + 1 + k as u16, width, 1),
+            );
+        }
     }
 }
 
@@ -1158,10 +1229,23 @@ mod tests {
         };
         let top = row(22);
         let bottom = row(23);
-        assert!(top.starts_with("^G Help"));
-        assert!(top.contains("^O Write Out"));
-        assert!(bottom.starts_with("^X Exit"));
-        assert!(bottom.contains("^R Read File"));
+        // Emacs notation by default; the help key is a prefix.
+        assert!(top.starts_with("C-g Help…"), "{top}");
+        assert!(top.contains("C-o Write Out"), "{top}");
+        assert!(bottom.starts_with("C-x Exit"), "{bottom}");
+        assert!(bottom.contains("C-r Read File"), "{bottom}");
+        // key_notation = nano: nano's own bar.
+        let mut e = ed("x");
+        e.config.nano_keys = true;
+        terminal.draw(|f| draw(f, &e)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..80)
+                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .collect()
+        };
+        assert!(row(22).starts_with("^G Help…"), "{}", row(22));
+        assert!(row(23).starts_with("^X Exit"), "{}", row(23));
     }
 
     #[test]

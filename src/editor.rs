@@ -80,7 +80,17 @@ pub struct Editor {
     /// frame by `refresh_prompt_hints`, so the directory is read when the
     /// text changes rather than on every draw.
     pub prompt_hints: Option<(PromptKind, String, Vec<String>)>,
-    pub help: bool,
+    /// The keymaps in effect: the global layer and each mode's (see
+    /// `commands.rs`). A host can rebind by editing them.
+    pub keymaps: crate::commands::Keymaps,
+    /// A key sequence under way: a prefix pressed, or `describe-key` waiting.
+    pub pending: crate::commands::Pending,
+    /// `M-x`, while it is open.
+    pub palette: Option<crate::help::Palette>,
+    /// A help page (the overview, every key, a key's description).
+    pub info: Option<crate::help::InfoView>,
+    /// Commands run, most recent first: `M-x` offers them first.
+    pub command_history: Vec<&'static str>,
     pub status: Option<Flash>,
     pub loc_until: Option<Instant>,
     pub quit: bool,
@@ -238,7 +248,11 @@ impl Editor {
             search_regex: false,
             prompt: None,
             prompt_hints: None,
-            help: false,
+            keymaps: crate::commands::Keymaps::standard(),
+            pending: Default::default(),
+            palette: None,
+            info: None,
+            command_history: Vec::new(),
             status: None,
             loc_until: None,
             quit: false,
@@ -2223,14 +2237,6 @@ impl Editor {
             }
         }
         self.bs_mut().cursor = Pos { row: r, col: c };
-    }
-
-    pub(crate) fn next_line(&mut self) {
-        self.move_down();
-    }
-
-    pub(crate) fn prev_line(&mut self) {
-        self.move_up();
     }
 
     // Next Word (nano's ^Right / M-N): move forward one word.

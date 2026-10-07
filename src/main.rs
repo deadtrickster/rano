@@ -1,5 +1,5 @@
-mod bindings;
 mod buffer;
+mod commands;
 mod config;
 mod diffview;
 mod editor;
@@ -7,6 +7,7 @@ mod encoding;
 mod exec;
 mod exec_ctrl;
 mod export;
+mod help;
 mod keys;
 mod load_ctrl;
 mod loader;
@@ -651,6 +652,13 @@ fn run(
         dirty |= ed.start_pending_load();
         dirty |= ed.refresh_prompt_hints();
         dirty |= ed.refresh_diff_view();
+        dirty |= ed.refresh_info_view();
+        // A prefix's card appears after a pause: redraw when it becomes due.
+        let card = ed.pending_card().is_some();
+        if card != ed.pending.card_shown {
+            ed.pending.card_shown = card;
+            dirty = true;
+        }
         ed.apply_startup_pos();
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
@@ -690,6 +698,11 @@ fn run(
             8
         } else {
             200
+        };
+        // Come back when a prefix's card is due, not at the next keystroke.
+        let wait = match ed.card_due() {
+            Some(d) => wait.min(d.as_millis() as u64 + 1),
+            None => wait,
         };
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
@@ -1230,6 +1243,187 @@ mod ed_tests {
         assert!(lines(&ed).contains(&"    let sum = 1;".to_string()));
         press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
         assert_eq!(lines(&ed).join("\n"), CONFLICTED);
+    }
+
+    // ---- keymaps, M-x, help pages, which-key ----
+
+    fn screen(ed: &Editor, w: u16, h: u16) -> Vec<String> {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::draw(f, ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
+        let mut ed = test_ed("- [ ] task");
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(ed.pending.keys.len(), 1, "M-t is a prefix");
+        assert!(ed.pending_card().is_none(), "its card waits a moment");
+        assert!(ed.card_due().is_some());
+        // Held still: the card shows.
+        ed.pending.since = Some(Instant::now() - Duration::from_secs(1));
+        let (m, _) = ed.pending_card().expect("card");
+        assert_eq!(m.name, "todo");
+        let rows = screen(&ed, 80, 16);
+        assert!(rows.iter().any(|r| r.contains("todo M-t-")), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Tick") && r.contains("Decline")),
+            "{rows:#?}"
+        );
+        // The bar shows what can follow, too.
+        assert!(ed.bar_items().iter().any(|(k, t)| k == "t" && t == "Tick"));
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(ed.pending.keys.is_empty());
+        assert_eq!(lines(&ed)[0], "- [x] task", "M-t t ticked it");
+        // ESC abandons a prefix; an unbound key says so.
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ed.status_text().as_deref(), Some("Quit"));
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(ed.status_text().as_deref(), Some("M-t q is undefined"));
+        assert_eq!(lines(&ed)[0], "- [x] task", "nothing was typed");
+    }
+
+    #[test]
+    fn the_help_key_shows_its_card_at_once_and_opens_pages() {
+        let mut ed = test_ed("text");
+        ed.text_w = 100;
+        ed.text_h = 30;
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert!(ed.pending_card().is_some(), "help shows at once");
+        press(&mut ed, KeyCode::Char('b'), KeyModifiers::NONE);
+        let v = ed.info.as_ref().expect("the bindings page");
+        let text: Vec<String> = v
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            text.iter()
+                .any(|r| r.contains("C-o") && r.contains("Write Out")),
+            "{text:#?}"
+        );
+        assert!(
+            text.iter()
+                .any(|r| r.contains("M-t t") && r.contains("Tick")),
+            "{text:#?}"
+        );
+        assert!(
+            text.iter()
+                .any(|r| r.contains("Conflict view") || r.contains("Patch and conflict"))
+        );
+        // A page's own keys, and q closes it; typing does not reach the text.
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert_eq!(lines(&ed), vec!["text"]);
+        press(&mut ed, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(ed.info.is_none());
+        // C-g C-g: the overview.
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(ed.info.as_ref().unwrap().title, "Help");
+    }
+
+    #[test]
+    fn describe_key_says_what_a_key_runs_even_through_a_prefix() {
+        let mut ed = test_ed("text");
+        let page = |ed: &Editor| -> String {
+            ed.info
+                .as_ref()
+                .unwrap()
+                .lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        let p = page(&ed);
+        assert!(p.contains("C-k runs Cut") && p.contains("(cut)"), "{p}");
+        assert_eq!(lines(&ed), vec!["text"], "described, not run");
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(page(&ed).contains("M-t x runs Decline"), "{}", page(&ed));
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(page(&ed).contains("C-z is not bound"), "{}", page(&ed));
+    }
+
+    #[test]
+    fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
+        let mut ed = test_ed("text");
+        press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+        assert!(ed.palette.is_some());
+        press_text(&mut ed, "wri out");
+        assert_eq!(lines(&ed), vec!["text"], "the query is not the text");
+        assert_eq!(ed.palette.as_ref().unwrap().items[0], "write-out");
+        let rows = screen(&ed, 100, 20);
+        assert!(
+            rows.iter().any(|r| r.starts_with("M-x wri out")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Write Out") && r.contains("C-o")),
+            "{rows:#?}"
+        );
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ed.palette.is_none());
+        assert_eq!(
+            ed.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::WriteName)
+        );
+        ed.prompt = None;
+        // Recently run comes first among equals; an empty query lists all.
+        press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(ed.palette.as_ref().unwrap().items[0], "write-out");
+        assert!(ed.palette.as_ref().unwrap().items.len() > 40);
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(ed.palette.is_none());
+        // Nothing matches: Enter says so and runs nothing.
+        press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+        press_text(&mut ed, "qqqq");
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ed.status_text().unwrap().contains("No command matches"));
+    }
+
+    #[test]
+    fn a_view_puts_its_own_keys_on_the_bar() {
+        let mut ed = conflict_ed();
+        let bar = ed.bar_items();
+        assert!(
+            bar.iter().any(|(k, t)| k == "o" && t == "Take Ours"),
+            "{bar:?}"
+        );
+        assert!(
+            bar.iter().any(|(k, t)| k == "s" && t == "Split/Unified"),
+            "{bar:?}"
+        );
+        // A key the view does not bind is ignored, not typed.
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert_eq!(lines(&ed).join("\n"), CONFLICTED);
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(
+            ed.bar_items()
+                .iter()
+                .any(|(k, t)| k == "C-x" && t == "Exit")
+        );
     }
 
     #[test]

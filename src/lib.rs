@@ -25,6 +25,10 @@ pub mod conflict;
 pub mod diff;
 pub mod encoding;
 pub mod highlight;
+// Keys and keymaps, emacs-shaped: chords, prefix maps, a stack of active maps
+// (mode over global), where-is. Pure data — command names, not functions — so
+// a host can stack its own map over the editor's.
+pub mod keymap;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;

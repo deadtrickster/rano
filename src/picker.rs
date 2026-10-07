@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::buffer::Pos;
 use crate::editor::Editor;
 use crate::lsp;
@@ -22,6 +20,18 @@ pub enum PickTarget {
     Buffer(usize),
     /// Jump here, as a definition jump would (pushes an M-, entry).
     Location(lsp::DefLocation),
+}
+
+/// What a command does in the list overlay.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PickAct {
+    Move(isize),
+    Page(isize),
+    Top,
+    Bottom,
+    Accept,
+    Close,
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,31 +252,30 @@ impl Editor {
 
     /// Keys while the list is open. Returns with the list closed (Enter,
     /// Esc) or still open (motion).
-    pub(crate) fn handle_picker_key(&mut self, mut p: Picker, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
+    /// One action in the list overlay, from a command (`commands.rs`).
+    pub(crate) fn picker_act(&mut self, act: PickAct) {
+        let Some(mut p) = self.picker.take() else {
+            return;
+        };
         let n = p.items.len();
-        let page = list_rows(self.text_h);
-        match key.code {
-            KeyCode::Esc => return,
-            KeyCode::Char('g' | 'c' | 'x') if ctrl => return,
-            // The key that opened the list closes it again.
-            KeyCode::Char('l' | '?') if alt => return,
-            KeyCode::Enter => {
+        let page = list_rows(self.text_h) as isize;
+        let last = n.saturating_sub(1) as isize;
+        let to = |at: isize| at.clamp(0, last.max(0)) as usize;
+        match act {
+            PickAct::Close => return,
+            PickAct::Accept => {
                 self.picker_accept(p);
                 return;
             }
-            KeyCode::Up => p.sel = p.sel.saturating_sub(1),
-            KeyCode::Char('p') if ctrl => p.sel = p.sel.saturating_sub(1),
-            KeyCode::Down => p.sel = (p.sel + 1).min(n.saturating_sub(1)),
-            KeyCode::Char('n') if ctrl => p.sel = (p.sel + 1).min(n.saturating_sub(1)),
-            KeyCode::PageUp => p.sel = p.sel.saturating_sub(page),
-            KeyCode::PageDown => p.sel = (p.sel + page).min(n.saturating_sub(1)),
-            KeyCode::Home => p.sel = 0,
-            KeyCode::End => p.sel = n.saturating_sub(1),
+            PickAct::Move(d) => p.sel = to(p.sel as isize + d),
+            PickAct::Page(d) => p.sel = to(p.sel as isize + d * page),
+            PickAct::Top => p.sel = 0,
+            PickAct::Bottom => p.sel = to(last),
             // Buffer list only: close the selected buffer from the list.
-            KeyCode::Delete if p.is_buffers() => {
-                let PickTarget::Buffer(i) = p.items[p.sel].target else {
+            PickAct::Delete => {
+                let Some(PickTarget::Buffer(i)) = p.items.get(p.sel).map(|it| it.target.clone())
+                else {
+                    self.picker = Some(p);
                     return;
                 };
                 self.cur = i;
@@ -281,9 +290,13 @@ impl Editor {
                 p.title = format!("Buffers ({})", p.items.len());
                 p.sel = p.sel.min(p.items.len() - 1);
             }
-            _ => {}
         }
         self.picker = Some(p);
+    }
+
+    /// Whether the open list is the buffer list (it has `<delete>`).
+    pub(crate) fn picker_is_buffers(&self) -> bool {
+        self.picker.as_ref().is_some_and(Picker::is_buffers)
     }
 
     fn picker_accept(&mut self, p: Picker) {
@@ -303,7 +316,7 @@ mod tests {
     use crate::BufferState;
     use crate::buffer::Buffer;
     use crate::config;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn buf(text: &str, name: Option<&Path>) -> Buffer {
         let mut b = Buffer::new();

@@ -19,6 +19,9 @@ pub struct Config {
     /// the selection — as JSON on stdin and as `RANO_FILE` / `RANO_LINE` /
     /// `RANO_COLUMN` in its environment. `None`: M-S has nowhere to send.
     pub send_command: Option<String>,
+    /// Write keys nano's way (`^X`, `M-U`) instead of emacs's (`C-x`, `M-u`)
+    /// in the bar, the help pages and `M-x`: `key_notation = nano`.
+    pub nano_keys: bool,
 }
 
 impl Default for Config {
@@ -31,6 +34,7 @@ impl Default for Config {
             wrap: true,
             autoupdate: None,
             send_command: None,
+            nano_keys: false,
         }
     }
 }
@@ -111,6 +115,11 @@ fn parse_config(text: &str) -> Config {
                     cfg.autoupdate = Some(b);
                 }
             }
+            "key_notation" => match value {
+                "nano" => cfg.nano_keys = true,
+                "emacs" => cfg.nano_keys = false,
+                _ => {}
+            },
             "send_command" => {
                 cfg.send_command = (!value.is_empty()).then(|| value.to_string());
             }

@@ -2643,7 +2643,11 @@ impl Editor {
             }
         };
         let count = buf.row_count();
-        if self.config.multibuffer {
+        // Without multibuffer the new file replaces the current buffer — but
+        // never one with unsaved edits: that one stays, and the file gets a
+        // buffer of its own, so opening a file cannot throw work away.
+        let kept = !self.config.multibuffer && self.bs().buf.modified;
+        if self.config.multibuffer || kept {
             self.buffers.push(BufferState::new(buf));
             self.cur = self.buffers.len() - 1;
         } else {
@@ -2655,7 +2659,13 @@ impl Editor {
         self.lsp_sync();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        self.flash(&format!("Read {} lines", count));
+        if kept {
+            self.flash(&format!(
+                "Read {count} lines into a new buffer: the other has unsaved edits (M-< goes back)"
+            ));
+        } else {
+            self.flash(&format!("Read {} lines", count));
+        }
         true
     }
 

@@ -111,7 +111,7 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-{` | Jump to the previous heading |
 | `M-N` | Toggle line-number gutter |
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
-| `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
+| `F8` | Open file (new buffer when `multibuffer`, else replaces current — unless it has unsaved edits, which keeps it); `name:line[:col]` jumps there |
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
 | `M-P` | Preview a diff/patch buffer, or a file's merge conflicts side by side |

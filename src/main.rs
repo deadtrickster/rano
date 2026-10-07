@@ -3532,6 +3532,35 @@ mod ed_tests {
     }
 
     #[test]
+    fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
+        let d = temp_dir("open_single_modified");
+        let f1 = d.0.join("a.txt");
+        fs::write(&f1, "x\ny\nz").unwrap();
+        let mut ed = test_ed("seed");
+        press_text(&mut ed, "EDIT ");
+        assert!(ed.bs().buf.modified);
+        press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+        press_text(&mut ed, &f1.display().to_string());
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ed.buffers.len(), 2, "the edited buffer was not replaced");
+        assert_eq!(lines(&ed), vec!["x", "y", "z"]);
+        assert!(ed.status_text().unwrap().contains("unsaved edits"));
+        assert!(!ed.config.multibuffer, "the setting is unchanged");
+        assert_eq!(
+            ed.buffers[0].buf.row(0).iter().collect::<String>(),
+            "EDIT seed"
+        );
+        // Back in an unmodified buffer, the next open replaces as before.
+        let f2 = d.0.join("b.txt");
+        fs::write(&f2, "b").unwrap();
+        press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+        press_text(&mut ed, &f2.display().to_string());
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(lines(&ed), vec!["b"]);
+    }
+
+    #[test]
     fn open_missing_file_flashes() {
         let mut ed = test_ed("seed");
         press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);

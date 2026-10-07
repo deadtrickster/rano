@@ -25,8 +25,8 @@ impl Editor {
     /// when `None`), centred. A file still arriving is positioned when that
     /// row lands, in its own buffer whatever is current by then.
     ///
-    /// A new file gets a buffer of its own even without `multibuffer` when the
-    /// current one has unsaved edits, so a host's jump can never discard them.
+    /// Without `multibuffer` a new file replaces the current buffer, unless
+    /// that one has unsaved edits: then it gets a buffer of its own.
     pub fn open_at(
         &mut self,
         path: &Path,
@@ -40,15 +40,9 @@ impl Editor {
         if let Some(i) = self.find_buffer(path) {
             self.set_current(i);
         } else {
-            let keep = self.bs().buf.modified && !self.config.multibuffer;
-            if keep {
-                self.config.multibuffer = true;
-            }
-            let opened = self.open_file(&path.display().to_string());
-            if keep {
-                self.config.multibuffer = false;
-            }
-            if !opened {
+            // `open_file` keeps a buffer with unsaved edits and opens the file
+            // beside it, so a host's jump never discards work.
+            if !self.open_file(&path.display().to_string()) {
                 return Err(self.status_text().unwrap_or_else(|| "cannot open".into()));
             }
         }

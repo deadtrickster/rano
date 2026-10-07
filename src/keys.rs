@@ -122,6 +122,8 @@ impl Editor {
                 KeyCode::Char('l') => self.open_buffer_list(),
                 // M-P: preview a diff/patch buffer, or a file's conflicts.
                 KeyCode::Char('p') => self.toggle_rendered_view(),
+                // M-S: send the file, cursor and selection to the host.
+                KeyCode::Char('s') => self.send_position(),
                 KeyCode::Char('w') => self.close_buffer(),
                 // M-? : every usage of the symbol under the cursor (LSP
                 // references), listed; Enter jumps there and M-, comes back.

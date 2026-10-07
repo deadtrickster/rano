@@ -33,6 +33,9 @@ pub mod style;
 // The row store (§15, §16.3). It is declared in `main.rs` too now: the
 // binary's `Buffer` is built on `Rows`, which is stage A of that migration.
 pub mod rows;
+// What the editor sends a host (file, cursor, selection): the shared type for
+// `Editor::on_send` and the binary's `send_command`.
+pub mod send;
 pub mod syntax;
 // The version check and self-update. lib-only: the binary reads it, but so
 // could an embedder that wants to offer the same thing.

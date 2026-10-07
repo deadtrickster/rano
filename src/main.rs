@@ -27,6 +27,7 @@ mod prompt;
 mod rows;
 mod search;
 mod search_ctrl;
+mod send_ctrl;
 mod syntax;
 mod todo_ctrl;
 mod ui;
@@ -146,6 +147,17 @@ pub struct BufferState {
     /// the first time this buffer becomes current, so `rano *.rs` costs one
     /// read and one language server up front rather than one per file.
     pub(crate) pending_load: Option<PathBuf>,
+    /// Where to put the cursor once this buffer has that row, and centre it:
+    /// `--line`/`--column`, `file:line:col`, or [`Editor::open_at`].
+    ///
+    /// Applied late on purpose, because three things have to be true first: the
+    /// terminal's size (to know what "centre" means), the wrap table (a visual
+    /// row is not a buffer row when wrap is on), and — with the async loader —
+    /// the arrival of the row itself. A huge file delivers rows in batches, so a
+    /// position a million rows in is applied when it lands rather than clamped
+    /// to whatever had arrived. Per buffer, so a position waiting for its rows
+    /// cannot land in another buffer that became current meanwhile.
+    pub(crate) goto: Option<Pos>,
     pub(crate) undo: VecDeque<UndoStep>,
     redo: VecDeque<UndoStep>,
     pending: Option<UndoStep>,
@@ -188,6 +200,7 @@ impl BufferState {
             edit_gen: 0,
             load: None,
             pending_load: None,
+            goto: None,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             pending: None,
@@ -253,8 +266,16 @@ impl Editor {
     /// first becomes current — see `start_pending_load`. A file named twice
     /// gets one buffer; a file that does not exist yet is a new buffer that
     /// will be saved under that name, as for the first file.
+    #[cfg(test)]
     pub(crate) fn add_deferred_buffers(&mut self, paths: &[PathBuf]) {
-        for p in paths {
+        let at: Vec<(PathBuf, Option<Pos>)> = paths.iter().map(|p| (p.clone(), None)).collect();
+        self.add_deferred_buffers_at(&at);
+    }
+
+    /// [`Self::add_deferred_buffers`], each with the position (`file:line:col`,
+    /// `+line`) its cursor goes to once it is read.
+    pub(crate) fn add_deferred_buffers_at(&mut self, files: &[(PathBuf, Option<Pos>)]) {
+        for (p, at) in files {
             if self.find_buffer(p).is_some() {
                 continue;
             }
@@ -264,6 +285,7 @@ impl Editor {
             if p.exists() {
                 bs.pending_load = Some(p.clone());
             }
+            bs.goto = *at;
             self.buffers.push(bs);
         }
     }
@@ -299,6 +321,9 @@ struct Args {
     /// In command-line order; each opens as its own buffer, the first one
     /// current. `--line`/`--column` apply to the first.
     files: Vec<String>,
+    /// Each file's own position, 1-based (line, column), from `file:line:col`
+    /// or a preceding `+line[,col]`; parallel to `files`.
+    positions: Vec<Option<(usize, Option<usize>)>>,
     /// 1-based, as a person reads them and as `Ln` in the status bar counts.
     /// Converted to 0-based before the editor sees them.
     line: Option<usize>,
@@ -321,8 +346,38 @@ fn parse_num(flag: &str, v: &str) -> Result<usize, String> {
         .map_err(|_| format!("{flag} needs a number, got {v:?}"))
 }
 
+/// `name:line` or `name:line:col`, when `arg` is not itself an existing path
+/// (a file really named `a:3` opens as named). Splits from the right, so a
+/// name with colons of its own keeps them.
+fn split_position(arg: &str) -> Option<(String, usize, Option<usize>)> {
+    if Path::new(arg).exists() {
+        return None;
+    }
+    let num = |s: &str| s.parse::<usize>().ok().filter(|&n| n > 0);
+    let (head, last) = arg.rsplit_once(':')?;
+    let last = num(last)?;
+    if let Some((name, line)) = head.rsplit_once(':')
+        && let Some(line) = num(line)
+        && !name.is_empty()
+    {
+        return Some((name.to_string(), line, Some(last)));
+    }
+    (!head.is_empty()).then(|| (head.to_string(), last, None))
+}
+
+/// `+line` or `+line,col` (nano's and vi's form), for the file after it.
+fn plus_position(arg: &str) -> Option<(usize, Option<usize>)> {
+    let rest = arg.strip_prefix('+')?;
+    let (line, col) = match rest.split_once(',') {
+        Some((l, c)) => (l, Some(c.parse().ok()?)),
+        None => (rest, None),
+    };
+    Some((line.parse().ok()?, col))
+}
+
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = Args::default();
+    let mut plus: Option<(usize, Option<usize>)> = None;
     let mut i = 0usize;
     while i < args.len() {
         let (key, inline) = split_eq(&args[i]);
@@ -355,7 +410,18 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             other if other.len() > 1 && other.starts_with('-') => {
                 return Err(format!("unknown option {other}"));
             }
-            other => out.files.push(other.to_string()),
+            other if plus_position(other).is_some() => plus = plus_position(other),
+            other => match split_position(other) {
+                Some((name, line, col)) => {
+                    out.files.push(name);
+                    out.positions.push(Some((line, col)));
+                    plus = None;
+                }
+                None => {
+                    out.files.push(other.to_string());
+                    out.positions.push(plus.take());
+                }
+            },
         }
         i += 1;
     }
@@ -383,6 +449,8 @@ usage: rano [options] [file...]
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
                     (both apply to the first file)
+  file:LINE[:COL]   open that file at that position
+  +LINE[,COL] file  the same, for the file after it
   -h, --help        this
   -V, --version     the version
 
@@ -437,16 +505,28 @@ fn main() {
     }
 
     // 1-based on the command line, 0-based internally; a missing column is 0.
-    let pos = args.line.map(|l| crate::buffer::Pos {
+    let to_pos = |(l, c): (usize, Option<usize>)| crate::buffer::Pos {
         row: l.saturating_sub(1),
-        col: args.col.unwrap_or(1).saturating_sub(1),
-    });
+        col: c.unwrap_or(1).saturating_sub(1),
+    };
+    // `--line`/`--column` win over the first file's own `file:line`.
+    let pos = args
+        .line
+        .map(|l| (l, args.col))
+        .or(args.positions.first().copied().flatten())
+        .map(to_pos);
     let mut cfg = config::load();
     // The other files become buffers of their own, read when first visited.
     // Naming several files is asking for several buffers, so the session is
     // multibuffer whatever the config says: F8 and jumps then add buffers
     // rather than replacing the one in view.
-    let rest: Vec<PathBuf> = args.files.iter().skip(1).map(PathBuf::from).collect();
+    let rest: Vec<(PathBuf, Option<crate::buffer::Pos>)> = args
+        .files
+        .iter()
+        .zip(args.positions.iter())
+        .skip(1)
+        .map(|(f, p)| (PathBuf::from(f), p.map(to_pos)))
+        .collect();
     if !rest.is_empty() {
         cfg.multibuffer = true;
     }
@@ -511,7 +591,7 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
 fn run(
     buf: Buffer,
     load: Option<PathBuf>,
-    rest: Vec<PathBuf>,
+    rest: Vec<(PathBuf, Option<crate::buffer::Pos>)>,
     pos: Option<crate::buffer::Pos>,
     cfg: config::Config,
 ) -> io::Result<()> {
@@ -532,9 +612,12 @@ fn run(
     // `Editor::new` because it is a property of RUNNING, not of being — no test
     // makes a network call by constructing an editor.
     ed.start_update_check();
+    if let Some(cmd) = ed.config.send_command.clone() {
+        ed.on_send = Some(send_ctrl::command_sender(cmd));
+    }
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
-    ed.startup_pos = pos;
+    ed.bs_mut().goto = pos;
     if let Some(path) = load
         && let Err(e) = ed.start_load(&path)
     {
@@ -545,7 +628,7 @@ fn run(
         eprintln!("rano: cannot read {}: {}", path.display(), e);
         std::process::exit(1);
     }
-    ed.add_deferred_buffers(&rest);
+    ed.add_deferred_buffers_at(&rest);
     // D6 dirty-draw: redraw only when something changed. Any handled key,
     // paste or resize dirties (coarse); the pollers below report their own
     // state changes. text_w is the FULL viewport width now (draw renders
@@ -2296,6 +2379,175 @@ mod ed_tests {
         test_ed(&text)
     }
 
+    // ---- the host API: open_at, file:line:col, +line, M-S ----
+
+    #[test]
+    fn a_file_can_carry_its_own_position_on_the_command_line() {
+        let a = parse_args(&argv(&[
+            "no_such_a.rs:12:3",
+            "no_such_b.rs:7",
+            "+5",
+            "c.rs",
+            "+9,2",
+            "d.rs",
+            "e.rs",
+        ]))
+        .expect("parse");
+        assert_eq!(
+            a.files,
+            vec!["no_such_a.rs", "no_such_b.rs", "c.rs", "d.rs", "e.rs"]
+        );
+        assert_eq!(
+            a.positions,
+            vec![
+                Some((12, Some(3))),
+                Some((7, None)),
+                Some((5, None)),
+                Some((9, Some(2))),
+                None
+            ]
+        );
+        // A name that exists as written is never split, colon or not.
+        let d = temp_dir("colon_name");
+        let odd = d.0.join("x:3");
+        fs::write(&odd, "").unwrap();
+        let s = odd.display().to_string();
+        let a = parse_args(&argv(&[&s])).expect("parse");
+        assert_eq!(a.files, vec![s]);
+        assert_eq!(a.positions, vec![None]);
+        // Not a position: no number, or a zero line.
+        assert_eq!(split_position("a.rs:"), None);
+        assert_eq!(split_position("a.rs:0"), None);
+        assert_eq!(split_position(":5"), None);
+        assert_eq!(
+            split_position("dir:x/a.rs:4"),
+            Some(("dir:x/a.rs".into(), 4, None))
+        );
+    }
+
+    #[test]
+    fn a_deferred_file_goes_to_its_own_position_when_first_shown() {
+        let d = temp_dir("deferred_pos");
+        let f = d.0.join("b.txt");
+        fs::write(&f, (1..=50).map(|i| format!("l{i}\n")).collect::<String>()).unwrap();
+        let mut ed = test_ed("first");
+        ed.text_h = 10;
+        ed.add_deferred_buffers_at(&[(f.clone(), Some(Pos { row: 29, col: 1 }))]);
+        assert_eq!(ed.buffers[1].goto, Some(Pos { row: 29, col: 1 }));
+        ed.set_current(1);
+        ed.load_now();
+        ed.apply_startup_pos();
+        assert_eq!(ed.bs().cursor, Pos { row: 29, col: 1 });
+        assert!(ed.bs().scroll > 0, "centred, not at the top");
+    }
+
+    #[test]
+    fn open_at_opens_switches_and_never_discards_unsaved_edits() {
+        let d = temp_dir("open_at");
+        let a = d.0.join("a.txt");
+        let b = d.0.join("b.txt");
+        fs::write(&a, "a1\na2\na3\n").unwrap();
+        fs::write(&b, "b1\nb2\nb3\nb4\n").unwrap();
+        let mut ed = Editor::new(Buffer::from_file(&a).unwrap(), config::Config::default());
+        ed.text_h = 10;
+        // Single-buffer, but the current buffer is modified: b gets its own.
+        press_text(&mut ed, "X");
+        ed.open_at(&b, 3, Some(2)).expect("open");
+        assert_eq!(ed.buffers.len(), 2, "the edited buffer was kept");
+        assert_eq!(ed.bs().buf.name.as_deref(), Some(b.as_path()));
+        assert_eq!(ed.bs().cursor, Pos { row: 2, col: 1 });
+        assert!(!ed.config.multibuffer, "the config is as it was");
+        // Already open: switch, and position.
+        ed.open_at(&a, 2, None).expect("switch");
+        assert_eq!(ed.bs().buf.name.as_deref(), Some(a.as_path()));
+        assert_eq!(lines(&ed)[0], "Xa1", "the edit is still there");
+        assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
+        // A missing file is an error, and nothing changes.
+        assert!(ed.open_at(&d.0.join("missing.txt"), 1, None).is_err());
+        assert_eq!(ed.buffers.len(), 2);
+    }
+
+    #[test]
+    fn f8_takes_a_line_after_the_name() {
+        let d = temp_dir("f8_line");
+        let f = d.0.join("f.txt");
+        fs::write(&f, "1\n2\n3\n4\n").unwrap();
+        let mut ed = test_ed("");
+        ed.text_h = 10;
+        ed.prompt = Some(crate::prompt::Prompt {
+            kind: PromptKind::OpenName,
+            text: format!("{}:3", f.display()),
+            cursor: 0,
+        });
+        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ed.prompt.is_none(), "{:?}", ed.status_text());
+        assert_eq!(ed.bs().buf.name.as_deref(), Some(f.as_path()));
+        assert_eq!(ed.bs().cursor.row, 2);
+    }
+
+    #[test]
+    fn m_s_sends_the_file_the_cursor_and_the_selection() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut ed = test_ed("fn a() {\n    body();\n}");
+        ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_send.rs"));
+        // No host yet: it says so.
+        press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+        assert!(ed.status_text().unwrap().starts_with("Nowhere to send"));
+        let got: Rc<RefCell<Vec<rano::send::SendEvent>>> = Rc::default();
+        let sink = got.clone();
+        ed.on_send = Some(Box::new(move |e| {
+            sink.borrow_mut().push(e.clone());
+            Ok("sent".into())
+        }));
+        ed.bs_mut().cursor = Pos { row: 1, col: 4 };
+        press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+        // A selection from (0, 3) to (1, 8): `a() {\n    body`.
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        ed.bs_mut().mark = Some(Pos { row: 0, col: 3 });
+        ed.bs_mut().cursor = Pos { row: 1, col: 8 };
+        press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_eq!(ed.status_text().as_deref(), Some("sent"));
+        let got = got.borrow();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].cursor, rano::send::Point { line: 2, column: 5 });
+        assert_eq!(got[0].selection, None);
+        assert!(got[0].path.as_deref().unwrap().ends_with("rano_send.rs"));
+        let s = got[1].selection.as_ref().expect("a selection");
+        assert_eq!((s.start.line, s.start.column), (1, 4));
+        assert_eq!((s.end.line, s.end.column), (2, 9));
+        assert_eq!(s.text, "a() {\n    body");
+    }
+
+    #[test]
+    fn send_command_gets_the_event_as_json_and_in_its_environment() {
+        let d = temp_dir("send_cmd");
+        let out = d.0.join("out.txt");
+        let cmd = format!(
+            "{{ echo \"$RANO_FILE|$RANO_LINE|$RANO_COLUMN\"; cat; }} > '{}.tmp' && mv '{0}.tmp' '{0}'",
+            out.display()
+        );
+        let mut send = crate::send_ctrl::command_sender(cmd);
+        let e = rano::send::SendEvent {
+            path: Some(PathBuf::from("/x/y.rs")),
+            cursor: rano::send::Point { line: 4, column: 2 },
+            selection: None,
+            modified: false,
+        };
+        assert_eq!(send(&e).unwrap(), "Sent line 4, column 2");
+        // The command runs on its own; wait for what it wrote.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !out.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = fs::read_to_string(&out).expect("the command ran");
+        let (env, json) = text.split_once('\n').unwrap();
+        assert_eq!(env, "/x/y.rs|4|2");
+        let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(v["cursor"]["line"], 4);
+        assert_eq!(v["path"], "/x/y.rs");
+    }
+
     #[test]
     fn a_startup_position_is_centred() {
         // 500 lines in a 20-row viewport. The target is a line with room above
@@ -2306,11 +2558,11 @@ mod ed_tests {
         ed.text_h = 20;
         ed.show_line_numbers = false;
         ed.text_w = 40;
-        ed.startup_pos = Some(Pos { row: 249, col: 0 });
+        ed.bs_mut().goto = Some(Pos { row: 249, col: 0 });
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(ed.bs().cursor, Pos { row: 249, col: 0 });
-        assert_eq!(ed.startup_pos, None, "applied once");
+        assert_eq!(ed.bs().goto, None, "applied once");
         // Centred: text_h/2 = 10 rows above, so the target is on pane row 11.
         assert_eq!(ed.bs().scroll, 239, "249 - text_h/2");
         let vis = ed.visual_pos(Pos { row: 249, col: 0 });
@@ -2327,14 +2579,14 @@ mod ed_tests {
         // centred — it is as centred as the file allows, which is the top.
         let mut ed = ed_with_lines(100);
         ed.text_h = 20;
-        ed.startup_pos = Some(Pos { row: 1, col: 0 });
+        ed.bs_mut().goto = Some(Pos { row: 1, col: 0 });
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(ed.bs().scroll, 0, "no blank space above the first line");
         // And near the end, the last screenful.
         let mut ed = ed_with_lines(100);
         ed.text_h = 20;
-        ed.startup_pos = Some(Pos { row: 99, col: 0 });
+        ed.bs_mut().goto = Some(Pos { row: 99, col: 0 });
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(ed.bs().scroll, 80, "100 rows - 20 visible");
@@ -2355,7 +2607,7 @@ mod ed_tests {
         ed.ensure_wrap_prefix();
         let seg = ed.seg_count(0);
         assert!(seg >= 6, "the long line wraps into {seg} rows");
-        ed.startup_pos = Some(Pos { row: 20, col: 0 });
+        ed.bs_mut().goto = Some(Pos { row: 20, col: 0 });
         ed.apply_startup_pos();
         let vis = ed.visual_pos(Pos { row: 20, col: 0 });
         // The target's BUFFER row is 20, but its VISUAL row is much further down
@@ -2376,14 +2628,14 @@ mod ed_tests {
         // place and look like the feature was broken, so it waits.
         let mut ed = ed_with_lines(10);
         ed.text_h = 10;
-        ed.startup_pos = Some(Pos {
+        ed.bs_mut().goto = Some(Pos {
             row: 999_999,
             col: 0,
         });
         ed.apply_startup_pos();
         assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 }, "not moved");
         assert_eq!(
-            ed.startup_pos,
+            ed.bs().goto,
             Some(Pos {
                 row: 999_999,
                 col: 0
@@ -2397,7 +2649,7 @@ mod ed_tests {
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(ed.bs().cursor.row, 999_999);
-        assert_eq!(ed.startup_pos, None);
+        assert_eq!(ed.bs().goto, None);
         assert_eq!(
             ed.bs().scroll,
             999_999 - 5,
@@ -2409,7 +2661,7 @@ mod ed_tests {
     fn a_column_is_clamped_to_the_line() {
         let mut ed = ed_with_lines(10);
         ed.text_h = 10;
-        ed.startup_pos = Some(Pos { row: 2, col: 999 });
+        ed.bs_mut().goto = Some(Pos { row: 2, col: 999 });
         ed.ensure_wrap_prefix();
         ed.apply_startup_pos();
         assert_eq!(

@@ -50,6 +50,8 @@ rano [options] [file...]
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
                     (both apply to the first file)
+  file:LINE[:COL]   open that file at that position (any file, not just the first)
+  +LINE[,COL] file  the same, nano/vi style, for the file after it
   -h, --help        usage
   -V, --version     the version
 
@@ -113,6 +115,7 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
 | `M-P` | Preview a diff/patch buffer, or a file's merge conflicts side by side |
+| `M-S` | Send the file, cursor and selection to `send_command` (see [Talking to a host](#talking-to-a-host)) |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
 | `^J` / `F10` | Justify current paragraph |
@@ -242,6 +245,33 @@ same red an error gets: `- [/]` is not one of the three, and neither the grammar
 nor a plain markdown reader will tell you. In a file that is not `TODO.md` the
 editor stays out of it — `[-]` in somebody else's markdown is theirs to write.
 
+## Talking to a host
+
+rano can be told where to go, and can say where you are.
+
+**Going somewhere.** `rano src/main.rs:120:5`, `rano +120 src/main.rs`, and
+`src/main.rs:120` at the `F8` prompt all open the file with the cursor on that
+line, centred. A file that is already open is switched to rather than read
+twice. In code, a host that owns the editor calls
+`Editor::open_at(path, line, column)`. If the current buffer has unsaved edits,
+the file opens in a new buffer even without `multibuffer`, so a jump never
+throws edits away.
+
+**Sending your place.** `M-S` hands the host a `rano::send::SendEvent`: the
+file's absolute path, the cursor, the selection (start, end and text) when a
+mark is set, and whether the buffer has unsaved edits. Lines and columns are
+1-based and count characters. A host sets `Editor::on_send` to a callback. The
+standalone binary runs `send_command` with `sh -c`, the event as one line of
+JSON on stdin, and `RANO_FILE`, `RANO_LINE` and `RANO_COLUMN` in its
+environment:
+
+```json
+{"path":"/src/main.rs","cursor":{"line":120,"column":5},"selection":{"start":{"line":118,"column":1},"end":{"line":120,"column":5},"text":"..."},"modified":false}
+```
+
+rano doesn't wait for the command, and its output is discarded (the terminal
+belongs to the editor), so the status line only says the event was sent.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/rano/config.toml` (falling back to `~/.config/rano/config.toml`):
@@ -253,6 +283,7 @@ line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
 wrap = true         # soft line wrap (M-\ toggles at runtime)
 autoupdate = true   # check GitHub for a newer release at startup
+send_command = "my-tool --from rano"  # what M-S runs; quote it to keep a '#'
 ```
 
 The todo keys need no configuration: they act on a line that has a task marker,

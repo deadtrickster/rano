@@ -97,6 +97,9 @@ pub struct Editor {
     /// Split (two panels) rather than unified, for the next diff view: the last
     /// choice made with `s` in this session.
     pub diff_split: bool,
+    /// Where M-S sends the reader's place (see `send_ctrl.rs`): a host's
+    /// callback, or in the standalone binary the configured `send_command`.
+    pub on_send: Option<crate::send_ctrl::OnSend>,
     pub replace: Option<ReplaceState>,
     pub replace_pos: Option<Pos>,
     pub replace_count: usize,
@@ -140,16 +143,6 @@ pub struct Editor {
     pub(crate) completion_retries: u8,
     /// Where M-, returns to, one entry per definition jump (stacked).
     pub def_back: Vec<DefBack>,
-    /// Where to put the cursor once the buffer has that row, and centre it.
-    ///
-    /// `--line`/`--column` on the command line. It lives here rather than being
-    /// applied at parse time because three things have to be true first and none
-    /// of them is known then: the terminal's size (to know what "centre" means),
-    /// the wrap table (a visual row is not a buffer row when wrap is on), and —
-    /// with the async loader — the arrival of the row itself. A huge file
-    /// delivers rows in batches, so a position a million rows in is applied when
-    /// it lands rather than being clamped to whatever had arrived.
-    pub(crate) startup_pos: Option<Pos>,
     /// The loader filled its adoption budget on the last poll, so more is
     /// ready and the loop should come straight back for it. This is what keeps
     /// the load at disk speed: the budget bounds one ITERATION so the keyboard
@@ -255,6 +248,7 @@ impl Editor {
             picker: None,
             diff_view: None,
             diff_split: false,
+            on_send: None,
             replace: None,
             replace_pos: None,
             replace_count: 0,
@@ -275,7 +269,6 @@ impl Editor {
             completion_retries: 0,
             update: crate::update_ctrl::UpdateCheck::default(),
             def_back: Vec::new(),
-            startup_pos: None,
             load_saturated: false,
             highlight_dirty: true,
             diag_dirty: true,
@@ -705,7 +698,7 @@ impl Editor {
     /// Wait until the buffer has `p.row`, then put the cursor there and centre
     /// the line. No-op once applied.
     pub(crate) fn apply_startup_pos(&mut self) {
-        let Some(p) = self.startup_pos else {
+        let Some(p) = self.bs().goto else {
             return;
         };
         // Not yet: with the loader, a row a million lines in arrives minutes
@@ -728,7 +721,7 @@ impl Editor {
         let max_scroll = total.saturating_sub(text_h);
         let bs = self.bs_mut();
         bs.scroll = cv.saturating_sub(half).min(max_scroll);
-        self.startup_pos = None;
+        bs.goto = None;
         self.adjust_scroll_x();
     }
 
@@ -2999,7 +2992,7 @@ pub(crate) fn plural(n: usize) -> &'static str {
 /// `path` made absolute and symlink-free when it exists; otherwise made
 /// absolute against the working directory, so a not-yet-saved buffer still
 /// compares equal to itself.
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()

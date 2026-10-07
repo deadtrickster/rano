@@ -15,6 +15,10 @@ pub struct Config {
     /// `Some(true)` on, `None` not set — and `None` is what lets the
     /// `RANO_AUTOUPDATE` environment variable decide. See `crate::update`.
     pub autoupdate: Option<bool>,
+    /// M-S: a shell command (`sh -c`) that receives the cursor, the file and
+    /// the selection — as JSON on stdin and as `RANO_FILE` / `RANO_LINE` /
+    /// `RANO_COLUMN` in its environment. `None`: M-S has nowhere to send.
+    pub send_command: Option<String>,
 }
 
 impl Default for Config {
@@ -26,6 +30,7 @@ impl Default for Config {
             multibuffer: false,
             wrap: true,
             autoupdate: None,
+            send_command: None,
         }
     }
 }
@@ -63,16 +68,17 @@ fn parse_config(text: &str) -> Config {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Strip an inline comment, then require `key = value`.
-        let line = match line.find('#') {
-            Some(i) => line[..i].trim(),
-            None => line,
-        };
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let key = key.trim();
         let value = value.trim();
+        // A double-quoted value is taken whole, `#` and all (a shell command
+        // can carry one); anything else ends at an inline comment.
+        let value = match value.strip_prefix('"') {
+            Some(q) => q.split_once('"').map_or(q, |(v, _)| v),
+            None => value.split('#').next().unwrap_or("").trim(),
+        };
         match key {
             // Clamped so the display math can never break.
             "tab_width" => {
@@ -105,6 +111,9 @@ fn parse_config(text: &str) -> Config {
                     cfg.autoupdate = Some(b);
                 }
             }
+            "send_command" => {
+                cfg.send_command = (!value.is_empty()).then(|| value.to_string());
+            }
             _ => {}
         }
     }
@@ -122,6 +131,22 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_command_keeps_a_quoted_hash_and_drops_a_trailing_comment() {
+        let c = parse_config("send_command = \"letibot send --tag '#rano'\"  # the host\n");
+        assert_eq!(
+            c.send_command.as_deref(),
+            Some("letibot send --tag '#rano'")
+        );
+        let c = parse_config("send_command = pbcopy # clipboard\n");
+        assert_eq!(c.send_command.as_deref(), Some("pbcopy"));
+        assert_eq!(parse_config("send_command =\n").send_command, None);
+        // The old keys are unchanged by the quoting rule.
+        let c = parse_config("wrap = false # a = b\ntab_width = 4\n");
+        assert!(!c.wrap);
+        assert_eq!(c.tab_width, 4);
+    }
 
     #[test]
     fn empty_text_is_default() {

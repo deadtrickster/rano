@@ -47,7 +47,9 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use crate::highlight::role_grid;
 use crate::style::{Palette, Role};
+use crate::syntax::Lang;
 use crate::width;
 
 /// Byte spans within one line, in order and non-overlapping.
@@ -366,6 +368,30 @@ pub fn render_from(
     old_start: usize,
     new_start: usize,
 ) -> Vec<Line<'static>> {
+    render_in(old, new, cfg, old_start, new_start, None)
+}
+
+/// [`render_from`], syntax-coloured in `lang`: the code keeps its colours
+/// under the row's tint, as in the split view.
+pub fn render_in(
+    old: &[&str],
+    new: &[&str],
+    cfg: &DiffConfig,
+    old_start: usize,
+    new_start: usize,
+    lang: Option<Lang>,
+) -> Vec<Line<'static>> {
+    // Tabs first, once, so the class grid and the painted line are one grid
+    // (the split view's rule, and the reason it has one).
+    let old_x: Vec<String> = old.iter().map(|l| expand_tabs(l, TAB_STOP)).collect();
+    let new_x: Vec<String> = new.iter().map(|l| expand_tabs(l, TAB_STOP)).collect();
+    let old: Vec<&str> = old_x.iter().map(String::as_str).collect();
+    let new: Vec<&str> = new_x.iter().map(String::as_str).collect();
+    let (old, new) = (&old[..], &new[..]);
+    let grids = Grids {
+        old: role_grid(old, lang),
+        new: role_grid(new, lang),
+    };
     let old_base = old_start.saturating_sub(1);
     let new_base = new_start.saturating_sub(1);
     let d = diff_lines(old, new);
@@ -408,7 +434,9 @@ pub fn render_from(
             }
             rows_left -= 1;
             let emph: Option<&Spans> = paired.get(ri).and_then(|p| p.as_ref());
-            out.extend(row_lines(r, old, new, cfg, numw, emph, old_base, new_base));
+            out.extend(row_lines(
+                r, old, new, &grids, cfg, numw, emph, old_base, new_base,
+            ));
         }
     }
     if dropped > 0 {
@@ -418,6 +446,12 @@ pub fn render_from(
         ));
     }
     out
+}
+
+/// Each side's syntax roles, one row per line (see [`role_grid`]).
+struct Grids {
+    old: Vec<Vec<Role>>,
+    new: Vec<Vec<Role>>,
 }
 
 /// Said in place of a minimal diff when [`Diff::degraded`].
@@ -456,6 +490,7 @@ fn row_lines(
     r: &Row,
     old: &[&str],
     new: &[&str],
+    grids: &Grids,
     cfg: &DiffConfig,
     numw: usize,
     emph: Option<&Spans>,
@@ -466,26 +501,30 @@ fn row_lines(
     // the old file's on a deletion and on a context row, the new file's on an
     // addition. Right-aligned, and `numw` spans **both** files' numbering,
     // because the one column carries either.
-    let (sign, role, text, num) = match *r {
+    let (sign, role, text, num, classes) = match *r {
         Row::Context { a, .. } => (
             " ",
             Role::Plain,
             old.get(a).copied().unwrap_or(""),
             old_base + a + 1,
+            grids.old.get(a),
         ),
         Row::Removed { a } => (
             "-",
             Role::Removed,
             old.get(a).copied().unwrap_or(""),
             old_base + a + 1,
+            grids.old.get(a),
         ),
         Row::Added { b } => (
             "+",
             Role::Added,
             new.get(b).copied().unwrap_or(""),
             new_base + b + 1,
+            grids.new.get(b),
         ),
     };
+    let classes: &[Role] = classes.map(Vec::as_slice).unwrap_or(&[]);
     let p = cfg.palette;
     let gutter = if cfg.line_numbers {
         format!("{num:>numw$} ")
@@ -497,12 +536,17 @@ fn row_lines(
     // Tabs must be expanded before wrapping or the width is a lie.
     let text = expand_tabs(text, TAB_STOP);
     let base = p.style(role);
-    let em = base.patch(p.style(Role::Emphasis));
+    let em = p.style(Role::Emphasis);
+    // Tint, then the syntax colour over it, then the changed-word emphasis
+    // over both: each layer adds to the one under it.
     let cells: Vec<(char, Style)> = text
         .char_indices()
-        .map(|(i, c)| {
+        .enumerate()
+        .map(|(k, (i, c))| {
+            let syn = p.style(classes.get(k).copied().unwrap_or(Role::Plain));
+            let s = base.patch(syn);
             let inside = emph.is_some_and(|sp| sp.iter().any(|&(s, e)| s <= i && i < e));
-            (c, if inside { em } else { base })
+            (c, if inside { s.patch(em) } else { s })
         })
         .collect();
     // The gutter takes the line's own foreground on a changed row — the same
@@ -1252,6 +1296,38 @@ mod tests {
         for l in render(&o, &n, &cfg) {
             assert!(l.spans.iter().all(|s| s.style == Style::new()), "{l:?}");
         }
+    }
+
+    /// The unified view colours the code in its language under the row's tint,
+    /// and with no language it does not.
+    #[test]
+    fn the_unified_view_is_syntax_coloured_under_the_tint() {
+        use ratatui::style::Color;
+        let o = ["fn a() {}"];
+        let n = ["fn b() {}"];
+        let cfg = DiffConfig {
+            palette: Palette::Colour,
+            ..Default::default()
+        };
+        let rows = render_in(&o, &n, &cfg, 1, 1, Some(Lang::Rust));
+        let added = rows
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "+"))
+            .unwrap();
+        let kw = added
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("fn"))
+            .expect("the keyword is its own span");
+        assert_eq!(kw.style.fg, Some(Color::Magenta), "{added:?}");
+        assert_eq!(kw.style.bg, Palette::Colour.style(Role::Added).bg);
+        let plain = render_from(&o, &n, &cfg, 1, 1);
+        assert!(
+            plain
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .all(|s| s.style.fg != Some(Color::Magenta))
+        );
     }
 
     #[test]

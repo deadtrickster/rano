@@ -157,20 +157,27 @@ drawing ratatui lines, for other programs that show text the same way.
 ### Diff preview and merge conflicts
 
 `M-P` draws the current buffer over the text, using the same renderers as the
-save diff above, and `M-P` or Esc goes back to the text. The text itself is
-left unchanged.
+save diff above, and `M-P` or Esc goes back to the text. Only resolving a
+conflict from the view (below) changes the text.
 
 - **A diff or patch** (`.diff`, `.patch`, or any buffer holding `git diff` /
   `diff -u` output) is shown file by file and hunk by hunk, numbered by each
   file's own lines, with changed words emphasised. The commit message and
   `format-patch` signature are shown dimmed.
 - **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
-  without diff3's `|||||||` base) is shown as ours against theirs. The two
-  sides line up line by line, with context around each conflict, instead of
-  being interleaved in one block.
+  without diff3's `|||||||` base) is shown one conflict per section, with ours
+  and theirs lined up and the surrounding lines of the file for context. Each
+  side is numbered by its own version of the file. In this view:
+  - `n` / `p` (or `]` / `[`) go to the next / previous conflict;
+  - `o` takes ours, `t` theirs, `b` both (ours first), `B` both (theirs
+    first) — each one undo step (`M-U`), and the view moves on to what is
+    left, closing when nothing is;
+  - `c` cycles the comparison: ours against theirs, then base against ours and
+    base against theirs — what each side changed — when the base was recorded
+    (`git config merge.conflictStyle diff3`).
 
 `s` switches between unified and two panels, and the choice sticks for the
-session. The two-panel view also colours each side in the file's language.
+session. Both are syntax-coloured in the file's language.
 
 ## Buffers
 

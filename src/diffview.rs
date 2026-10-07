@@ -16,12 +16,14 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use rano::conflict::{Compare, Take};
 use rano::diff::DiffConfig;
 use rano::sidediff::{EditView, edit_view, render_edit_view};
 use rano::style::Palette;
 use ratatui::text::Line;
 
-use crate::editor::Editor;
+use crate::buffer::Pos;
+use crate::editor::{ActionKind, Editor};
 use crate::syntax::Lang;
 
 /// What a diff view shows.
@@ -34,8 +36,16 @@ pub enum Source {
     },
     /// A diff or patch buffer's text.
     Patch { name: String, text: String },
-    /// A buffer with conflict markers.
-    Conflict { name: String, text: String },
+    /// A buffer with conflict markers, and where the reader is in it.
+    Conflict {
+        name: String,
+        text: String,
+        /// The conflict the keys act on (0-based, file order).
+        current: usize,
+        compare: Compare,
+        /// Each conflict's header row in `lines`, from the last render.
+        sections: Vec<usize>,
+    },
 }
 
 pub struct DiffView {
@@ -72,7 +82,7 @@ impl DiffView {
             max_rows: usize::MAX,
         };
         let view = edit_view(self.split);
-        self.lines = match &self.source {
+        self.lines = match &mut self.source {
             Source::Save { path, disk, mine } => {
                 let shown = path.display().to_string();
                 render_edit_view(&shown, disk, mine, 1, 1, &cfg, view)
@@ -80,9 +90,22 @@ impl DiffView {
             Source::Patch { text, .. } => {
                 rano::patch::render(&rano::patch::parse(text), &cfg, view)
             }
-            Source::Conflict { name, text } => {
-                rano::conflict::render(name, text, &cfg, view).unwrap_or_default()
-            }
+            Source::Conflict {
+                name,
+                text,
+                current,
+                compare,
+                sections,
+            } => match rano::conflict::render_view(name, text, &cfg, view, *compare, *current) {
+                Some(v) => {
+                    *sections = v.sections;
+                    v.lines
+                }
+                None => {
+                    sections.clear();
+                    Vec::new()
+                }
+            },
         };
         self.width = width;
         self.top = self.top.min(self.lines.len().saturating_sub(1));
@@ -106,8 +129,22 @@ impl DiffView {
             Source::Patch { name, .. } => {
                 format!(" Patch {name} ({view})   s: split/unified  Esc: back to the text")
             }
-            Source::Conflict { name, .. } => {
-                format!(" Conflicts in {name} ({view})   s: split/unified  Esc: back to the text")
+            Source::Conflict {
+                current,
+                sections,
+                compare,
+                ..
+            } => {
+                let cmp = match compare {
+                    Compare::OursTheirs => "ours/theirs",
+                    Compare::BaseOurs => "base/ours",
+                    Compare::BaseTheirs => "base/theirs",
+                };
+                format!(
+                    " Conflict {}/{} ({view}, {cmp})   n/p: next/prev  o/t: take ours/theirs  b/B: both  c: compare  s: split  Esc: back",
+                    current + 1,
+                    sections.len()
+                )
             }
         }
     }
@@ -152,7 +189,13 @@ impl Editor {
         // Conflicts first: a patch file with markers in it is mid-merge too,
         // and the merge is what needs reading.
         if rano::conflict::has_conflicts(&text) {
-            self.open_view(Source::Conflict { name, text });
+            self.open_view(Source::Conflict {
+                name,
+                text,
+                current: 0,
+                compare: Compare::OursTheirs,
+                sections: Vec::new(),
+            });
         } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Diff)
             || looks_like_a_patch(&text)
         {
@@ -179,6 +222,10 @@ impl Editor {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let page = body_rows(self.text_h);
         let last = v.lines.len().saturating_sub(page);
+        if let Some(act) = conflict_action(&v, key) {
+            self.conflict_act(v, act);
+            return;
+        }
         // Leaving: back to the save question, or back to the text.
         let leave = |ed: &mut Editor, v: &DiffView| {
             if v.answers_save() {
@@ -225,6 +272,152 @@ impl Editor {
         let last = v.lines.len().saturating_sub(page);
         v.top = v.top.min(last);
         self.diff_view = Some(v);
+    }
+}
+
+/// What a key does in the conflict view, beyond scrolling.
+enum ConflictAct {
+    /// Make conflict `current + delta` current and scroll to it.
+    Move(isize),
+    /// The next comparison (ours/theirs → base/ours → base/theirs).
+    Compare,
+    Take(Take),
+}
+
+fn conflict_action(v: &DiffView, key: KeyEvent) -> Option<ConflictAct> {
+    if !matches!(v.source, Source::Conflict { .. })
+        || key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    Some(match key.code {
+        KeyCode::Char('n' | ']') => ConflictAct::Move(1),
+        KeyCode::Char('p' | '[') => ConflictAct::Move(-1),
+        KeyCode::Char('c') => ConflictAct::Compare,
+        KeyCode::Char('o') => ConflictAct::Take(Take::Ours),
+        KeyCode::Char('t') => ConflictAct::Take(Take::Theirs),
+        KeyCode::Char('b') => ConflictAct::Take(Take::OursThenTheirs),
+        KeyCode::Char('B') => ConflictAct::Take(Take::TheirsThenOurs),
+        _ => return None,
+    })
+}
+
+impl Editor {
+    fn conflict_act(&mut self, mut v: DiffView, act: ConflictAct) {
+        let width = self.text_w;
+        match act {
+            ConflictAct::Move(d) => {
+                if let Source::Conflict {
+                    current, sections, ..
+                } = &mut v.source
+                {
+                    let last = sections.len().saturating_sub(1) as isize;
+                    *current = (*current as isize + d).clamp(0, last) as usize;
+                }
+                v.render(width);
+                v.jump_to_current();
+            }
+            ConflictAct::Compare => {
+                if let Source::Conflict { compare, .. } = &mut v.source {
+                    *compare = compare.next();
+                }
+                v.render(width);
+                v.jump_to_current();
+            }
+            ConflictAct::Take(take) => return self.resolve_conflict(v, take),
+        }
+        self.clamp_top(&mut v);
+        self.diff_view = Some(v);
+    }
+
+    fn clamp_top(&self, v: &mut DiffView) {
+        let last = v.lines.len().saturating_sub(body_rows(self.text_h));
+        v.top = v.top.min(last);
+    }
+
+    /// Replace the current conflict's marker block with the side taken, as one
+    /// undo step, then show what is left — or close when nothing is.
+    fn resolve_conflict(&mut self, mut v: DiffView, take: Take) {
+        let Source::Conflict { current, .. } = &v.source else {
+            return;
+        };
+        let k = *current;
+        // The buffer itself, not the view's snapshot: the view is modal, so the
+        // two agree, and the edit must be computed against what it edits.
+        let text = self.bs().buf.text();
+        let Some((start, end, lines)) = rano::conflict::resolution(&text, k, take) else {
+            self.flash("No base recorded for this conflict");
+            self.diff_view = Some(v);
+            return;
+        };
+        let mut rows: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
+        // A buffer is never zero rows.
+        if rows.is_empty() && self.bs().buf.row_count() == end - start {
+            rows.push(Vec::new());
+        }
+        self.begin_action(ActionKind::Resolve, start, end);
+        self.bs_mut().buf.splice_rows(start, end, rows);
+        let last_row = self.bs().buf.row_count().saturating_sub(1);
+        self.bs_mut().cursor = Pos {
+            row: start.min(last_row),
+            col: 0,
+        };
+        self.bs_mut().mark = None;
+        self.finish_step();
+        self.edit_invalidate();
+        let taken = match take {
+            Take::Ours => "ours",
+            Take::Theirs => "theirs",
+            Take::OursThenTheirs => "both, ours first",
+            Take::TheirsThenOurs => "both, theirs first",
+            Take::Base => "the base",
+        };
+        let text = self.bs().buf.text();
+        let left = rano::conflict::parse(&text)
+            .iter()
+            .filter(|s| matches!(s, rano::conflict::Segment::Conflict(_)))
+            .count();
+        if left == 0 {
+            self.adjust_scroll(self.text_h);
+            self.adjust_scroll_x();
+            self.flash(&format!(
+                "Took {taken}. All conflicts resolved: review, then save"
+            ));
+            return;
+        }
+        if let Source::Conflict {
+            text: snap,
+            current,
+            ..
+        } = &mut v.source
+        {
+            *snap = text;
+            // The same index is now the conflict that followed.
+            *current = k.min(left - 1);
+        }
+        v.render(self.text_w);
+        v.jump_to_current();
+        self.clamp_top(&mut v);
+        let plural = if left == 1 { "" } else { "s" };
+        self.flash(&format!(
+            "Took {taken}; {left} conflict{plural} left. M-U undoes"
+        ));
+        self.diff_view = Some(v);
+    }
+}
+
+impl DiffView {
+    /// Scroll so the current conflict's header is the first row shown.
+    fn jump_to_current(&mut self) {
+        if let Source::Conflict {
+            current, sections, ..
+        } = &self.source
+            && let Some(&row) = sections.get(*current)
+        {
+            self.top = row;
+        }
     }
 }
 

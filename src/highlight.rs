@@ -8,6 +8,7 @@
 //! coloured differently in two panes of one screen.
 
 use crate::style::Role;
+use crate::syntax::{Highlighter, Lang};
 
 /// Capture names onto the six syntax roles.
 ///
@@ -35,6 +36,29 @@ pub fn role_for_capture(name: &str) -> Role {
             None => Role::Plain,
         },
     }
+}
+
+/// One role per character, one row per line, for `lines` read as one text in
+/// `lang`; rows of nothing (plain) when there is no language. The whole text is
+/// parsed at once, so a construct spanning lines keeps its scope.
+///
+/// The grid can come back shorter than `lines` — [`Highlighter::classes`] is
+/// empty when a parser will not take the language — so callers index it with
+/// `get` and read a missing row as plain.
+pub fn role_grid(lines: &[&str], lang: Option<Lang>) -> Vec<Vec<Role>> {
+    let Some(lang) = lang else {
+        return vec![Vec::new(); lines.len()];
+    };
+    let src = lines.join("\n");
+    Highlighter::new()
+        .classes(&src, lang)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|c| c.map(|n| role_for_capture(&n)).unwrap_or(Role::Plain))
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]

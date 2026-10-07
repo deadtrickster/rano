@@ -20,15 +20,15 @@
 //! # How it is drawn
 //!
 //! Each hunk's old and new sides are an **excerpt** with known starts, which is
-//! exactly what [`crate::diff::render_from`] and [`crate::sidediff::render_split`]
+//! exactly what [`crate::diff::render_in`] and [`crate::sidediff::render_split`]
 //! take: they re-diff the excerpt, so the drawing gets the word-level emphasis
-//! and (in the split view) syntax colour in the file's own language, numbered by
+//! and syntax colour in the file's own language, numbered by
 //! the file and not by the patch. The context is the whole excerpt, so a hunk
 //! made with `-U10` keeps its ten lines.
 
 use ratatui::text::{Line, Span};
 
-use crate::diff::{DiffConfig, faint_line, render_from};
+use crate::diff::{DiffConfig, faint_line, render_in};
 use crate::sidediff::{EditView, SplitConfig, lang_for, render_split};
 use crate::style::Role;
 
@@ -279,7 +279,7 @@ pub fn render(p: &Patch, cfg: &DiffConfig, view: EditView) -> Vec<Line<'static>>
             // 1-based line the excerpt starts at, which is then 1.
             let (os, ns) = (h.old_start.max(1), h.new_start.max(1));
             match view {
-                EditView::Unified => out.extend(render_from(&old, &new, &hcfg, os, ns)),
+                EditView::Unified => out.extend(render_in(&old, &new, &hcfg, os, ns, lang)),
                 EditView::Split => out.extend(render_split(
                     &old,
                     &new,

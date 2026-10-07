@@ -46,6 +46,9 @@ pub enum ActionKind {
     /// coalesces with nothing — pressing M-T twice must undo twice, not merge
     /// into one.
     Todo,
+    /// A merge conflict resolved from the conflict view: its marker block
+    /// replaced by the side taken. One undo step each, coalescing with nothing.
+    Resolve,
 }
 
 #[derive(Debug)]

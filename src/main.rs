@@ -1042,10 +1042,111 @@ mod ed_tests {
                 .as_ref()
                 .unwrap()
                 .header()
-                .contains("Conflicts")
+                .contains("Conflict 1/1")
         );
         press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ed.diff_view.is_none());
+    }
+
+    const CONFLICTED: &str = "fn main() {\n<<<<<<< HEAD\n    let total = 1;\n=======\n    let sum = 1;\n>>>>>>> feature\n    mid();\n<<<<<<< HEAD\n    one();\n||||||| base\n    zero();\n=======\n    two();\n>>>>>>> feature\n}";
+
+    fn conflict_ed() -> Editor {
+        let mut ed = test_ed(CONFLICTED);
+        ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_resolve.rs"));
+        ed.text_w = 120;
+        ed.text_h = 30;
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+        assert!(ed.diff_view.is_some());
+        ed
+    }
+
+    #[test]
+    fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
+        let mut ed = conflict_ed();
+        // A short screen, so moving to a conflict has to scroll.
+        ed.text_h = 6;
+        assert!(
+            ed.diff_view
+                .as_ref()
+                .unwrap()
+                .header()
+                .contains("Conflict 1/2")
+        );
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+        let v = ed.diff_view.as_ref().unwrap();
+        assert!(v.header().contains("Conflict 2/2"), "{}", v.header());
+        // Scrolled to it: the first row shown is its header, marked current.
+        let first: String = v.lines[v.top]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(first.starts_with("▶ Conflict 2 of 2"), "{first:?}");
+        // Past the last one it stays.
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(
+            ed.diff_view
+                .as_ref()
+                .unwrap()
+                .header()
+                .contains("Conflict 2/2")
+        );
+        // c: base against ours shows the base's line.
+        press(&mut ed, KeyCode::Char('c'), KeyModifiers::NONE);
+        let rows = diff_view_text(&ed);
+        assert!(
+            ed.diff_view
+                .as_ref()
+                .unwrap()
+                .header()
+                .contains("base/ours")
+        );
+        assert!(rows.iter().any(|r| r.contains("zero()")), "{rows:?}");
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(
+            ed.diff_view
+                .as_ref()
+                .unwrap()
+                .header()
+                .contains("Conflict 1/2")
+        );
+    }
+
+    #[test]
+    fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
+        let mut ed = conflict_ed();
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(
+            lines(&ed)[..3],
+            ["fn main() {", "    let sum = 1;", "    mid();"],
+            "{:?}",
+            lines(&ed)
+        );
+        // One left, and it is now current.
+        let v = ed.diff_view.as_ref().expect("still open");
+        assert!(v.header().contains("Conflict 1/1"), "{}", v.header());
+        assert!(ed.status_text().unwrap().contains("1 conflict left"));
+        // b: both, ours first — the last one, so the view closes.
+        press(&mut ed, KeyCode::Char('b'), KeyModifiers::NONE);
+        assert!(ed.diff_view.is_none());
+        assert!(ed.status_text().unwrap().contains("All conflicts resolved"));
+        assert_eq!(
+            lines(&ed),
+            vec![
+                "fn main() {",
+                "    let sum = 1;",
+                "    mid();",
+                "    one();",
+                "    two();",
+                "}"
+            ]
+        );
+        // Each take is one undo step.
+        press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert!(lines(&ed).contains(&"<<<<<<< HEAD".to_string()));
+        assert!(lines(&ed).contains(&"    let sum = 1;".to_string()));
+        press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert_eq!(lines(&ed).join("\n"), CONFLICTED);
     }
 
     #[test]

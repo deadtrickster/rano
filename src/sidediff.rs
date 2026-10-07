@@ -38,7 +38,7 @@ use crate::diff::{
     DiffConfig, GAVE_UP, Row, TAB_STOP, diff_lines, expand_tabs, faint_line, hunk_header, hunks,
     spans_width, wrap_cells,
 };
-use crate::highlight::role_for_capture;
+use crate::highlight::role_grid;
 use crate::style::Role;
 use crate::syntax::{self, Lang};
 
@@ -92,8 +92,8 @@ pub fn render_split(old: &[&str], new: &[&str], sc: &SplitConfig) -> Vec<Line<'s
     }
 
     let g = Geometry::of(sc, old, new);
-    let old_classes = class_grid(old, sc.lang);
-    let new_classes = class_grid(new, sc.lang);
+    let old_classes = role_grid(old, sc.lang);
+    let new_classes = role_grid(new, sc.lang);
 
     let mut budget = sc.cfg.max_rows;
     let mut dropped = 0usize;
@@ -391,23 +391,6 @@ fn side_lines(
         .collect()
 }
 
-/// One class grid per excerpt, one role per character.
-fn class_grid(lines: &[&str], lang: Option<Lang>) -> Vec<Vec<Role>> {
-    let Some(lang) = lang else {
-        return vec![Vec::new(); lines.len()];
-    };
-    let src = lines.join("\n");
-    let mut hl = syntax::Highlighter::new();
-    hl.classes(&src, lang)
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|c| c.map(|n| role_for_capture(&n)).unwrap_or(Role::Plain))
-                .collect()
-        })
-        .collect()
-}
-
 /// The language of a file, by the same table the editor uses.
 pub fn lang_for(path: &str) -> Option<Lang> {
     syntax::detect(Some(std::path::Path::new(path)), None)
@@ -479,12 +462,13 @@ pub fn render_edit_view(
         EditView::Unified => {
             let old: Vec<&str> = before.lines().collect();
             let new: Vec<&str> = after.lines().collect();
-            out.extend(crate::diff::render_from(
+            out.extend(crate::diff::render_in(
                 &old,
                 &new,
                 cfg,
                 before_start,
                 after_start,
+                lang_for(path),
             ))
         }
     }
@@ -784,7 +768,7 @@ mod tests {
             let b = line.find(needle).unwrap();
             line[..b].chars().count()
         };
-        let grid = class_grid(&lines, Some(Lang::Rust));
+        let grid = role_grid(&lines, Some(Lang::Rust));
         let l0 = lines[0];
         assert_eq!(grid[0][col_of(l0, "—")], Role::StringLit, "{:?}", grid[0]);
         assert_eq!(grid[0][col_of(l0, "b\"") + 1], Role::StringLit);

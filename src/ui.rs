@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 
 /// Nano decorates the title bar, prompt bar and the key combos of the
 /// function bar with plain reverse video (ncurses A_REVERSE, SGR 7). That is
@@ -507,6 +507,33 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         }
     }
 
+    // ---- list overlay (M-L buffers, M-? usages) ----
+    // Covers the text area: a reversed header naming the list and its keys,
+    // then one row per item with the selection reversed, scrolled so the
+    // selection stays in view.
+    if let Some(p) = &ed.picker {
+        let area_text = Rect::new(0, 1, width, text_h as u16);
+        f.render_widget(Clear, area_text);
+        let header = format!(" {}   Enter: go  Esc: close", p.title);
+        f.render_widget(
+            Paragraph::new(Line::from(header)).style(rev()),
+            Rect::new(0, 1, width, 1),
+        );
+        let rows = crate::picker::list_rows(text_h);
+        let start = (p.sel + 1).saturating_sub(rows);
+        for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
+            let style = if start + k == p.sel {
+                rev()
+            } else {
+                Style::default()
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(format!(" {}", it.label))).style(style),
+                Rect::new(0, 2 + k as u16, width, 1),
+            );
+        }
+    }
+
     // ---- status line (row height-3) ----
     // nano (winio.c:statusline): the prompt bar is a full reverse strip with
     // the label and answer left-aligned at column 0; a plain message sits
@@ -607,7 +634,8 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     }
 
     // ---- cursor ----
-    if !ed.help {
+    // None over the list overlay: the selection is the reversed row.
+    if !ed.help && ed.picker.is_none() {
         if let Some(p) = &ed.prompt {
             // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);

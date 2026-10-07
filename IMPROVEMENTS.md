@@ -240,6 +240,8 @@ Gates to keep green while working: `cargo test`, `cargo clippy --all-targets -- 
   `args.first()`, so `rano --writ` opens a new buffer literally named `--writ`.
   Fix: reject unknown `--`-prefixed args with a usage message; add `+N`
   (start at line), multiple files (one buffer each), and `-` for stdin.
+  (Done: unknown flags are refused, `--line`/`--column` exist, and several
+  files open one buffer each. Still open: `+N` and `-` for stdin.)
 - [ ] **`--help` is one line.** `main.rs:175`. Document the flags, the key
   model, the config path and the debug env vars (`RANO_LSP_RAW`, and the
   `RANO_LSP_LOG` proposed above).
@@ -256,8 +258,8 @@ Gates to keep green while working: `cargo test`, `cargo clippy --all-targets -- 
 
 - [ ] Multi-cursor or at least `M-A` select-line / select-all, which makes the
   existing cut/copy/replace paths much more useful.
-- [ ] `go to symbol` / `find references` / `rename symbol` over LSP (the client
-  already has request plumbing in `lsp.rs:506-516`).
+- [ ] `go to symbol` / `rename symbol` over LSP (the client already has the
+  request plumbing; `find references` landed as `M-?`, in `picker.rs`).
 - [ ] Format file / region (`textDocument/formatting`, or `sh -c` fallback).
 - [ ] Undo history browser (`M-U` list), plus per-buffer undo already exists —
   surface the count in the status line.

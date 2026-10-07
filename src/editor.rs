@@ -78,6 +78,11 @@ pub struct Editor {
     pub quit: bool,
     pub pending_write: Option<PathBuf>,
     pub quit_after_save: bool,
+    /// M-W on a modified buffer answered 'y': close it once the save lands
+    /// (the save may first need a file name).
+    pub close_after_save: bool,
+    /// The list overlay (M-L buffers, M-? usages); modal while open.
+    pub picker: Option<crate::picker::Picker>,
     pub replace: Option<ReplaceState>,
     pub replace_pos: Option<Pos>,
     pub replace_count: usize,
@@ -231,6 +236,8 @@ impl Editor {
             quit: false,
             pending_write: None,
             quit_after_save: false,
+            close_after_save: false,
+            picker: None,
             replace: None,
             replace_pos: None,
             replace_count: 0,
@@ -1473,11 +1480,25 @@ impl Editor {
             None => false,
         };
         if same_file {
+            // The buffer is named even for a same-file jump: by the time M-,
+            // unwinds it the user may have switched buffers, and the position
+            // belongs to this one.
             self.def_back.push(DefBack {
                 buf: None,
-                idx: None,
+                idx: Some(self.cur),
                 pos: from,
             });
+        } else if let Some(i) = self.find_buffer(&target_path) {
+            // Already open (from the command line, F8, or an earlier jump):
+            // go to that buffer rather than reading a second copy of the file,
+            // which would split its edits across two buffers.
+            self.def_back.push(DefBack {
+                buf: None,
+                idx: Some(self.cur),
+                pos: from,
+            });
+            self.cur = i;
+            self.load_now();
         } else {
             let buf = match Buffer::from_file(&target_path) {
                 Ok(b) => b,
@@ -1509,7 +1530,8 @@ impl Editor {
         let row = loc.line as usize;
         let line = self.bs().buf.row_opt(row).cloned().unwrap_or_default();
         let col = lsp::utf16_to_char(&line, loc.character as usize);
-        self.bs_mut().cursor = Pos { row, col };
+        let bs = self.bs_mut();
+        bs.cursor = bs.buf.clamp(Pos { row, col });
         self.completion_close();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
@@ -1586,6 +1608,11 @@ impl Editor {
     /// Left click: cursor + fresh selection anchor. Left drag: extend.
     /// Wheel: scroll the viewport a few lines. Everything else is ignored.
     pub(crate) fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+        // The list overlay is keyboard-only; the text under it is not there
+        // to click.
+        if self.picker.is_some() {
+            return false;
+        }
         self.ensure_wrap_prefix();
         use crossterm::event::MouseEventKind as K;
         match m.kind {
@@ -2367,6 +2394,10 @@ impl Editor {
                 self.lsp_flush(Instant::now());
                 self.lsp_sync();
                 self.flash(&format!("Wrote {} bytes", bytes));
+                if self.close_after_save {
+                    self.close_after_save = false;
+                    self.remove_current_buffer();
+                }
                 if self.quit_after_save {
                     self.quit_after_save = false;
                     // Re-attempt the quit: further modified buffers get the
@@ -2375,6 +2406,10 @@ impl Editor {
                 }
             }
             Err(e) => {
+                // The quit or close this save was for is off: the buffer is
+                // still unsaved, and a later save must not finish it silently.
+                self.quit_after_save = false;
+                self.close_after_save = false;
                 self.flash(&format!("Error: {}", e));
             }
         }
@@ -2441,7 +2476,17 @@ impl Editor {
         if path.is_empty() {
             return true;
         }
-        let buf = match Buffer::from_file(Path::new(&expand_tilde(path))) {
+        let path = PathBuf::from(expand_tilde(path));
+        // Already open in another buffer: switch to it. (Re-opening the
+        // CURRENT file in single-buffer mode still re-reads it from disk —
+        // that is how a revert is done there.)
+        if let Some(i) = self.find_buffer(&path)
+            && (self.config.multibuffer || i != self.cur)
+        {
+            self.set_current(i);
+            return true;
+        }
+        let buf = match Buffer::from_file(&path) {
             Ok(b) => b,
             Err(e) => {
                 self.flash(&format!("Error: {}", e));
@@ -2554,6 +2599,40 @@ impl Editor {
 
     // ---------- buffers ----------
 
+    /// The open buffer showing `path`, if any. Paths are compared after
+    /// canonicalising, so `./src/a.rs`, `src/a.rs` and the absolute path a
+    /// language server sends all name the same buffer.
+    pub(crate) fn find_buffer(&self, path: &Path) -> Option<usize> {
+        let want = canonical(path);
+        self.buffers
+            .iter()
+            .position(|bs| bs.buf.name.as_deref().is_some_and(|n| canonical(n) == want))
+    }
+
+    /// Make buffer `i` current and say so — the one way M-</M->, the buffer
+    /// list and F8-on-an-open-file change buffers.
+    pub(crate) fn set_current(&mut self, i: usize) {
+        if i >= self.buffers.len() {
+            return;
+        }
+        self.cur = i;
+        self.completion_close();
+        self.adjust_scroll(self.text_h);
+        self.adjust_scroll_x();
+        let name = self.buffer_name(i);
+        self.flash(&format!("Buffer: {name}"));
+    }
+
+    /// What the status line and the buffer list call buffer `i`.
+    pub(crate) fn buffer_name(&self, i: usize) -> String {
+        self.buffers[i]
+            .buf
+            .name
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "scratch".to_string())
+    }
+
     /// M-> / M-<: switch to the next/previous buffer, wrapping. All view and
     /// edit state lives in BufferState, so switching only re-points `cur`;
     /// each buffer keeps its own LSP session (lsp_poll services whichever
@@ -2563,17 +2642,77 @@ impl Editor {
         if n < 2 {
             return;
         }
-        self.cur = (self.cur as isize + dir).rem_euclid(n as isize) as usize;
+        let i = (self.cur as isize + dir).rem_euclid(n as isize) as usize;
+        self.set_current(i);
+    }
+
+    /// M-W: close the current buffer. A modified one asks first (y saves,
+    /// n discards); the last buffer is not closed — ^X is how to leave.
+    pub(crate) fn close_buffer(&mut self) {
+        if self.buffers.len() < 2 {
+            self.flash("Last buffer; ^X to exit");
+            return;
+        }
+        if self.bs().buf.modified {
+            self.prompt = Some(Prompt {
+                kind: PromptKind::ConfirmClose,
+                text: String::new(),
+                cursor: 0,
+            });
+            return;
+        }
+        self.remove_current_buffer();
+    }
+
+    pub(crate) fn answer_close(&mut self, c: char) {
+        match c {
+            'y' | 'Y' => {
+                self.close_after_save = true;
+                match self.bs().buf.name.clone() {
+                    Some(p) => self.save_to(p),
+                    None => {
+                        self.prompt = Some(Prompt {
+                            kind: PromptKind::WriteName,
+                            text: String::new(),
+                            cursor: 0,
+                        });
+                    }
+                }
+            }
+            'n' | 'N' => self.remove_current_buffer(),
+            _ => {}
+        }
+    }
+
+    /// Drop the current buffer (its load is cancelled and its language
+    /// server shut down with it) and fix up everything that indexes
+    /// `buffers`: the M-, stack loses the entries that pointed into the
+    /// closed buffer, and later indices shift down by one.
+    pub(crate) fn remove_current_buffer(&mut self) {
+        if self.buffers.len() < 2 {
+            return;
+        }
+        let k = self.cur;
+        let name = self.buffer_name(k);
+        self.cancel_load();
+        self.completion_close();
+        let gone = self.buffers.remove(k);
+        drop(gone);
+        self.def_back.retain(|e| e.idx != Some(k));
+        for e in &mut self.def_back {
+            if let Some(i) = e.idx.as_mut()
+                && *i > k
+            {
+                *i -= 1;
+            }
+        }
+        // The buffer that followed takes the closed one's place (nano's
+        // order); closing the last one lands on the new last.
+        self.cur = k.min(self.buffers.len() - 1);
+        self.highlight_dirty = true;
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        let name = self
-            .bs()
-            .buf
-            .name
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "scratch".to_string());
-        self.flash(&format!("Buffer: {name}"));
+        self.flash(&format!("Closed {name}"));
     }
 
     // ---------- justify / sort ----------
@@ -2696,6 +2835,21 @@ pub(crate) fn plural(n: usize) -> &'static str {
 /// Rebuild `syntax_diags` from the fresh tree-sitter parse. Called after
 /// every re-highlight (open, read, edit) so mistakes are visible even with
 /// no language server.
+/// `path` made absolute and symlink-free when it exists; otherwise made
+/// absolute against the working directory, so a not-yet-saved buffer still
+/// compares equal to itself.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
 pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
     bs.syntax_diags = bs
         .hl

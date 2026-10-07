@@ -11,6 +11,7 @@ mod load_ctrl;
 mod loader;
 mod lsp;
 mod lsp_ctrl;
+mod picker;
 mod prompt;
 // The chunked row store (§16.3). Declared here now because the binary's
 // `Buffer` is built on it — the library-only note in `lib.rs` said this would
@@ -140,6 +141,10 @@ pub struct BufferState {
     /// A file still arriving from disk; `None` once it has (or a normal,
     /// fully-loaded buffer). See `load_ctrl.rs`.
     pub(crate) load: Option<crate::loader::LoadJob>,
+    /// A file named on the command line but not read yet: it starts loading
+    /// the first time this buffer becomes current, so `rano *.rs` costs one
+    /// read and one language server up front rather than one per file.
+    pub(crate) pending_load: Option<PathBuf>,
     pub(crate) undo: VecDeque<UndoStep>,
     redo: VecDeque<UndoStep>,
     pending: Option<UndoStep>,
@@ -181,6 +186,7 @@ impl BufferState {
             wrap_extend_from: None,
             edit_gen: 0,
             load: None,
+            pending_load: None,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             pending: None,
@@ -241,6 +247,26 @@ impl Editor {
         dirty
     }
 
+    /// One buffer per extra command-line file, after the first. Each is
+    /// named at once (title, buffer list, language) but read only when it
+    /// first becomes current — see `start_pending_load`. A file named twice
+    /// gets one buffer; a file that does not exist yet is a new buffer that
+    /// will be saved under that name, as for the first file.
+    pub(crate) fn add_deferred_buffers(&mut self, paths: &[PathBuf]) {
+        for p in paths {
+            if self.find_buffer(p).is_some() {
+                continue;
+            }
+            let mut buf = Buffer::new();
+            buf.name = Some(p.clone());
+            let mut bs = BufferState::new(buf);
+            if p.exists() {
+                bs.pending_load = Some(p.clone());
+            }
+            self.buffers.push(bs);
+        }
+    }
+
     // ---------- styling ----------
 
     /// The file name for the title bar, prefixed "[i/n] " when several
@@ -263,13 +289,15 @@ impl Editor {
 
 /// The command line, parsed.
 ///
-/// Hand-rolled rather than a parser crate: one optional file, a handful of
-/// flags, and no subcommands. What it must get right is that a flag's VALUE is
+/// Hand-rolled rather than a parser crate: files, a handful of flags, and no
+/// subcommands. What it must get right is that a flag's VALUE is
 /// not mistaken for the file — `rano --line 42 main.rs` — which the positional
 /// `args.first()` it replaced did get wrong.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
-    file: Option<String>,
+    /// In command-line order; each opens as its own buffer, the first one
+    /// current. `--line`/`--column` apply to the first.
+    files: Vec<String>,
     /// 1-based, as a person reads them and as `Ln` in the status bar counts.
     /// Converted to 0-based before the editor sees them.
     line: Option<usize>,
@@ -326,23 +354,34 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             other if other.len() > 1 && other.starts_with('-') => {
                 return Err(format!("unknown option {other}"));
             }
-            other => {
-                if out.file.is_some() {
-                    return Err(format!("only one file, got {other:?} as well"));
-                }
-                out.file = Some(other.to_string());
-            }
+            other => out.files.push(other.to_string()),
         }
         i += 1;
+    }
+    if out.export.is_some() && out.files.len() > 1 {
+        return Err(format!(
+            "--export takes one file, got {} ({})",
+            out.files.len(),
+            out.files.join(", ")
+        ));
     }
     Ok(out)
 }
 
+impl Args {
+    /// The first file: the one that opens current, and the one `--line`,
+    /// `--column` and `--export` act on.
+    fn file(&self) -> Option<&str> {
+        self.files.first().map(String::as_str)
+    }
+}
+
 const USAGE: &str = "\
-usage: rano [options] [file]
+usage: rano [options] [file...]
 
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
+                    (both apply to the first file)
   -h, --help        this
   -V, --version     the version
 
@@ -372,7 +411,7 @@ fn main() {
     // what makes it usable in a pipe and as a way to measure the highlighter
     // without the UI in the way.
     if let Some(fmt) = args.export {
-        if let Err(e) = export_to_stdout(args.file.clone(), fmt) {
+        if let Err(e) = export_to_stdout(args.file().map(str::to_string), fmt) {
             eprintln!("rano: {e}");
             std::process::exit(1);
         }
@@ -383,7 +422,7 @@ fn main() {
     // even ^C — for 575 ms at 184 MB and about six seconds at 2 GB. The run
     // loop starts a loader instead and adopts rows as they arrive; see
     // `load_ctrl.rs` and `loader.rs`.
-    let file = args.file.clone();
+    let file = args.file().map(str::to_string);
     let mut buf = Buffer::new();
     let mut load: Option<PathBuf> = None;
     if let Some(f) = &file {
@@ -401,8 +440,16 @@ fn main() {
         row: l.saturating_sub(1),
         col: args.col.unwrap_or(1).saturating_sub(1),
     });
-    let cfg = config::load();
-    if let Err(e) = run(buf, load, pos, cfg) {
+    let mut cfg = config::load();
+    // The other files become buffers of their own, read when first visited.
+    // Naming several files is asking for several buffers, so the session is
+    // multibuffer whatever the config says: F8 and jumps then add buffers
+    // rather than replacing the one in view.
+    let rest: Vec<PathBuf> = args.files.iter().skip(1).map(PathBuf::from).collect();
+    if !rest.is_empty() {
+        cfg.multibuffer = true;
+    }
+    if let Err(e) = run(buf, load, rest, pos, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -463,6 +510,7 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
 fn run(
     buf: Buffer,
     load: Option<PathBuf>,
+    rest: Vec<PathBuf>,
     pos: Option<crate::buffer::Pos>,
     cfg: config::Config,
 ) -> io::Result<()> {
@@ -496,6 +544,7 @@ fn run(
         eprintln!("rano: cannot read {}: {}", path.display(), e);
         std::process::exit(1);
     }
+    ed.add_deferred_buffers(&rest);
     // D6 dirty-draw: redraw only when something changed. Any handled key,
     // paste or resize dirties (coarse); the pollers below report their own
     // state changes. text_w is the FULL viewport width now (draw renders
@@ -514,6 +563,8 @@ fn run(
         // the scroll. Running `adjust_scroll` first would then pull the view
         // back to the nearest edge, which is the opposite of centring. It is
         // also why this waits for the row — see `apply_startup_pos`.
+        // A file from the command line whose buffer just became current.
+        dirty |= ed.start_pending_load();
         ed.apply_startup_pos();
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
@@ -605,7 +656,7 @@ mod ed_tests {
     use super::*;
     use crate::BufferState;
     use crate::buffer::Pos;
-    use crate::editor::Flash;
+    use crate::editor::{DefBack, Flash};
     use crate::prompt::{PromptKind, complete_path, expand_tilde};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1307,7 +1358,8 @@ mod ed_tests {
         ed.goto_location(loc, Pos { row: 1, col: 3 });
         assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
         assert_eq!(ed.def_back.len(), 1);
-        assert!(ed.def_back[0].buf.is_none() && ed.def_back[0].idx.is_none());
+        assert!(ed.def_back[0].buf.is_none());
+        assert_eq!(ed.def_back[0].idx, Some(0), "the origin buffer is recorded");
         // M-, returns to the origin row.
         press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
         assert_eq!(ed.bs().cursor, Pos { row: 1, col: 3 });
@@ -1859,22 +1911,19 @@ mod ed_tests {
         // The bug the positional `args.first()` had: `--line 42 main.rs` made
         // "42" the file.
         let a = parse_args(&argv(&["--line", "42", "main.rs"])).expect("parse");
-        assert_eq!(a.file.as_deref(), Some("main.rs"));
+        assert_eq!(a.file(), Some("main.rs"));
         assert_eq!(a.line, Some(42));
         assert_eq!(a.col, None);
         // And in the other order.
         let a = parse_args(&argv(&["main.rs", "--line", "42"])).expect("parse");
-        assert_eq!(a.file.as_deref(), Some("main.rs"));
+        assert_eq!(a.file(), Some("main.rs"));
         assert_eq!(a.line, Some(42));
     }
 
     #[test]
     fn the_value_forms_are_accepted() {
         let a = parse_args(&argv(&["--line=42", "--col=7", "f.rs"])).expect("equals form");
-        assert_eq!(
-            (a.line, a.col, a.file.as_deref()),
-            (Some(42), Some(7), Some("f.rs"))
-        );
+        assert_eq!((a.line, a.col, a.file()), (Some(42), Some(7), Some("f.rs")));
         let a = parse_args(&argv(&["-l", "42", "-c", "7", "f.rs"])).expect("short form");
         assert_eq!((a.line, a.col), (Some(42), Some(7)));
         let a = parse_args(&argv(&["--column", "3", "f.rs"])).expect("long column");
@@ -1894,7 +1943,10 @@ mod ed_tests {
             (argv(&["--line", "abc"]), "a non-number"),
             (argv(&["--line", "-1"]), "a negative line"),
             (argv(&["--nope", "f.rs"]), "an unknown option"),
-            (argv(&["a.rs", "b.rs"]), "two files"),
+            (
+                argv(&["--export", "html", "a.rs", "b.rs"]),
+                "two files to export",
+            ),
             (argv(&["--export", "pdf", "f.rs"]), "an unknown format"),
         ] {
             assert!(parse_args(&args).is_err(), "{why}: {args:?} was accepted");
@@ -1905,7 +1957,7 @@ mod ed_tests {
     fn help_and_version_win_over_a_file() {
         // `rano --help file.rs` prints usage rather than opening the file.
         let a = parse_args(&argv(&["--help", "file.rs"])).expect("parse");
-        assert!(a.help && a.file.is_some());
+        assert!(a.help && a.file().is_some());
         let a = parse_args(&argv(&["-V"])).expect("parse");
         assert!(a.version);
     }
@@ -3036,5 +3088,225 @@ mod ed_tests {
         press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
         assert!(f2.exists());
         assert!(ed.quit, "last buffer saved → quit");
+    }
+
+    // ---------- buffers: close, CLI files, reuse by jumps ----------
+
+    fn named_buffers(names: &[&str]) -> Editor {
+        let mut ed = test_ed("0");
+        ed.config.multibuffer = true;
+        ed.bs_mut().buf.name = Some(PathBuf::from(names[0]));
+        for (i, n) in names.iter().enumerate().skip(1) {
+            let mut b = buf_with(&i.to_string());
+            b.name = Some(PathBuf::from(n));
+            ed.buffers.push(BufferState::new(b));
+        }
+        ed
+    }
+
+    #[test]
+    fn close_buffer_removes_it_and_lands_on_the_next() {
+        let mut ed = named_buffers(&["/tmp/rano_c0", "/tmp/rano_c1", "/tmp/rano_c2"]);
+        ed.cur = 1;
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.cur, 1);
+        assert_eq!(
+            lines(&ed),
+            vec!["2"],
+            "the following buffer takes its place"
+        );
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(ed.cur, 0, "closing the last one lands on the new last");
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(ed.buffers.len(), 1, "the last buffer stays");
+        assert!(ed.status_text().unwrap().contains("^X"));
+    }
+
+    #[test]
+    fn close_modified_buffer_asks_and_n_discards() {
+        let mut ed = named_buffers(&["/tmp/rano_m0", "/tmp/rano_m1"]);
+        ed.buffers[0].buf.modified = true;
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert!(matches!(
+            ed.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::ConfirmClose)
+        ));
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ed.buffers.len(), 2, "cancel keeps it");
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(ed.buffers.len(), 1);
+        assert_eq!(lines(&ed), vec!["1"]);
+    }
+
+    #[test]
+    fn close_modified_buffer_y_saves_then_closes() {
+        let d = temp_dir("close_save");
+        let f = d.0.join("a.txt");
+        let mut ed = named_buffers(&[f.to_str().unwrap(), "/tmp/rano_cs1"]);
+        ed.buffers[0].buf.modified = true;
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(fs::read_to_string(&f).unwrap().trim_end(), "0");
+        assert_eq!(ed.buffers.len(), 1);
+        assert!(!ed.close_after_save);
+    }
+
+    #[test]
+    fn cancelling_the_file_name_of_a_close_forgets_the_close() {
+        let mut ed = test_ed("scratch");
+        ed.buffers.push(BufferState::new(buf_with("other")));
+        ed.bs_mut().buf.modified = true;
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(matches!(
+            ed.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::WriteName)
+        ));
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ed.close_after_save, "a later ^O must not close the buffer");
+        assert_eq!(ed.buffers.len(), 2);
+    }
+
+    #[test]
+    fn closing_a_buffer_fixes_the_jump_back_stack() {
+        let mut ed = named_buffers(&["/tmp/rano_j0", "/tmp/rano_j1", "/tmp/rano_j2"]);
+        ed.def_back.push(DefBack {
+            buf: None,
+            idx: Some(1),
+            pos: Pos { row: 0, col: 0 },
+        });
+        ed.def_back.push(DefBack {
+            buf: None,
+            idx: Some(2),
+            pos: Pos { row: 0, col: 1 },
+        });
+        ed.cur = 1;
+        press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(
+            ed.def_back.len(),
+            1,
+            "entries into the closed buffer are gone"
+        );
+        assert_eq!(ed.def_back[0].idx, Some(1), "later indices shift down");
+        ed.cur = 0;
+        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(lines(&ed), vec!["2"]);
+    }
+
+    #[test]
+    fn several_files_parse_in_order() {
+        let a = parse_args(&argv(&["a.rs", "-l", "3", "b.rs", "c.rs"])).expect("parse");
+        assert_eq!(a.files, vec!["a.rs", "b.rs", "c.rs"]);
+        assert_eq!(a.file(), Some("a.rs"));
+        assert_eq!(a.line, Some(3));
+    }
+
+    #[test]
+    fn extra_files_are_named_now_and_read_when_visited() {
+        let d = temp_dir("deferred");
+        let b = d.0.join("b.txt");
+        fs::write(&b, "bee\n").unwrap();
+        let missing = d.0.join("new.txt");
+        let mut ed = test_ed("a");
+        ed.bs_mut().buf.name = Some(d.0.join("a.txt"));
+        ed.add_deferred_buffers(&[b.clone(), missing.clone(), b.clone()]);
+        assert_eq!(ed.buffers.len(), 3, "a file named twice gets one buffer");
+        assert_eq!(ed.buffers[1].pending_load.as_ref(), Some(&b));
+        assert!(
+            ed.buffers[2].pending_load.is_none(),
+            "a new file has nothing to read"
+        );
+        assert!(!ed.start_pending_load(), "buffer 0 has nothing pending");
+        press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+        assert!(ed.start_pending_load());
+        assert!(ed.bs().pending_load.is_none());
+        for _ in 0..200 {
+            ed.load_poll();
+            if !ed.loading() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(lines(&ed), vec!["bee"]);
+    }
+
+    #[test]
+    fn open_file_switches_to_an_already_open_buffer() {
+        let d = temp_dir("open_dup");
+        let f = d.0.join("a.txt");
+        fs::write(&f, "disk").unwrap();
+        let mut ed = named_buffers(&[f.to_str().unwrap(), "/tmp/rano_od1"]);
+        ed.cur = 1;
+        assert!(ed.open_file(f.to_str().unwrap()));
+        assert_eq!(ed.buffers.len(), 2, "no second copy");
+        assert_eq!(ed.cur, 0);
+        assert_eq!(lines(&ed), vec!["0"], "the open buffer, not the disk text");
+    }
+
+    #[test]
+    fn definition_into_an_open_buffer_reuses_it() {
+        let d = temp_dir("def_reuse");
+        let src = d.0.join("src.rs");
+        let tgt = d.0.join("tgt.rs");
+        fs::write(&tgt, "fn t() {}\n").unwrap();
+        let mut ed = named_buffers(&[src.to_str().unwrap(), tgt.to_str().unwrap()]);
+        // An unsaved edit in the target buffer must be what the jump lands in.
+        ed.buffers[1]
+            .buf
+            .set_rows(vec!["fn t() { edited }".chars().collect()]);
+        let loc = lsp::DefLocation {
+            uri: lsp::path_to_uri(&tgt),
+            line: 0,
+            character: 3,
+        };
+        ed.goto_location(loc, Pos { row: 0, col: 0 });
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.cur, 1);
+        assert_eq!(lines(&ed), vec!["fn t() { edited }"]);
+        assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
+        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(ed.cur, 0);
+    }
+
+    #[test]
+    fn definition_into_a_deferred_buffer_reads_it_first() {
+        let d = temp_dir("def_deferred");
+        let tgt = d.0.join("tgt.rs");
+        fs::write(&tgt, "// one\n// two\nfn t() {}\n").unwrap();
+        let mut ed = named_ed("fn a() {}\n", "/tmp/rano_def_deferred_src.rs");
+        ed.config.multibuffer = true;
+        ed.add_deferred_buffers(std::slice::from_ref(&tgt));
+        let loc = lsp::DefLocation {
+            uri: lsp::path_to_uri(&tgt),
+            line: 2,
+            character: 3,
+        };
+        ed.goto_location(loc, Pos { row: 0, col: 0 });
+        assert_eq!(ed.cur, 1);
+        assert!(ed.bs().pending_load.is_none());
+        assert_eq!(ed.bs().cursor, Pos { row: 2, col: 3 });
+        assert_eq!(lines(&ed).len(), 3);
+    }
+
+    #[test]
+    fn picker_draws_over_the_text() {
+        let mut ed = test_ed("hidden text");
+        ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_draw_a"));
+        let mut b = buf_with("x");
+        b.name = Some(PathBuf::from("/tmp/rano_draw_b"));
+        ed.buffers.push(BufferState::new(b));
+        ed.open_buffer_list();
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| ui::draw(f, &ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row =
+            |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        assert!(row(1).contains("Buffers (2)"), "{}", row(1));
+        assert!(row(2).contains("rano_draw_a"), "{}", row(2));
+        assert!(row(3).contains("rano_draw_b"), "{}", row(3));
+        assert!(!(1..9).any(|y| row(y).contains("hidden text")));
     }
 }

@@ -22,6 +22,7 @@ pub enum PromptKind {
     FilterCmd,
     BackupName,
     ConfirmSave,
+    ConfirmClose,
     ConfirmOverwrite,
     ReplaceAsk,
 }
@@ -46,6 +47,7 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::FilterCmd => "Filter: ",
         PromptKind::BackupName => "Backup Name: ",
         PromptKind::ConfirmSave => "Save modified buffer? (y, n, or ^G to cancel) ",
+        PromptKind::ConfirmClose => "Save before closing? (y, n, or ^G to cancel) ",
         PromptKind::ConfirmOverwrite => "File exists, overwrite? (y or n) ",
         PromptKind::ReplaceAsk => "Replace? (y, n, a, q) ",
     }
@@ -105,6 +107,17 @@ impl Editor {
                 }
                 if let KeyCode::Char(c) = key.code {
                     self.answer_save(c);
+                    return;
+                }
+                self.prompt = Some(p);
+                return;
+            }
+            PromptKind::ConfirmClose => {
+                if cancel {
+                    return;
+                }
+                if let KeyCode::Char(c) = key.code {
+                    self.answer_close(c);
                     return;
                 }
                 self.prompt = Some(p);
@@ -325,6 +338,13 @@ impl Editor {
                 } else {
                     self.hist_idx = None;
                     self.hist_draft.clear();
+                    // A file name asked for by a quit or a close: cancelling
+                    // it abandons that too, or the next ordinary ^O would
+                    // quit or close behind the user's back.
+                    if matches!(p.kind, PromptKind::WriteName) {
+                        self.quit_after_save = false;
+                        self.close_after_save = false;
+                    }
                 }
             }
         }

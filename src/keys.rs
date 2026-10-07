@@ -59,6 +59,10 @@ impl Editor {
             self.help = false;
             return;
         }
+        if let Some(p) = self.picker.take() {
+            self.handle_picker_key(p, key);
+            return;
+        }
         if let Some(p) = self.prompt.take() {
             self.handle_prompt_key(p, key);
             return;
@@ -110,6 +114,12 @@ impl Editor {
                 // M-< / M-> : previous / next buffer (wraps).
                 KeyCode::Char('<') => self.switch_buffer(-1),
                 KeyCode::Char('>') => self.switch_buffer(1),
+                // M-L: list the open buffers; M-W: close this one.
+                KeyCode::Char('l') => self.open_buffer_list(),
+                KeyCode::Char('w') => self.close_buffer(),
+                // M-? : every usage of the symbol under the cursor (LSP
+                // references), listed; Enter jumps there and M-, comes back.
+                KeyCode::Char('?') => self.find_usages(),
                 KeyCode::Left => self.prev_word(),
                 KeyCode::Right => self.next_word(),
                 _ => {}

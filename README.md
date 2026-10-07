@@ -45,10 +45,11 @@ cargo build --release
 ## Usage
 
 ```
-rano [options] [file]
+rano [options] [file...]
 
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
+                    (both apply to the first file)
   -h, --help        usage
   -V, --version     the version
 
@@ -58,6 +59,11 @@ rano [options] [file]
 
 Opens `file` if it exists, otherwise starts a new buffer that will be saved
 under that name. No arguments starts an empty buffer.
+
+Several files open one buffer each, the first one current: `rano src/*.rs`.
+The others are read the first time you switch to them, so naming twenty files
+costs one read and one language server up front. Naming more than one file
+turns `multibuffer` on for the session. See [Buffers](#buffers).
 
 `--line` and `--column` open at a position, which is what makes `rano` usable
 as somebody else's `$EDITOR`: a compiler error, a grep hit or a stack trace
@@ -93,7 +99,8 @@ message and exits non-zero, so a caller can tell what happened.
 | `^/` / `F11` | Go to line |
 | `M-D` | Jump to next diagnostic (wraps) |
 | `M-.` | Jump to definition (LSP) |
-| `M-,` | Jump back (stacked — one press per jump) |
+| `M-?` | Find usages (LSP references): list them, Enter jumps to one |
+| `M-,` | Jump back (stacked — one press per jump, from a definition or a usage) |
 | `M-V` | Install the newer release the startup check found |
 | `M-T` | Tick the task on this line (`[ ]` ↔ `[x]`) |
 | `M-C` | Tick every task in this section — or in this task's subtree |
@@ -104,6 +111,8 @@ message and exits non-zero, so a caller can tell what happened.
 | `M-\` | Toggle soft line wrap (long lines wrap at the viewport edge) |
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
 | `M-<` / `M->` | Previous / next buffer |
+| `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
+| `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
 | `^J` / `F10` | Justify current paragraph |
 | `F7` | Make backup (`file~`) |
@@ -128,6 +137,29 @@ filename prompts, `M-b`/`M-f` move by word.
 
 Bracketed paste is supported: multi-line pastes arrive as a single undoable
 edit.
+
+## Buffers
+
+With `multibuffer = true` (or more than one file on the command line) every
+file you open gets its own buffer, with its own cursor, undo history and
+language server:
+
+- `F8` opens a file in a new buffer, or switches to it if it is already open.
+- `M-<` / `M->` cycle through buffers. `M-L` lists them: the arrows, `PgUp` /
+  `PgDn`, `Home` / `End` move, Enter switches, `Del` closes the selected one, and
+  Esc leaves the list.
+- `M-W` closes the current buffer. A modified buffer asks first: `y` saves and
+  closes, `n` discards and closes. The last buffer stays open; `^X` exits.
+- `^X` offers each modified buffer for saving in turn, then exits.
+
+Jumps go through the same buffers:
+
+- `M-.` (definition) into a file that is already open switches to that buffer,
+  unsaved edits and all, rather than reading a second copy from disk.
+- `M-?` (usages) lists every reference to the symbol under the cursor as
+  `file:line:col  text`, grouped by file. The text comes from the open buffer
+  when there is one, so unsaved edits show. Enter jumps there like `M-.` does.
+- `M-,` unwinds either kind of jump, back into the buffer you started from.
 
 ## Todos
 

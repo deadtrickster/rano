@@ -80,6 +80,9 @@ pub struct LspClient {
     pub doc_uri: Option<String>,
     pub doc_path: Option<PathBuf>,
     doc_version: i32,
+    /// Where the server's copy of the document ends: the end of the last
+    /// text sent (didOpen, then each didChange). See `did_change_params`.
+    sent_end: (u64, u64),
     initialized: bool,
     pub lang: Lang,
 }
@@ -204,8 +207,13 @@ pub fn find_project_root(start: &Path, marker: &str) -> PathBuf {
     }
 }
 
+/// A `file://` URI names an absolute path, so a relative one — what
+/// `rano src/main.rs` names its buffer — is made absolute against the working
+/// directory first. Without that the server is told about `file://src/main.rs`,
+/// which is no file, and answers every request with nothing.
 pub(crate) fn path_to_uri(path: &Path) -> String {
-    let s = path.to_string_lossy();
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = abs.to_string_lossy();
     if cfg!(windows) {
         format!("file:///{}", s.replace('\\', "/"))
     } else {
@@ -308,33 +316,40 @@ pub struct DefLocation {
 /// Parse a definition response: a Location, a Location array, a
 /// LocationLink array, or null. Returns the first target.
 fn parse_definition(v: &Value) -> Option<DefLocation> {
+    parse_locations(v).into_iter().next()
+}
+
+/// Every target in a Location / Location[] / LocationLink[] / null result,
+/// in the server's order. Shared by definition (which takes the first) and
+/// references (which lists them all).
+fn parse_locations(v: &Value) -> Vec<DefLocation> {
     let candidates: Vec<&Value> = match v {
-        Value::Null => return None,
+        Value::Null => return Vec::new(),
         Value::Array(a) => a.iter().collect(),
         one => vec![one],
     };
+    let mut out = Vec::with_capacity(candidates.len());
     for loc in candidates {
         if let Some(uri) = loc.get("uri").and_then(Value::as_str) {
             let s = &loc["range"]["start"];
-            return Some(DefLocation {
+            out.push(DefLocation {
                 uri: uri.to_string(),
                 line: s["line"].as_u64().unwrap_or(0),
                 character: s["character"].as_u64().unwrap_or(0),
             });
-        }
-        if let Some(uri) = loc.get("targetUri").and_then(Value::as_str) {
+        } else if let Some(uri) = loc.get("targetUri").and_then(Value::as_str) {
             let mut s = &loc["targetSelectionRange"]["start"];
             if s.is_null() {
                 s = &loc["targetRange"]["start"];
             }
-            return Some(DefLocation {
+            out.push(DefLocation {
                 uri: uri.to_string(),
                 line: s["line"].as_u64().unwrap_or(0),
                 character: s["character"].as_u64().unwrap_or(0),
             });
         }
     }
-    None
+    out
 }
 
 /// Inverse of `path_to_uri`, which does not percent-encode: a `file://` URI
@@ -480,22 +495,32 @@ fn spawn_reader(
     });
 }
 
-/// Build the `textDocument/didChange` params for a full-document sync: one
-/// range edit spanning the entire text, ending at the last line's length in
-/// UTF-16 code units (a trailing `\n` yields an empty final line).
-fn did_change_params(uri: &str, version: i32, text: &str) -> Value {
+/// Where `text` ends as an LSP position: the last line's index and its
+/// length in UTF-16 code units (a trailing `\n` yields an empty final line).
+fn text_end(text: &str) -> (u64, u64) {
     let lines = text.split('\n').collect::<Vec<_>>();
     let last = lines.len().saturating_sub(1);
     let last_len = lines[last]
         .chars()
         .map(|c| c.len_utf16() as u64)
         .sum::<u64>();
+    (last as u64, last_len)
+}
+
+/// Build the `textDocument/didChange` params for a full-document sync: one
+/// range edit replacing the whole of the SERVER's copy — from the start to
+/// `old_end`, where the last text sent to it ended — with `text`. The range
+/// has to describe the old document, not the new one: a file still arriving
+/// is opened empty, and a range sized to the new text then points past the
+/// end of the server's copy, which rust-analyzer rejects, leaving it with an
+/// empty document that answers every request with an error.
+fn did_change_params(uri: &str, version: i32, old_end: (u64, u64), text: &str) -> Value {
     json!({
         "textDocument": { "uri": uri, "version": version },
         "contentChanges": [{
             "range": {
                 "start": { "line": 0, "character": 0 },
-                "end": { "line": last, "character": last_len }
+                "end": { "line": old_end.0, "character": old_end.1 }
             },
             "text": text
         }]
@@ -536,6 +561,7 @@ impl LspClient {
             doc_uri: Some(path_to_uri(doc)),
             doc_path: Some(doc.to_path_buf()),
             doc_version: 1,
+            sent_end: (0, 0),
             initialized: false,
             lang,
         };
@@ -630,12 +656,13 @@ impl LspClient {
                 }
             }),
         );
+        self.sent_end = text_end(text);
         self.initialized = true;
         Ok(())
     }
 
     /// Send a change. Servers may request full or incremental sync; a single
-    /// range edit covering the whole document is valid for both, so we always
+    /// range edit replacing the whole document is valid for both, so we always
     /// use that (LSP character offsets are UTF-16 code units).
     pub fn change(&mut self, text: &str) {
         if !self.initialized {
@@ -645,7 +672,8 @@ impl LspClient {
             return;
         };
         self.doc_version += 1;
-        let params = did_change_params(&uri, self.doc_version, text);
+        let params = did_change_params(&uri, self.doc_version, self.sent_end, text);
+        self.sent_end = text_end(text);
         self.notify("textDocument/didChange", params);
     }
 
@@ -708,6 +736,29 @@ impl LspClient {
         let (id, rx) = self.request("textDocument/definition", params);
         let result = self.wait(id, rx, timeout)?;
         Ok(parse_definition(&result))
+    }
+
+    /// Synchronous `textDocument/references` (M-?): every usage of the
+    /// symbol at the position, the declaration included, in the server's
+    /// order. An empty list when the server answers null.
+    pub fn references(
+        &mut self,
+        uri: &str,
+        line: u64,
+        character: u64,
+        timeout: Duration,
+    ) -> Result<Vec<DefLocation>, String> {
+        if !self.initialized {
+            return Ok(Vec::new());
+        }
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+            "context": { "includeDeclaration": true }
+        });
+        let (id, rx) = self.request("textDocument/references", params);
+        let result = self.wait(id, rx, timeout)?;
+        Ok(parse_locations(&result))
     }
 
     /// Send a JSON-RPC response to a server-initiated request.
@@ -862,6 +913,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_locations_keeps_every_reference() {
+        let refs = json!([
+            {"uri": "file:///a.rs", "range": {"start": {"line": 3, "character": 1}}},
+            {"uri": "file:///b.rs", "range": {"start": {"line": 0, "character": 7}}},
+            {"targetUri": "file:///c.rs",
+             "targetRange": {"start": {"line": 9, "character": 0}}}
+        ]);
+        let locs = parse_locations(&refs);
+        assert_eq!(locs.len(), 3);
+        assert_eq!(locs[1].uri, "file:///b.rs");
+        assert_eq!((locs[1].line, locs[1].character), (0, 7));
+        assert_eq!(locs[2].line, 9, "a LocationLink falls back to targetRange");
+        assert!(parse_locations(&json!(null)).is_empty());
+        assert!(parse_locations(&json!([])).is_empty());
+    }
+
+    #[test]
+    fn a_relative_path_becomes_an_absolute_uri() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            path_to_uri(Path::new("src/main.rs")),
+            path_to_uri(&cwd.join("src/main.rs"))
+        );
+        assert!(path_to_uri(Path::new("src/main.rs")).starts_with("file:///"));
+    }
+
+    #[test]
     fn uri_path_roundtrip() {
         let p = std::path::Path::new("/home/u/my file.rs");
         assert_eq!(uri_to_path(&path_to_uri(p)), p);
@@ -891,36 +969,36 @@ mod tests {
     }
 
     #[test]
-    fn did_change_params_single_line() {
-        let v = did_change_params("file:///t", 3, "abc");
+    fn did_change_params_replaces_the_old_document() {
+        let v = did_change_params("file:///t", 3, (0, 0), "abc\ndef\n");
         assert_eq!(v["textDocument"]["uri"], "file:///t");
         assert_eq!(v["textDocument"]["version"], 3);
+        // The range is what the server HAS (here: an empty document opened
+        // before the file arrived), not the size of the new text.
         assert_eq!(
             v["contentChanges"][0]["range"]["end"],
-            json!({ "line": 0, "character": 3 })
+            json!({ "line": 0, "character": 0 })
         );
-        assert_eq!(v["contentChanges"][0]["text"], "abc");
+        assert_eq!(v["contentChanges"][0]["text"], "abc\ndef\n");
     }
 
     #[test]
-    fn did_change_params_trailing_newline() {
+    fn text_end_single_line() {
+        assert_eq!(text_end("abc"), (0, 3));
+        assert_eq!(text_end(""), (0, 0));
+    }
+
+    #[test]
+    fn text_end_trailing_newline() {
         // "a𝕏" is 3 chars / 4 UTF-16 units; the trailing \n makes an empty
-        // final line, so the range ends at {line:2, character:0}.
-        let v = did_change_params("file:///t", 1, "a𝕏\nb\n");
-        assert_eq!(
-            v["contentChanges"][0]["range"]["end"],
-            json!({ "line": 2, "character": 0 })
-        );
+        // final line, so the text ends at {line:2, character:0}.
+        assert_eq!(text_end("a𝕏\nb\n"), (2, 0));
     }
 
     #[test]
-    fn did_change_params_astral_last_line() {
+    fn text_end_astral_last_line() {
         // 𝕏 is one char but 2 UTF-16 code units.
-        let v = did_change_params("file:///t", 1, "a𝕏");
-        assert_eq!(
-            v["contentChanges"][0]["range"]["end"],
-            json!({ "line": 0, "character": 3 })
-        );
+        assert_eq!(text_end("a𝕏"), (0, 3));
     }
 
     // Test-only client whose writes land in `buf` instead of a server's stdin;
@@ -955,6 +1033,7 @@ mod tests {
             doc_uri: None,
             doc_path: None,
             doc_version: 1,
+            sent_end: (0, 0),
             initialized: false,
             lang: Lang::Rust,
         }

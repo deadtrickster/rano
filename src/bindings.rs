@@ -12,7 +12,7 @@ pub struct Binding {
 /// rows are reserved for features whose wiring lands with later items
 /// (diagnostics, line numbers, wrap, filter, buffer switching).
 #[rustfmt::skip]
-    pub static BAR: [Binding; 37] = [
+    pub static BAR: [Binding; 40] = [
     Binding { key: "^G", label: "Help" },
     Binding { key: "^X", label: "Exit" },
     Binding { key: "^O", label: "Write Out" },
@@ -40,11 +40,14 @@ pub struct Binding {
     Binding { key: "M-D", label: "Next Diagnostic" },
     Binding { key: "M-.", label: "Definition" },
     Binding { key: "M-,", label: "Jump Back" },
+    Binding { key: "M-?", label: "Usages" },
     Binding { key: "M-N", label: "Line Numbers" },
     Binding { key: "M-\\", label: "Wrap" },
     Binding { key: "M-|", label: "Filter" },
     Binding { key: "M-<", label: "Prev Buffer" },
     Binding { key: "M->", label: "Next Buffer" },
+    Binding { key: "M-L", label: "Buffer List" },
+    Binding { key: "M-W", label: "Close Buffer" },
     Binding { key: "M-T", label: "Todo Tick" },
     Binding { key: "M-C", label: "Todo Section" },
     Binding { key: "M-X", label: "Todo Decline" },
@@ -103,7 +106,10 @@ pub fn help_lines() -> Vec<String> {
         "  M-6 copies the current line or marked region to the cutbuffer.".to_string(),
         "  ^F searches; ^B searches backwards; M-B/M-F jump to the previous/next match."
             .to_string(),
-        "  ^X exits; if the buffer is modified you will be asked to save.".to_string(),
+        "  ^X exits; every modified buffer is offered for saving first.".to_string(),
+        "  M-L lists the open buffers (Del closes one); M-? lists usages (LSP).".to_string(),
+        "  In a list: arrows/PgUp/PgDn move, Enter goes there, Esc closes; M-, comes back."
+            .to_string(),
         String::new(),
         "  Press any key to continue".to_string(),
     ]);
@@ -147,11 +153,11 @@ mod tests {
         // here — the bar only shows as many as the terminal width fits, so a
         // forgotten append would be invisible on a wide screen and missing on a
         // narrow one.
-        assert_eq!(BAR.len(), 37);
+        assert_eq!(BAR.len(), 40);
         let keys: Vec<&str> = BAR.iter().map(|b| b.key).collect();
         for k in [
-            "M-D", "M-.", "M-,", "M-N", "M-\\", "M-|", "M-<", "M->", "M-T", "M-C", "M-X", "M-}",
-            "M-{",
+            "M-D", "M-.", "M-,", "M-?", "M-N", "M-\\", "M-|", "M-<", "M->", "M-L", "M-W", "M-T",
+            "M-C", "M-X", "M-}", "M-{",
         ] {
             assert!(keys.contains(&k), "reserved row {} missing", k);
         }

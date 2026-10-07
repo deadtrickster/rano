@@ -169,6 +169,52 @@ impl Editor {
             job.cancel();
         }
     }
+
+    /// Start the deferred read of a file named on the command line, now that
+    /// its buffer is current. Called once per loop iteration, so whatever
+    /// made the buffer current — M->, the buffer list, a close, ^X's save
+    /// prompt — the file starts arriving on the next frame. Returns whether
+    /// anything changed.
+    pub(crate) fn start_pending_load(&mut self) -> bool {
+        let Some(path) = self.bs_mut().pending_load.take() else {
+            return false;
+        };
+        if let Err(e) = self.start_load(&path) {
+            self.flash(&format!("Cannot read {}: {e}", path.display()));
+        }
+        true
+    }
+
+    /// Make the current buffer whole, synchronously: a deferred file is read
+    /// now and a load in flight is replaced by a full read. For jumps
+    /// (definition, usages) into a buffer that has not finished arriving —
+    /// they need the target row to exist before the cursor is put on it.
+    pub(crate) fn load_now(&mut self) {
+        let pending = self.bs_mut().pending_load.take();
+        let in_flight = self.bs().load.is_some();
+        let path = match pending {
+            Some(p) => p,
+            None if in_flight && !self.bs().buf.modified => match self.bs().buf.name.clone() {
+                Some(p) => p,
+                None => return,
+            },
+            None => return,
+        };
+        self.cancel_load();
+        match Buffer::from_file(&path) {
+            Ok(buf) => {
+                let bs = self.bs_mut();
+                bs.load = None;
+                bs.buf = buf;
+                bs.edit_gen = bs.edit_gen.wrapping_add(1);
+                bs.wrap_extend_from = None;
+                self.highlight_dirty = true;
+                self.diag_dirty = true;
+                self.lsp_sync();
+            }
+            Err(e) => self.flash(&format!("Cannot read {}: {e}", path.display())),
+        }
+    }
 }
 
 #[cfg(test)]

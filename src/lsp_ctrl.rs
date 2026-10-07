@@ -69,7 +69,10 @@ impl Editor {
         if lsp::command_for(lang).is_none() {
             return;
         }
-        let dir = name
+        // From the absolute path: a relative name's parent walks up to the
+        // empty path, and a root of "" is no project.
+        let dir = std::path::absolute(&name)
+            .unwrap_or_else(|_| name.clone())
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));

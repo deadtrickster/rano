@@ -59,6 +59,10 @@ impl Editor {
             self.help = false;
             return;
         }
+        if let Some(v) = self.diff_view.take() {
+            self.handle_diff_key(v, key);
+            return;
+        }
         if let Some(p) = self.picker.take() {
             self.handle_picker_key(p, key);
             return;

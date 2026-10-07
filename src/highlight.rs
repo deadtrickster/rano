@@ -1,0 +1,90 @@
+//! Syntax roles: **[`crate::syntax`]'s captures, [`crate::style`]'s roles.**
+//!
+//! Ported from letibot's `crates/ui/src/highlight.rs`. The engine is
+//! [`crate::syntax`]; what lives here is the other half, `capture name → Role`,
+//! for renderers that paint by role (the diffs in [`crate::diff`] and
+//! [`crate::sidediff`]) rather than by the editor's own capture theme. One table:
+//! two copies would drift, and the drift would be invisible — the same Rust
+//! coloured differently in two panes of one screen.
+
+use crate::style::Role;
+
+/// Capture names onto the six syntax roles.
+///
+/// A name the table does not list falls back to its prefix (`type.builtin` →
+/// `type`), and only a name with no known prefix at all (`variable`,
+/// `punctuation.bracket`) is plain — which is honest, because those are the
+/// tokens a reader does not need coloured.
+///
+/// # Why six
+///
+/// A terminal has expensive colour and cheap structure, and six roles is what a
+/// reader holds: a keyword, a type, a function name, a string, a number, a
+/// comment. What is not mapped is not lost: [`Role::Plain`] is the reader's own
+/// foreground, which is the right colour for punctuation.
+pub fn role_for_capture(name: &str) -> Role {
+    match name {
+        "comment" => Role::Comment,
+        "string" | "escape" => Role::StringLit,
+        "number" | "constant" | "property" => Role::NumberLit,
+        "type" | "constructor" | "label" => Role::TypeName,
+        "keyword" | "include" | "preproc" | "variable.builtin" => Role::Keyword,
+        "function" => Role::FuncName,
+        _ => match name.split_once('.') {
+            Some((prefix, _)) => role_for_capture(prefix),
+            None => Role::Plain,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_common_captures_land_on_a_role() {
+        for (name, want) in [
+            ("keyword", Role::Keyword),
+            ("string", Role::StringLit),
+            ("comment", Role::Comment),
+            ("number", Role::NumberLit),
+            ("type", Role::TypeName),
+            ("function", Role::FuncName),
+            ("constructor", Role::TypeName),
+            ("escape", Role::StringLit),
+            ("property", Role::NumberLit),
+            ("include", Role::Keyword),
+        ] {
+            assert_eq!(role_for_capture(name), want, "{name}");
+        }
+    }
+
+    /// A dotted name falls back to its prefix, one level at a time — which is what
+    /// keeps a grammar's new sub-capture from rendering plain the day it appears.
+    #[test]
+    fn a_dotted_name_falls_back_to_its_prefix() {
+        assert_eq!(role_for_capture("type.builtin"), Role::TypeName);
+        assert_eq!(role_for_capture("function.method"), Role::FuncName);
+        assert_eq!(
+            role_for_capture("keyword.control.conditional"),
+            Role::Keyword
+        );
+        assert_eq!(role_for_capture("string.escape"), Role::StringLit);
+        assert_eq!(role_for_capture("variable.builtin"), Role::Keyword);
+    }
+
+    /// What is not drawn is plain, not guessed at.
+    #[test]
+    fn punctuation_and_variables_are_plain() {
+        for name in [
+            "punctuation.bracket",
+            "punctuation.delimiter",
+            "variable",
+            "variable.parameter",
+            "operator",
+            "",
+        ] {
+            assert_eq!(role_for_capture(name), Role::Plain, "{name:?}");
+        }
+    }
+}

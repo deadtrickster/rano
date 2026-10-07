@@ -13,21 +13,6 @@ use ratatui::widgets::{Clear, Paragraph};
 /// function bar with plain reverse video (ncurses A_REVERSE, SGR 7). That is
 /// what nano itself emits and it renders fine in tmux; the gray-on-gray bug
 /// came from an explicit white-on-darkgray pair, not from reverse video.
-/// Unified-diff colours: removed red, added green, hunk headers cyan.
-fn diff_line_style(line: &str) -> Style {
-    if line.starts_with("+++") || line.starts_with("---") {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') {
-        Style::new().fg(Color::Green)
-    } else if line.starts_with('-') {
-        Style::new().fg(Color::Red)
-    } else if line.starts_with("@@") {
-        Style::new().fg(Color::Cyan)
-    } else {
-        Style::default()
-    }
-}
-
 const fn rev() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
@@ -578,34 +563,49 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     if let Some(p) = &ed.picker {
         let area_text = Rect::new(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
-        let keys = if p.is_diff() {
-            "y: save anyway  n: don't  Esc: back"
-        } else {
-            "Enter: go  Esc: close"
-        };
-        let header = format!(" {}   {keys}", p.title);
+        let header = format!(" {}   Enter: go  Esc: close", p.title);
         f.render_widget(
             Paragraph::new(Line::from(header)).style(rev()),
             Rect::new(0, 1, width, 1),
         );
         let rows = crate::picker::list_rows(text_h);
-        // A diff scrolls: its `sel` is the top line, not a highlighted one.
-        let start = if p.is_diff() {
-            p.sel
-        } else {
-            (p.sel + 1).saturating_sub(rows)
-        };
+        let start = (p.sel + 1).saturating_sub(rows);
         for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
-            let style = if p.is_diff() {
-                // A diff has no selection to show, only lines to colour.
-                diff_line_style(&it.label)
-            } else if start + k == p.sel {
+            let style = if start + k == p.sel {
                 rev()
             } else {
                 Style::default()
             };
             f.render_widget(
                 Paragraph::new(Line::from(format!(" {}", it.label))).style(style),
+                Rect::new(0, 2 + k as u16, width, 1),
+            );
+        }
+    }
+
+    // ---- external-change diff (over the text, like the list) ----
+    // A reversed header naming the file, the view and the keys, then the
+    // rendered diff lines from `top`. The lines are already styled by the
+    // library's renderers; they are drawn as they are.
+    if let Some(v) = &ed.diff_view {
+        let area_text = Rect::new(0, 1, width, text_h as u16);
+        f.render_widget(Clear, area_text);
+        let view = match v.view() {
+            rano::sidediff::EditView::Split => "split",
+            rano::sidediff::EditView::Unified => "unified",
+        };
+        let header = format!(
+            " Saving would change {} ({view})   s: split/unified  y: save anyway  n: don't  Esc: back",
+            v.path.display()
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(header)).style(rev()),
+            Rect::new(0, 1, width, 1),
+        );
+        let rows = crate::diffview::body_rows(text_h);
+        for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
+            f.render_widget(
+                Paragraph::new(l.clone()),
                 Rect::new(0, 2 + k as u16, width, 1),
             );
         }
@@ -733,8 +733,9 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     }
 
     // ---- cursor ----
-    // None over the list overlay: the selection is the reversed row.
-    if !ed.help && ed.picker.is_none() {
+    // None over the list overlay (the selection is the reversed row) or over
+    // the diff, which has nothing to point at.
+    if !ed.help && ed.picker.is_none() && ed.diff_view.is_none() {
         if let Some(p) = &ed.prompt {
             // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);
@@ -807,7 +808,10 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
     if !name.is_empty() {
         let nl = name.chars().count();
         let region_end = s.len().saturating_sub(8);
-        let mut pos = (left.len() + region_end - nl) / 2;
+        // Saturating: a name longer than the region would underflow here (a
+        // debug-build panic, a release-build name that vanished) — it is
+        // placed at the left edge and cut instead.
+        let mut pos = (left.len() + region_end).saturating_sub(nl) / 2;
         if pos < left.len() {
             pos = left.len();
         }
@@ -1046,6 +1050,13 @@ mod tests {
     }
 
     // ---------- title_line / function-bar layout ----------
+
+    #[test]
+    fn title_line_survives_a_name_longer_than_the_bar() {
+        let long = format!("/tmp/{}/f.txt", "d".repeat(120));
+        let t = title_line(60, &long, false, "");
+        assert_eq!(t.chars().count(), 60, "{t:?}");
+    }
 
     #[test]
     fn title_line_left_center_right() {

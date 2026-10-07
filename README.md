@@ -142,10 +142,16 @@ edit.
 
 rano does not watch files. When you save over a file that something else has
 written since rano read it (its size or modification time differ), it asks
-first: `y` overwrites, `n` (or `^G`) doesn't save, and `d` shows a unified diff
-of what the save would change (it runs the system `diff`). In the diff, the
-arrows and `PgUp` / `PgDn` scroll, `y` / `n` answer, and Esc goes back to the
-question. A save that was part of `^X` or `M-W` is called off by `n`.
+first: `y` overwrites, `n` (or `^G`) doesn't save, and `d` shows what the save
+would change: the file on disk against the buffer, unified or in two panels
+(`s` switches, and the choice sticks for the session), with line numbers, the
+changed words emphasised and the code syntax-coloured in the two-panel view. In
+the diff, the arrows, `PgUp` / `PgDn` / Space, `Home` / `End` scroll, `y` / `n`
+answer, and Esc goes back to the question. A save that was part of `^X` or `M-W`
+is called off by `n`.
+
+The diff renderers are part of rano's library (`rano::diff`, `rano::sidediff`),
+drawing ratatui lines, for other programs that show text the same way.
 
 ## Buffers
 

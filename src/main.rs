@@ -1,6 +1,7 @@
 mod bindings;
 mod buffer;
 mod config;
+mod diffview;
 mod editor;
 mod encoding;
 mod exec;
@@ -566,6 +567,7 @@ fn run(
         // A file from the command line whose buffer just became current.
         dirty |= ed.start_pending_load();
         dirty |= ed.refresh_prompt_hints();
+        dirty |= ed.refresh_diff_view();
         ed.apply_startup_pos();
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
@@ -923,21 +925,60 @@ mod ed_tests {
     #[test]
     fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
         let (_d, f, mut ed) = externally_changed("ext_diff");
+        ed.text_w = 100;
+        ed.text_h = 20;
         ed.save_to(f.clone());
         press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
-        let p = ed.picker.as_ref().expect("diff view");
-        assert!(p.is_diff());
-        let labels: Vec<&str> = p.items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"-one"), "{labels:?}");
-        assert!(labels.contains(&"+Xone"), "{labels:?}");
-        assert!(labels.contains(&"-three from elsewhere"), "{labels:?}");
+        let text = |ed: &Editor| -> Vec<String> {
+            ed.diff_view
+                .as_ref()
+                .expect("diff view")
+                .lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        // Unified first (the session's default): the file's name, the hunk, and
+        // each line numbered in its own file.
+        let rows = text(&ed);
+        assert!(rows[0].ends_with("f.txt"), "{rows:?}");
+        assert!(rows[1].starts_with("@@"), "{rows:?}");
+        assert!(rows.contains(&"1 -one".to_string()), "{rows:?}");
+        assert!(rows.contains(&"1 +Xone".to_string()), "{rows:?}");
+        assert!(
+            rows.contains(&"3 -three from elsewhere".to_string()),
+            "{rows:?}"
+        );
+        // s: two panels, the disk's line on the left and the buffer's on the right.
+        press(&mut ed, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(ed.diff_split, "the choice is remembered");
+        let rows = text(&ed);
+        let pair = rows.iter().find(|r| r.contains("Xone")).expect("the pair");
+        let (left, right) = pair.split_once('│').expect("two panels");
+        assert!(left.contains("- one"), "{pair:?}");
+        assert!(right.contains("+ Xone"), "{pair:?}");
+        // A resize re-renders at the new width.
+        ed.text_w = 60;
+        assert!(ed.refresh_diff_view());
+        assert!(!ed.refresh_diff_view());
+        // Drawn over the text, with the header naming the view.
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        ed.text_h = 8;
+        term.draw(|fr| ui::draw(fr, &ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row =
+            |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        assert!(row(1).contains("Saving would change"), "{}", row(1));
+        assert!((2..9).any(|y| row(y).contains("Xone")));
         press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(ed.picker.is_none());
+        assert!(ed.diff_view.is_none());
         assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
         // y from the diff itself answers the question.
         press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ed.diff_view.is_some());
         press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
-        assert!(ed.picker.is_none());
+        assert!(ed.diff_view.is_none());
         assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
     }
 
@@ -957,7 +998,7 @@ mod ed_tests {
         ed.save_to(f.clone());
         assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
         press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
-        assert!(ed.picker.is_none());
+        assert!(ed.diff_view.is_none());
         assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
         assert!(
             ed.status_text()

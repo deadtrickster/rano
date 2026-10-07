@@ -8,11 +8,22 @@
 //! - [`syntax`] — tree-sitter highlighting: language detection, the
 //!   capture walk, and [`syntax::Highlighter::classes`] for callers that
 //!   own their palette rather than borrowing rano's.
+//! - [`diff`] / [`sidediff`] — line diffs drawn as ratatui lines, unified or
+//!   in two panels, with [`style`]'s roles and [`highlight`]'s syntax mapping.
 //! - [`width`] — display width: how many columns a character takes, where a
 //!   line's wrap segments begin, and which clusters may never be split.
 
 pub mod buffer;
+// Diffs, as ratatui lines: the edit script and the unified view (`diff`), the
+// two-panel view (`sidediff`), the roles and palette they paint with (`style`),
+// and syntax captures onto those roles (`highlight`). Ported from letibot's
+// `crates/ui` so that text rendering has one home; lib-only, and the editor's
+// external-change diff reaches them as `rano::diff` / `rano::sidediff`.
+pub mod diff;
 pub mod encoding;
+pub mod highlight;
+pub mod sidediff;
+pub mod style;
 // The row store (§15, §16.3). It is declared in `main.rs` too now: the
 // binary's `Buffer` is built on `Rows`, which is stage A of that migration.
 pub mod rows;

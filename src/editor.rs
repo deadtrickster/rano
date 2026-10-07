@@ -88,6 +88,12 @@ pub struct Editor {
     pub close_after_save: bool,
     /// The list overlay (M-L buffers, M-? usages); modal while open.
     pub picker: Option<crate::picker::Picker>,
+    /// The external-change diff over the text; modal while open, and it answers
+    /// to the "File changed on disk" question.
+    pub diff_view: Option<crate::diffview::DiffView>,
+    /// Split (two panels) rather than unified, for the next diff view: the last
+    /// choice made with `s` in this session.
+    pub diff_split: bool,
     pub replace: Option<ReplaceState>,
     pub replace_pos: Option<Pos>,
     pub replace_count: usize,
@@ -244,6 +250,8 @@ impl Editor {
             quit_after_save: false,
             close_after_save: false,
             picker: None,
+            diff_view: None,
+            diff_split: false,
             replace: None,
             replace_pos: None,
             replace_count: 0,
@@ -2470,30 +2478,42 @@ impl Editor {
         });
     }
 
-    /// `d`: what saving would change in the file as it is on disk now, as a
-    /// unified diff in the list overlay. Esc (or d) comes back to the
-    /// question; y and n answer it from there.
+    /// `d`: what saving would change in the file as it is on disk now, drawn
+    /// by the library's diff renderers (split or unified, `s` toggles). Esc
+    /// (or d) comes back to the question; y and n answer it from there.
     fn show_external_diff(&mut self) {
         let Some(path) = self.pending_write.clone() else {
             return;
         };
-        let diff = self
-            .bs()
-            .buf
-            .file_bytes()
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| disk_diff(&path, bytes));
-        match diff {
-            Ok(text) if text.is_empty() => {
-                self.flash("No differences: only the file's timestamp changed");
-                self.reask_external();
-            }
-            Ok(text) => self.open_diff_view(&path, &text),
+        let mine = match self.bs().buf.file_bytes() {
+            Ok(b) => b,
             Err(e) => {
-                self.flash(&format!("diff: {e}"));
+                self.flash(&format!("Cannot encode the buffer: {e}"));
                 self.reask_external();
+                return;
             }
+        };
+        // A file that is gone is diffed as empty: every line shows as added.
+        let disk = fs::read(&path).unwrap_or_default();
+        if disk == mine {
+            self.flash("No differences: only the file's timestamp changed");
+            self.reask_external();
+            return;
         }
+        // Both sides read the way the buffer reads its file, so an encoding
+        // difference is not every line changed.
+        let enc = self.bs().buf.encoding;
+        let decode = |b: &[u8]| {
+            crate::encoding::decode(b, enc)
+                .unwrap_or_else(|_| String::from_utf8_lossy(b).into_owned())
+        };
+        let (disk, mine) = (decode(&disk), decode(&mine));
+        if disk.lines().eq(mine.lines()) {
+            self.flash("No differences in the text: only line endings or encoding");
+            self.reask_external();
+            return;
+        }
+        self.open_diff_view(&path, disk, mine);
     }
 
     fn write_file(&mut self, path: PathBuf) {
@@ -2976,46 +2996,6 @@ pub(crate) fn plural(n: usize) -> &'static str {
 /// `path` made absolute and symlink-free when it exists; otherwise made
 /// absolute against the working directory, so a not-yet-saved buffer still
 /// compares equal to itself.
-/// `diff -u` of the file on disk (`path`) against `bytes`, the buffer as a
-/// save would write it, fed on stdin. Empty when they are the same. A file
-/// that is gone is diffed as empty, so every line shows as added.
-fn disk_diff(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let disk = if path.exists() {
-        path.to_path_buf()
-    } else {
-        PathBuf::from("/dev/null")
-    };
-    let shown = path.display();
-    let mut child = Command::new("diff")
-        .arg("-u")
-        .arg("--label")
-        .arg(format!("{shown} (on disk)"))
-        .arg("--label")
-        .arg(format!("{shown} (rano)"))
-        .arg(&disk)
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    // Written from its own thread: diff can fill its stdout pipe before it
-    // has read all of stdin, and then both sides would wait on each other.
-    let mut stdin = child.stdin.take().expect("piped");
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&bytes);
-    });
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let _ = writer.join();
-    // 0: same, 1: different, anything else: diff itself failed.
-    match out.status.code() {
-        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-    }
-}
-
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {

@@ -14,6 +14,9 @@
 //!   line's wrap segments begin, and which clusters may never be split.
 
 pub mod buffer;
+// Merge conflicts taken apart: the file resolved ours-way and theirs-way,
+// diffed side by side with the renderers below (the editor's M-P).
+pub mod conflict;
 // Diffs, as ratatui lines: the edit script and the unified view (`diff`), the
 // two-panel view (`sidediff`), the roles and palette they paint with (`style`),
 // and syntax captures onto those roles (`highlight`). Ported from letibot's
@@ -22,6 +25,9 @@ pub mod buffer;
 pub mod diff;
 pub mod encoding;
 pub mod highlight;
+// Unified diffs read back in: a patch file parsed into files and hunks, drawn
+// with the renderers above (the editor's M-P view of a .diff/.patch buffer).
+pub mod patch;
 pub mod sidediff;
 pub mod style;
 // The row store (§15, §16.3). It is declared in `main.rs` too now: the

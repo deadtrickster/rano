@@ -590,16 +590,8 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     if let Some(v) = &ed.diff_view {
         let area_text = Rect::new(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
-        let view = match v.view() {
-            rano::sidediff::EditView::Split => "split",
-            rano::sidediff::EditView::Unified => "unified",
-        };
-        let header = format!(
-            " Saving would change {} ({view})   s: split/unified  y: save anyway  n: don't  Esc: back",
-            v.path.display()
-        );
         f.render_widget(
-            Paragraph::new(Line::from(header)).style(rev()),
+            Paragraph::new(Line::from(v.header())).style(rev()),
             Rect::new(0, 1, width, 1),
         );
         let rows = crate::diffview::body_rows(text_h);

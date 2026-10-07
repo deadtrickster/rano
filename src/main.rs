@@ -982,6 +982,80 @@ mod ed_tests {
         assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
     }
 
+    fn diff_view_text(ed: &Editor) -> Vec<String> {
+        ed.diff_view
+            .as_ref()
+            .expect("diff view")
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn m_p_previews_a_patch_buffer_and_closes_again() {
+        let mut ed = test_ed(
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -7,3 +7,3 @@\n fn a() {\n-    old();\n+    new();\n }",
+        );
+        ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_preview.patch"));
+        ed.text_w = 100;
+        ed.text_h = 20;
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+        let rows = diff_view_text(&ed);
+        assert!(rows.contains(&"src/a.rs".to_string()), "{rows:?}");
+        assert!(rows.contains(&"8 -    old();".to_string()), "{rows:?}");
+        assert!(rows.contains(&"8 +    new();".to_string()), "{rows:?}");
+        assert!(ed.diff_view.as_ref().unwrap().header().contains("Patch"));
+        // y and n are not answers here; M-P closes and leaves no prompt.
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(ed.diff_view.is_some());
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+        assert!(ed.diff_view.is_none());
+        assert!(ed.prompt.is_none());
+        // The text is untouched: the preview is a view, not an edit.
+        assert_eq!(lines(&ed)[0], "diff --git a/src/a.rs b/src/a.rs");
+    }
+
+    #[test]
+    fn m_p_shows_merge_conflicts_ours_against_theirs() {
+        let mut ed = test_ed(
+            "fn main() {\n<<<<<<< HEAD\n    let total = 1;\n=======\n    let sum = 1;\n>>>>>>> feature\n}",
+        );
+        ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_conflict.rs"));
+        ed.text_w = 100;
+        ed.text_h = 20;
+        ed.diff_split = true;
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+        let rows = diff_view_text(&ed);
+        assert!(rows[0].starts_with("1 conflict"), "{rows:?}");
+        let pair = rows
+            .iter()
+            .find(|r| r.contains("let total"))
+            .expect("{rows:?}");
+        let (left, right) = pair.split_once('│').expect("two panels");
+        assert!(
+            left.contains("let total") && right.contains("let sum"),
+            "{pair:?}"
+        );
+        assert!(
+            ed.diff_view
+                .as_ref()
+                .unwrap()
+                .header()
+                .contains("Conflicts")
+        );
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(ed.diff_view.is_none());
+    }
+
+    #[test]
+    fn m_p_on_plain_text_says_there_is_nothing_to_render() {
+        let mut ed = test_ed("just text");
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+        assert!(ed.diff_view.is_none());
+        assert!(ed.status_text().unwrap().starts_with("Nothing to render"));
+    }
+
     #[test]
     fn a_timestamp_only_change_says_so_in_the_diff() {
         let d = temp_dir("ext_touch");

@@ -112,6 +112,7 @@ message and exits non-zero, so a caller can tell what happened.
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current) |
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
+| `M-P` | Preview a diff/patch buffer, or a file's merge conflicts side by side |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
 | `^J` / `F10` | Justify current paragraph |
@@ -152,6 +153,24 @@ is called off by `n`.
 
 The diff renderers are part of rano's library (`rano::diff`, `rano::sidediff`),
 drawing ratatui lines, for other programs that show text the same way.
+
+### Diff preview and merge conflicts
+
+`M-P` draws the current buffer over the text, using the same renderers as the
+save diff above, and `M-P` or Esc goes back to the text. The text itself is
+left unchanged.
+
+- **A diff or patch** (`.diff`, `.patch`, or any buffer holding `git diff` /
+  `diff -u` output) is shown file by file and hunk by hunk, numbered by each
+  file's own lines, with changed words emphasised. The commit message and
+  `format-patch` signature are shown dimmed.
+- **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
+  without diff3's `|||||||` base) is shown as ours against theirs. The two
+  sides line up line by line, with context around each conflict, instead of
+  being interleaved in one block.
+
+`s` switches between unified and two panels, and the choice sticks for the
+session. The two-panel view also colours each side in the file's language.
 
 ## Buffers
 

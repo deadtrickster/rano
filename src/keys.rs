@@ -120,6 +120,8 @@ impl Editor {
                 KeyCode::Char('>') => self.switch_buffer(1),
                 // M-L: list the open buffers; M-W: close this one.
                 KeyCode::Char('l') => self.open_buffer_list(),
+                // M-P: preview a diff/patch buffer, or a file's conflicts.
+                KeyCode::Char('p') => self.toggle_rendered_view(),
                 KeyCode::Char('w') => self.close_buffer(),
                 // M-? : every usage of the symbol under the cursor (LSP
                 // references), listed; Enter jumps there and M-, comes back.

@@ -13,6 +13,21 @@ use ratatui::widgets::{Clear, Paragraph};
 /// function bar with plain reverse video (ncurses A_REVERSE, SGR 7). That is
 /// what nano itself emits and it renders fine in tmux; the gray-on-gray bug
 /// came from an explicit white-on-darkgray pair, not from reverse video.
+/// Unified-diff colours: removed red, added green, hunk headers cyan.
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::new().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::new().fg(Color::Red)
+    } else if line.starts_with("@@") {
+        Style::new().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
 const fn rev() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
@@ -251,6 +266,55 @@ fn line_to_spans(
         spans.push(Span::styled(run, s));
     }
     Line::from(spans)
+}
+
+/// Most rows the live path suggestions take above a file-name prompt.
+const HINT_ROWS: usize = 4;
+
+/// Lay out path suggestions in rows of `width`, two spaces apart, at most
+/// `max` rows; when they do not all fit, the last row ends with how many
+/// were left out. Every row is padded to the full width.
+pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut shown = 0;
+    for n in names {
+        let add = if cur.is_empty() {
+            format!(" {n}")
+        } else {
+            format!("  {n}")
+        };
+        if cur.chars().count() + add.chars().count() <= width {
+            cur.push_str(&add);
+            shown += 1;
+            continue;
+        }
+        if rows.len() + 1 == max || cur.is_empty() {
+            break;
+        }
+        rows.push(std::mem::take(&mut cur));
+        cur = format!(" {n}");
+        shown += 1;
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    let left = names.len() - shown;
+    if left > 0
+        && let Some(last) = rows.last_mut()
+    {
+        let tail = format!("  (+{left})");
+        let keep = width.saturating_sub(tail.chars().count());
+        if last.chars().count() > keep {
+            *last = last.chars().take(keep).collect();
+        }
+        last.push_str(&tail);
+    }
+    for r in &mut rows {
+        let pad = width.saturating_sub(r.chars().count());
+        r.push_str(&" ".repeat(pad));
+    }
+    rows
 }
 
 pub fn draw(f: &mut Frame, ed: &Editor) {
@@ -514,15 +578,28 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     if let Some(p) = &ed.picker {
         let area_text = Rect::new(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
-        let header = format!(" {}   Enter: go  Esc: close", p.title);
+        let keys = if p.is_diff() {
+            "y: save anyway  n: don't  Esc: back"
+        } else {
+            "Enter: go  Esc: close"
+        };
+        let header = format!(" {}   {keys}", p.title);
         f.render_widget(
             Paragraph::new(Line::from(header)).style(rev()),
             Rect::new(0, 1, width, 1),
         );
         let rows = crate::picker::list_rows(text_h);
-        let start = (p.sel + 1).saturating_sub(rows);
+        // A diff scrolls: its `sel` is the top line, not a highlighted one.
+        let start = if p.is_diff() {
+            p.sel
+        } else {
+            (p.sel + 1).saturating_sub(rows)
+        };
         for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
-            let style = if start + k == p.sel {
+            let style = if p.is_diff() {
+                // A diff has no selection to show, only lines to colour.
+                diff_line_style(&it.label)
+            } else if start + k == p.sel {
                 rev()
             } else {
                 Style::default()
@@ -540,6 +617,28 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // centered with only the bracketed text reversed.
     let status_row = area.height - 3;
     if let Some(p) = &ed.prompt {
+        // The prompt owns the status row, so what goes with it is drawn
+        // above it, over the bottom text rows: the live path suggestions,
+        // or a message raised while it is open ("No match").
+        let flash = ed
+            .status
+            .as_ref()
+            .filter(|fl| fl.until > std::time::Instant::now())
+            .map(|fl| vec![format!(" {}", fl.text)]);
+        let hints = ed
+            .prompt_hints
+            .as_ref()
+            .filter(|(k, t, n)| *k == p.kind && *t == p.text && !n.is_empty())
+            .map(|(_, _, n)| hint_rows(n, width as usize, text_h.min(HINT_ROWS)));
+        if let Some(rows) = flash.or(hints) {
+            let top = status_row - rows.len() as u16;
+            for (k, r) in rows.iter().enumerate() {
+                f.render_widget(
+                    Paragraph::new(Line::from(r.as_str())).style(rev()),
+                    Rect::new(0, top + k as u16, width, 1),
+                );
+            }
+        }
         let (text, _) = prompt_text(p, width as usize);
         let mut s: Vec<char> = text.chars().collect();
         s.resize(width as usize, ' ');

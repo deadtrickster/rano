@@ -22,6 +22,8 @@ pub enum PickTarget {
     Buffer(usize),
     /// Jump here, as a definition jump would (pushes an M-, entry).
     Location(lsp::DefLocation),
+    /// A line of text to read, not to choose: the external-change diff.
+    Text,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +48,13 @@ impl Picker {
         self.items
             .first()
             .is_some_and(|i| matches!(i.target, PickTarget::Buffer(_)))
+    }
+
+    /// The external-change diff, which answers to the save question.
+    pub(crate) fn is_diff(&self) -> bool {
+        self.items
+            .first()
+            .is_some_and(|i| matches!(i.target, PickTarget::Text))
     }
 }
 
@@ -97,6 +106,28 @@ impl Editor {
                 }
             })
             .collect()
+    }
+
+    // ---------- external-change diff ----------
+
+    /// Show `diff` (unified, disk against buffer) over the text, opened from
+    /// the "File changed on disk" question it belongs to.
+    pub(crate) fn open_diff_view(&mut self, path: &Path, diff: &str) {
+        self.completion_close();
+        let items: Vec<PickItem> = diff
+            .lines()
+            .map(|l| PickItem {
+                label: l.replace('\t', "    "),
+                target: PickTarget::Text,
+            })
+            .collect();
+        let from = self.bs().cursor;
+        self.picker = Some(Picker {
+            title: format!("Changes a save would make to {}", display_path(path)),
+            items,
+            sel: 0,
+            from,
+        });
     }
 
     // ---------- M-?: find usages ----------
@@ -247,6 +278,28 @@ impl Editor {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let n = p.items.len();
         let page = list_rows(self.text_h);
+        // The diff answers the question it was opened from: y and n answer
+        // it here, and leaving goes back to it.
+        if p.is_diff() {
+            match key.code {
+                KeyCode::Char('y' | 'Y' | 'n' | 'N') if !ctrl && !alt => {
+                    let KeyCode::Char(c) = key.code else {
+                        unreachable!()
+                    };
+                    self.answer_external(c);
+                    return;
+                }
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('d' | 'q') => {
+                    self.reask_external();
+                    return;
+                }
+                KeyCode::Char('g' | 'c') if ctrl => {
+                    self.reask_external();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => return,
             KeyCode::Char('g' | 'c' | 'x') if ctrl => return,
@@ -270,6 +323,7 @@ impl Editor {
                     return;
                 };
                 self.cur = i;
+                self.highlight_dirty = true;
                 self.close_buffer();
                 // A modified buffer is now asking whether to save: that
                 // prompt replaces the list.
@@ -282,6 +336,10 @@ impl Editor {
             }
             _ => {}
         }
+        if p.is_diff() {
+            // Its top line: never so far down that the last page is short.
+            p.sel = p.sel.min(n.saturating_sub(page));
+        }
         self.picker = Some(p);
     }
 
@@ -292,6 +350,7 @@ impl Editor {
         match item.target {
             PickTarget::Buffer(i) => self.set_current(i),
             PickTarget::Location(loc) => self.goto_location(loc, p.from),
+            PickTarget::Text => {}
         }
     }
 }

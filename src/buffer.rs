@@ -1,7 +1,29 @@
 use crate::encoding::{self, Encoding, Scope};
 use crate::rows::Rows;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// What the file looked like on disk when this buffer last read or wrote
+/// it. A save compares it with the file as it is now: a difference means
+/// something else wrote the file in between, and the save asks first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DiskStamp {
+    pub mtime: Option<SystemTime>,
+    pub len: u64,
+}
+
+impl DiskStamp {
+    /// The stamp of `path` now; `None` when it cannot be read (gone, or no
+    /// permission), which a save treats as a change when it had one before.
+    pub fn of(path: &Path) -> Option<Self> {
+        let m = fs::metadata(path).ok()?;
+        Some(Self {
+            mtime: m.modified().ok(),
+            len: m.len(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Pos {
@@ -33,6 +55,9 @@ pub struct Buffer {
     /// found, or opening a cp1252 file and saving it would rewrite it as UTF-8
     /// with replacement characters in it. See [`crate::encoding`].
     pub encoding: Encoding,
+    /// The file as it was when last read or written; `None` for a buffer
+    /// that never was (a new file, a scratch buffer).
+    pub disk: Option<DiskStamp>,
 }
 
 impl Buffer {
@@ -43,6 +68,7 @@ impl Buffer {
             modified: false,
             crlf: false,
             encoding: Encoding::Utf8,
+            disk: None,
         }
     }
 }
@@ -60,11 +86,16 @@ impl Buffer {
     /// UTF-16 or windows-1252 file opens at all, and that a UTF-8 BOM is
     /// stripped rather than becoming an invisible first column.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
+        // Stamped BEFORE the read: a write that lands during it then shows
+        // as a change, which errs toward asking.
+        let disk = DiskStamp::of(path);
         let bytes = fs::read(path)?;
         let encoding = encoding::detect(&bytes, Scope::Whole);
         let text = encoding::decode(&bytes, encoding)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(Self::from_text(&text, Some(path.to_path_buf()), encoding))
+        let mut b = Self::from_text(&text, Some(path.to_path_buf()), encoding);
+        b.disk = disk;
+        Ok(b)
     }
 
     /// A buffer over already-decoded text: the rows, the CRLF decision and the
@@ -91,6 +122,7 @@ impl Buffer {
             modified: false,
             crlf,
             encoding,
+            disk: None,
         }
     }
 
@@ -506,6 +538,7 @@ mod tests {
             modified: false,
             crlf: false,
             encoding: Encoding::Utf8,
+            disk: None,
         }
     }
 

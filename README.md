@@ -138,6 +138,15 @@ filename prompts, `M-b`/`M-f` move by word.
 Bracketed paste is supported: multi-line pastes arrive as a single undoable
 edit.
 
+### Files changed on disk
+
+rano does not watch files. When you save over a file that something else has
+written since rano read it (its size or modification time differ), it asks
+first: `y` overwrites, `n` (or `^G`) doesn't save, and `d` shows a unified diff
+of what the save would change (it runs the system `diff`). In the diff, the
+arrows and `PgUp` / `PgDn` scroll, `y` / `n` answer, and Esc goes back to the
+question. A save that was part of `^X` or `M-W` is called off by `n`.
+
 ## Buffers
 
 With `multibuffer = true` (or more than one file on the command line) every

@@ -25,6 +25,8 @@ impl Editor {
             let bs = self.bs_mut();
             bs.buf = Buffer::new();
             bs.buf.name = Some(path.to_path_buf());
+            // Before the reader starts, as `Buffer::from_file` does.
+            bs.buf.disk = crate::buffer::DiskStamp::of(path);
             // The rows arrive one batch at a time; one empty row is what a
             // buffer holds before any do, and the invariant `Buffer` needs.
             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };

@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::editor::Editor;
 use crate::search_ctrl::ReplaceState;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     WriteName,
     ReadName,
@@ -24,6 +24,8 @@ pub enum PromptKind {
     ConfirmSave,
     ConfirmClose,
     ConfirmOverwrite,
+    /// The file changed on disk since it was read; `pending_write` holds it.
+    ConfirmExternal,
     ReplaceAsk,
 }
 
@@ -49,6 +51,9 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::ConfirmSave => "Save modified buffer? (y, n, or ^G to cancel) ",
         PromptKind::ConfirmClose => "Save before closing? (y, n, or ^G to cancel) ",
         PromptKind::ConfirmOverwrite => "File exists, overwrite? (y or n) ",
+        PromptKind::ConfirmExternal => {
+            "File changed on disk since it was read. Overwrite? (y, n, d for diff) "
+        }
         PromptKind::ReplaceAsk => "Replace? (y, n, a, q) ",
     }
 }
@@ -140,6 +145,18 @@ impl Editor {
                         }
                         _ => {}
                     }
+                    return;
+                }
+                self.prompt = Some(p);
+                return;
+            }
+            PromptKind::ConfirmExternal => {
+                if cancel {
+                    self.cancel_external_save();
+                    return;
+                }
+                if let KeyCode::Char(c) = key.code {
+                    self.answer_external(c);
                     return;
                 }
                 self.prompt = Some(p);
@@ -294,15 +311,11 @@ impl Editor {
                 ) =>
             {
                 match complete_path(&p.text) {
-                    Some((common, options)) => {
+                    Some((common, _)) => {
                         if common.chars().count() > p.text.chars().count() {
                             p.text = common;
                         }
                         p.cursor = p.text.chars().count();
-                        if options.len() > 1 {
-                            let shown: Vec<String> = options.iter().take(5).cloned().collect();
-                            self.flash(&shown.join("  "));
-                        }
                     }
                     None => self.flash("No match"),
                 }
@@ -437,7 +450,12 @@ pub(crate) fn complete_path(prefix: &str) -> Option<(String, Vec<String>)> {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),
         None => ("", prefix),
     };
-    let rd = fs::read_dir(if dir.is_empty() { "." } else { dir }).ok()?;
+    let rd = fs::read_dir(if dir.is_empty() {
+        ".".to_string()
+    } else {
+        expand_tilde(dir)
+    })
+    .ok()?;
     let mut names: Vec<String> = rd
         .flatten()
         .filter(|e| {

@@ -565,6 +565,7 @@ fn run(
         // also why this waits for the row — see `apply_startup_pos`.
         // A file from the command line whose buffer just became current.
         dirty |= ed.start_pending_load();
+        dirty |= ed.refresh_prompt_hints();
         ed.apply_startup_pos();
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
@@ -853,6 +854,116 @@ mod ed_tests {
         assert_eq!(bytes, b"a\r\nb\r\n");
         assert!(!ed.bs().buf.modified);
         assert_eq!(ed.bs().buf.name, Some(out));
+    }
+
+    // Saving over a file something else changed since it was read.
+
+    /// A file read into an editor, then rewritten on disk behind its back.
+    fn externally_changed(tag: &str) -> (TempDir, PathBuf, Editor) {
+        let d = temp_dir(tag);
+        let f = d.0.join("f.txt");
+        fs::write(&f, "one\ntwo\n").unwrap();
+        let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+        press_text(&mut ed, "X");
+        fs::write(&f, "one\ntwo\nthree from elsewhere\n").unwrap();
+        (d, f, ed)
+    }
+
+    fn prompt_kind(ed: &Editor) -> Option<PromptKind> {
+        ed.prompt.as_ref().map(|p| p.kind)
+    }
+
+    #[test]
+    fn save_of_an_unchanged_file_does_not_ask() {
+        let d = temp_dir("ext_same");
+        let f = d.0.join("f.txt");
+        fs::write(&f, "one\n").unwrap();
+        let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+        press_text(&mut ed, "X");
+        // ^O on the buffer's own file is a save, not "File exists".
+        ed.do_write(f.display().to_string());
+        assert_eq!(prompt_kind(&ed), None);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\n");
+    }
+
+    #[test]
+    fn save_asks_when_the_file_changed_on_disk() {
+        let (_d, f, mut ed) = externally_changed("ext_ask");
+        ed.save_to(f.clone());
+        assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
+        assert_eq!(
+            fs::read_to_string(&f).unwrap(),
+            "one\ntwo\nthree from elsewhere\n"
+        );
+        // y writes, and the next save is quiet: the stamp is the new file's.
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
+        press_text(&mut ed, "Y");
+        ed.save_to(f.clone());
+        assert_eq!(prompt_kind(&ed), None);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "XYone\ntwo\n");
+    }
+
+    #[test]
+    fn no_to_the_external_change_keeps_the_file_and_disarms_quit() {
+        let (_d, f, mut ed) = externally_changed("ext_no");
+        press(&mut ed, KeyCode::Char('x'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
+        press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(!ed.quit);
+        assert!(!ed.quit_after_save);
+        assert!(ed.bs().buf.modified);
+        assert_eq!(
+            fs::read_to_string(&f).unwrap(),
+            "one\ntwo\nthree from elsewhere\n"
+        );
+    }
+
+    #[test]
+    fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
+        let (_d, f, mut ed) = externally_changed("ext_diff");
+        ed.save_to(f.clone());
+        press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+        let p = ed.picker.as_ref().expect("diff view");
+        assert!(p.is_diff());
+        let labels: Vec<&str> = p.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"-one"), "{labels:?}");
+        assert!(labels.contains(&"+Xone"), "{labels:?}");
+        assert!(labels.contains(&"-three from elsewhere"), "{labels:?}");
+        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(ed.picker.is_none());
+        assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
+        // y from the diff itself answers the question.
+        press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(ed.picker.is_none());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
+    }
+
+    #[test]
+    fn a_timestamp_only_change_says_so_in_the_diff() {
+        let d = temp_dir("ext_touch");
+        let f = d.0.join("f.txt");
+        fs::write(&f, "one\n").unwrap();
+        let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+        let later = std::time::SystemTime::now() + Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        ed.save_to(f.clone());
+        assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
+        press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ed.picker.is_none());
+        assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
+        assert!(
+            ed.status_text()
+                .unwrap()
+                .contains("only the file's timestamp")
+        );
     }
 
     // D3 — undo/redo protective tests (green on the snapshot impl; they must
@@ -3288,6 +3399,81 @@ mod ed_tests {
         assert!(ed.bs().pending_load.is_none());
         assert_eq!(ed.bs().cursor, Pos { row: 2, col: 3 });
         assert_eq!(lines(&ed).len(), 3);
+    }
+
+    #[test]
+    fn a_buffer_made_current_is_highlighted() {
+        let dir = std::env::temp_dir().join("rano_hl_switch_fixture");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.rs");
+        let b = dir.join("b.rs");
+        std::fs::write(&a, "fn a() {}\n").unwrap();
+        std::fs::write(&b, "fn b() {}\n").unwrap();
+        let mut ed = test_ed("");
+        ed.config.multibuffer = true;
+        ed.text_h = 10;
+        let colored = |ed: &Editor| ed.bs().hl.style_at(Pos { row: 0, col: 0 }).is_some();
+        // F8 into a new buffer.
+        assert!(ed.open_file(a.to_str().unwrap()));
+        ed.ensure_highlight();
+        assert!(colored(&ed), "F8 opened a.rs uncoloured");
+        assert!(ed.open_file(b.to_str().unwrap()));
+        ed.ensure_highlight();
+        assert!(colored(&ed), "F8 opened b.rs uncoloured");
+        // Back to a.rs through the buffer switch, after its grid was dropped.
+        let ia = ed.find_buffer(&a).unwrap();
+        ed.buffers[ia].hl = Default::default();
+        ed.set_current(ia);
+        ed.ensure_highlight();
+        assert!(colored(&ed), "switching to a.rs left it uncoloured");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_prompt_shows_live_path_hints() {
+        let dir = std::env::temp_dir().join("rano_hints_fixture");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("alpha.rs"), "").unwrap();
+        std::fs::write(dir.join("beta.rs"), "").unwrap();
+        let mut ed = test_ed("hidden text");
+        let base = format!("{}/", dir.display());
+        ed.prompt = Some(crate::prompt::Prompt {
+            kind: PromptKind::OpenName,
+            cursor: base.chars().count(),
+            text: base.clone(),
+        });
+        assert!(ed.refresh_prompt_hints());
+        assert!(!ed.refresh_prompt_hints());
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| ui::draw(f, &ed)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row =
+            |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        // status row is 12 - 3 = 9; the hints sit on the row above it.
+        assert!(row(8).contains("alpha.rs  beta.rs  sub/"), "{}", row(8));
+        // Typing narrows them.
+        ed.prompt.as_mut().unwrap().text = format!("{base}b");
+        assert!(ed.refresh_prompt_hints());
+        assert_eq!(
+            ed.prompt_hints.as_ref().unwrap().2,
+            vec!["beta.rs".to_string()]
+        );
+        ed.prompt = None;
+        assert!(ed.refresh_prompt_hints());
+        assert!(ed.prompt_hints.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hint_rows_cap_and_count_the_rest() {
+        let names: Vec<String> = (0..20).map(|i| format!("file{i:02}.rs")).collect();
+        let rows = ui::hint_rows(&names, 30, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.chars().count() == 30));
+        assert!(rows[1].trim_end().ends_with("(+16)"), "{:?}", rows);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::BufferState;
 use crate::RowWrap;
-use crate::buffer::{Buffer, Pos};
+use crate::buffer::{Buffer, DiskStamp, Pos};
 use crate::config;
 use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
@@ -72,6 +72,11 @@ pub struct Editor {
     pub search_case_sensitive: bool,
     pub search_regex: bool,
     pub prompt: Option<Prompt>,
+    /// Live path suggestions for the open file-name prompt: the (kind, text)
+    /// they were computed for, and the matching entries. Refreshed once per
+    /// frame by `refresh_prompt_hints`, so the directory is read when the
+    /// text changes rather than on every draw.
+    pub prompt_hints: Option<(PromptKind, String, Vec<String>)>,
     pub help: bool,
     pub status: Option<Flash>,
     pub loc_until: Option<Instant>,
@@ -230,6 +235,7 @@ impl Editor {
             search_case_sensitive: false,
             search_regex: false,
             prompt: None,
+            prompt_hints: None,
             help: false,
             status: None,
             loc_until: None,
@@ -280,6 +286,36 @@ impl Editor {
     fn clamp_cursor(&mut self) {
         let bs = self.bs_mut();
         bs.cursor = bs.buf.clamp(bs.cursor);
+    }
+
+    /// Recompute the live path suggestions when the open prompt is a
+    /// file-name prompt whose text changed. Returns whether they changed.
+    pub(crate) fn refresh_prompt_hints(&mut self) -> bool {
+        let want = self.prompt.as_ref().filter(|p| {
+            matches!(
+                p.kind,
+                PromptKind::WriteName
+                    | PromptKind::ReadName
+                    | PromptKind::OpenName
+                    | PromptKind::BackupName
+            )
+        });
+        match want {
+            None => self.prompt_hints.take().is_some(),
+            Some(p) => {
+                if let Some((k, t, _)) = &self.prompt_hints
+                    && *k == p.kind
+                    && *t == p.text
+                {
+                    return false;
+                }
+                let names = crate::prompt::complete_path(&p.text)
+                    .map(|(_, n)| n)
+                    .unwrap_or_default();
+                self.prompt_hints = Some((p.kind, p.text.clone(), names));
+                true
+            }
+        }
     }
 
     pub(crate) fn flash(&mut self, msg: &str) {
@@ -1498,6 +1534,7 @@ impl Editor {
                 pos: from,
             });
             self.cur = i;
+            self.highlight_dirty = true;
             self.load_now();
         } else {
             let buf = match Buffer::from_file(&target_path) {
@@ -1525,6 +1562,7 @@ impl Editor {
                     pos: from,
                 });
             }
+            self.highlight_dirty = true;
             self.lsp_sync();
         }
         let row = loc.line as usize;
@@ -1551,6 +1589,8 @@ impl Editor {
         {
             self.cur = i;
         }
+        // Another buffer (or the same one swapped back) is on screen.
+        self.highlight_dirty = true;
         let pos = entry.pos;
         let bs = self.bs_mut();
         bs.cursor = bs.buf.clamp(pos);
@@ -2352,7 +2392,15 @@ impl Editor {
             return;
         }
         let path = PathBuf::from(expand_tilde(&name));
-        if path.exists() {
+        // Writing a buffer back to its own file is a save, not an overwrite:
+        // `save_to` asks only when something else changed the file.
+        let own = self
+            .bs()
+            .buf
+            .name
+            .as_deref()
+            .is_some_and(|n| canonical(n) == canonical(&path));
+        if path.exists() && !own {
             self.pending_write = Some(path);
             self.prompt = Some(Prompt {
                 kind: PromptKind::ConfirmOverwrite,
@@ -2364,7 +2412,91 @@ impl Editor {
         }
     }
 
+    /// Save to `path`, unless it is this buffer's own file and something
+    /// else wrote that file since it was read: then ask (y overwrites, n
+    /// cancels, d shows what differs) — see `answer_external`.
     pub(crate) fn save_to(&mut self, path: PathBuf) {
+        if self.changed_on_disk(&path) {
+            self.pending_write = Some(path);
+            self.prompt = Some(Prompt {
+                kind: PromptKind::ConfirmExternal,
+                text: String::new(),
+                cursor: 0,
+            });
+            return;
+        }
+        self.write_file(path);
+    }
+
+    /// Whether `path` is the current buffer's file and no longer looks the
+    /// way it did when the buffer read or last wrote it. Checked lazily,
+    /// at save time only.
+    fn changed_on_disk(&self, path: &Path) -> bool {
+        let buf = &self.bs().buf;
+        let (Some(stamp), Some(name)) = (buf.disk, buf.name.as_deref()) else {
+            return false;
+        };
+        canonical(name) == canonical(path) && DiskStamp::of(path) != Some(stamp)
+    }
+
+    /// The answer to "File changed on disk since it was read".
+    pub(crate) fn answer_external(&mut self, c: char) {
+        match c {
+            'y' | 'Y' => {
+                if let Some(path) = self.pending_write.take() {
+                    self.write_file(path);
+                }
+            }
+            'n' | 'N' => self.cancel_external_save(),
+            'd' | 'D' => self.show_external_diff(),
+            _ => self.reask_external(),
+        }
+    }
+
+    /// Not saving after all: the quit or close the save was for is off too,
+    /// or the next unrelated save would finish it.
+    pub(crate) fn cancel_external_save(&mut self) {
+        self.pending_write = None;
+        self.quit_after_save = false;
+        self.close_after_save = false;
+        self.flash("Not saved");
+    }
+
+    pub(crate) fn reask_external(&mut self) {
+        self.prompt = Some(Prompt {
+            kind: PromptKind::ConfirmExternal,
+            text: String::new(),
+            cursor: 0,
+        });
+    }
+
+    /// `d`: what saving would change in the file as it is on disk now, as a
+    /// unified diff in the list overlay. Esc (or d) comes back to the
+    /// question; y and n answer it from there.
+    fn show_external_diff(&mut self) {
+        let Some(path) = self.pending_write.clone() else {
+            return;
+        };
+        let diff = self
+            .bs()
+            .buf
+            .file_bytes()
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| disk_diff(&path, bytes));
+        match diff {
+            Ok(text) if text.is_empty() => {
+                self.flash("No differences: only the file's timestamp changed");
+                self.reask_external();
+            }
+            Ok(text) => self.open_diff_view(&path, &text),
+            Err(e) => {
+                self.flash(&format!("diff: {e}"));
+                self.reask_external();
+            }
+        }
+    }
+
+    fn write_file(&mut self, path: PathBuf) {
         // The buffer's OWN encoding, not always UTF-8: a file read as cp1252 or
         // UTF-16 is written back the way it was found, or opening and saving
         // would rewrite it as UTF-8 with the characters replaced.
@@ -2380,6 +2512,7 @@ impl Editor {
             Ok(()) => {
                 {
                     let bs = self.bs_mut();
+                    bs.buf.disk = DiskStamp::of(&path);
                     bs.buf.name = Some(path);
                     bs.buf.modified = false;
                     // The file's name changed, so its language may have too:
@@ -2500,6 +2633,9 @@ impl Editor {
         } else {
             self.buffers[self.cur] = BufferState::new(buf);
         }
+        // A fresh highlighter has no window, which `highlight_covers_viewport`
+        // reads as "covers everything"; only the flag gets it a first pass.
+        self.highlight_dirty = true;
         self.lsp_sync();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
@@ -2550,6 +2686,7 @@ impl Editor {
         if let Some(i) = self.first_modified_from(self.cur) {
             if i != self.cur {
                 self.cur = i;
+                self.highlight_dirty = true;
                 self.adjust_scroll(self.text_h);
                 self.adjust_scroll_x();
             }
@@ -2616,6 +2753,7 @@ impl Editor {
             return;
         }
         self.cur = i;
+        self.highlight_dirty = true;
         self.completion_close();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
@@ -2838,6 +2976,46 @@ pub(crate) fn plural(n: usize) -> &'static str {
 /// `path` made absolute and symlink-free when it exists; otherwise made
 /// absolute against the working directory, so a not-yet-saved buffer still
 /// compares equal to itself.
+/// `diff -u` of the file on disk (`path`) against `bytes`, the buffer as a
+/// save would write it, fed on stdin. Empty when they are the same. A file
+/// that is gone is diffed as empty, so every line shows as added.
+fn disk_diff(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let disk = if path.exists() {
+        path.to_path_buf()
+    } else {
+        PathBuf::from("/dev/null")
+    };
+    let shown = path.display();
+    let mut child = Command::new("diff")
+        .arg("-u")
+        .arg("--label")
+        .arg(format!("{shown} (on disk)"))
+        .arg("--label")
+        .arg(format!("{shown} (rano)"))
+        .arg(&disk)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Written from its own thread: diff can fill its stdout pipe before it
+    // has read all of stdin, and then both sides would wait on each other.
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&bytes);
+    });
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let _ = writer.join();
+    // 0: same, 1: different, anything else: diff itself failed.
+    match out.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {

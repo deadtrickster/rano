@@ -3029,8 +3029,13 @@ pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
             line,
             col,
             end_col,
+            // A merge conflict is work to finish, not broken code: a warning.
+            severity: if message.starts_with("merge conflict") {
+                2
+            } else {
+                1
+            },
             message,
-            severity: 1,
         })
         .collect();
     widen_zero_width(&mut bs.syntax_diags, &bs.buf.rows_vec());

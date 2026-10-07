@@ -236,7 +236,7 @@ impl Lang {
             Lang::Make => tree_sitter_make::HIGHLIGHTS_QUERY,
             Lang::Dockerfile => DOCKERFILE_HIGHLIGHTS_QUERY,
             Lang::Ini => tree_sitter_ini::HIGHLIGHTS_QUERY,
-            Lang::Diff => tree_sitter_diff::HIGHLIGHTS_QUERY,
+            Lang::Diff => DIFF_HIGHLIGHTS_QUERY,
             Lang::Elisp => tree_sitter_elisp::HIGHLIGHTS_QUERY,
             Lang::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
             Lang::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
@@ -453,6 +453,22 @@ static MARKDOWN_INLINE_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
 /// crate itself evaluates are used (`#eq?`, `#match?`, `#any-of?`); the
 /// neovim-only ones the upstream query leans on (`#lua-match?`, custom
 /// predicates) would be silently ignored here, matching everything.
+/// The diff grammar's own query names its captures for the colours of the
+/// `tree-sitter highlight` command — it says so ("these scopes are arbitrary")
+/// — so a deleted line came out `@keyword` (violet here) and `diff --git` as
+/// `@variable.builtin` (red). These are names for what the lines are, coloured
+/// the way git colours them: deletions red, additions green, hunk headers cyan,
+/// file headers bold, the rest of the metadata dim.
+const DIFF_HIGHLIGHTS_QUERY: &str = r#"
+(deletion) @diff.minus
+(addition) @diff.plus
+(location) @diff.hunk
+[(old_file) (new_file) (command)] @diff.file
+[(index) (mode) (similarity) (score)] @comment
+(commit) @constant
+(comment) @comment
+"#;
+
 const COMMONLISP_HIGHLIGHTS_QUERY: &str = r##"
 ; Plain symbols. `theme` has no "variable" entry, so the editor leaves them
 ; uncoloured; the more specific patterns below override this one.
@@ -814,6 +830,124 @@ impl Window {
 /// Shaped like the rows it came from: each covered row is followed by a
 /// newline, so a partial first row still reads as a line to the grammar and
 /// the row arithmetic in `for_each_capture` stays true.
+/// What one line of a file mid-merge is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// Outside any conflict: every version has it.
+    Text,
+    /// `<<<<<<<`, `|||||||`, `=======` or `>>>>>>>`.
+    Marker,
+    Ours,
+    Base,
+    Theirs,
+}
+
+/// Every line of `src` classified; empty when there is no conflict (every line
+/// is then `Text`). A conflict opens at `<<<<<<<`; the base section after
+/// `|||||||` and theirs after `=======` count only inside one, so markdown's
+/// setext underline is left alone; a conflict still open at the end keeps its
+/// lines (the text may be a window that cut it).
+fn conflict_parts(src: &str) -> Vec<Part> {
+    if !src.contains("<<<<<<<") {
+        return Vec::new();
+    }
+    let marker = |l: &str, c: &str| {
+        l.strip_prefix(c)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    };
+    let mut state = Part::Text;
+    src.split('\n')
+        .map(|l| {
+            let l = l.strip_suffix('\r').unwrap_or(l);
+            let (part, next) = match state {
+                _ if marker(l, "<<<<<<<") && state == Part::Text => (Part::Marker, Part::Ours),
+                Part::Ours if marker(l, "|||||||") => (Part::Marker, Part::Base),
+                Part::Ours | Part::Base if l == "=======" => (Part::Marker, Part::Theirs),
+                Part::Theirs if marker(l, ">>>>>>>") => (Part::Marker, Part::Text),
+                s => (s, s),
+            };
+            state = next;
+            part
+        })
+        .collect()
+}
+
+/// The marker lines' indexes.
+#[cfg(test)]
+fn conflict_marker_lines(src: &str) -> Vec<usize> {
+    conflict_parts(src)
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| **p == Part::Marker)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Each conflict's rows, `(<<<<<<<, >>>>>>>)` inclusive; one still open at the
+/// end runs to the last line.
+fn conflict_regions(parts: &[Part]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, p) in parts.iter().enumerate() {
+        match (p, start) {
+            (Part::Marker, None) => start = Some(i),
+            (Part::Text, Some(s)) => {
+                out.push((s, i - 1));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, parts.len().saturating_sub(1)));
+    }
+    out
+}
+
+/// `src` as the version of the file that takes `side` in every conflict: the
+/// markers and the other sides' lines blanked — each ASCII character a space,
+/// so every byte and character offset stays where it was. Each side is a real
+/// version of the file, so a grammar reads valid code if that side is; reading
+/// the sides one after another instead doubles closing braces and calls the
+/// rest of the file broken.
+fn version(src: &str, parts: &[Part], side: Part) -> String {
+    if parts.is_empty() {
+        return src.to_string();
+    }
+    src.split('\n')
+        .zip(parts.iter().chain(std::iter::repeat(&Part::Text)))
+        .map(|(l, p)| {
+            if *p == Part::Text || *p == side {
+                l.to_string()
+            } else {
+                l.chars()
+                    .map(|c| if c.is_ascii() && c != '\r' { ' ' } else { c })
+                    .collect()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// A conflict marker line: dim, as git and emacs's smerge leave them — the
+/// sides' tints are what shows where a conflict is.
+fn conflict_marker_style() -> Style {
+    Style::default().fg(rgb(0x7f, 0x84, 0x8e))
+}
+
+/// The background a side of a conflict is tinted with, under its own syntax
+/// colours: ours red and theirs green, as the conflict view draws them (ours
+/// is its left, `-` side), and the base yellow. The same dark cube colours as
+/// the diff views' rows.
+fn conflict_tint(p: Part) -> Option<Color> {
+    match p {
+        Part::Ours => Some(Color::Indexed(52)),
+        Part::Theirs => Some(Color::Indexed(22)),
+        Part::Base => Some(Color::Indexed(58)),
+        Part::Text | Part::Marker => None,
+    }
+}
+
 fn window_text(buf: &Buffer, win: Window) -> (String, usize, usize) {
     let last = win.rows.1.min(buf.row_count().saturating_sub(1));
     let first = win.rows.0.min(last);
@@ -934,6 +1068,12 @@ fn theme(name: &str) -> Style {
         "property" => Style::default().fg(rgb(0xd1, 0x9a, 0x66)),
         "function" | "method" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
         "variable.builtin" | "tag" | "error" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
+        // Diffs, git's way: removed red, added green, hunk headers cyan, the
+        // file headers in the text's own colour, bold.
+        "diff.minus" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
+        "diff.plus" => Style::default().fg(rgb(0x98, 0xc3, 0x79)),
+        "diff.hunk" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
+        "diff.file" => Style::default().add_modifier(Modifier::BOLD),
         // Markdown's own vocabulary (nvim-treesitter names, which is what the
         // inline query uses). The distinctions are nano's markdown mode's:
         // code and literals in cyan, emphasis and strong visually weighted,
@@ -989,6 +1129,11 @@ pub struct Highlighter {
     /// `didChange`, because nobody needs an error squiggle within 16 ms of a
     /// keystroke but everybody notices a 400 ms hitch per key.
     diag_tree: Option<Tree>,
+    /// The merge conflicts in the text `diag_tree` was parsed from, as rows
+    /// `(<<<<<<<, >>>>>>>)` inclusive: a syntax error inside one is an artefact
+    /// of reading the sides one after another, and the conflict itself is what
+    /// is reported there.
+    diag_conflicts: Vec<(usize, usize)>,
 }
 
 impl Highlighter {
@@ -1001,6 +1146,7 @@ impl Highlighter {
             window_covers_whole: false,
             tree: None,
             diag_tree: None,
+            diag_conflicts: Vec::new(),
         }
     }
 
@@ -1067,6 +1213,12 @@ impl Highlighter {
                 (text, base_row, base_col)
             }
         };
+        // Mid-merge, the text is coloured as ours' version of the file, and
+        // the base and theirs each as their own (see `version`); the markers
+        // are bands.
+        let parts = conflict_parts(&source);
+        let full = source;
+        let source = version(&full, &parts, Part::Ours);
         // What was actually parsed, after the buffer's own bounds clamped it.
         let parsed = win.map(|w| Window {
             rows: (w.rows.0, w.rows.1.min(buf.row_count().saturating_sub(1))),
@@ -1107,6 +1259,33 @@ impl Highlighter {
             self.markdown_inline_pass(&source, &block, |slice, base_row, t, q| {
                 Self::apply_styles(slice, t, q, base_row, &mut grid)
             });
+        }
+        for side in [Part::Base, Part::Theirs] {
+            if !parts.contains(&side) {
+                continue;
+            }
+            let src = version(&full, &parts, side);
+            let Some(tree) = self.parser.parse(src.as_bytes(), None) else {
+                continue;
+            };
+            let other = Self::build_styles(&src, &tree, &query);
+            for (i, p) in parts.iter().enumerate() {
+                if *p == side
+                    && let (Some(row), Some(theirs)) = (grid.get_mut(i), other.get(i))
+                {
+                    row.clone_from(theirs);
+                }
+            }
+        }
+        for (i, p) in parts.iter().enumerate() {
+            let Some(row) = grid.get_mut(i) else { continue };
+            if *p == Part::Marker {
+                row.fill(conflict_marker_style());
+            } else if let Some(bg) = conflict_tint(*p) {
+                for cell in row.iter_mut() {
+                    *cell = cell.bg(bg);
+                }
+            }
         }
         self.line_styles = grid;
         self.window = parsed.map(|w| (w, base_row, base_col));
@@ -1232,6 +1411,11 @@ impl Highlighter {
             return false;
         }
         let source = buf.text();
+        // Mid-merge, ours' version of the file is what is checked: markers
+        // and both sides together would be errors that are not there.
+        let parts = conflict_parts(&source);
+        self.diag_conflicts = conflict_regions(&parts);
+        let source = version(&source, &parts, Part::Ours);
         match self.parser.parse(source.as_bytes(), None) {
             Some(tree) => {
                 self.diag_tree = Some(tree);
@@ -1327,11 +1511,25 @@ impl Highlighter {
         let Some(tree) = self.diag_tree.as_ref() else {
             return Vec::new();
         };
+        // One diagnostic per conflict, on its `<<<<<<<` line, so the next-
+        // diagnostic key walks from conflict to conflict.
+        let mut out: Vec<(usize, usize, usize, String)> = self
+            .diag_conflicts
+            .iter()
+            .map(|&(s, _)| {
+                (
+                    s,
+                    0,
+                    7,
+                    "merge conflict (M-p shows it side by side)".to_string(),
+                )
+            })
+            .collect();
         let root = tree.root_node();
         if !root.has_error() {
-            return Vec::new();
+            return out;
         }
-        let mut out = Vec::new();
+        let first_own = out.len();
         let mut stack = vec![(root, false)];
         while let Some((node, in_error)) = stack.pop() {
             let is_error = node.is_error() && !in_error;
@@ -1356,6 +1554,16 @@ impl Highlighter {
                         break;
                     }
                 }
+            }
+        }
+        // Errors inside a conflict are the sides read one after another.
+        let conflicts = &self.diag_conflicts;
+        let mut i = first_own;
+        while i < out.len() {
+            if conflicts.iter().any(|&(s, e)| (s..=e).contains(&out[i].0)) {
+                out.swap_remove(i);
+            } else {
+                i += 1;
             }
         }
         out.sort();
@@ -2587,11 +2795,109 @@ mod tests {
         let b = buf_named("t.diff", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n");
         let mut hl = Highlighter::new();
         hl.refresh(&b);
-        assert!(style_at(&hl, 0, 0).is_some()); // old_file
-        assert!(style_at(&hl, 1, 0).is_some()); // new_file
-        assert!(style_at(&hl, 2, 0).is_some()); // @@ hunk location
-        assert!(style_at(&hl, 3, 0).is_some()); // -old deletion
-        assert!(style_at(&hl, 4, 0).is_some()); // +new addition
+        // Git's colours, not the grammar's arbitrary ones: a deletion is red
+        // (it was the keyword violet), an addition green, the hunk cyan, and
+        // both file names one bold style (`---` was violet, `+++` green).
+        let fg = |r: usize| style_at(&hl, r, 0).and_then(|s| s.fg);
+        let red = Some(rgb(0xe0, 0x6c, 0x75));
+        assert_eq!(fg(3), red, "-old");
+        assert_eq!(fg(4), Some(rgb(0x98, 0xc3, 0x79)), "+new");
+        assert_eq!(fg(2), Some(rgb(0x56, 0xb6, 0xc2)), "@@");
+        for r in [0, 1] {
+            let s = style_at(&hl, r, 0).expect("file header styled");
+            assert!(s.add_modifier.contains(Modifier::BOLD), "row {r}: {s:?}");
+            assert_eq!(s.fg, None, "row {r}: the text's own colour");
+        }
+        // `diff --git` is a file header too, not red.
+        let b = buf_named(
+            "t.diff",
+            "diff --git a/f b/f\nindex 83b737f..1c2d3e4 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+        );
+        hl.refresh(&b);
+        let s = style_at(&hl, 0, 0).expect("styled");
+        assert!(
+            s.add_modifier.contains(Modifier::BOLD) && s.fg.is_none(),
+            "{s:?}"
+        );
+        // The metadata (`index`, modes) is dim, past the word itself.
+        let dim = (0..30)
+            .filter_map(|c| style_at(&hl, 1, c).and_then(|s| s.fg))
+            .next();
+        assert_eq!(dim, Some(rgb(0x7f, 0x84, 0x8e)), "index line dim");
+    }
+
+    const DIFF3: &str = "impl Client {\n    pub fn new(base_url: &str) -> Self {\n        Client {\n            base_url: base_url.to_string(),\n<<<<<<< HEAD\n            timeout: Duration::from_secs(30),\n||||||| 83b737f\n            timeout: Duration::from_secs(10),\n=======\n            timeout: Duration::from_secs(5),\n>>>>>>> feature/retry\n        }\n    }\n\n    pub fn get(&self, path: &str) -> u32 {\n        1\n    }\n}\n";
+
+    #[test]
+    fn conflict_markers_are_found_only_inside_a_conflict() {
+        assert_eq!(conflict_marker_lines(DIFF3), vec![4, 6, 8, 10]);
+        // A setext underline is not a marker, and neither is a lone `=======`.
+        assert!(conflict_marker_lines("Title\n=======\n\ntext\n").is_empty());
+        let md = "Title\n=======\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nT2\n=======\n";
+        assert_eq!(conflict_marker_lines(md), vec![2, 4, 6]);
+        // `<<<<<<<<` (eight) is not a marker.
+        assert!(conflict_marker_lines("<<<<<<<< x\n").is_empty());
+        // A version keeps every offset, and only its own side.
+        let parts = conflict_parts(DIFF3);
+        let theirs = version(DIFF3, &parts, Part::Theirs);
+        assert_eq!(theirs.len(), DIFF3.len());
+        assert_eq!(theirs.lines().nth(4).unwrap().trim(), "", "marker");
+        assert_eq!(theirs.lines().nth(5).unwrap().trim(), "", "ours");
+        assert_eq!(theirs.lines().nth(9), DIFF3.lines().nth(9), "theirs");
+        assert_eq!(theirs.lines().next(), DIFF3.lines().next(), "text");
+        assert_eq!(conflict_regions(&parts), vec![(4, 10)]);
+    }
+
+    /// A file mid-merge: the markers are dim, each side is tinted (ours red,
+    /// base yellow, theirs green) under its own syntax colours, the code after
+    /// the conflict is code again, and only the conflict is reported.
+    #[test]
+    fn a_file_with_conflicts_highlights_as_code_with_tinted_sides() {
+        let b = buf_named("client.rs", DIFF3);
+        let mut hl = Highlighter::new();
+        hl.refresh(&b);
+        for row in [4, 6, 8, 10] {
+            for col in [0, 3, 6] {
+                assert_eq!(
+                    style_at(&hl, row, col),
+                    Some(conflict_marker_style()),
+                    "row {row} col {col}"
+                );
+            }
+        }
+        // `timeout` lines and `pub fn get` after the conflict are code again.
+        let fn_kw = style_at(&hl, 14, 8).and_then(|s| s.fg);
+        assert_eq!(
+            fn_kw,
+            Some(theme("keyword").fg.unwrap()),
+            "pub fn after the conflict"
+        );
+        let num = style_at(&hl, 5, 41).expect("ours' 30");
+        assert_eq!(num.fg, theme("number").fg, "30 is still a number");
+        assert_eq!(num.bg, Some(Color::Indexed(52)), "ours is red");
+        assert_eq!(
+            style_at(&hl, 7, 41).and_then(|s| s.bg),
+            Some(Color::Indexed(58)),
+            "base"
+        );
+        assert_eq!(
+            style_at(&hl, 9, 41).and_then(|s| s.bg),
+            Some(Color::Indexed(22)),
+            "theirs"
+        );
+        assert_eq!(style_at(&hl, 3, 12).and_then(|s| s.bg), None, "shared text");
+        assert!(hl.parse_for_diagnostics(&b));
+        let rows: Vec<Vec<char>> = DIFF3.lines().map(|l| l.chars().collect()).collect();
+        // The conflict is the one diagnostic: no errors from the sides.
+        assert_eq!(
+            hl.syntax_errors(&rows),
+            vec![(
+                4,
+                0,
+                7,
+                "merge conflict (M-p shows it side by side)".to_string()
+            )]
+        );
     }
 
     #[test]

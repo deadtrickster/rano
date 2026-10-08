@@ -224,7 +224,7 @@ pub fn width(s: &str) -> usize {
 }
 
 /// C0, C1 and DEL. Zero columns, and never part of the cluster beside them.
-fn is_control(c: char) -> bool {
+pub fn is_control(c: char) -> bool {
     super::is_control(c as u32)
 }
 

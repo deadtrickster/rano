@@ -43,6 +43,7 @@ pub mod decision;
 pub mod jobs;
 pub mod outcome;
 pub mod pane;
+pub mod picker;
 pub mod text;
 pub mod tool_row;
 

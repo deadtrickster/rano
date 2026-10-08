@@ -1004,6 +1004,7 @@ dependencies = [
  "cc",
  "crossterm",
  "flate2",
+ "libc",
  "ratatui",
  "regex",
  "serde",

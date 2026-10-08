@@ -46,6 +46,10 @@ pub mod rows;
 // `Editor::on_send` and the binary's `send_command`.
 pub mod send;
 pub mod syntax;
+// The terminal: raw mode and restore, the row-diffing painter, input decoding
+// into rano's own events, feature detection, kitty graphics and OSC 8 links.
+// Ported from letibot's `crates/tui/src/backend/`; draws `render`'s rows.
+pub mod term;
 // The version check and self-update. lib-only: the binary reads it, but so
 // could an embedder that wants to offer the same thing.
 pub mod update;

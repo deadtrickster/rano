@@ -9,6 +9,10 @@ crossterm = "0.29.0"
 # cannot deadlock, which is not true of shelling out to `gzip` and pumping its
 # pipes by hand. See `update::extract_binary` for what that cost twice.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Raw mode, the window size and the host name, for `rano::term`: the only C the
+# terminal layer needs. Already in the tree (through tree-sitter's and others'
+# dependencies), so this is a direct edge to a crate already built, not a new one.
+libc = "0.2"
 ratatui = "0.30.2"
 tree-sitter = "0.27"
 tree-sitter-language = "0.1"

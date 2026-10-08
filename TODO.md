@@ -2726,6 +2726,23 @@ and the first one written from a sample of one is wrong for the second.
 That is what makes the pane affordable: when you look at it, it has structure
 already, and rendering decodes only the rows on screen.
 
+**Landed** as `src/logblocks.rs`, with no caller yet (the pane is §20.3 F):
+`Blocks` is append-only — `push` sees each arriving row once — and keeps one
+`usize` per block and nothing per row. Two consequences are the rule and not
+exceptions to it, and both are tested:
+
+- **A blank row begins a block of its own.** It is not a continuation, because
+  it does not start with whitespace — and "swallow the blank and join the two
+  sides" would be a second rule, which is the thing this section is against. So
+  `Error:`/frames/blank/`Error2:`/frames is three blocks: the two traces are the
+  two that span more than one row, and the blank is a block that happens to be
+  one row long. A renderer that wants the two traces together can say so; the
+  boundaries stay the boundaries.
+- **The first row begins a block even when it is indented**, because there is
+  nothing above it to continue. A tail that starts mid-trace therefore shows one
+  block, which is the honest reading of a file whose earlier rows were never
+  read.
+
 ### 20.5 The stack-trace case, done lazily
 
 A killer stack trace is the awkward shape in three ways at once: it is long, so

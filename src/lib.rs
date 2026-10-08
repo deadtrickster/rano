@@ -154,6 +154,7 @@ mod host;
 mod keys;
 mod load_ctrl;
 mod loader;
+pub mod logblocks;
 mod lsp;
 mod lsp_ctrl;
 mod picker;

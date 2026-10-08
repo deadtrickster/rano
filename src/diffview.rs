@@ -17,9 +17,9 @@ use std::path::PathBuf;
 
 use crate::conflict::{Compare, Take};
 use crate::diff::DiffConfig;
+use crate::render::Line;
 use crate::sidediff::{EditView, edit_view, render_edit_view};
 use crate::style::Palette;
-use ratatui::text::Line;
 
 use crate::buffer::Pos;
 use crate::editor::{ActionKind, Editor};
@@ -54,7 +54,7 @@ pub struct DiffView {
     pub top: usize,
     /// The width `lines` were rendered for.
     width: usize,
-    pub lines: Vec<Line<'static>>,
+    pub lines: Vec<Line>,
 }
 
 impl DiffView {

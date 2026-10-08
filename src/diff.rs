@@ -6,9 +6,9 @@
 //! from grok-build (xAI, Apache-2.0, `xai-grok-pager-diff`): `Row`,
 //! `MAX_CONTEXT = 3`, overlapping-hunk stitching. The edit script, the hunks, the
 //! word diff and the tab rule are letibot's, unchanged; what changed in the move is
-//! the medium. letibot drew ANSI strings, and rano draws ratatui [`Line`]s — so a
-//! row is spans with [`Style`]s that compose, a background survives the syntax
-//! colour patched over it, and the wrap is rano's own cluster-aware
+//! the medium. letibot drew ANSI strings, and rano draws [`crate::render`] [`Line`]s
+//! — so a row is spans whose [`Style`]s stack roles, a diff tint survives the syntax
+//! role patched over it, and the wrap is rano's own cluster-aware
 //! [`crate::width::segments`] rather than an escape-carrying string wrapper.
 //!
 //! # The algorithm, and the bound on it
@@ -44,8 +44,7 @@
 //! keeps two numbers, one per panel: two panels over two files are two files'
 //! lines.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use crate::render::{Line, Span, Style};
 
 use crate::highlight::role_grid;
 use crate::style::{Palette, Role};
@@ -354,7 +353,7 @@ impl Default for DiffConfig {
 ///
 /// Unified degrades to a narrow terminal by wrapping, which loses alignment but
 /// no content; the split view needs twice the width for the same code.
-pub fn render(old: &[&str], new: &[&str], cfg: &DiffConfig) -> Vec<Line<'static>> {
+pub fn render(old: &[&str], new: &[&str], cfg: &DiffConfig) -> Vec<Line> {
     render_from(old, new, cfg, 1, 1)
 }
 
@@ -367,7 +366,7 @@ pub fn render_from(
     cfg: &DiffConfig,
     old_start: usize,
     new_start: usize,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     render_in(old, new, cfg, old_start, new_start, None)
 }
 
@@ -380,7 +379,7 @@ pub fn render_in(
     old_start: usize,
     new_start: usize,
     lang: Option<Lang>,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     // Tabs first, once, so the class grid and the painted line are one grid
     // (the split view's rule, and the reason it has one).
     let old_x: Vec<String> = old.iter().map(|l| expand_tabs(l, TAB_STOP)).collect();
@@ -458,7 +457,7 @@ struct Grids {
 pub(crate) const GAVE_UP: &str = "! diff gave up on the minimal edit script; \
      the changed region is shown as a whole replacement";
 
-pub(crate) fn faint_line(p: Palette, s: &str) -> Line<'static> {
+pub(crate) fn faint_line(p: Palette, s: &str) -> Line {
     Line::from(Span::styled(s.to_string(), p.style(Role::Faint)))
 }
 
@@ -496,7 +495,7 @@ fn row_lines(
     emph: Option<&Spans>,
     old_base: usize,
     new_base: usize,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     // **One number column, not two.** The line's own number in its own file:
     // the old file's on a deletion and on a context row, the new file's on an
     // addition. Right-aligned, and `numw` spans **both** files' numbering,
@@ -544,9 +543,9 @@ fn row_lines(
         .enumerate()
         .map(|(k, (i, c))| {
             let syn = p.style(classes.get(k).copied().unwrap_or(Role::Plain));
-            let s = base.patch(syn);
+            let s = base.patch(&syn);
             let inside = emph.is_some_and(|sp| sp.iter().any(|&(s, e)| s <= i && i < e));
-            (c, if inside { s.patch(em) } else { s })
+            (c, if inside { s.patch(&em) } else { s })
         })
         .collect();
     // The gutter takes the line's own foreground on a changed row — the same
@@ -564,7 +563,7 @@ fn row_lines(
             if i == 0 {
                 // The sign keeps the role's foreground; the body's style is
                 // background-only, so the text keeps its own foreground.
-                spans.push(Span::styled(gutter.clone(), gut_style));
+                spans.push(Span::styled(gutter.clone(), gut_style.clone()));
                 spans.push(Span::styled(sign, p.style(role.foreground())));
             } else {
                 // A wrapped continuation keeps the colour and loses the sign, so
@@ -582,7 +581,7 @@ fn row_lines(
 /// own greedy cluster fill ([`width::segments`]): a wide character or a base and
 /// its combining marks never split. An empty input is one empty row — an empty
 /// line is still a line.
-pub(crate) fn wrap_cells(cells: &[(char, Style)], w: usize) -> Vec<Vec<Span<'static>>> {
+pub(crate) fn wrap_cells(cells: &[(char, Style)], w: usize) -> Vec<Vec<Span>> {
     let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
     let starts = width::segments(&chars, TAB_STOP, w);
     starts
@@ -596,19 +595,21 @@ pub(crate) fn wrap_cells(cells: &[(char, Style)], w: usize) -> Vec<Vec<Span<'sta
 }
 
 /// Runs of one style, one span each.
-pub(crate) fn spans_of(cells: &[(char, Style)]) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
+pub(crate) fn spans_of(cells: &[(char, Style)]) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
     let mut run = String::new();
-    let mut style = None;
-    for &(c, s) in cells {
-        if style.is_some_and(|st| st != s) {
-            out.push(Span::styled(std::mem::take(&mut run), style.unwrap()));
+    let mut style: Option<&Style> = None;
+    for (c, s) in cells {
+        if let Some(st) = style
+            && st != s
+        {
+            out.push(Span::styled(std::mem::take(&mut run), st.clone()));
         }
         style = Some(s);
-        run.push(c);
+        run.push(*c);
     }
     if let Some(s) = style {
-        out.push(Span::styled(run, s));
+        out.push(Span::styled(run, s.clone()));
     }
     out
 }
@@ -785,7 +786,7 @@ mod tests {
     /// What a row says, styles dropped: what a `Palette::None` reader sees.
     fn text(rows: &[Line]) -> Vec<String> {
         rows.iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     }
 
@@ -1279,7 +1280,7 @@ mod tests {
         let tint = Palette::Colour.style(Role::Added);
         assert_eq!(
             word.style,
-            tint.patch(Palette::Colour.style(Role::Emphasis))
+            tint.patch(&Palette::Colour.style(Role::Emphasis))
         );
         assert!(
             added
@@ -1302,7 +1303,6 @@ mod tests {
     /// and with no language it does not.
     #[test]
     fn the_unified_view_is_syntax_coloured_under_the_tint() {
-        use ratatui::style::Color;
         let o = ["fn a() {}"];
         let n = ["fn b() {}"];
         let cfg = DiffConfig {
@@ -1319,14 +1319,17 @@ mod tests {
             .iter()
             .find(|s| s.content.starts_with("fn"))
             .expect("the keyword is its own span");
-        assert_eq!(kw.style.fg, Some(Color::Magenta), "{added:?}");
-        assert_eq!(kw.style.bg, Palette::Colour.style(Role::Added).bg);
+        assert_eq!(
+            kw.style.roles().collect::<Vec<_>>(),
+            vec![Role::Added, Role::Keyword],
+            "{added:?}"
+        );
         let plain = render_from(&o, &n, &cfg, 1, 1);
         assert!(
             plain
                 .iter()
                 .flat_map(|l| l.spans.iter())
-                .all(|s| s.style.fg != Some(Color::Magenta))
+                .all(|s| s.style.top() != Role::Keyword)
         );
     }
 
@@ -1336,7 +1339,7 @@ mod tests {
         let rows = wrap_cells(&cells, 3);
         let got: Vec<String> = rows
             .iter()
-            .map(|r| r.iter().map(|s| s.content.as_ref()).collect())
+            .map(|r| r.iter().map(|s| s.content.as_str()).collect())
             .collect();
         assert_eq!(got, vec!["ab", "\u{4e2d}c", "d"]);
         assert_eq!(wrap_cells(&[], 10).len(), 1, "an empty line is still a row");

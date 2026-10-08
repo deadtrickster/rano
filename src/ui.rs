@@ -613,7 +613,7 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
         );
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(Paragraph::new(l.clone()), at(0, 2 + k as u16, width, 1));
+            f.render_widget(Paragraph::new(bridge(l)), at(0, 2 + k as u16, width, 1));
         }
     }
 
@@ -794,7 +794,7 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
         );
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(Paragraph::new(l.clone()), at(0, 2 + k as u16, width, 1));
+            f.render_widget(Paragraph::new(bridge(l)), at(0, 2 + k as u16, width, 1));
         }
     }
 
@@ -858,7 +858,11 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     if let Some((m, keys)) = ed.pending_card() {
         let nano = ed.config.nano_keys;
         let entries = crate::commands::entries_of(m, nano);
-        let rows = crate::help::card_rows(&entries, width as usize, Style::new().fg(Color::Cyan));
+        let rows = crate::help::card_rows(
+            &entries,
+            width as usize,
+            &crate::render::Style::of(crate::style::Role::Key),
+        );
         let n = rows.len().min(text_h.saturating_sub(1));
         let top = status_row.saturating_sub(n as u16 + 1);
         f.render_widget(Clear, at(0, top, width, n as u16 + 1));
@@ -872,9 +876,27 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
             at(0, top, width, 1),
         );
         for (k, l) in rows.into_iter().take(n).enumerate() {
-            f.render_widget(Paragraph::new(l), at(0, top + 1 + k as u16, width, 1));
+            f.render_widget(
+                Paragraph::new(bridge(&l)),
+                at(0, top + 1 + k as u16, width, 1),
+            );
         }
     }
+}
+
+/// A render-core line as a ratatui one, under the colour palette. Transitional:
+/// the renderers paint `crate::render` lines and this frame is still ratatui's;
+/// it goes when the editor draws into a `render::Buffer`.
+fn bridge(l: &crate::render::Line) -> Line<'static> {
+    Line::from(
+        l.spans
+            .iter()
+            .map(|s| {
+                let look = l.style.patch(&s.style).look(crate::style::Palette::Colour);
+                Span::styled(s.content.clone(), look.ratatui())
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Build the title bar string: program name left, file name centered in the

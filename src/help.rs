@@ -13,8 +13,8 @@
 //! - **`describe-key`** (`C-g k`): press a key, read what it runs.
 
 use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use crate::render::{Line, Span, Style};
+use crate::style::Role;
 
 use crate::commands::{Group, command, commands};
 use crate::editor::Editor;
@@ -148,13 +148,13 @@ pub enum PageKind {
     /// Every key in effect.
     Bindings,
     /// Fixed lines (a key's description).
-    Text(Vec<Line<'static>>),
+    Text(Vec<Line>),
 }
 
 pub struct InfoView {
     pub title: String,
     pub kind: PageKind,
-    pub lines: Vec<Line<'static>>,
+    pub lines: Vec<Line>,
     pub top: usize,
     width: usize,
 }
@@ -216,23 +216,24 @@ impl Editor {
     /// What `seq` does, on a page of its own.
     pub(crate) fn show_description(&mut self, seq: &[Key], name: Option<&str>) {
         let keys = notation(self.config.nano_keys, seq);
-        let strong = Style::new().add_modifier(Modifier::BOLD);
-        let faint = Style::new().add_modifier(Modifier::DIM);
+        let strong = Style::of(Role::Strong);
+        let faint = Style::of(Role::Faint);
+        let key = Style::of(Role::Key).bold();
         let mut lines = vec![Line::default()];
         match name.and_then(command) {
             Some(c) => {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {keys}"), strong.fg(Color::Cyan)),
+                    Span::styled(format!("  {keys}"), key),
                     Span::raw(" runs "),
                     Span::styled(c.title.to_string(), strong),
-                    Span::styled(format!("  ({})", c.name), faint),
+                    Span::styled(format!("  ({})", c.name), faint.clone()),
                 ]));
                 lines.push(Line::default());
                 lines.push(Line::from(format!("  {}", c.doc)));
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
                     format!("  {}", c.group.title()),
-                    faint,
+                    faint.clone(),
                 )));
                 let others = self.keys_for(c.name);
                 if c.group.global() {
@@ -241,11 +242,11 @@ impl Editor {
                     } else {
                         format!("  Keys: {others}.  M-x {} runs it by name.", c.name)
                     };
-                    lines.push(Line::from(Span::styled(also, faint)));
+                    lines.push(Line::from(Span::styled(also, faint.clone())));
                 }
             }
             None => lines.push(Line::from(vec![
-                Span::styled(format!("  {keys}"), strong.fg(Color::Cyan)),
+                Span::styled(format!("  {keys}"), key),
                 Span::raw(" is not bound to anything here."),
             ])),
         }
@@ -272,7 +273,7 @@ impl Editor {
 
     /// Every key in effect as cards: the global commands by group, then each
     /// mode's own keys.
-    fn binding_cards(&self, width: usize) -> Vec<Line<'static>> {
+    fn binding_cards(&self, width: usize) -> Vec<Line> {
         let nano = self.config.nano_keys;
         let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
         for g in [
@@ -333,8 +334,8 @@ fn mode_entries(maps: &[&Keymap], nano: bool) -> Vec<(String, String)> {
     out.into_iter().map(|(t, ks)| (ks.join(" "), t)).collect()
 }
 
-fn overview_intro(ed: &Editor) -> Vec<Line<'static>> {
-    let strong = Style::new().add_modifier(Modifier::BOLD);
+fn overview_intro(ed: &Editor) -> Vec<Line> {
+    let strong = Style::of(Role::Strong);
     let k = |name: &str| ed.keys_for(name);
     let mut l = vec![
         Line::default(),
@@ -359,8 +360,8 @@ fn overview_intro(ed: &Editor) -> Vec<Line<'static>> {
 
 /// Sections of `(key, title)` entries as cards: a bold heading per section,
 /// then its entries in as many columns as fit, keys coloured.
-pub fn cards(sections: &[(String, Vec<(String, String)>)], width: usize) -> Vec<Line<'static>> {
-    let key_style = Style::new().fg(Color::Cyan);
+pub fn cards(sections: &[(String, Vec<(String, String)>)], width: usize) -> Vec<Line> {
+    let key_style = Style::of(Role::Key);
     let mut out = Vec::new();
     for (title, entries) in sections {
         if entries.is_empty() {
@@ -368,20 +369,16 @@ pub fn cards(sections: &[(String, Vec<(String, String)>)], width: usize) -> Vec<
         }
         out.push(Line::from(Span::styled(
             format!("  {title}"),
-            Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            Style::of(Role::Strong).underline(),
         )));
-        out.extend(card_rows(entries, width, key_style));
+        out.extend(card_rows(entries, width, &key_style));
         out.push(Line::default());
     }
     out
 }
 
 /// Entries laid out in columns of equal width, row by row.
-pub fn card_rows(
-    entries: &[(String, String)],
-    width: usize,
-    key_style: Style,
-) -> Vec<Line<'static>> {
+pub fn card_rows(entries: &[(String, String)], width: usize, key_style: &Style) -> Vec<Line> {
     let kw = entries
         .iter()
         .map(|(k, _)| k.chars().count())
@@ -402,7 +399,7 @@ pub fn card_rows(
             for (k, t) in row {
                 let k: String = k.chars().take(kw.max(1)).collect();
                 let pad = kw.saturating_sub(k.chars().count());
-                spans.push(Span::styled(k, key_style));
+                spans.push(Span::styled(k, key_style.clone()));
                 let t_room = cell.saturating_sub(kw + 2);
                 let t: String = t.chars().take(t_room).collect();
                 let tpad = t_room.saturating_sub(t.chars().count());
@@ -437,7 +434,7 @@ mod tests {
             .map(|i| (format!("C-{i}"), format!("Command {i}")))
             .collect();
         for w in [30usize, 60, 120] {
-            for l in card_rows(&entries, w, Style::new()) {
+            for l in card_rows(&entries, w, &Style::new()) {
                 let n: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
                 assert!(n <= w, "{w}: {n}");
             }

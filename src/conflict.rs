@@ -15,7 +15,7 @@
 //! `>>>>>>> label`. A conflict that never closes is kept as ordinary text, so
 //! nothing in the file is dropped.
 
-use ratatui::text::{Line, Span};
+use crate::render::{Line, Span};
 
 use crate::diff::{DiffConfig, render_in};
 use crate::sidediff::{EditView, SplitConfig, lang_for, render_split};
@@ -187,7 +187,7 @@ impl Compare {
 
 /// The drawn conflicts, and where each one's section starts in `lines`.
 pub struct View {
-    pub lines: Vec<Line<'static>>,
+    pub lines: Vec<Line>,
     /// Index into `lines` of each conflict's header row, in file order.
     pub sections: Vec<usize>,
     /// Each conflict's rows in the text: its `<<<<<<<` line to one past its
@@ -345,12 +345,7 @@ pub fn render_view(
 
 /// [`render_view`] ours against theirs, the first conflict current: just the
 /// lines.
-pub fn render(
-    path: &str,
-    text: &str,
-    cfg: &DiffConfig,
-    view: EditView,
-) -> Option<Vec<Line<'static>>> {
+pub fn render(path: &str, text: &str, cfg: &DiffConfig, view: EditView) -> Option<Vec<Line>> {
     render_view(path, text, cfg, view, Compare::OursTheirs, 0).map(|v| v.lines)
 }
 
@@ -418,7 +413,7 @@ fn other() {
 
     fn text(rows: &[Line]) -> Vec<String> {
         rows.iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     }
 

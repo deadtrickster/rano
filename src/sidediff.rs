@@ -6,13 +6,13 @@
 //! **opencode**'s (MIT) diff viewer: a `split | unified` view, line numbers both
 //! sides, the change carried by the sign column, and syntax colouring over the
 //! whole panel. The pairing, the geometry and the edit script are letibot's,
-//! unchanged; the medium is ratatui [`Line`]s instead of ANSI strings.
+//! unchanged; the medium is [`crate::render`] [`Line`]s instead of ANSI strings.
 //!
 //! That change removes a whole class of defect the ANSI version had to repair by
 //! hand. There, a syntax span closed with a reset, and a reset ended the row's
 //! tint at the first keyword — so every reset inside a tinted cell had to be
 //! rewritten into "reset, then reopen the tint". Here a cell's spans are the
-//! tint's [`Style`] with the syntax colour *patched over it*: the background is
+//! tint's [`Style`] with the syntax role *stacked over it*: the background is
 //! simply still there.
 //!
 //! - The change is carried by the **sign**, a glyph, so it survives
@@ -31,8 +31,7 @@
 //! No clock, no filesystem, no terminal. The tree-sitter parse is deterministic
 //! in the source text, so the output is too.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use crate::render::{Line, Span, Style};
 
 use crate::diff::{
     DiffConfig, GAVE_UP, Row, TAB_STOP, diff_lines, expand_tabs, faint_line, hunk_header, hunks,
@@ -71,7 +70,7 @@ const MIN_BODY: usize = 8;
 /// right gutter, sign and code. A line that wraps keeps its continuation under
 /// its own panel and blanks the other, so the eye reads the pair and not the
 /// wrap.
-pub fn render_split(old: &[&str], new: &[&str], sc: &SplitConfig) -> Vec<Line<'static>> {
+pub fn render_split(old: &[&str], new: &[&str], sc: &SplitConfig) -> Vec<Line> {
     let p = sc.cfg.palette;
     // **Tabs first, once, before anything colours or measures a line**, so the
     // class grid (built from these same strings) and the line are one grid.
@@ -261,7 +260,7 @@ fn render_pair(
     new_classes: &[Vec<Role>],
     sc: &SplitConfig,
     g: &Geometry,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     // **Both lookups are guarded.** The class grid can be shorter than the
     // lines — `Highlighter::classes` returns an empty grid when a parser will
     // not take the language or a query will not compile — and a bare index
@@ -309,7 +308,7 @@ fn render_pair(
         .collect()
 }
 
-fn blank(w: usize) -> Vec<Span<'static>> {
+fn blank(w: usize) -> Vec<Span> {
     vec![Span::raw(" ".repeat(w))]
 }
 
@@ -326,7 +325,7 @@ fn side_lines(
     sc: &SplitConfig,
     g: &Geometry,
     panel_w: usize,
-) -> Vec<Vec<Span<'static>>> {
+) -> Vec<Vec<Span>> {
     let p = sc.cfg.palette;
     let Some((h, text, classes, num)) = half else {
         return vec![blank(panel_w)];
@@ -342,7 +341,7 @@ fn side_lines(
         .enumerate()
         .map(|(i, c)| {
             let role = classes.get(i).copied().unwrap_or(Role::Plain);
-            (c, base.patch(p.style(role)))
+            (c, base.patch(&p.style(role)))
         })
         .collect();
     let gutter_w = Geometry::gutter_w_for(sc, g.numw) - 2;
@@ -350,13 +349,13 @@ fn side_lines(
         .into_iter()
         .enumerate()
         .map(|(k, body)| {
-            let mut spans: Vec<Span<'static>> = Vec::with_capacity(body.len() + 4);
+            let mut spans: Vec<Span> = Vec::with_capacity(body.len() + 4);
             if k > 0 {
                 // A continuation keeps its panel's colour and loses its number
                 // and sign, exactly as the unified view's continuation does.
                 spans.push(Span::styled(
                     " ".repeat(gutter_w + 1),
-                    base.patch(p.style(Role::Faint)),
+                    base.patch(&p.style(Role::Faint)),
                 ));
             } else {
                 if sc.cfg.line_numbers {
@@ -370,21 +369,21 @@ fn side_lines(
                     };
                     spans.push(Span::styled(
                         format!("{:>numw$} ", num, numw = g.numw),
-                        base.patch(p.style(fg)),
+                        base.patch(&p.style(fg)),
                     ));
                 }
                 // The sign keeps the role's green or red; the cell's base is
                 // background-only, so the code keeps its own foregrounds.
                 spans.push(Span::styled(
                     h.sign.to_string(),
-                    base.patch(p.style(h.role.foreground())),
+                    base.patch(&p.style(h.role.foreground())),
                 ));
             }
-            spans.push(Span::styled(" ", base));
+            spans.push(Span::styled(" ", base.clone()));
             spans.extend(body);
             let vis = spans_width(&spans);
             if vis < panel_w {
-                spans.push(Span::styled(" ".repeat(panel_w - vis), base));
+                spans.push(Span::styled(" ".repeat(panel_w - vis), base.clone()));
             }
             spans
         })
@@ -405,7 +404,7 @@ pub fn render_edit(
     before_start: usize,
     after_start: usize,
     cfg: &DiffConfig,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     let old: Vec<&str> = before.lines().collect();
     let new: Vec<&str> = after.lines().collect();
     let sc = SplitConfig {
@@ -448,7 +447,7 @@ pub fn render_edit_view(
     after_start: usize,
     cfg: &DiffConfig,
     view: EditView,
-) -> Vec<Line<'static>> {
+) -> Vec<Line> {
     let mut out = vec![faint_line(cfg.palette, path)];
     match view {
         EditView::Split => out.extend(render_edit(
@@ -479,7 +478,13 @@ pub fn render_edit_view(
 mod tests {
     use super::*;
     use crate::style::Palette;
-    use ratatui::style::Color;
+
+    /// Whether a span sits in a diff tint, and which.
+    fn tint(s: &Span) -> Option<Role> {
+        s.style
+            .roles()
+            .find(|r| matches!(r, Role::Added | Role::Removed))
+    }
 
     fn sc(
         width: usize,
@@ -508,12 +513,12 @@ mod tests {
     /// What a row says, styles dropped.
     fn plain(rows: &[Line]) -> Vec<String> {
         rows.iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     }
 
     /// The right panel's spans of a row: everything after the separator.
-    fn right_of<'a>(row: &'a Line<'static>) -> &'a [Span<'static>] {
+    fn right_of<'a>(row: &'a Line) -> &'a [Span] {
         let i = row
             .spans
             .iter()
@@ -641,26 +646,35 @@ mod tests {
             .iter()
             .find(|r| plain(std::slice::from_ref(*r))[0].contains("new();"))
             .expect("the changed row");
-        let green = Palette::Colour.style(Role::Added).bg;
-        let red = Palette::Colour.style(Role::Removed).bg;
         let right = right_of(changed);
-        assert!(right.iter().all(|s| s.style.bg == green), "{right:?}");
+        assert!(
+            right.iter().all(|s| tint(s) == Some(Role::Added)),
+            "{right:?}"
+        );
         let sign = right.iter().find(|s| s.content == "+").unwrap();
-        assert_eq!(sign.style.fg, Some(Color::Green));
+        assert_eq!(sign.style.top(), Role::Success);
         let num = right.iter().find(|s| s.content.trim() == "2").unwrap();
-        assert_eq!(num.style.fg, Some(Color::Green));
+        assert_eq!(num.style.top(), Role::Success);
         let code = right.iter().find(|s| s.content.contains("new();")).unwrap();
-        assert_eq!(code.style.fg, None, "the code keeps its own foreground");
+        assert_eq!(
+            code.style.top(),
+            Role::Added,
+            "the code keeps its own foreground"
+        );
         let sep_at = changed.spans.iter().position(|s| s.content == SEP).unwrap();
-        assert!(changed.spans[..sep_at].iter().all(|s| s.style.bg == red));
-        assert_eq!(changed.spans[sep_at].style.bg, None);
+        assert!(
+            changed.spans[..sep_at]
+                .iter()
+                .all(|s| tint(s) == Some(Role::Removed))
+        );
+        assert_eq!(tint(&changed.spans[sep_at]), None);
 
         // A context row is untinted.
         let ctx = rows
             .iter()
             .find(|r| plain(std::slice::from_ref(*r))[0].contains("fn a() {"))
             .unwrap();
-        assert!(ctx.spans.iter().all(|s| s.style.bg.is_none()), "{ctx:?}");
+        assert!(ctx.spans.iter().all(|s| tint(s).is_none()), "{ctx:?}");
 
         // No palette, no style: the glyph alone says which is which.
         for r in render_split(&old, &new, &sc(60, Palette::None, 1, 1)) {
@@ -742,7 +756,7 @@ mod tests {
             rows.iter().any(|r| {
                 r.spans
                     .iter()
-                    .any(|s| s.content.contains("fn") && s.style.fg == Some(Color::Magenta))
+                    .any(|s| s.content.contains("fn") && s.style.top() == Role::Keyword)
             })
         };
         assert!(keyword(&render_split(&old, &new, &sc)));

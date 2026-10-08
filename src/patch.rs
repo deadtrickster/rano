@@ -26,7 +26,7 @@
 //! the file and not by the patch. The context is the whole excerpt, so a hunk
 //! made with `-U10` keeps its ten lines.
 
-use ratatui::text::{Line, Span};
+use crate::render::{Line, Span};
 
 use crate::diff::{DiffConfig, faint_line, render_in};
 use crate::sidediff::{EditView, SplitConfig, lang_for, render_split};
@@ -251,9 +251,9 @@ fn hunk_header(l: &str) -> Option<(usize, usize, usize, usize)> {
 
 /// Draw a parsed patch: the preamble faint, then per file its name (and what
 /// its headers say), then each hunk in `view` at the file's own line numbers.
-pub fn render(p: &Patch, cfg: &DiffConfig, view: EditView) -> Vec<Line<'static>> {
+pub fn render(p: &Patch, cfg: &DiffConfig, view: EditView) -> Vec<Line> {
     let pal = cfg.palette;
-    let mut out: Vec<Line<'static>> = p.preamble.iter().map(|l| faint_line(pal, l)).collect();
+    let mut out: Vec<Line> = p.preamble.iter().map(|l| faint_line(pal, l)).collect();
     for f in &p.files {
         if !out.is_empty() {
             out.push(Line::default());
@@ -304,7 +304,7 @@ mod tests {
 
     fn text(rows: &[Line]) -> Vec<String> {
         rows.iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     }
 

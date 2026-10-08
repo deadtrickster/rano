@@ -12,7 +12,7 @@
 //! - [`syntax`] — tree-sitter highlighting: language detection, the
 //!   capture walk, and [`syntax::Highlighter::classes`] for callers that
 //!   own their palette rather than borrowing rano's.
-//! - [`diff`] / [`sidediff`] — line diffs drawn as ratatui lines, unified or
+//! - [`diff`] / [`sidediff`] — line diffs drawn as [`render`] lines, unified or
 //!   in two panels, with [`style`]'s roles and [`highlight`]'s syntax mapping.
 //! - [`width`] — display width: how many columns a character takes, where a
 //!   line's wrap segments begin, and which clusters may never be split;
@@ -59,7 +59,7 @@ pub mod buffer;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,
 // diffed side by side with the renderers below (the editor's M-P).
 pub mod conflict;
-// Diffs, as ratatui lines: the edit script and the unified view (`diff`), the
+// Diffs, as `render` lines: the edit script and the unified view (`diff`), the
 // two-panel view (`sidediff`), the roles and palette they paint with (`style`),
 // and syntax captures onto those roles (`highlight`). Ported from letibot's
 // `crates/ui` so that text rendering has one home; lib-only, and the editor's
@@ -72,7 +72,7 @@ pub mod highlight;
 // a host can stack its own map over the editor's.
 pub mod keymap;
 // A model's markdown reply, rendered while it streams: a bounded parse window,
-// a block model, and a painter to ratatui lines (ported from letibot's TUI).
+// a block model, and a painter to `render` lines (ported from letibot's TUI).
 pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).

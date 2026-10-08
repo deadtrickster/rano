@@ -285,7 +285,7 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
             .expect("diff view")
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     };
     // Unified first (the session's default): the file's name, the hunk, and
@@ -337,7 +337,7 @@ fn diff_view_text(ed: &Editor) -> Vec<String> {
         .expect("diff view")
         .lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
         .collect()
 }
 
@@ -428,7 +428,7 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
     let first: String = v.lines[v.top]
         .spans
         .iter()
-        .map(|s| s.content.as_ref())
+        .map(|s| s.content.as_str())
         .collect();
     assert!(first.starts_with("▶ Conflict 2 of 2"), "{first:?}");
     // Past the last one it stays.
@@ -554,7 +554,7 @@ fn the_help_key_shows_its_card_at_once_and_opens_pages() {
     let text: Vec<String> = v
         .lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
         .collect();
     assert!(
         text.iter()
@@ -593,7 +593,7 @@ fn describe_key_says_what_a_key_runs_even_through_a_prefix() {
             .map(|l| {
                 l.spans
                     .iter()
-                    .map(|s| s.content.as_ref())
+                    .map(|s| s.content.as_str())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()

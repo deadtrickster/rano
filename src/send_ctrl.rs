@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use rano::send::{Point, Selection, SendEvent};
+use crate::send::{Point, Selection, SendEvent};
 
 use crate::buffer::Pos;
 use crate::editor::{Editor, canonical, normalize};
@@ -141,4 +141,23 @@ pub fn command_sender(cmd: String) -> OnSend {
         };
         Ok(format!("Sent {what}"))
     })
+}
+
+/// `name:line` or `name:line:col`, when `arg` is not itself an existing path
+/// (a file really named `a:3` opens as named). Splits from the right, so a
+/// name with colons of its own keeps them.
+pub fn split_position(arg: &str) -> Option<(String, usize, Option<usize>)> {
+    if Path::new(arg).exists() {
+        return None;
+    }
+    let num = |s: &str| s.parse::<usize>().ok().filter(|&n| n > 0);
+    let (head, last) = arg.rsplit_once(':')?;
+    let last = num(last)?;
+    if let Some((name, line)) = head.rsplit_once(':')
+        && let Some(line) = num(line)
+        && !name.is_empty()
+    {
+        return Some((name.to_string(), line, Some(last)));
+    }
+    (!head.is_empty()).then(|| (head.to_string(), last, None))
 }

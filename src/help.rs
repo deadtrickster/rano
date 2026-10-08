@@ -12,7 +12,7 @@
 //!   by what they do.
 //! - **`describe-key`** (`C-g k`): press a key, read what it runs.
 
-use rano::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
+use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -187,7 +187,7 @@ impl Editor {
     }
 
     /// Re-render a help page after a resize. Returns whether it changed.
-    pub(crate) fn refresh_info_view(&mut self) -> bool {
+    pub fn refresh_info_view(&mut self) -> bool {
         let w = self.text_w;
         let Some(mut v) = self.info.take() else {
             return false;

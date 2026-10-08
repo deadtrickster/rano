@@ -163,8 +163,8 @@ pub struct Editor {
     /// produce. Off unless enabled — see `crate::update::enabled`, which reads
     /// the config and `RANO_AUTOUPDATE`. Nothing here runs in tests, because
     /// `Editor::new` does not start the check; `run()` does.
-    pub(crate) update: crate::update_ctrl::UpdateCheck,
-    pub(crate) load_saturated: bool,
+    pub update: crate::update_ctrl::UpdateCheck,
+    pub load_saturated: bool,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
     pub(crate) highlight_dirty: bool,
@@ -235,7 +235,7 @@ pub(crate) fn completion_prefix(
 }
 
 impl Editor {
-    pub(crate) fn new(buf: Buffer, config: config::Config) -> Self {
+    pub fn new(buf: Buffer, config: config::Config) -> Self {
         let tab_width = config.tab_width;
         let show_line_numbers = config.line_numbers;
         let wrap = config.wrap;
@@ -297,7 +297,7 @@ impl Editor {
         &self.buffers[self.cur]
     }
 
-    pub(crate) fn bs_mut(&mut self) -> &mut BufferState {
+    pub fn bs_mut(&mut self) -> &mut BufferState {
         &mut self.buffers[self.cur]
     }
 
@@ -308,7 +308,7 @@ impl Editor {
 
     /// Recompute the live path suggestions when the open prompt is a
     /// file-name prompt whose text changed. Returns whether they changed.
-    pub(crate) fn refresh_prompt_hints(&mut self) -> bool {
+    pub fn refresh_prompt_hints(&mut self) -> bool {
         let want = self.prompt.as_ref().filter(|p| {
             matches!(
                 p.kind,
@@ -343,7 +343,7 @@ impl Editor {
         });
     }
 
-    pub(crate) fn adjust_scroll(&mut self, text_h: usize) {
+    pub fn adjust_scroll(&mut self, text_h: usize) {
         if text_h == 0 {
             return;
         }
@@ -380,7 +380,7 @@ impl Editor {
     /// scroll_x and the viewport width are both in display cols; the
     /// viewport excludes the gutter when line numbers are shown (F4).
     /// M-\: with soft wrap on, lines wrap instead of scrolling sideways.
-    pub(crate) fn adjust_scroll_x(&mut self) {
+    pub fn adjust_scroll_x(&mut self) {
         if self.wrap {
             self.bs_mut().scroll_x = 0;
             return;
@@ -711,7 +711,7 @@ impl Editor {
 
     /// Wait until the buffer has `p.row`, then put the cursor there and centre
     /// the line. No-op once applied.
-    pub(crate) fn apply_startup_pos(&mut self) {
+    pub fn apply_startup_pos(&mut self) {
         let Some(p) = self.bs().goto else {
             return;
         };
@@ -858,7 +858,7 @@ impl Editor {
     /// makes a fast typist cost one highlight per painted frame instead of one
     /// per keystroke — and it is what lets a huge file open at all, since the
     /// first highlight is then the viewport window rather than the document.
-    pub(crate) fn ensure_highlight(&mut self) {
+    pub fn ensure_highlight(&mut self) {
         // The wrap table first: `highlight_covers_viewport` reads the viewport in
         // VISUAL rows when wrap is on, so a stale table would answer the question
         // about the wrong rows. `highlight_now` already did this; the check now
@@ -881,7 +881,7 @@ impl Editor {
     /// measured 402 ms per key on a 2.09 MB file (`bench_threshold_cliff`).
     ///
     /// Returns whether diagnostics changed, for the dirty-draw pass.
-    pub(crate) fn diag_flush(&mut self, now: Instant) -> bool {
+    pub fn diag_flush(&mut self, now: Instant) -> bool {
         if !self.diag_dirty || now < self.diag_last_edit + Duration::from_millis(300) {
             return false;
         }
@@ -1434,7 +1434,7 @@ impl Editor {
     /// Fire a scheduled completion re-request once its timer elapses. The
     /// popup must still be open on the cursor's row with a completable
     /// prefix, otherwise the wait is dropped.
-    pub(crate) fn completion_retry_poll(&mut self) {
+    pub fn completion_retry_poll(&mut self) {
         let Some(t) = self.completion_retry else {
             return;
         };
@@ -1665,7 +1665,7 @@ impl Editor {
 
     /// Left click: cursor + fresh selection anchor. Left drag: extend.
     /// Wheel: scroll the viewport a few lines. Everything else is ignored.
-    pub(crate) fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+    pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
         // The list overlay is keyboard-only; the text under it is not there
         // to click.
         if self.picker.is_some() {
@@ -2017,7 +2017,7 @@ impl Editor {
 
     /// E1: bracketed paste. \r is stripped, newlines split into rows; the
     /// whole paste (including selection replacement) is ONE undo step.
-    pub(crate) fn paste_text(&mut self, s: &str) {
+    pub fn paste_text(&mut self, s: &str) {
         let frags: Vec<Vec<char>> = s
             .replace('\r', "")
             .split('\n')
@@ -3063,4 +3063,100 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
         (a, b) = (b, a % b);
     }
     a
+}
+
+impl Editor {
+    pub fn status_text(&self) -> Option<String> {
+        // A load in flight is the most important thing to say: without it the
+        // screen is a frame with nothing in it, which reads as frozen.
+        if let Some(s) = self.loading_text() {
+            return Some(s);
+        }
+        if let Some(f) = &self.status
+            && f.until > Instant::now()
+        {
+            return Some(f.text.clone());
+        }
+        if let Some(job) = &self.bs().exec_job {
+            return Some(format!("Running: {}", job.cmd));
+        }
+        if let Some(s) = self.lsp_status() {
+            return Some(s);
+        }
+        if let Some(t) = self.loc_until
+            && t > Instant::now()
+        {
+            return Some(format!(
+                "Line {}, Col {}",
+                self.bs().cursor.row + 1,
+                self.bs().cursor.col + 1
+            ));
+        }
+        None
+    }
+
+    /// Expire an overdue status flash / cursor-position display. Returns
+    /// whether anything visible was cleared (dirty-draw, D6).
+    pub fn tick_status(&mut self) -> bool {
+        let mut dirty = false;
+        if let Some(f) = &self.status
+            && f.until <= Instant::now()
+        {
+            self.status = None;
+            dirty = true;
+        }
+        if self.loc_until.is_some_and(|t| t <= Instant::now()) {
+            self.loc_until = None;
+            dirty = true;
+        }
+        dirty
+    }
+
+    /// One buffer per extra command-line file, after the first. Each is
+    /// named at once (title, buffer list, language) but read only when it
+    /// first becomes current — see `start_pending_load`. A file named twice
+    /// gets one buffer; a file that does not exist yet is a new buffer that
+    /// will be saved under that name, as for the first file.
+    #[cfg(test)]
+    pub(crate) fn add_deferred_buffers(&mut self, paths: &[PathBuf]) {
+        let at: Vec<(PathBuf, Option<Pos>)> = paths.iter().map(|p| (p.clone(), None)).collect();
+        self.add_deferred_buffers_at(&at);
+    }
+
+    /// [`Self::add_deferred_buffers`], each with the position (`file:line:col`,
+    /// `+line`) its cursor goes to once it is read.
+    pub fn add_deferred_buffers_at(&mut self, files: &[(PathBuf, Option<Pos>)]) {
+        for (p, at) in files {
+            if self.find_buffer(p).is_some() {
+                continue;
+            }
+            let mut buf = Buffer::new();
+            buf.name = Some(p.clone());
+            let mut bs = BufferState::new(buf);
+            if p.exists() {
+                bs.pending_load = Some(p.clone());
+            }
+            bs.goto = *at;
+            self.buffers.push(bs);
+        }
+    }
+
+    // ---------- styling ----------
+
+    /// The file name for the title bar, prefixed "[i/n] " when several
+    /// buffers are open. Scratch buffers show an empty name.
+    pub(crate) fn title_text(&self) -> String {
+        let name = self
+            .bs()
+            .buf
+            .name
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if self.buffers.len() > 1 {
+            format!("[{}/{}] {}", self.cur + 1, self.buffers.len(), name)
+        } else {
+            name
+        }
+    }
 }

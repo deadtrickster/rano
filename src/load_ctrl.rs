@@ -19,7 +19,7 @@ impl Editor {
     /// Returns whether a job started; a file that cannot be opened is reported
     /// by the caller (it is the one failure that should not become a status
     /// line, because there is nothing on screen to attach it to).
-    pub(crate) fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
+    pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
         let job = LoadJob::spawn(path.to_path_buf())?;
         {
             let bs = self.bs_mut();
@@ -47,7 +47,7 @@ impl Editor {
     /// keeps the loop's iteration short and the keyboard live while a 184 MB
     /// file is still arriving. When the budget is exhausted it says so, so the
     /// loop can skip its idle wait and keep going — see `load_saturated`.
-    pub(crate) fn load_poll(&mut self) -> bool {
+    pub fn load_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().load.as_mut() else {
             return false;
         };
@@ -147,7 +147,7 @@ impl Editor {
 
     /// Whether a load is in flight. Used by the loop to keep adopting, and by
     /// the status line to say so rather than looking frozen.
-    pub(crate) fn loading(&self) -> bool {
+    pub fn loading(&self) -> bool {
         self.bs().load.is_some()
     }
 
@@ -177,7 +177,7 @@ impl Editor {
     /// made the buffer current — M->, the buffer list, a close, ^X's save
     /// prompt — the file starts arriving on the next frame. Returns whether
     /// anything changed.
-    pub(crate) fn start_pending_load(&mut self) -> bool {
+    pub fn start_pending_load(&mut self) -> bool {
         let Some(path) = self.bs_mut().pending_load.take() else {
             return false;
         };

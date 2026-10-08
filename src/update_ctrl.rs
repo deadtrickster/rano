@@ -104,7 +104,7 @@ impl crate::editor::Editor {
     /// Start the startup check, if it is enabled. Called from `run()` rather
     /// than `Editor::new` so no test makes a network request by constructing an
     /// editor — the check is a property of RUNNING, not of being.
-    pub(crate) fn start_update_check(&mut self) {
+    pub fn start_update_check(&mut self) {
         let on = crate::update::enabled(
             self.config.autoupdate,
             std::env::var("RANO_AUTOUPDATE").ok().as_deref(),
@@ -119,7 +119,7 @@ impl crate::editor::Editor {
     /// only printed on exit, so the session said nothing and `M-V` was
     /// undiscoverable — found by running the binary and watching the status line
     /// stay empty, not by reading the code.
-    pub(crate) fn update_poll(&mut self) -> bool {
+    pub fn update_poll(&mut self) -> bool {
         if !self.update.poll() {
             return false;
         }
@@ -132,7 +132,7 @@ impl crate::editor::Editor {
 
     /// Whether the exit notice should be printed. Separate from `found` so the
     /// environment can silence it for a run without disabling the check.
-    pub(crate) fn update_installable_on_exit(&self) -> bool {
+    pub fn update_installable_on_exit(&self) -> bool {
         announce_on_exit()
     }
 

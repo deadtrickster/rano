@@ -2,8 +2,8 @@
 //! rest go through the keymaps (`commands.rs`), which is where every key's
 //! meaning is written down.
 
+use crate::keymap::Key;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rano::keymap::Key;
 
 use crate::editor::Editor;
 

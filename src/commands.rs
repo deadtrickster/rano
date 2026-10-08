@@ -16,8 +16,8 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use rano::conflict::Take;
-use rano::keymap::{Entry, Key, Keymap, Lookup, lookup, seq_emacs, where_is};
+use crate::conflict::Take;
+use crate::keymap::{Entry, Key, Keymap, Lookup, lookup, seq_emacs, where_is};
 
 use crate::diffview::{ConflictAct, DiffAct, DiffKind};
 use crate::editor::Editor;
@@ -1084,7 +1084,7 @@ impl Editor {
 
     /// The prefix card to show now, if any: the map a pending prefix leads to,
     /// once it has waited [`CARD_DELAY`] (or at once for help).
-    pub(crate) fn pending_card(&self) -> Option<(&Keymap, Vec<Key>)> {
+    pub fn pending_card(&self) -> Option<(&Keymap, Vec<Key>)> {
         let since = self.pending.since?;
         match lookup(&self.active_keymaps(), &self.pending.keys) {
             Lookup::Prefix(m)
@@ -1098,7 +1098,7 @@ impl Editor {
 
     /// Whether a prefix is waiting for its card's delay to pass, so the loop
     /// knows to come back and draw it.
-    pub(crate) fn card_due(&self) -> Option<Duration> {
+    pub fn card_due(&self) -> Option<Duration> {
         let since = self.pending.since?;
         CARD_DELAY.checked_sub(since.elapsed())
     }
@@ -1121,7 +1121,7 @@ impl Editor {
                 .iter()
                 .filter_map(|name| {
                     if let Some(prefix) = name.strip_prefix('@') {
-                        let seq = rano::keymap::parse_seq(prefix)?;
+                        let seq = crate::keymap::parse_seq(prefix)?;
                         let Lookup::Prefix(m) = lookup(&stack, &seq) else {
                             return None;
                         };
@@ -1228,7 +1228,7 @@ mod tests {
         let k = Keymaps::standard();
         for name in BAR {
             if let Some(p) = name.strip_prefix('@') {
-                let seq = rano::keymap::parse_seq(p).unwrap();
+                let seq = crate::keymap::parse_seq(p).unwrap();
                 assert!(
                     matches!(lookup(&[&k.global], &seq), Lookup::Prefix(_)),
                     "{p}"

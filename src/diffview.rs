@@ -5,9 +5,9 @@
 //!   the file. It answers to the question — `y` and `n` answer from here, and
 //!   leaving comes back to it;
 //! - **M-P on a diff or patch buffer**: the patch drawn file by file, hunk by
-//!   hunk, at each file's own line numbers ([`rano::patch`]);
+//!   hunk, at each file's own line numbers ([`crate::patch`]);
 //! - **M-P on a buffer with merge conflicts**: ours against theirs, side by
-//!   side ([`rano::conflict`]).
+//!   side ([`crate::conflict`]).
 //!
 //! The sources are kept and the lines re-rendered only when the width or the
 //! view changes — a diff and a highlight of two whole files is not per-frame
@@ -15,10 +15,10 @@
 
 use std::path::PathBuf;
 
-use rano::conflict::{Compare, Take};
-use rano::diff::DiffConfig;
-use rano::sidediff::{EditView, edit_view, render_edit_view};
-use rano::style::Palette;
+use crate::conflict::{Compare, Take};
+use crate::diff::DiffConfig;
+use crate::sidediff::{EditView, edit_view, render_edit_view};
+use crate::style::Palette;
 use ratatui::text::Line;
 
 use crate::buffer::Pos;
@@ -87,7 +87,7 @@ impl DiffView {
                 render_edit_view(&shown, disk, mine, 1, 1, &cfg, view)
             }
             Source::Patch { text, .. } => {
-                rano::patch::render(&rano::patch::parse(text), &cfg, view)
+                crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             Source::Conflict {
                 name,
@@ -95,7 +95,7 @@ impl DiffView {
                 current,
                 compare,
                 sections,
-            } => match rano::conflict::render_view(name, text, &cfg, view, *compare, *current) {
+            } => match crate::conflict::render_view(name, text, &cfg, view, *compare, *current) {
                 Some(v) => {
                     *sections = v.sections;
                     v.lines
@@ -187,7 +187,7 @@ impl Editor {
             .map(|l| l.iter().collect::<String>());
         // Conflicts first: a patch file with markers in it is mid-merge too,
         // and the merge is what needs reading.
-        if rano::conflict::has_conflicts(&text) {
+        if crate::conflict::has_conflicts(&text) {
             self.open_view(Source::Conflict {
                 name,
                 text,
@@ -205,7 +205,7 @@ impl Editor {
     }
 
     /// Re-render after a resize. Returns whether anything changed.
-    pub(crate) fn refresh_diff_view(&mut self) -> bool {
+    pub fn refresh_diff_view(&mut self) -> bool {
         let w = self.text_w;
         match self.diff_view.as_mut() {
             Some(v) if v.width != w => {
@@ -342,7 +342,7 @@ impl Editor {
         // The buffer itself, not the view's snapshot: the view is modal, so the
         // two agree, and the edit must be computed against what it edits.
         let text = self.bs().buf.text();
-        let Some((start, end, lines)) = rano::conflict::resolution(&text, k, take) else {
+        let Some((start, end, lines)) = crate::conflict::resolution(&text, k, take) else {
             self.flash("No base recorded for this conflict");
             self.diff_view = Some(v);
             return;
@@ -370,9 +370,9 @@ impl Editor {
             Take::Base => "the base",
         };
         let text = self.bs().buf.text();
-        let left = rano::conflict::parse(&text)
+        let left = crate::conflict::parse(&text)
             .iter()
-            .filter(|s| matches!(s, rano::conflict::Segment::Conflict(_)))
+            .filter(|s| matches!(s, crate::conflict::Segment::Conflict(_)))
             .count();
         if left == 0 {
             self.adjust_scroll(self.text_h);
@@ -420,5 +420,5 @@ impl DiffView {
 /// unnamed buffer, or a file without the extension. It is one when it has a
 /// file header and a hunk.
 fn looks_like_a_patch(text: &str) -> bool {
-    !rano::patch::parse(text).files.is_empty() && text.lines().any(|l| l.starts_with("@@ -"))
+    !crate::patch::parse(text).files.is_empty() && text.lines().any(|l| l.starts_with("@@ -"))
 }

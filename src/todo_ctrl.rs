@@ -34,7 +34,7 @@ use crate::editor::{ActionKind, Editor};
 // leticl sees exactly what the editor uses. Only `&str`, ranges and `String` cross
 // the boundary, so the binary's `Buffer` and the library's stay independent — as
 // they already were for every other module.
-use rano::todo::{self, State};
+use crate::todo::{self, State};
 
 /// The byte range of `text()` that row `r` occupies, and how many bytes it is.
 ///

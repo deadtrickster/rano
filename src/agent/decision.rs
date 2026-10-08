@@ -323,10 +323,15 @@ impl DecisionCard {
         // REVERSE → the reverse attribute.
         // Wrapped rather than left to the frame's trim: the question is the one line on the
         // card that may not lose its end.
-        let mut out: Vec<Line> = wrap(&clean_one(&format!("? {headline} [{}]", self.kind)), w)
-            .into_iter()
-            .map(|l| one(l, Role::Attention))
-            .collect();
+        // **One row, cut rather than wrapped** — letibot's card drew the question as one row
+        // and its frame cut it to the width, so a long ask never pushed the target down.
+        // **Yellow, not the bold attention register** — the card's own colour in letibot,
+        // where the question and its ladder are the same plain yellow and the highlighted
+        // row is the one thing that stands out.
+        let mut out: Vec<Line> = vec![one(
+            super::text::trim_to(&clean_one(&format!("? {headline} [{}]", self.kind)), w),
+            Role::Pending,
+        )];
         // **Whose call this is, when it is not this session's own.** A subagent's gate posts
         // its card to the root — *"who asks subagents permissions? i think they should
         // surface to the parent head all the way to the root obviously"* — and without this
@@ -368,7 +373,7 @@ impl DecisionCard {
             }
             for t in &self.write_targets {
                 let r = if t.unresolved {
-                    Role::Attention
+                    Role::Pending
                 } else {
                     Role::Strong
                 };
@@ -386,7 +391,7 @@ impl DecisionCard {
                             format!("{unresolved} writes")
                         }
                     ),
-                    Role::Attention,
+                    Role::Pending,
                 ));
             }
         }
@@ -500,7 +505,7 @@ impl DecisionCard {
                     // of thing rather than as "this one".
                     super::text::styled(l, crate::render::Style::new().reverse())
                 } else {
-                    one(l, Role::Attention)
+                    one(l, Role::Pending)
                 });
             }
         }
@@ -539,15 +544,16 @@ impl DecisionCard {
             // The rule the *Always allow* answer will write is in the option's own label, so
             // the hint points at editing it: a pattern they cannot see is a pattern they
             // cannot adjust.
-            "  ↑↓ to choose · Enter to answer · or type the id · `allow_always <glob>` to widen \
-             or narrow the rule shown above"
+            // The run of spaces is letibot's own, byte for byte: its card has always
+            // drawn this hint with them, and its frames are compared by the bytes.
+            "  ↑↓ to choose · Enter to answer · or type the id ·              `allow_always <glob>` to widen or narrow the rule shown above"
         } else {
             "  ↑↓ to choose · Enter to answer · or type the id"
         };
         // The hints are trimmed to the card rather than wrapped (the frame trimmed them in
         // letibot): they are the least of the card, and a wrapped hint is a row the
         // content's window pays for.
-        choices.push(one(super::text::trim_to(hint, w), Role::Attention));
+        choices.push(one(super::text::trim_to(hint, w), Role::Pending));
         // **The option that asks for words says where to type them.** Its label promised
         // *"tell the model why"* and the card never said how.
         if self
@@ -560,7 +566,7 @@ impl DecisionCard {
                     "  `deny_and_tell <why>` denies and sends those words to the model",
                     w,
                 ),
-                Role::Attention,
+                Role::Pending,
             ));
         }
         (out, choices)
@@ -905,7 +911,7 @@ mod tests {
         assert_eq!(own.spans[0].style.top(), Role::Strong);
         let head = lines[0].plain();
         assert_eq!(head, "? `bash` wants exec access [permission]");
-        assert_eq!(lines[0].spans[0].style.top(), Role::Attention);
+        assert_eq!(lines[0].spans[0].style.top(), Role::Pending);
         assert!(
             plain(&lines)
                 .iter()
@@ -972,7 +978,7 @@ mod tests {
                 .attrs
                 .contains(crate::style::Attrs::REVERSE)
         );
-        assert_eq!(choices[0].spans[0].style.top(), Role::Attention);
+        assert_eq!(choices[0].spans[0].style.top(), Role::Pending);
         // Past the end clamps to the last rung rather than marking nothing.
         d.selected = 99;
         assert!(plain(&d.split(100).1)[2].starts_with("  ▸"));
@@ -1112,7 +1118,7 @@ mod tests {
         let lines = d.lines(200);
         assert_eq!(
             line_with(&lines, "Path.home()").spans[0].style.top(),
-            Role::Attention,
+            Role::Pending,
             "an unresolved target is not drawn as a path"
         );
         assert_eq!(

@@ -20,7 +20,8 @@ fn faint(s: &str, w: usize) -> Line {
 }
 
 fn headline(s: &str, w: usize) -> Line {
-    one(trim_to(s, w), Role::Attention)
+    // Yellow, the register letibot's ask cards are drawn in — not the bold attention one.
+    one(trim_to(s, w), Role::Pending)
 }
 
 /// **The key-ask card**: what is asking, and where the key goes.
@@ -245,7 +246,7 @@ mod tests {
         let lines = card.lines(80);
         let s = plain(&lines).join("\n");
         assert!(lines[0].plain().starts_with("? "), "no marker: {s}");
-        assert_eq!(role_of(&lines[0], "sudo"), Some(Role::Attention));
+        assert_eq!(role_of(&lines[0], "sudo"), Some(Role::Pending));
         assert_eq!(s.matches("sudo wants a password").count(), 1, "{s}");
         assert!(s.contains("[sudo] password for dead:"), "{s}");
         assert!(s.contains("run: sudo apt install x"), "{s}");

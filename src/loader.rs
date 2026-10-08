@@ -53,6 +53,44 @@ const BATCH: usize = 512;
 /// the loader the stall.
 pub const ADOPT_BUDGET: usize = 8 * BATCH;
 
+/// How many rows a tail (`-f`/`--follow`) opens with.
+///
+/// Several screens at any realistic terminal height — `Editor::HIGHLIGHT_MARGIN`
+/// is 200 rows for the same reason — and deliberately fewer than one [`BATCH`],
+/// so the whole tail lands in the first poll rather than arriving in lumps.
+///
+/// This is the number of rows the view STARTS with, not the number it keeps:
+/// TODO.md §20.4's budget is what makes a tail nobody is looking at cheap, and
+/// that is a later increment than the open.
+pub const TAIL_ROWS: usize = 200;
+
+/// The first window [`tail_offset`] reads, widened 4x until it holds
+/// [`TAIL_ROWS`] rows.
+///
+/// One [`CHUNK`]: page-cache friendly, and more than enough for the common log
+/// shape, so the widening loop does not run at all. Its COST is what matters —
+/// a 2 GiB log opens for this much reading and not the file's.
+pub const TAIL_WINDOW: u64 = CHUNK as u64;
+
+/// A buffer opened at the tail of a file: `-f`/`--follow`, and later a `.log`
+/// name (TODO.md §20.7).
+///
+/// It exists to remember the one number the rest of the mode is defined
+/// against, §20.1's idea 2: **the size at open**. Below it, the file was there
+/// before we were, so a row can be numbered, styled and searched like any other
+/// file's. At or above it, the rows are still arriving, and are neither styled
+/// nor counted until their newline lands — which is what makes "settled" a fact
+/// about the file rather than a guess about the user's patience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tail {
+    /// The file's length when it was opened.
+    ///
+    /// Read by no one yet: increment E (settle-before-styling) is its first
+    /// reader, and increment D (following the growth) is its second.
+    #[allow(dead_code)]
+    pub size_at_open: u64,
+}
+
 /// One message from the reader thread.
 #[derive(Debug)]
 pub enum LoadMsg {
@@ -106,17 +144,35 @@ pub struct LoadJob {
 }
 
 impl LoadJob {
-    /// Start reading `path`. The returned job is polled by the event loop; it
-    /// never blocks the caller, including `spawn`.
+    /// Start reading `path` from its beginning.
     pub fn spawn(path: PathBuf) -> io::Result<Self> {
+        Self::spawn_from(path, 0)
+    }
+
+    /// Start reading `path` from byte `from` onward — the tail path, paired
+    /// with [`tail_offset`].
+    ///
+    /// The seek happens HERE, on the caller's thread and before the worker
+    /// exists, for the same reason the open does: a position that could not be
+    /// taken is the caller's problem to report now, not a status line after a
+    /// frame has been drawn.
+    ///
+    /// `from` is also what tells the reader whether the bytes it sees first are
+    /// the file's start, which is a real difference and not a formality: at 0 a
+    /// byte-order mark is a mark and is skipped, and at a tail offset the same
+    /// three bytes are content.
+    pub fn spawn_from(path: PathBuf, from: u64) -> io::Result<Self> {
         // Open here, on the caller's thread: a missing or unreadable file is
         // the caller's problem to report *now*, not a message that arrives
         // after a frame has already been drawn.
-        let file = File::open(&path)?;
+        let mut file = File::open(&path)?;
+        if from > 0 {
+            file.seek(SeekFrom::Start(from))?;
+        }
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let c = Arc::clone(&cancel);
-        std::thread::spawn(move || read_all(file, &tx, &c));
+        std::thread::spawn(move || read_all(file, from, &tx, &c));
         Ok(Self {
             rx,
             cancel,
@@ -220,18 +276,8 @@ fn decode_row(
     }
 }
 
-/// The reader thread: one pass, decoding rows as their newlines arrive.
-///
-/// It never re-reads and never holds the whole file: `pending` is one partial
-/// row, and a row is sent as soon as it is complete.
 /// Where the tail of a file begins: the byte offset of the first of its last
 /// `rows` rows.
-///
-/// **Not yet called** — increment B of TODO.md §20.3 wires it to `-f`. It is
-/// landed first because the off-by-ones are the whole difficulty and they are
-/// testable in isolation, against a forward-reading reference, without a
-/// terminal, a loader or a buffer in the picture.
-#[allow(dead_code)]
 ///
 /// **Scans backwards from the end, so the cost is the tail and not the file.**
 /// That is the whole point for a log: a 2 GiB file opens showing its last
@@ -302,10 +348,11 @@ pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::
 
 /// The rows of `[from, size)` — the tail a caller reads after [`tail_offset`].
 ///
-/// Not yet called; see `tail_offset`.
-///
-/// Split from the offset so the two can be tested apart: this is the read, and
-/// it is deliberately a plain forward read from a byte the caller already has.
+/// Not yet called: [`LoadJob::spawn_from`] does the seek and the read together
+/// (one open, one position), so a caller wanting both halves as separate steps
+/// has not appeared. Kept and tested because it is the forward-reading half of
+/// `tail_offset`'s contract — the offset `tail_offset` returns is only correct
+/// if reading from it yields the last `rows` rows.
 #[allow(dead_code)]
 pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(from))?;
@@ -314,7 +361,15 @@ pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
+/// The reader thread: one pass, decoding rows as their newlines arrive.
+///
+/// It never re-reads and never holds the whole file: `pending` is one partial
+/// row, and a row is sent as soon as it is complete.
+///
+/// `from` is where the file was positioned before the thread started, and it is
+/// the only difference between reading a file and reading its tail: the loop is
+/// the same, and so is every message it sends.
+fn read_all(mut file: File, from: u64, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
     use crate::encoding::{self, Encoding, Scope};
     let mut buf = vec![0u8; CHUNK];
     let mut pending: Vec<u8> = Vec::new();
@@ -357,7 +412,10 @@ fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
                 return; // the loop is gone; nothing to deliver to
             }
             encoding = Some(enc);
-            first_chunk_bom = true;
+            // Only the file's own beginning can be a byte-order mark. A tail
+            // read starts mid-file, where those same three bytes (EF BB BF) are
+            // a character somebody wrote, so they must not be eaten.
+            first_chunk_bom = from == 0;
         }
         let chunk = &buf[..n];
         let mut start = if first_chunk_bom {
@@ -557,6 +615,40 @@ mod tail_tests {
                 "rows={rows}: the bytes from the offset are not the last rows"
             );
         }
+    }
+
+    /// **The offset and the reader meet.** `spawn_from` at a tail offset gives
+    /// the file's last rows and NOT the whole file — which is the entire point
+    /// of the pair, and the thing a wrong seek or a wrong offset would hide as
+    /// a plausible-looking tail.
+    #[test]
+    fn spawn_from_reads_the_last_rows_and_not_the_file() {
+        let body: Vec<u8> = (0..300)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let t = Temp::new("spawn_from.txt", &body);
+        let size = body.len() as u64;
+        let mut f = File::open(t.path()).expect("open");
+        let off = tail_offset(&mut f, size, 5, 128).expect("tail_offset");
+        let mut job = LoadJob::spawn_from(t.path(), off).expect("spawn_from");
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let mut done = false;
+        for _ in 0..500 {
+            match job.poll(&mut rows) {
+                Adopted::Finished { .. } => {
+                    done = true;
+                    break;
+                }
+                Adopted::Failed(e) => panic!("the reader failed: {e}"),
+                _ => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+        assert!(done, "the reader never finished");
+        let got: Vec<String> = rows.iter().map(|r| r.iter().collect()).collect();
+        assert_eq!(got.len(), 5, "the whole file arrived: {got:?}");
+        assert_eq!(got[0], "line 295");
+        assert_eq!(got[4], "line 299");
     }
 
     /// **The cost is the tail, not the file.** A file far larger than the window
@@ -834,6 +926,24 @@ mod tests {
         let (rows, _, _) = drain(&mut job);
         assert_eq!(text(&rows), ["caf\u{e9} latin-1"]);
         assert_eq!(job.encoding, Some(crate::encoding::Encoding::Cp1252));
+    }
+
+    /// **A byte-order mark in the middle of a file is content.** Only the
+    /// file's own first bytes can be a mark — a tail read starts wherever
+    /// `tail_offset` says, and if that happens to be a row beginning with
+    /// EF BB BF, those bytes are a character somebody wrote. Eating them would
+    /// silently corrupt one line out of the middle of a log, which is exactly
+    /// the kind of bug a tail is prone to.
+    #[test]
+    fn a_tail_read_does_not_eat_a_mid_file_byte_order_mark() {
+        let mut body = b"first\n".to_vec();
+        body.extend_from_slice("\u{feff}".as_bytes());
+        body.extend_from_slice(b"second\n");
+        let t = Temp::new("midbom.txt", &body);
+        // Byte 6 is the row that begins with the mark.
+        let mut job = LoadJob::spawn_from(t.path().to_path_buf(), 6).expect("spawn_from");
+        let (rows, _, _) = drain(&mut job);
+        assert_eq!(text(&rows), ["\u{feff}second"], "the mark was eaten");
     }
 
     #[test]

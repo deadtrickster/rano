@@ -8,7 +8,9 @@
 
 use crate::buffer::Buffer;
 use crate::editor::Editor;
-use crate::loader::{ADOPT_BUDGET as budget, Adopted, LoadJob};
+use crate::loader::{
+    ADOPT_BUDGET as budget, Adopted, LoadJob, TAIL_ROWS, TAIL_WINDOW, Tail, tail_offset,
+};
 use std::path::Path;
 
 impl Editor {
@@ -20,7 +22,38 @@ impl Editor {
     /// by the caller (it is the one failure that should not become a status
     /// line, because there is nothing on screen to attach it to).
     pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
+        // `spawn` rather than `spawn_from(path, 0)`: reading a whole file is
+        // the case with a name of its own, and what every caller but the tail
+        // wants.
         let job = LoadJob::spawn(path.to_path_buf())?;
+        self.begin_load(path, job);
+        Ok(())
+    }
+
+    /// [`Self::start_load`], from byte `from` to the end of the file — the tail
+    /// path, whose offset comes from [`crate::loader::tail_offset`].
+    ///
+    /// Everything else is identical on purpose: a tail is a file read that
+    /// begins later, so the reader, the batching, the adoption budget, the
+    /// diagnostics refresh and the cursor's arrival are all the same machinery.
+    /// What makes it a tail is the offset, and what remembers that it is one is
+    /// [`crate::BufferState::tail`].
+    pub fn start_load_from(&mut self, path: &Path, from: u64) -> std::io::Result<()> {
+        let job = LoadJob::spawn_from(path.to_path_buf(), from)?;
+        self.begin_load(path, job);
+        Ok(())
+    }
+
+    /// The buffer's half of opening a file: name it, give it the one row a
+    /// `Buffer` always holds, hand it the job, and invalidate what a new file
+    /// invalidates.
+    ///
+    /// Shared by the two openers above because a tail differs from a plain read
+    /// in exactly one thing — the byte the reader starts at — and in nothing a
+    /// buffer knows. Which is also why the view flags are cleared here and set
+    /// by `start_tail` afterwards: reading a file is reading a file, and what
+    /// view it is read INTO comes from the caller.
+    fn begin_load(&mut self, path: &Path, job: LoadJob) {
         {
             let bs = self.bs_mut();
             bs.buf = Buffer::new();
@@ -32,6 +65,15 @@ impl Editor {
             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
             bs.scroll = 0;
             bs.load = Some(job);
+            // This BufferState holds a NEW document from disk, so the two flags
+            // that describe the previous one's view are cleared. `tail` because
+            // a load that is not a tail must not look like one — it would land at
+            // the bottom and remember a size from another file. `read_only`
+            // because that is what `open_file` does too: a freshly read document
+            // is writable unless the caller says otherwise, and `start_tail` says
+            // otherwise one line after this returns.
+            bs.tail = None;
+            bs.read_only = false;
         }
         // A new file is a new language, a new LSP session and a new highlight.
         self.lsp_sync();
@@ -41,6 +83,32 @@ impl Editor {
         // decode of bytes that are not text (see `Editor::preview_if_picture`). Done before
         // the loader's rows land, because the view reads the file, not the buffer.
         self.preview_if_picture();
+    }
+
+    /// Open `path` as a tail: the last few screens, read from the end, and
+    /// read-only — `-f`/`--follow`, and one day a `.log` name (TODO.md §20).
+    ///
+    /// Two things are decided here and nowhere else:
+    ///
+    /// - **Where to start reading.** [`tail_offset`] scans *backwards*, so a
+    ///   2 GiB log opens showing its last screens for a read of a few hundred
+    ///   KiB rather than the whole file. That is the increment this one is for.
+    /// - **That it is a view.** The operator's rule, and the reason is at the
+    ///   keystroke (§20.6): a tailed file is one something else is writing, so
+    ///   an edit that could never be saved is work lost silently.
+    ///
+    /// `size_at_open` is recorded rather than used, because the two things it
+    /// decides — which rows are still arriving (§20.3 D) and which may be styled
+    /// (§20.3 E) — are later increments. It is remembered now so that opening a
+    /// tail and following one are not two different notions of "the file".
+    pub fn start_tail(&mut self, path: &Path) -> std::io::Result<()> {
+        let mut file = std::fs::File::open(path)?;
+        let size = file.metadata()?.len();
+        let from = tail_offset(&mut file, size, TAIL_ROWS, TAIL_WINDOW)?;
+        self.start_load_from(path, from)?;
+        let bs = self.bs_mut();
+        bs.tail = Some(Tail { size_at_open: size });
+        bs.read_only = true;
         Ok(())
     }
 
@@ -80,6 +148,23 @@ impl Editor {
                     was.min(bs.wrap_rows.len())
                 },
             );
+            // A tail lands at the BOTTOM, and goes on doing so as it grows: the
+            // last row is what the eye wants at a tail, and the scroll that
+            // follows the cursor (`adjust_scroll`, in `tick`) then puts the end
+            // of what has arrived at the foot of the screen.
+            //
+            // In this increment the reader delivers the tail once, so this is
+            // "open showing the end". It is written as a rule about every batch
+            // and not as a one-shot, because that is the same line that makes
+            // following work when the reader keeps delivering (TODO.md §20.3 D).
+            if bs.tail.is_some() {
+                bs.cursor = crate::buffer::Pos {
+                    row: bs.buf.row_count().saturating_sub(1),
+                    col: 0,
+                };
+                // `--line` and a tail ask for opposite ends of the file.
+                bs.goto = None;
+            }
             bs.edit_gen = bs.edit_gen.wrapping_add(1);
             self.highlight_dirty = true;
         }
@@ -132,11 +217,24 @@ impl Editor {
                     }
                     bs.buf.row_count()
                 };
-                self.flash(&format!(
-                    "Read {} line{}",
-                    rows,
-                    crate::editor::plural(rows)
-                ));
+                if self.bs().tail.is_some() {
+                    // **Not "Read N lines".** `rows` here is the tail we asked
+                    // for — 200, or the whole file if it is shorter — and the
+                    // file's own line count has not been measured. §20.1's idea
+                    // 3 is the increment that measures it; this line is the one
+                    // that would otherwise state it wrongly (TODO.md §20.3 C).
+                    self.flash(&format!(
+                        "Tailing — showing the last {} line{}",
+                        rows,
+                        crate::editor::plural(rows)
+                    ));
+                } else {
+                    self.flash(&format!(
+                        "Read {} line{}",
+                        rows,
+                        crate::editor::plural(rows)
+                    ));
+                }
                 dirty = true;
             }
             Adopted::Failed(e) => {
@@ -215,6 +313,11 @@ impl Editor {
                 bs.buf = buf;
                 bs.edit_gen = bs.edit_gen.wrapping_add(1);
                 bs.wrap_extend_from = None;
+                // The buffer is the whole file now, so it is no longer a tail:
+                // `size_at_open` would be describing a view that this read has
+                // just replaced with the file itself. Read-only is left alone —
+                // that was asked for, and a whole read does not unask it.
+                bs.tail = None;
                 self.highlight_dirty = true;
                 self.diag_dirty = true;
                 self.lsp_sync();

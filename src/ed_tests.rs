@@ -3866,3 +3866,178 @@ fn the_title_says_view_when_read_only() {
     let t = ui::title_for_test(&mut ed, 80);
     assert!(t.contains("VIEW") && t.contains('M'), "{t:?}");
 }
+
+// ---------- tail mode (-f/--follow, TODO.md §20) ----------
+
+/// Pump the loader until the file has arrived. The loader is a thread, so this
+/// is the same loop `run` makes — bounded, because a test that waits forever
+/// is a test that hangs CI rather than failing it.
+fn settle(ed: &mut Editor) {
+    for _ in 0..500 {
+        ed.load_poll();
+        if !ed.loading() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the load never finished");
+}
+
+/// A `.log` of `n` numbered lines, in its own scratch directory.
+fn numbered_log(tag: &str, n: usize) -> (TempDir, PathBuf) {
+    let d = temp_dir(tag);
+    let path = d.0.join("big.log");
+    let text: String = (1..=n).map(|i| format!("line {i}\n")).collect();
+    fs::write(&path, text).unwrap();
+    (d, path)
+}
+
+/// **A tail opens at the END.** The rows it shows are the file's LAST ones —
+/// which is what scanning backwards for the offset buys, and what a wrong
+/// offset would quietly replace with the first screenful.
+#[test]
+fn a_tail_open_shows_the_end_of_the_file() {
+    let n = crate::loader::TAIL_ROWS + 300;
+    let (_d, path) = numbered_log("tail_end", n);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+
+    let rows = lines(&ed);
+    assert_eq!(
+        rows.len(),
+        crate::loader::TAIL_ROWS,
+        "a tail is the last few screens, not the {n}-line file"
+    );
+    assert_eq!(
+        rows[0],
+        format!("line {}", n - crate::loader::TAIL_ROWS + 1)
+    );
+    assert_eq!(rows[rows.len() - 1], format!("line {n}"));
+}
+
+/// The view lands at the BOTTOM: the cursor is on the last row, so the scroll
+/// that follows the cursor leaves the end of the file at the foot of the
+/// screen. This is the half of a tail a user sees immediately.
+#[test]
+fn a_tail_lands_at_the_bottom() {
+    let (_d, path) = numbered_log("tail_bottom", crate::loader::TAIL_ROWS + 300);
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    // `tick` is what runs the scroll, so ask for it the way the run loop does.
+    ed.tick(Instant::now());
+
+    let rows = lines(&ed);
+    assert_eq!(ed.bs().cursor.row, rows.len() - 1, "not on the last row");
+    assert_eq!(
+        ed.bs().scroll,
+        rows.len() - ed.text_h,
+        "not scrolled to the end"
+    );
+}
+
+/// **A tail is a view of somebody else's file**, so it opens read-only — the
+/// operator's rule, and the refusal is at the keystroke (§20.6).
+#[test]
+fn a_tail_is_read_only() {
+    let (_d, path) = numbered_log("tail_ro", crate::loader::TAIL_ROWS + 300);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    assert!(ed.bs().read_only, "a tail opened editable");
+
+    let before = lines(&ed);
+    ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+    ed.insert_char('X');
+    assert_eq!(lines(&ed), before, "typing changed a tail");
+    let said = ed.status_text().unwrap_or_default();
+    assert!(said.contains("Read-only"), "it did not say why: {said:?}");
+}
+
+/// A plain open is NOT a tail: the whole file, editable, from row 1. The flag
+/// has to be the only thing that decides this, or `-f` would be a mode.
+#[test]
+fn a_plain_open_is_not_a_tail() {
+    let n = crate::loader::TAIL_ROWS + 300;
+    let (_d, path) = numbered_log("tail_none", n);
+    let mut ed = test_ed("");
+    ed.start_load(&path).expect("open");
+    settle(&mut ed);
+
+    assert!(!ed.bs().read_only);
+    assert!(ed.bs().tail.is_none());
+    let rows = lines(&ed);
+    assert_eq!(rows.len(), n, "a plain open shows the whole file");
+    assert_eq!(rows[0], "line 1");
+}
+
+/// **The status line must not claim a line count it does not know** (§20.3 C).
+/// "Read 200 lines" is a lie about a file with 500 in it — and it is the
+/// measured line count of the file, not of the tail, that §20.1's background
+/// scan exists to provide.
+#[test]
+fn the_tail_says_what_it_is_instead_of_a_line_count() {
+    let (_d, path) = numbered_log("tail_status", crate::loader::TAIL_ROWS + 300);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    let said = ed.status_text().unwrap_or_default();
+    assert!(said.contains("Tailing"), "{said:?}");
+    assert!(
+        !said.contains("Read"),
+        "it claimed a line count it does not have: {said:?}"
+    );
+
+    // And a plain open still says what it always said.
+    let (_d2, path2) = numbered_log("tail_status_plain", 3);
+    let mut ed = test_ed("");
+    ed.start_load(&path2).expect("open");
+    settle(&mut ed);
+    assert_eq!(ed.status_text().as_deref(), Some("Read 3 lines"));
+}
+
+/// A file shorter than a tail is shown whole, and an empty one is still a
+/// buffer — the awkward shapes, not special cases.
+#[test]
+fn a_tail_of_a_short_or_empty_file_is_whole() {
+    let (_d, path) = numbered_log("tail_short", 3);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    assert_eq!(lines(&ed), vec!["line 1", "line 2", "line 3"]);
+    assert!(ed.bs().tail.is_some(), "still a tail, just a short one");
+
+    let d = temp_dir("tail_empty");
+    let empty = d.0.join("empty.log");
+    fs::write(&empty, "").unwrap();
+    let mut ed = test_ed("");
+    ed.start_tail(&empty).expect("tail open");
+    settle(&mut ed);
+    assert_eq!(lines(&ed), vec![""], "an empty tail is one empty row");
+}
+
+/// A tail keeps its own buffers' state: opening a second file plainly must not
+/// leave the tail flag behind on it, or every later buffer would land at the
+/// bottom and refuse to be written.
+#[test]
+fn a_plain_open_clears_the_tail_flag() {
+    let (_d, path) = numbered_log("tail_clear", 5);
+    let (_d2, other) = numbered_log("tail_clear2", 5);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    assert!(ed.bs().tail.is_some());
+
+    ed.start_load(&other).expect("open");
+    settle(&mut ed);
+    assert!(
+        ed.bs().tail.is_none(),
+        "a plain load inherited the tail flag"
+    );
+    assert!(
+        !ed.bs().read_only,
+        "read-only is per open, and this open did not ask for it"
+    );
+}

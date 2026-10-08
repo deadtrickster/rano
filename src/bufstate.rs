@@ -70,6 +70,16 @@ pub struct BufferState {
     /// Nav, search and everything that only moves still work: that is the
     /// point of opening a file you will not edit.
     pub read_only: bool,
+    /// **This buffer is a tail of a file**: `-f`/`--follow` opened it at the
+    /// last few screens of a file that something else is writing (TODO.md §20).
+    ///
+    /// It remembers the size at open — §20.1's idea 2 — which is the line
+    /// between a row that can be numbered, styled and searched like a file's and
+    /// a row that is still arriving. `None` is an ordinary document.
+    ///
+    /// `pub(crate)` like [`Self::load`], for the same reason: it names a type
+    /// from a module the crate does not export.
+    pub(crate) tail: Option<crate::loader::Tail>,
     /// Horizontal scroll of the text window, in DISPLAY cols (E3/F2).
     /// Always 0 while soft wrap is on (lines wrap instead of scrolling).
     pub scroll_x: usize,
@@ -162,6 +172,7 @@ impl BufferState {
             search_matches: None,
             exec_job: None,
             read_only: false,
+            tail: None,
             scroll_x: 0,
             wrap_prefix: Vec::new(),
             wrap_rows: Vec::new(),

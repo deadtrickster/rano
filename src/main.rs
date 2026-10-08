@@ -31,6 +31,8 @@ struct Args {
     line: Option<usize>,
     col: Option<usize>,
     export: Option<export::Format>,
+    /// `-f`/`--follow`: open the first file at its tail, read-only (TODO.md §20).
+    follow: bool,
     help: bool,
     version: bool,
 }
@@ -81,6 +83,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "-c" | "--col" | "--column" => {
                 out.col = Some(parse_num("--column", &value("--column")?)?)
             }
+            "-f" | "--follow" => out.follow = true,
             "--export" => {
                 let v = value("--export")?;
                 out.export = Some(export::Format::parse(&v).ok_or_else(|| {
@@ -120,7 +123,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 
 impl Args {
     /// The first file: the one that opens current, and the one `--line`,
-    /// `--column` and `--export` act on.
+    /// `--column`, `--follow` and `--export` act on.
     fn file(&self) -> Option<&str> {
         self.files.first().map(String::as_str)
     }
@@ -131,7 +134,8 @@ usage: rano [options] [file...]
 
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
-                    (both apply to the first file)
+  -f, --follow      open at the tail: the last few screens, read-only
+                    (all three apply to the first file)
   file:LINE[:COL]   open that file at that position
   +LINE[,COL] file  the same, for the file after it
   -h, --help        this
@@ -225,7 +229,7 @@ fn main() {
     if !rest.is_empty() {
         cfg.multibuffer = true;
     }
-    if let Err(e) = run(buf, load, rest, pos, cfg) {
+    if let Err(e) = run(buf, load, rest, pos, args.follow, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -288,6 +292,7 @@ fn run(
     load: Option<PathBuf>,
     rest: Vec<(PathBuf, Option<Pos>)>,
     pos: Option<Pos>,
+    follow: bool,
     cfg: config::Config,
 ) -> io::Result<()> {
     // Raw mode, the alternate screen, bracketed paste and mouse buttons (the
@@ -318,14 +323,23 @@ fn run(
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.bs_mut().goto = pos;
-    if let Some(path) = load
-        && let Err(e) = ed.start_load(&path)
-    {
-        // The one load failure reported before a frame is drawn: there is
-        // nothing on screen yet to attach a status line to.
-        drop(terminal);
-        eprintln!("rano: cannot read {}: {}", path.display(), e);
-        std::process::exit(1);
+    if let Some(path) = load {
+        // `-f`/`--follow` opens at the TAIL: the last few screens read from the
+        // end of the file, read-only, landing at the bottom (TODO.md §20).
+        // Everything else about the open — the name, the language, the deferred
+        // buffers behind it, the frame — is the same call.
+        let started = if follow {
+            ed.start_tail(&path)
+        } else {
+            ed.start_load(&path)
+        };
+        if let Err(e) = started {
+            // The one load failure reported before a frame is drawn: there is
+            // nothing on screen yet to attach a status line to.
+            drop(terminal);
+            eprintln!("rano: cannot read {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
     }
     ed.add_deferred_buffers_at(&rest);
     let mut frame = render::Buffer::empty(Rect::default());
@@ -456,6 +470,21 @@ mod args_tests {
         let a = parse_args(&argv(&["main.rs", "--line", "42"])).expect("parse");
         assert_eq!(a.file(), Some("main.rs"));
         assert_eq!(a.line, Some(42));
+    }
+
+    #[test]
+    fn follow_is_a_flag_and_not_a_file() {
+        // `-f` takes no value, so the file after it is the FILE.
+        for args in [&["-f", "huge.log"][..], &["--follow", "huge.log"][..]] {
+            let a = parse_args(&argv(args)).expect("parse");
+            assert!(a.follow, "{args:?} did not set follow");
+            assert_eq!(a.file(), Some("huge.log"), "{args:?} ate the file");
+        }
+        // Off by default: a plain open must stay a plain open.
+        assert!(!parse_args(&argv(&["huge.log"])).expect("parse").follow);
+        // And in any order, like every other flag.
+        let a = parse_args(&argv(&["huge.log", "-f"])).expect("parse");
+        assert!(a.follow && a.file() == Some("huge.log"));
     }
 
     #[test]

@@ -2672,9 +2672,22 @@ case — `one_nl: rows=1 window=16 — got 2, reference 0`.
 ### 20.3 The increments, in order
 
 - [x] **A** — `tail_offset` + `read_from`, with the reference tests. `landed`
-- [ ] **B** — `LoadJob::spawn_from(path, offset)` (a seek before the existing
-      reader) and `-f`/`--follow` in `parse_args`, scrolling to the end when the
-      first batch lands.
+- [x] **B** — `LoadJob::spawn_from(path, offset)`: the seek before the existing
+      reader, with `spawn` kept as the `from = 0` case of it. `-f`/`--follow` in
+      `parse_args`, opening at `tail_offset` and landing at the bottom. `landed`
+      **Measured end to end, `rano -f` against `rano`, on one 27 MB log of
+      400 000 rows, release build, 4 s in: 4 MB RSS against 145 MB — 36×.** The
+      tail reads its last 200 rows and never touches the file's beginning, which
+      is the whole argument for the mode.
+      A tail opens **read-only** (§20.6) here rather than in a later increment,
+      because "it is like i should be able to tail anyfile right, which makes is
+      readonly btw" is one thought. Its status line says `Tailing — showing the
+      last N lines` and not `Read N lines`: N is the tail we asked for, not the
+      file's line count.
+      **Left to C, and visible in that measurement's output**: the gutter and the
+      status line number the tail from 1, so a 400 000-row file reads `Ln 200`.
+      §20.1's idea 3 is the increment that makes that number true — or that stops
+      claiming it until it is.
 - [ ] **C** — the background line count. Until it answers, the status line must
       not claim a line number it does not know: showing "Ln 1" for the file's
       line 4 000 000 is a lie, and a tail view without numbering is fine.

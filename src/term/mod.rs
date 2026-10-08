@@ -10,8 +10,13 @@
 //! It knows rows of text and bytes, and nothing about the editor or a session. The dependency
 //! runs one way: `crate::render` builds the rows, this writes them.
 
+pub mod compat;
+pub mod decode;
+pub mod event;
 pub mod features;
 pub mod graphics;
 pub mod links;
 
+pub use decode::{decode, decode_prefix, legacy_bytes};
+pub use event::{Event, KeyCode, KeyEvent, Mods, MouseButton, MouseEvent, MouseKind};
 pub use features::Features;

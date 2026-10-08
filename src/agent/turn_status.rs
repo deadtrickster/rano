@@ -269,6 +269,95 @@ mod tests {
     use super::*;
     use crate::agent::testing::role_of;
 
+    fn bar_text(p: &Prefill, cols: usize) -> String {
+        Line::new(bar(p, cols)).plain()
+    }
+
+    /// letibot `progress::there_is_no_rate_before_there_is_evidence_for_one`.
+    #[test]
+    fn there_is_no_rate_before_there_is_evidence_for_one() {
+        assert!(
+            Prefill {
+                total: 100,
+                cache: 100,
+                processed: 100,
+                time_ms: 0
+            }
+            .rate()
+            .is_none()
+        );
+        assert!(
+            Prefill {
+                total: 100,
+                cache: 0,
+                processed: 4,
+                time_ms: 10
+            }
+            .rate()
+            .is_none()
+        );
+    }
+
+    /// letibot `progress::the_moving_edge_has_sub_cell_resolution`: a 20-cell bar over a 40k
+    /// prompt moves one cell per 2k tokens, and at whole-cell resolution a bar that is
+    /// genuinely advancing looks frozen.
+    #[test]
+    fn the_moving_edge_has_sub_cell_resolution() {
+        let mk = |processed| Prefill {
+            total: 40_000,
+            cache: 0,
+            processed,
+            time_ms: 1_000,
+        };
+        let a = bar_text(&mk(10_000), 22);
+        let b = bar_text(&mk(10_300), 22);
+        assert_ne!(a, b, "300 tokens of a 40k prompt must move the bar");
+        assert_eq!(visible_width_of(&a), 22);
+        assert_eq!(visible_width_of(&b), 22);
+    }
+
+    /// letibot `progress::the_bar_is_exactly_the_requested_width_at_every_fraction`.
+    #[test]
+    fn the_bar_is_exactly_the_requested_width_at_every_fraction() {
+        for cache in [0u64, 1, 37, 99, 100] {
+            for processed in cache..=100 {
+                for w in [6usize, 10, 21, 40] {
+                    let p = Prefill {
+                        total: 100,
+                        cache,
+                        processed,
+                        time_ms: 100,
+                    };
+                    assert_eq!(
+                        Line::new(bar(&p, w)).width(),
+                        w,
+                        "cache {cache} processed {processed} w {w}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// letibot `progress::the_status_line_never_exceeds_its_width`.
+    #[test]
+    fn the_status_line_never_exceeds_its_width() {
+        let p = Prefill {
+            total: 41_233,
+            cache: 38_100,
+            processed: 39_900,
+            time_ms: 1_240,
+        };
+        for w in [12usize, 20, 30, 50, 80, 120, 200] {
+            let l = prefill_line(&p, w);
+            assert!(l.width() <= w, "{w}: {} cols {:?}", l.width(), l.plain());
+            assert!(l.plain().contains("prefill"), "{w}: {:?}", l.plain());
+        }
+    }
+
+    fn visible_width_of(s: &str) -> usize {
+        super::super::text::visible_width(s)
+    }
+
     fn busy(elapsed: u64, now: u64) -> TurnStatus {
         TurnStatus {
             busy: true,

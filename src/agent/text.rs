@@ -347,6 +347,30 @@ pub fn wrapped(s: &str, w: usize, r: Role) -> Vec<Line> {
 mod tests {
     use super::*;
 
+    /// letibot `progress::the_minutes_rung_says_expires_and_the_seconds_rungs_say_left`:
+    /// every rung is a number a person can act on — `expires in 5 min` is a sentence about a
+    /// wait, and `300s left` a number about a stopwatch.
+    #[test]
+    fn the_minutes_rung_says_expires_and_the_seconds_rungs_say_left() {
+        assert!(countdown(600_000).starts_with("expires in "), "600s");
+        assert!(countdown(120_000).starts_with("expires in "), "120s");
+        assert!(countdown(119_000).ends_with(" left"), "119s");
+        assert!(countdown(59_000).ends_with(" left"), "59s");
+    }
+
+    /// letibot `progress::compact_numbers_and_durations_read_at_a_glance`.
+    #[test]
+    fn compact_numbers_and_durations_read_at_a_glance() {
+        use super::super::header::thousands;
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(41_233), "41.2k");
+        assert_eq!(thousands(1_234_567), "1.23M");
+        assert_eq!(duration(340), "340ms");
+        assert_eq!(duration(3_400), "3.4s");
+        assert_eq!(duration(95_000), "1m35s");
+        assert_eq!(duration(3_700_000), "1h01m");
+    }
+
     /// letibot `sanitize::an_escape_sequence_goes_whole_and_never_leaves_its_body_behind`,
     /// with the C1 spellings: not one byte of a sequence's body is left as text, a lone
     /// control is a space, and the newlines stay.

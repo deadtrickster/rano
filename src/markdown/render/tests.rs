@@ -8,9 +8,10 @@
 //! columns, a list's indent — it asserts on the plain text exactly as before.
 
 use super::*;
-use crate::markdown::line::{MdLine, spans_width};
+use crate::markdown::line::{base, spans_width};
 use crate::markdown::parse::{IncrementalMarkdown, lex};
 use crate::markdown::testing::MARKDOWN;
+use crate::style::Attrs;
 
 fn opts() -> RenderOptions {
     RenderOptions::default()
@@ -23,28 +24,28 @@ fn bounded(limit: usize) -> RenderOptions {
     }
 }
 
-fn text(lines: &[MdLine]) -> Vec<String> {
-    lines.iter().map(MdLine::text).collect()
+fn text(lines: &[Line]) -> Vec<String> {
+    lines.iter().map(Line::plain).collect()
 }
 
-fn joined(lines: &[MdLine]) -> String {
+fn joined(lines: &[Line]) -> String {
     text(lines).join("\n")
 }
 
-fn spans(lines: &[MdLine]) -> impl Iterator<Item = &MdSpan> {
+fn spans(lines: &[Line]) -> impl Iterator<Item = &Span> {
     lines.iter().flat_map(|l| l.spans.iter())
 }
 
-fn has_role(lines: &[MdLine], r: Role) -> bool {
-    spans(lines).any(|s| s.role == r)
+fn has_role(lines: &[Line], r: Role) -> bool {
+    spans(lines).any(|s| s.style.top() == r)
 }
 
 /// The spans whose text is exactly `t`.
-fn span_of<'a>(lines: &'a [MdLine], t: &str) -> Vec<&'a MdSpan> {
-    spans(lines).filter(|s| s.text == t).collect()
+fn span_of<'a>(lines: &'a [Line], t: &str) -> Vec<&'a Span> {
+    spans(lines).filter(|s| s.content == t).collect()
 }
 
-fn render(src: &str, width: usize) -> Vec<MdLine> {
+fn render(src: &str, width: usize) -> Vec<Line> {
     lex(src)
         .iter()
         .flat_map(|b| render_block(b, width, &opts()))
@@ -137,7 +138,7 @@ fn the_register_is_on_every_row() {
         max_block_lines: 4,
     };
     let lines = render_blocks(&lex(MARKDOWN), 72, &o);
-    assert!(lines.iter().all(|l| l.base == Some(Role::Reasoning)));
+    assert!(lines.iter().all(|l| base(l) == Some(Role::Reasoning)));
 }
 
 #[test]
@@ -190,11 +191,11 @@ fn the_renderer_sees_styles_not_markers() {
         },
     ];
     let s = runs_spans(&runs, Role::Plain);
-    let l = [MdLine::new(s)];
+    let l = [Line::new(s)];
     assert_eq!(joined(&l), "plain bold and code");
-    assert!(span_of(&l, "bold")[0].attrs.bold);
-    assert_eq!(span_of(&l, "code")[0].role, Role::Code);
-    assert!(!span_of(&l, "plain ")[0].attrs.bold);
+    assert!(span_of(&l, "bold")[0].style.attrs.contains(Attrs::BOLD));
+    assert_eq!(span_of(&l, "code")[0].style.top(), Role::Code);
+    assert!(!span_of(&l, "plain ")[0].style.attrs.contains(Attrs::BOLD));
 }
 
 #[test]
@@ -345,10 +346,10 @@ mod tables {
     #[test]
     fn a_bullet_is_faint_and_a_number_is_not() {
         let l = render("- a\n", 80);
-        assert_eq!(span_of(&l, "· ")[0].role, Role::Faint);
+        assert_eq!(span_of(&l, "· ")[0].style.top(), Role::Faint);
         let l = render("1. a\n", 80);
-        assert!(l[0].spans[0].text.starts_with("1. "), "{l:?}");
-        assert_eq!(l[0].spans[0].role, Role::Plain);
+        assert!(l[0].spans[0].content.starts_with("1. "), "{l:?}");
+        assert_eq!(l[0].spans[0].style.top(), Role::Plain);
     }
 
     #[test]
@@ -398,11 +399,11 @@ mod tables {
             "header and first row disagree:\n{screen}"
         );
         for l in &lines {
-            assert!(l.width() <= 120, "{} columns: {:?}", l.width(), l.text());
+            assert!(l.width() <= 120, "{} columns: {:?}", l.width(), l.plain());
         }
         // The header is strong and the frame is faint.
-        assert_eq!(span_of(&lines, "branch")[0].role, Role::Strong);
-        assert_eq!(span_of(&lines, " │ ")[0].role, Role::Faint);
+        assert_eq!(span_of(&lines, "branch")[0].style.top(), Role::Strong);
+        assert_eq!(span_of(&lines, " │ ")[0].style.top(), Role::Faint);
     }
 
     #[test]
@@ -410,7 +411,7 @@ mod tables {
         let lines = render(BOARD, 60);
         let screen = joined(&lines);
         for l in &lines {
-            assert!(l.width() <= 60, "{} columns: {:?}", l.width(), l.text());
+            assert!(l.width() <= 60, "{} columns: {:?}", l.width(), l.plain());
         }
         // The long status text is wrapped, not cut: every word still there.
         assert!(screen.contains("harnessd"), "{screen}");
@@ -481,9 +482,15 @@ mod inline_render {
     fn markers_are_styles_on_the_screen_and_not_characters() {
         let l = render("plain **bold** and `code` and ~~struck~~ end\n", 60);
         assert_eq!(joined(&l), "plain bold and code and struck end");
-        assert!(span_of(&l, "bold")[0].attrs.bold, "{l:?}");
-        assert_eq!(span_of(&l, "code")[0].role, Role::Code, "{l:?}");
-        assert!(span_of(&l, "struck")[0].attrs.struck, "{l:?}");
+        assert!(
+            span_of(&l, "bold")[0].style.attrs.contains(Attrs::BOLD),
+            "{l:?}"
+        );
+        assert_eq!(span_of(&l, "code")[0].style.top(), Role::Code, "{l:?}");
+        assert!(
+            span_of(&l, "struck")[0].style.attrs.contains(STRUCK),
+            "{l:?}"
+        );
     }
 
     /// A `*` that is not emphasis is text, on the screen as in the model.
@@ -491,7 +498,10 @@ mod inline_render {
     fn a_literal_asterisk_survives_the_renderer() {
         let l = render("2 * 3 = 6\n", 40);
         assert_eq!(joined(&l), "2 * 3 = 6");
-        assert!(!spans(&l).any(|s| s.attrs.italic), "{l:?}");
+        assert!(
+            !spans(&l).any(|s| s.style.attrs.contains(Attrs::ITALIC)),
+            "{l:?}"
+        );
     }
 
     /// Emphasis inside a container keeps the container: bold in a quote is
@@ -500,13 +510,13 @@ mod inline_render {
     fn inline_styles_compose_with_their_block() {
         let l = render("> a **b** c\n", 40);
         let b = span_of(&l, "b")[0];
-        assert_eq!(b.role, Role::Faint);
-        assert!(b.attrs.bold);
-        assert_eq!(span_of(&l, " c")[0].role, Role::Faint);
+        assert_eq!(b.style.top(), Role::Faint);
+        assert!(b.style.attrs.contains(Attrs::BOLD));
+        assert_eq!(span_of(&l, " c")[0].style.top(), Role::Faint);
         let l = render("## the `x` thing\n", 40);
-        assert_eq!(span_of(&l, "x")[0].role, Role::Code);
-        assert!(span_of(&l, "x")[0].attrs.bold);
-        assert_eq!(span_of(&l, " thing")[0].role, Role::Subheading);
+        assert_eq!(span_of(&l, "x")[0].style.top(), Role::Code);
+        assert!(span_of(&l, "x")[0].style.attrs.contains(Attrs::BOLD));
+        assert_eq!(span_of(&l, " thing")[0].style.top(), Role::Subheading);
     }
 
     /// Heading levels are different roles, and the hashes stay, faint.
@@ -519,8 +529,8 @@ mod inline_render {
         ] {
             let l = render(src, 40);
             assert_eq!(joined(&l), src.trim_end());
-            assert_eq!(span_of(&l, "a")[0].role, role);
-            assert_eq!(l[0].spans[0].role, Role::Faint);
+            assert_eq!(span_of(&l, "a")[0].style.top(), role);
+            assert_eq!(l[0].spans[0].style.top(), Role::Faint);
         }
     }
 
@@ -582,7 +592,10 @@ done
             "the level marker is drawn: {text}"
         );
         // The markers that did not reach the screen are meanings that did.
-        assert!(spans(&lines).any(|s| s.attrs.bold), "nothing came out bold");
+        assert!(
+            spans(&lines).any(|s| s.style.attrs.contains(Attrs::BOLD)),
+            "nothing came out bold"
+        );
         assert!(has_role(&lines, Role::Code), "nothing came out as code");
     }
 
@@ -604,13 +617,16 @@ done
                 "item {n} kept its markers:\n{text}"
             );
         }
-        assert!(spans(&lines).any(|s| s.attrs.bold), "nothing came out bold");
+        assert!(
+            spans(&lines).any(|s| s.style.attrs.contains(Attrs::BOLD)),
+            "nothing came out bold"
+        );
         assert!(has_role(&lines, Role::Code), "nothing came out as code");
         // Most of the message is not code: the swallowed-message bug made it all
         // code-coloured.
         let code_cols: usize = spans(&lines)
-            .filter(|s| s.role == Role::Code)
-            .map(|s| s.text.len())
+            .filter(|s| s.style.top() == Role::Code)
+            .map(|s| s.content.len())
             .sum();
         assert!(code_cols * 4 < text.len(), "{code_cols} of {}", text.len());
         // Every item is still on the screen, and the last line of the 100-line
@@ -698,7 +714,7 @@ mod a_fence_is_coloured_only_if_it_names_a_language {
 mod code_fences_are_coloured_by_rano {
     use super::*;
 
-    fn painted(fence: &str, body: &str) -> Vec<MdLine> {
+    fn painted(fence: &str, body: &str) -> Vec<Line> {
         let src = format!("```{fence}\n{body}```\n");
         let b = lex(&src);
         let Some(Block::Code { .. }) = b.first() else {
@@ -707,8 +723,8 @@ mod code_fences_are_coloured_by_rano {
         render_block(&b[0], 72, &opts())
     }
 
-    fn syntax(lines: &[MdLine]) -> bool {
-        spans(lines).any(|s| !matches!(s.role, Role::Plain | Role::Faint))
+    fn syntax(lines: &[Line]) -> bool {
+        spans(lines).any(|s| !matches!(s.style.top(), Role::Plain | Role::Faint))
     }
 
     /// **The whole point of R18.1.** These languages were rendered plain by the
@@ -777,7 +793,7 @@ mod code_fences_are_coloured_by_rano {
     fn a_bare_fence_draws_a_rule_with_no_label_in_it() {
         let out = painted("", "fn main() {}\n");
         assert_eq!(joined(&out), "┌─\n│ fn main() {}\n└─");
-        assert_eq!(out[0].spans[0].role, Role::Faint);
+        assert_eq!(out[0].spans[0].style.top(), Role::Faint);
     }
 
     /// **Structure rather than shape.** These are the cases letibot's
@@ -791,13 +807,15 @@ mod code_fences_are_coloured_by_rano {
         // lifetime from a character literal, and `str` is a type.
         let out = painted("rust", "fn f<'a>(x: &'a str) -> &'a str { x }\n");
         assert!(
-            span_of(&out, "a").iter().any(|s| s.role == Role::TypeName),
+            span_of(&out, "a")
+                .iter()
+                .any(|s| s.style.top() == Role::TypeName),
             "the lifetime is not a type: {out:?}"
         );
         assert!(
             span_of(&out, "str")
                 .iter()
-                .any(|s| s.role == Role::TypeName),
+                .any(|s| s.style.top() == Role::TypeName),
             "`str` is not a type: {out:?}"
         );
         assert!(
@@ -822,7 +840,8 @@ mod code_fences_are_coloured_by_rano {
         // **A Python decorator is a function.**
         let out = painted("python", "@decorator\ndef f():\n    pass\n");
         assert!(
-            spans(&out).any(|s| s.role == Role::FuncName && s.text.starts_with("@decorator")),
+            spans(&out)
+                .any(|s| s.style.top() == Role::FuncName && s.content.starts_with("@decorator")),
             "not a function: {out:?}"
         );
     }
@@ -834,7 +853,7 @@ mod code_fences_are_coloured_by_rano {
         let out = painted("rust", "/* one\ntwo\nthree */\nlet x = 1;\n");
         for (i, l) in out.iter().enumerate().skip(1).take(3) {
             assert!(
-                l.spans.iter().any(|s| s.role == Role::Comment),
+                l.spans.iter().any(|s| s.style.top() == Role::Comment),
                 "line {i} lost its colour: {l:?}"
             );
         }

@@ -2699,12 +2699,16 @@ A tailed file that is not on screen keeps:
 
 and keeps **no** decoded rows, no wrap geometry, no highlight grid, no parse tree.
 
-**Block heuristics** are the cheap half: a row is classified from its own bytes —
-does it start a block, continue one, or end one — with no parse and no state
-beyond the open block. For a log that is enough to know where a stack trace
-begins and ends, where a timestamped record starts, and where a blank line
-separates. Cost is one pass over the new bytes, at read time, with nothing
-retained but the boundaries.
+**Block heuristics** are the cheap half, and they are ONE RULE: **a row that
+starts with whitespace continues the block above it; anything else starts a new
+one.** Cost is a look at the first byte of each row, with nothing retained but the
+boundaries.
+
+That is deliberately not a format registry. It is enough for the two things that
+matter — a stack trace's frames are indented, so they group under the line that
+raised them; a log's records are not, so each stands alone — and it needs no
+knowledge of any particular logger. A rule per format would be a rule per file,
+and the first one written from a sample of one is wrong for the second.
 
 That is what makes the pane affordable: when you look at it, it has structure
 already, and rendering decodes only the rows on screen.
@@ -2716,10 +2720,11 @@ it costs rows; it is multi-row as ONE logical block, so styling each row
 separately is wrong; and when tailed it may be half-written, so the top frame you
 can see is not the first one.
 
-Heuristics handle it without a parser: `^\s+(at |\s+file |\s+\.\.\.)` and friends
-continue a block, a line that does not continue it ends the block, and a block
-ends at the first line that does not match. The partial case is the same rule —
-the block is open and unsettled until its end line arrives.
+The one rule in §20.4 handles it: the frames are indented, so they continue the
+line that raised them, and the block ends at the first line that is not indented.
+No `at `, no `File "`, no language — those would be three rules for three
+languages and wrong for the fourth. The partial case is the same rule: the block
+is open, and unsettled, until a row that is not indented arrives.
 
 **Lazily** is the operative word: the block boundary is computed when the bytes
 arrive, and the *rendering* of it (folding, colouring the frames, marking the
@@ -2747,20 +2752,17 @@ title already has a modified flag, so "VIEW" belongs beside it.
 ### 20.7 Which files default to this mode
 
 *"the usual logs must be put to this mode by default"* — so a predicate, in
-`syntax::lang_for`'s shadow (name and path, never content):
+`syntax::lang_for`'s shadow, and it is **the file name ending in `.log`. That is
+the whole rule.**
 
-- the file name ends in `.log`, which is what `/home/dead/logs/` is full of;
-- **or** the path is under `/var/log/`, where the names are `syslog`, `messages`,
-  `auth.log` and `kern.log` — half of which have no extension at all.
+No path rules, no content sniff, no format list. A first version of this section
+had `/var/log/` as a second rule and was written from one `ls` of one directory —
+which is how a predicate acquires a case per file its author happened to see, and
+then a bug per file they did not. `-f`/`--follow` is the escape hatch from the
+rule; `--edit` the escape hatch from the mode.
 
-**Deliberately NOT a content sniff.** Deciding "this looks like a log" from bytes
-means a source file with a timestamp in a comment opens read-only, and being
-wrong in that direction is much worse than not tailing a log you asked for
-explicitly. `-f`/`--follow` is the escape hatch from the predicate, and
-`--edit`/`--no-follow` the escape hatch from it.
-
-This is the increment I would do LAST of the three, despite being the smallest,
-because it is the one that changes behaviour for files nobody asked about.
+This is the increment I would do LAST, because it is the one that changes
+behaviour for files nobody asked about.
 
 ### 20.8 Docker output, and why it is a different problem
 
@@ -2775,9 +2777,8 @@ Two shapes, and only one of them is a file:
   big-endian length) is what `docker logs` and `attach` speak over the API. It is
   **not** what is in the file, so it is not a file-format problem.
 
-So the docker case is a **reader**: unwrap the `log` field and show that, with the
-stream and time as the record's own fields — the same "block heuristic" shape as
-§20.5, on a format whose per-line structure is known exactly. It is a separate
-increment, and I would want a real `*-json.log` in hand before writing it rather
-than a remembered schema. There is no readable one on this machine to check
-against.
+So the docker case would be a **reader** that unwraps the `log` field. **Not
+designed here, and not started**: there is no `*-json.log` on this machine to read
+the schema from, and writing it from memory is how the schema above went wrong on
+its first draft. Noted so the shape is not a surprise; built when there is a file
+in hand.

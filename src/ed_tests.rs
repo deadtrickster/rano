@@ -3956,6 +3956,93 @@ fn a_tail_is_read_only() {
     assert!(said.contains("Read-only"), "it did not say why: {said:?}");
 }
 
+/// **A tail follows.** A `-f` view of a file something else is writing shows the
+/// new lines as they arrive, in order, without dropping any — which is what
+/// makes `-f` a follow rather than a snapshot (TODO.md §20.3 D).
+#[test]
+fn a_tail_follows_the_growth() {
+    use std::io::Write as _;
+    let (_d, path) = numbered_log("tail_follow", 5);
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    assert_eq!(lines(&ed).len(), 5);
+    assert_eq!(ed.bs().cursor.row, 4, "it opened at the bottom");
+
+    // Something else appends, a row at a time.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
+    writeln!(f, "line 6").expect("write");
+    f.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lines(&ed).len() < 6 {
+        assert!(Instant::now() < deadline, "the growth never arrived");
+        ed.load_poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // **And the view came with it**, because it was at the end: a follow that
+    // left the scroll behind would show new lines off the bottom of the screen
+    // for ever.
+    ed.tick(Instant::now());
+    assert_eq!(ed.bs().cursor.row, 5, "the view did not follow the end");
+    assert_eq!(lines(&ed).last().unwrap(), "line 6");
+
+    // A burst arrives whole and in order.
+    writeln!(f, "line 7").expect("write");
+    writeln!(f, "line 8").expect("write");
+    f.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lines(&ed).len() < 8 {
+        assert!(Instant::now() < deadline, "the burst never arrived");
+        ed.load_poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(lines(&ed).last().unwrap(), "line 8");
+    assert_eq!(ed.bs().cursor.row, 7);
+}
+
+/// **A follow does not yank a reader.** If the view is not at the end, growth
+/// must not pull it there — the user is reading something, and following a file
+/// is not a licence to move their screen. The rows still arrive.
+#[test]
+fn a_follow_leaves_a_scrolled_away_view_alone() {
+    use std::io::Write as _;
+    let n = crate::loader::TAIL_ROWS + 1000; // more than a screen, so it can scroll
+    let want = crate::loader::TAIL_ROWS + 1; // the tail, plus the one that arrives
+    let (_d, path) = numbered_log("tail_follow_scroll", n);
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    ed.tick(Instant::now());
+    assert_eq!(lines(&ed).len(), crate::loader::TAIL_ROWS);
+    // The user scrolls back to read the top of the tail.
+    {
+        let bs = ed.bs_mut();
+        bs.scroll = 0;
+        bs.cursor = Pos { row: 0, col: 0 };
+    }
+
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
+    writeln!(f, "line {}", n + 1).expect("write");
+    f.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lines(&ed).len() < want {
+        assert!(Instant::now() < deadline, "the growth never arrived");
+        ed.load_poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(lines(&ed).last().unwrap(), &format!("line {}", n + 1));
+    assert_eq!(ed.bs().scroll, 0, "the view was yanked to the bottom");
+    assert_eq!(ed.bs().cursor.row, 0, "the cursor was moved");
+}
+
 /// A plain open is NOT a tail: the whole file, editable, from row 1. The flag
 /// has to be the only thing that decides this, or `-f` would be a mode.
 #[test]

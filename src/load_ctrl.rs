@@ -45,6 +45,15 @@ impl Editor {
         Ok(())
     }
 
+    /// [`Self::start_load_from`], **and keep reading the file as it grows** —
+    /// `-f`/`--follow` (TODO.md §20.3 D). Same load, same buffer, same
+    /// everything; the reader simply does not stop at the end.
+    pub fn start_follow_from(&mut self, path: &Path, from: u64) -> std::io::Result<()> {
+        let job = LoadJob::spawn_follow_from(path.to_path_buf(), from)?;
+        self.begin_load(path, job);
+        Ok(())
+    }
+
     /// The buffer's half of opening a file: name it, give it the one row a
     /// `Buffer` always holds, hand it the job, and invalidate what a new file
     /// invalidates.
@@ -88,27 +97,31 @@ impl Editor {
         self.preview_if_picture();
     }
 
-    /// Open `path` as a tail: the last few screens, read from the end, and
-    /// read-only — `-f`/`--follow`, and one day a `.log` name (TODO.md §20).
+    /// Open `path` as a tail: the last few screens, read from the end, read-only,
+    /// and followed as it grows — `-f`/`--follow`, and one day a `.log` name
+    /// (TODO.md §20).
     ///
-    /// Two things are decided here and nowhere else:
+    /// Three things are decided here and nowhere else:
     ///
     /// - **Where to start reading.** [`tail_offset`] scans *backwards*, so a
     ///   2 GiB log opens showing its last screens for a read of a few hundred
-    ///   KiB rather than the whole file. That is the increment this one is for.
+    ///   KiB rather than the whole file.
+    /// - **That it follows.** The reader does not stop when it reaches the end
+    ///   (§20.3 D). A log is a file somebody is still writing; a view that froze
+    ///   at the instant it was opened would be a snapshot nobody asked for.
     /// - **That it is a view.** The operator's rule, and the reason is at the
     ///   keystroke (§20.6): a tailed file is one something else is writing, so
     ///   an edit that could never be saved is work lost silently.
     ///
-    /// `size_at_open` is recorded rather than used, because the two things it
-    /// decides — which rows are still arriving (§20.3 D) and which may be styled
-    /// (§20.3 E) — are later increments. It is remembered now so that opening a
-    /// tail and following one are not two different notions of "the file".
+    /// `size_at_open` is recorded rather than used: §20.3 E is its reader, and
+    /// it is the line between "this row was here before us and can be styled
+    /// like a file's" and "this row is still arriving". Remembered now so that
+    /// opening a tail and following one are not two notions of "the file".
     pub fn start_tail(&mut self, path: &Path) -> std::io::Result<()> {
         let mut file = std::fs::File::open(path)?;
         let size = file.metadata()?.len();
         let from = tail_offset(&mut file, size, TAIL_ROWS, TAIL_WINDOW)?;
-        self.start_load_from(path, from)?;
+        self.start_follow_from(path, from)?;
         {
             let bs = self.bs_mut();
             bs.tail = Some(Tail { size_at_open: size });
@@ -191,10 +204,23 @@ impl Editor {
         self.load_saturated = matches!(outcome, Adopted::Rows(_)) && rows.len() >= budget;
         let mut dirty = !rows.is_empty();
         if !rows.is_empty() {
+            let text_h = self.text_h;
             let bs = self.bs_mut();
             // An append, not an edit: tell the wrap table it can extend from
             // where it already is rather than re-measuring the whole file.
             let was = bs.buf.row_count();
+            // **The view holds the end if it already had it.** A tail that
+            // yanked the scroll back on every arriving line would make reading
+            // the last few hundred lines of a busy log impossible; one that
+            // never moved would stop being a follow at all. So: stay at the
+            // bottom if the bottom was on screen, and otherwise leave the view
+            // exactly where the user put it.
+            //
+            // Compared in rows, and `scroll` counts VISUAL rows when wrap is
+            // on — the same number for a log, whose rows wrap only if it has
+            // very long ones, and being wrong costs one frame's scroll
+            // position rather than a wrong row.
+            let at_end = was <= text_h || bs.scroll + text_h >= was;
             // The buffer starts with one empty row. The first batch replaces
             // it rather than following it, so a file does not appear to begin
             // with a blank line.
@@ -211,16 +237,7 @@ impl Editor {
                     was.min(bs.wrap_rows.len())
                 },
             );
-            // A tail lands at the BOTTOM, and goes on doing so as it grows: the
-            // last row is what the eye wants at a tail, and the scroll that
-            // follows the cursor (`adjust_scroll`, in `tick`) then puts the end
-            // of what has arrived at the foot of the screen.
-            //
-            // In this increment the reader delivers the tail once, so this is
-            // "open showing the end". It is written as a rule about every batch
-            // and not as a one-shot, because that is the same line that makes
-            // following work when the reader keeps delivering (TODO.md §20.3 D).
-            if bs.tail.is_some() {
+            if bs.tail.is_some() && at_end {
                 bs.cursor = crate::buffer::Pos {
                     row: bs.buf.row_count().saturating_sub(1),
                     col: 0,
@@ -305,6 +322,32 @@ impl Editor {
                 }
                 dirty = true;
             }
+            Adopted::CaughtUp { crlf, .. } => {
+                self.load_saturated = false;
+                self.diag_dirty = true;
+                let rows = {
+                    let bs = self.bs_mut();
+                    // **`bs.load` stays.** Taking the job away is exactly what
+                    // would stop the following; what changes is that the job
+                    // reports `caught_up`, so nothing treats it as a read in
+                    // flight (`loading`, `loading_text`, `next_wakeup`).
+                    bs.buf.crlf = crlf;
+                    if bs.buf.rows_is_empty() {
+                        bs.buf.push_row(Vec::new());
+                    }
+                    bs.buf.row_count()
+                };
+                // **Not "Read N lines".** `rows` here is the tail we asked for,
+                // and the file's own line count is the background scan's
+                // (`BufferState::line_number`), not this. Saying 200 for a
+                // 400 000-line file is the lie §20.3 C exists to remove.
+                self.flash(&format!(
+                    "Tailing — showing the last {} line{}",
+                    rows,
+                    crate::editor::plural(rows)
+                ));
+                dirty = true;
+            }
             Adopted::Failed(e) => {
                 self.load_saturated = false;
                 self.bs_mut().load = None;
@@ -315,11 +358,14 @@ impl Editor {
         dirty
     }
 
-    /// Whether a load is in flight. Used by the loop to keep adopting, and by
-    /// the status line to say so rather than looking frozen — and by a host
-    /// that opened a file and wants to know whether its text has all arrived.
+    /// Whether the buffer's text is still arriving — and a follower that has
+    /// read everything the file had answers **false**, because there is nothing
+    /// in flight: the view is complete and something else may or may not write
+    /// more to it. A host that asked "has the text all arrived" wants that
+    /// answer, and it is what keeps the loop's wait at the idle cadence rather
+    /// than at the loading one (see `next_wakeup`).
     pub fn loading(&self) -> bool {
-        self.bs().load.is_some()
+        self.bs().load.as_ref().is_some_and(|j| !j.caught_up())
     }
 
     /// The status-line text for a load in flight, or `None`.
@@ -329,6 +375,11 @@ impl Editor {
     /// frame is confusing, "reading huge.log" is not.
     pub(crate) fn loading_text(&self) -> Option<String> {
         let job = self.bs().load.as_ref()?;
+        // A follower with nothing left to read is not a load in flight, so it
+        // does not get to say "Reading…" over every other status it outranks.
+        if job.caught_up() {
+            return None;
+        }
         Some(format!(
             "Reading… {} line{} so far",
             job.rows_read,

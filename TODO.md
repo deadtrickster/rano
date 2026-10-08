@@ -2704,9 +2704,25 @@ case — `one_nl: rows=1 window=16 — got 2, reference 0`.
       Cancelled, the scan reports `Stopped` and installs nothing: a partial count
       stated as the file's line count is a wrong number said confidently, which
       is worse than the blank gutter it replaces.
-- [ ] **D** — follow. Poll `size()`, read the growth, append. A trailing partial
-      line is **held back** until its newline arrives, which is what makes
-      "settled" a fact rather than a guess.
+- [x] **D** — follow: the reader does not stop at the end of the file, so the
+      rows `-f` opened on keep arriving. `LoadJob::spawn_follow_from` is the
+      same reader with one branch changed — at the end it waits and looks again,
+      and it says `CaughtUp` once instead of `Done` — and the whole of "the file
+      has finished writing this row" is that **`pending` is never flushed in
+      follow mode**: a row with no newline after it is not a row, so half a
+      stack trace is never shown as if it were whole (§20.5).
+      **The view holds the end if it already had it** and otherwise stays exactly
+      where the user put it: following is not a licence to move the reader's
+      screen, and a follow that never moved would stop being one.
+      `LoadJob::caught_up` is what keeps a follower with nothing to do from
+      holding the frame at the loading cadence and from saying "Reading…" over
+      every other status — there is nothing in flight, and `loading()` says so.
+      `landed`
+      **Measured**: a follower with nothing to do costs **0.0% CPU over 33 s**
+      (one read per 100 ms against the page cache, under what `ps` resolves) and
+      5.6 MB RSS. The first version of this showed NOTHING for any growth
+      smaller than `BATCH`: the batch was flushed only when full or at the end of
+      the file, and a follower has no end of file.
 - [ ] **E** — settle-before-styling: no highlight below `size_at_open`, none for
       an unsettled row, and the first style pass for a settled block happens once
       rather than per append.

@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 
 /// Read granularity. One page-cache-friendly read, and enough rows to fill a
 /// viewport several times over in the common log case.
@@ -106,7 +107,15 @@ pub enum LoadMsg {
     Rows(Vec<Vec<char>>),
     /// The end of the file. Carries whether it used CRLF, decided by the same
     /// pass that split the rows (a second scan would be a second full read).
+    ///
+    /// Sent once by a reading job and never by a following one: a follower has
+    /// no end, and this would be a message about a file that has one.
     Done { crlf: bool },
+    /// **Everything that exists has been read** — sent once by a follower when
+    /// it first reaches the end, and never by a plain reader (for which that is
+    /// `Done`). The rows in the buffer are settled at this moment; what arrives
+    /// after it is the file growing.
+    CaughtUp { crlf: bool },
     /// The read failed: unreadable, or not UTF-8. A message rather than an
     /// `eprintln!`, so it can become a status line instead of vanishing into a
     /// thread nobody is reading.
@@ -122,6 +131,9 @@ pub enum Adopted {
     Rows(usize),
     /// Rows were appended and the read finished.
     Finished { rows: usize, crlf: bool },
+    /// Rows were appended and the follower has read everything that exists; the
+    /// job is NOT over — more will arrive, which is what following means.
+    CaughtUp { rows: usize, crlf: bool },
     /// The read failed; the string is for the status line.
     Failed(String),
     /// The reader decided the encoding before any row arrived.
@@ -136,6 +148,13 @@ pub struct LoadJob {
     cancel: Arc<AtomicBool>,
     /// Set when `Done` or `Failed` has been seen, so `poll` stops asking.
     done: bool,
+    /// Set when `CaughtUp` has been seen: this job is a follower that has read
+    /// everything the file had, and is waiting for it to grow.
+    ///
+    /// It is what tells "a read in flight" (a frozen-looking screen) apart from
+    /// "a follower with nothing to do" (an ordinary, finished view), which are
+    /// the same `Some(job)` in [`crate::BufferState::load`].
+    caught_up: bool,
     /// Rows handed out so far, for the status line.
     pub rows_read: usize,
     /// The encoding the reader decided, once it has. `None` until the first
@@ -162,6 +181,21 @@ impl LoadJob {
     /// byte-order mark is a mark and is skipped, and at a tail offset the same
     /// three bytes are content.
     pub fn spawn_from(path: PathBuf, from: u64) -> io::Result<Self> {
+        Self::open(path, from, false)
+    }
+
+    /// Start reading `path` from `from` **and keep reading it as it grows** —
+    /// `-f`/`--follow` (TODO.md §20.3 D).
+    ///
+    /// The reader is the same one, with two differences that are the whole of
+    /// following: at the end of the file it waits and looks again instead of
+    /// finishing, and it says [`Adopted::CaughtUp`] once when it first gets
+    /// there rather than [`Adopted::Finished`].
+    pub fn spawn_follow_from(path: PathBuf, from: u64) -> io::Result<Self> {
+        Self::open(path, from, true)
+    }
+
+    fn open(path: PathBuf, from: u64, follow: bool) -> io::Result<Self> {
         // Open here, on the caller's thread: a missing or unreadable file is
         // the caller's problem to report *now*, not a message that arrives
         // after a frame has already been drawn.
@@ -172,14 +206,24 @@ impl LoadJob {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let c = Arc::clone(&cancel);
-        std::thread::spawn(move || read_all(file, from, &tx, &c));
+        std::thread::spawn(move || read_all(file, from, follow, &tx, &c));
         Ok(Self {
             rx,
             cancel,
             done: false,
+            caught_up: false,
             rows_read: 0,
             encoding: None,
         })
+    }
+
+    /// Whether this job is a follower that has read everything the file had.
+    ///
+    /// A follower with nothing to do is a finished view, not a read in flight:
+    /// it must not hold the frame at [`crate::host`]'s loading cadence, and it
+    /// must not keep saying "Reading…" over the status line for ever.
+    pub fn caught_up(&self) -> bool {
+        self.caught_up
     }
 
     /// Append at most [`ADOPT_BUDGET`] rows to `out`. **Never blocks.**
@@ -222,6 +266,14 @@ impl LoadJob {
                     let took = out.len() - before;
                     self.rows_read += took;
                     return Adopted::Finished { rows: took, crlf };
+                }
+                Ok(LoadMsg::CaughtUp { crlf }) => {
+                    // NOT done: everything so far has been read, and the point
+                    // of a follower is that there is more to come.
+                    self.caught_up = true;
+                    let took = out.len() - before;
+                    self.rows_read += took;
+                    return Adopted::CaughtUp { rows: took, crlf };
                 }
                 Ok(LoadMsg::Failed(e)) => {
                     self.done = true;
@@ -361,6 +413,31 @@ pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// How long a follower waits at the end of the file before looking again.
+///
+/// A poll rather than an inotify watch, deliberately: one syscall per tenth of
+/// a second costs nothing next to a frame, and it does not need a descriptor, a
+/// platform, or a story for the case where the file is replaced rather than
+/// appended to. `tail -f` looks cleverer and is the same mechanism underneath —
+/// including the one consequence worth naming: **a file that is replaced rather
+/// than appended to is not noticed**, because the descriptor is still the old
+/// one. (`tail -F` follows the NAME; that is a different feature and is not
+/// this one.)
+const FOLLOW_SLEEP: Duration = Duration::from_millis(100);
+
+/// Send `batch` as a `Rows` message, leaving it empty. Returns whether the loop
+/// it was sent to is still there.
+///
+/// A separate function because there are three moments to send: the batch is
+/// full, and — for a follower — the end of the file was reached, which is the
+/// one a plain read does not have.
+fn send_batch(tx: &mpsc::Sender<LoadMsg>, batch: &mut Vec<Vec<char>>) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    tx.send(LoadMsg::Rows(std::mem::take(batch))).is_ok()
+}
+
 /// The reader thread: one pass, decoding rows as their newlines arrive.
 ///
 /// It never re-reads and never holds the whole file: `pending` is one partial
@@ -369,7 +446,20 @@ pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
 /// `from` is where the file was positioned before the thread started, and it is
 /// the only difference between reading a file and reading its tail: the loop is
 /// the same, and so is every message it sends.
-fn read_all(mut file: File, from: u64, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
+///
+/// `follow` is the second difference, and it is two lines of it: at the end of
+/// the file a follower waits and looks again instead of finishing, and it says
+/// `CaughtUp` once instead of `Done`. **`pending` is deliberately NOT flushed in
+/// follow mode** — a row the file has not finished writing is not a row, and
+/// emitting it would put half a stack trace on screen as if it were whole
+/// (TODO.md §20.5) and give §20.3 E a row to style that is about to change.
+fn read_all(
+    mut file: File,
+    from: u64,
+    follow: bool,
+    tx: &mpsc::Sender<LoadMsg>,
+    cancel: &AtomicBool,
+) {
     use crate::encoding::{self, Encoding, Scope};
     let mut buf = vec![0u8; CHUNK];
     let mut pending: Vec<u8> = Vec::new();
@@ -381,12 +471,51 @@ fn read_all(mut file: File, from: u64, tx: &mpsc::Sender<LoadMsg>, cancel: &Atom
     let mut encoding: Option<Encoding> = None;
     let mut first = true;
     let mut first_chunk_bom = false;
+    let mut said_caught_up = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
         let n = match file.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                if !follow {
+                    break;
+                }
+                // **Flush the whole rows FIRST** — before the message that says
+                // this is all of them, and before waiting.
+                //
+                // A follower never reaches the end of `read_all`, and the end of
+                // the file is what flushes the last partial batch for a plain
+                // read. Without this, a file that grew by less than
+                // [`BATCH`] rows would show NOTHING at all: the rows would sit
+                // in `batch` for ever. (Written here because the first version
+                // of this had exactly that bug, and a followed file simply
+                // stayed empty.)
+                if !send_batch(tx, &mut batch) {
+                    return;
+                }
+                // Everything that exists has been read. Say so ONCE — this is
+                // "the file so far", not a per-growth event — and then wait for
+                // it to grow, holding `pending` (see this function's note on why
+                // a partial row is not emitted).
+                //
+                // Once is enough because in follow mode every row that reaches
+                // the buffer ended in a newline, so unlike a plain read there is
+                // no unsettled tail in it: the file has no end and every row in
+                // hand is one the file finished writing.
+                if !said_caught_up {
+                    said_caught_up = true;
+                    // `crlf` as of this moment. A file that switches convention
+                    // AFTER it is caught up does not update it — and does not
+                    // need to: a tail is read-only, so the flag never reaches a
+                    // write (TODO.md §20.6).
+                    if tx.send(LoadMsg::CaughtUp { crlf }).is_err() {
+                        return;
+                    }
+                }
+                std::thread::sleep(FOLLOW_SLEEP);
+                continue;
+            }
             Ok(n) => n,
             Err(e) => {
                 let _ = tx.send(LoadMsg::Failed(format!("{e}")));
@@ -447,11 +576,8 @@ fn read_all(mut file: File, from: u64, tx: &mpsc::Sender<LoadMsg>, cancel: &Atom
             }
             pending.clear();
             start = i + 1;
-            if batch.len() >= BATCH {
-                if tx.send(LoadMsg::Rows(std::mem::take(&mut batch))).is_err() {
-                    return; // the loop is gone; nothing to deliver to
-                }
-                batch = Vec::with_capacity(BATCH);
+            if batch.len() >= BATCH && !send_batch(tx, &mut batch) {
+                return; // the loop is gone; nothing to deliver to
             }
         }
         // The tail of the chunk is a partial row (or the start of one).
@@ -733,6 +859,9 @@ mod tests {
                     crlf = c;
                     break;
                 }
+                // A `spawn_from` job ends rather than catching up; this helper is
+                // for those, and a follower would hang it rather than reach here.
+                Adopted::CaughtUp { .. } => panic!("a follower has no end to drain"),
                 Adopted::Failed(e) => panic!("load failed: {e}"),
             }
             assert!(
@@ -903,6 +1032,94 @@ mod tests {
             "cancellation took {:?}",
             t0.elapsed()
         );
+    }
+
+    /// **A follower appends what arrives and holds back a half-written row.**
+    ///
+    /// Driven against a real file that grows under it, because the two things
+    /// that can be wrong here are facts about a file rather than about types: a
+    /// partial row shown as if it were whole (§20.5's half a stack trace), and a
+    /// row lost between the first read and the first append.
+    #[test]
+    fn a_follower_appends_growth_and_holds_back_a_partial_row() {
+        use std::io::Write;
+        let t = Temp::new("follow.txt", b"one\ntwo\n");
+        let mut job = LoadJob::spawn_follow_from(t.path().to_path_buf(), 0).expect("spawn");
+        let mut rows: Vec<Vec<char>> = Vec::new();
+
+        // The first pass reads everything there is and says so.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "the follower never caught up");
+            if let Adopted::CaughtUp { .. } = job.poll(&mut rows) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(text(&rows), ["one", "two"]);
+
+        // **A row the file has not finished writing is not a row.** "thr" has
+        // no newline after it, so it must NOT appear — the whole point of
+        // holding `pending` back rather than flushing it at the end.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(t.path())
+            .expect("append");
+        f.write_all(b"thr").expect("write");
+        f.flush().expect("flush");
+        let quiet = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < quiet {
+            let _ = job.poll(&mut rows);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(text(&rows), ["one", "two"], "a partial row was emitted");
+
+        // Its newline arrives and the row does, with nothing dropped.
+        f.write_all(b"ee\n").expect("write");
+        f.flush().expect("flush");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rows.len() < 3 {
+            assert!(Instant::now() < deadline, "the growth never arrived");
+            let _ = job.poll(&mut rows);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(text(&rows), ["one", "two", "three"]);
+
+        // A burst of several rows arrives in order, which is the reason the
+        // reader appends rather than re-reads.
+        f.write_all(b"four\nfive\n").expect("write");
+        f.flush().expect("flush");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rows.len() < 5 {
+            assert!(Instant::now() < deadline, "the burst never arrived");
+            let _ = job.poll(&mut rows);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(text(&rows), ["one", "two", "three", "four", "five"]);
+
+        job.cancel();
+    }
+
+    /// A follower that is caught up is not a read in flight: `loading` says so,
+    /// so the loop waits at its idle cadence and the status line stops saying
+    /// "Reading…" over everything else (§20.3 D).
+    #[test]
+    fn a_caught_up_follower_is_not_loading() {
+        let t = Temp::new("caught_up.txt", b"a\nb\n");
+        let mut job = LoadJob::spawn_follow_from(t.path().to_path_buf(), 0).expect("spawn");
+        assert!(!job.caught_up(), "not before it has read anything");
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !job.caught_up() {
+            assert!(Instant::now() < deadline, "never caught up");
+            let _ = job.poll(&mut rows);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(text(&rows), ["a", "b"]);
+        assert!(job.caught_up());
+        // And it stays a follower: polling after the catch-up is not an end.
+        assert_eq!(job.poll(&mut rows), Adopted::Nothing);
+        job.cancel();
     }
 
     #[test]

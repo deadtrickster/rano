@@ -15,6 +15,7 @@ use crate::BufferState;
 use crate::RowWrap;
 use crate::buffer::{Buffer, DiskStamp, Pos};
 use crate::config;
+use crate::diffview::DiffAct;
 pub use crate::keys::KeyOutcome;
 use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
@@ -64,6 +65,11 @@ pub(crate) struct UndoStep {
     pub cur_after: Pos,
     len_at_begin: usize, // buf.row_count() when the step began
 }
+
+/// How far one wheel notch scrolls — the text viewport, and a view drawn over
+/// it: three rows, which is what a notch is worth on a screen of any height
+/// (nano puts two `Alt+Up`/`Alt+Down` in for one, and those move a line each).
+const WHEEL_LINES: isize = 3;
 
 /// A rectangle of terminal cells: where the editor sits on the screen.
 ///
@@ -144,6 +150,12 @@ pub struct Editor {
     /// Split (two panels) rather than unified, for the next diff view: the last
     /// choice made with `s` in this session.
     pub diff_split: bool,
+    /// **Whether a left press armed a selection that has not dragged yet.** A
+    /// click places the cursor, and the anchor armed for the drag that may
+    /// follow is dropped when the button comes up without one — an anchor left
+    /// behind is what made a later scroll (whose pin moves the edit point)
+    /// redraw a selection from wherever the click landed.
+    pub(crate) mouse_arm: bool,
     /// Where M-S sends the reader's place (see `send_ctrl.rs`): a host's
     /// callback, or in the standalone binary the configured `send_command`.
     pub on_send: Option<crate::send_ctrl::OnSend>,
@@ -307,6 +319,7 @@ impl Editor {
             picker: None,
             diff_view: None,
             diff_split: false,
+            mouse_arm: false,
             on_send: None,
             replace: None,
             replace_pos: None,
@@ -1727,8 +1740,10 @@ impl Editor {
         })
     }
 
-    /// Left click: cursor + fresh selection anchor. Left drag: extend.
-    /// Wheel: scroll the viewport a few lines. Everything else is ignored.
+    /// Left click: the cursor, and — where the cursor already is — the mark, toggled
+    /// (`nano`'s rule). Left drag: extend. Release: a click that never dragged drops the
+    /// anchor it armed. Wheel: scroll the viewport a few lines. Everything else is
+    /// ignored.
     ///
     /// `m` is in terminal coordinates; an event outside the editor's area
     /// (see [`Self::set_area`]) is not the editor's and is ignored, so a host
@@ -1747,20 +1762,67 @@ impl Editor {
         if self.picker.is_some() {
             return false;
         }
+        // **A view drawn over the text takes the wheel and nothing else**: what the
+        // reader is looking at is the view, and a click has nothing there to point
+        // at (the renderer hides the cursor over it) — so a click must not move the
+        // cursor of the text underneath, which is a buffer they cannot see.
+        if self.diff_view.is_some() {
+            return match m.kind {
+                MouseKind::WheelUp => {
+                    self.diff_act(DiffAct::Scroll(-WHEEL_LINES));
+                    true
+                }
+                MouseKind::WheelDown => {
+                    self.diff_act(DiffAct::Scroll(WHEEL_LINES));
+                    true
+                }
+                _ => false,
+            };
+        }
         self.ensure_wrap_prefix();
         match m.kind {
-            MouseKind::WheelUp => self.wheel(-3),
-            MouseKind::WheelDown => self.wheel(3),
+            MouseKind::WheelUp => self.wheel(-WHEEL_LINES as i64),
+            MouseKind::WheelDown => self.wheel(WHEEL_LINES as i64),
             MouseKind::Press(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();
-                    bs.cursor = bs.buf.clamp(p);
-                    bs.mark = Some(bs.cursor);
+                    let at = bs.buf.clamp(p);
+                    let at_cursor = at == bs.cursor;
+                    // **nano's click** (winio.c: `do_mouse`): a click where the cursor
+                    // already is toggles the mark — that is the gesture that starts a
+                    // selection with the mouse. Anywhere else it places the cursor and
+                    // arms the mark for a drag, and a release that never dragged drops
+                    // the arm: an armed mark left behind is what made a later scroll
+                    // (whose pin moves the edit point) redraw a selection from wherever
+                    // the click landed.
+                    if at_cursor {
+                        bs.mark = match bs.mark {
+                            None => Some(bs.cursor),
+                            Some(_) => None,
+                        };
+                    } else {
+                        bs.cursor = at;
+                        bs.mark = Some(at);
+                    }
+                    self.mouse_arm = !at_cursor;
                     self.completion_close();
                     true
                 }
                 None => false,
             },
+            MouseKind::Release(MouseButton::Left) => {
+                // A press that never dragged was a click, and a click places the
+                // cursor: the anchor it armed goes with it. A drag's selection is
+                // kept (the two ends differ), and so is a mark the reader toggled by
+                // clicking on the cursor itself.
+                let armed = std::mem::take(&mut self.mouse_arm);
+                let bs = self.bs_mut();
+                let dropped = armed && bs.mark == Some(bs.cursor);
+                if dropped {
+                    bs.mark = None;
+                }
+                dropped
+            }
             MouseKind::Drag(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();

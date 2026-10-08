@@ -148,9 +148,11 @@ the config writes them nano's way (`^X`, `M-P`).
 
 Movement: arrows, `Home`, `End`, `PgUp`, `PgDn`, `^P`/`^N` (line), `^E` (end
 of line), `Alt+Left`/`Alt+Right` or `Ctrl+Left`/`Ctrl+Right` (word), `◂`/`▸`
-for back/forward in prompts. Mouse: left click moves the cursor (and starts
-a selection), left drag extends it, the wheel scrolls the view (the cursor
-stays put unless the scroll would push it out of sight). Editing: `Enter`,
+for back/forward in prompts. Mouse: left click moves the cursor, and a click
+*on* the cursor toggles the mark (nano's gesture — then a drag or the arrows
+extend the selection); left drag selects from where it was pressed. The wheel
+scrolls the view — the preview of a file, or the text (where the cursor stays
+put unless the scroll would push it out of sight). Editing: `Enter`,
 `Backspace`, `Delete`, `Tab`.
 `Tab` follows the buffer's own indent style: space-indented files get spaces
 up to the next unit boundary (the unit is detected from the file — e.g.

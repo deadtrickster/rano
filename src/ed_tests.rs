@@ -2577,9 +2577,97 @@ fn mouse_click_drag_and_wheel() {
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 2, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
+    // The button coming up keeps a selection that was actually dragged.
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 2, 4));
+    assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
     // Title row and status/bar rows are ignored.
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 0, 3)));
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 22, 3)));
+}
+
+/// **A click places the cursor and arms nothing.** The anchor a press sets is for
+/// the drag that may follow; a release with no drag in between drops it. Leaving
+/// it armed is what made a later scroll redraw a selection from wherever the
+/// click landed — the wheel pins the edit point as it scrolls.
+#[test]
+fn a_click_arms_no_selection_for_the_wheel_to_grow() {
+    let text: String = (1..=40).map(|i| format!("L{i}\n")).collect();
+    let mut ed = test_ed(&text);
+    ed.text_w = 40;
+    ed.text_h = 10;
+    ed.bs_mut().cursor = Pos { row: 20, col: 0 };
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 1)));
+    assert_eq!(
+        ed.bs().cursor,
+        Pos { row: 2, col: 0 },
+        "the click placed it"
+    );
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 3, 1));
+    assert_eq!(ed.bs().mark, None, "a click is not a selection");
+    // Scroll back and forth: the wheel pins the edit point to the edge it would
+    // cross (nano's scroll), and there is no anchor for that to select from.
+    for _ in 0..4 {
+        assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
+    }
+    assert_eq!(ed.bs().cursor.row, 12, "the wheel pinned the edit point");
+    assert!(ed.sel_span().is_none(), "and nothing got selected");
+    for _ in 0..6 {
+        ed.handle_mouse(me(MouseKind::WheelUp, 0, 0));
+    }
+    assert!(ed.sel_span().is_none(), "nor on the way back");
+    assert_eq!(ed.bs().mark, None);
+}
+
+/// nano's other half of the click: on the cursor itself it toggles the mark, which
+/// is how a selection is started with the mouse (winio.c: *"Clicking there where
+/// the cursor is toggles the mark"*).
+#[test]
+fn a_click_on_the_cursor_itself_toggles_the_mark() {
+    let mut ed = test_ed("hello\nworld\n");
+    ed.text_w = 40;
+    ed.text_h = 10;
+    let c = ed.bs().cursor;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, c.col as u16)));
+    assert_eq!(ed.bs().mark, Some(c), "clicking the cursor arms the mark");
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, c.col as u16));
+    assert_eq!(
+        ed.bs().mark,
+        Some(c),
+        "and the release keeps what was asked for"
+    );
+    // Clicking there again toggles it off, release or no release.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, c.col as u16)));
+    assert_eq!(ed.bs().mark, None);
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, c.col as u16));
+    assert_eq!(ed.bs().mark, None);
+}
+
+/// **The wheel works in a view drawn over the text** — the markdown preview, a
+/// diff — and only on the view: the text underneath is not what the reader is
+/// looking at, so a click there must not move its cursor either.
+#[test]
+fn the_wheel_scrolls_a_preview_and_leaves_the_text_under_it_alone() {
+    let text: String = (1..=60).map(|i| format!("para {i}\n\n")).collect();
+    let mut ed = test_ed(&text);
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_wheel.md"));
+    ed.text_w = 40;
+    ed.text_h = 10;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_some(), "a markdown preview");
+    let was = (ed.bs().scroll, ed.bs().cursor, ed.bs().mark);
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 3, 3)));
+    assert_eq!(ed.diff_view.as_ref().unwrap().top, 3, "the view scrolled");
+    assert!(ed.handle_mouse(me(MouseKind::WheelUp, 3, 3)));
+    assert_eq!(ed.diff_view.as_ref().unwrap().top, 0, "and back");
+    assert_eq!(
+        (ed.bs().scroll, ed.bs().cursor, ed.bs().mark),
+        was,
+        "the text under it did not move"
+    );
+    // A click is not the text's either: the view has nothing to point at.
+    assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 3)));
+    assert_eq!(ed.bs().mark, None);
+    assert_eq!(ed.bs().cursor, was.1);
 }
 
 // Wheel — viewport scrolls without moving the edit point; the cursor is

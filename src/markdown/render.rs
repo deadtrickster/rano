@@ -240,13 +240,15 @@ impl CodePaint {
                 if cursor < start {
                     push_span(&mut painted, plain_text(&chars[cursor..start]));
                 }
-                push_span(
-                    &mut painted,
-                    span(
-                        chars[start..end].iter().collect::<String>(),
-                        crate::highlight::role_for_capture(&s.name),
-                    ),
-                );
+                // **Each capture its own span**, even beside one of the same role:
+                // `assert_eq` and `!` are two captures and a host printing strings
+                // writes them as two painted runs, which is what letibot's rows
+                // always were. Coalescing them changes no cell, only the bytes a
+                // string host emits, and those are what its frames are compared by.
+                let text: String = chars[start..end].iter().collect();
+                if !text.is_empty() {
+                    painted.push(span(text, crate::highlight::role_for_capture(&s.name)));
+                }
                 cursor = end;
             }
             push_span(&mut painted, plain_text(&chars[cursor.min(chars.len())..]));

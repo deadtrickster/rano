@@ -519,6 +519,24 @@ mod inline_render {
         assert_eq!(span_of(&l, " thing")[0].style.top(), Role::Subheading);
     }
 
+    /// Two captures side by side are two spans even when they mean the same thing:
+    /// `assert_eq` and `!` are separate runs on the row a string host prints.
+    #[test]
+    fn adjacent_captures_of_one_role_stay_separate_spans() {
+        let l = render("```rust\nassert_eq!(a, b);\n```\n", 60);
+        let row = &l[1];
+        let kw: Vec<&str> = row
+            .spans
+            .iter()
+            .filter(|s| s.style.top() != Role::Plain && s.style.top() != Role::Faint)
+            .map(|s| s.content.as_str())
+            .collect();
+        assert!(
+            kw.starts_with(&["assert_eq", "!"]),
+            "the macro name and its bang were merged: {kw:?}"
+        );
+    }
+
     /// Heading levels are different roles, and the hashes stay, faint.
     #[test]
     fn heading_levels_carry_their_role_and_their_hashes() {

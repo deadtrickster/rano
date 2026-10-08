@@ -41,6 +41,7 @@ use crate::style::Role;
 pub mod asks;
 pub mod card;
 pub mod composer;
+pub mod config;
 pub mod decision;
 pub mod fit;
 pub mod header;

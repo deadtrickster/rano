@@ -3741,3 +3741,128 @@ fn picker_draws_over_the_text() {
     assert!(row(3).contains("rano_draw_b"), "{}", row(3));
     assert!(!(1..9).any(|y| row(y).contains("hidden text")));
 }
+
+// ---------- read-only mode (TODO.md §20.6) ----------
+
+/// Nothing in read-only mode changes the buffer, and it says why.
+#[test]
+fn read_only_refuses_every_way_to_change_the_buffer() {
+    // Every mutating action, driven through the editor "the way a key does".
+    // The list is not a guess: each of these records an undo step
+    // (`begin_action`'s callers) except `undo`/`redo`, which restore rather
+    // than record. A new mutation that forgets the gate is a hole — this test
+    // is what makes that visible.
+    for (label, act) in [
+        ("insert_char", 0usize),
+        ("newline", 1),
+        ("backspace", 2),
+        ("delete_at", 3),
+        ("cut", 4),
+        ("paste", 5),
+        ("paste_text", 6),
+        ("delete_char_cut", 7),
+        ("undo", 8),
+        ("redo", 9),
+        ("justify", 10),
+        ("sort", 11),
+        ("read", 12),
+        ("insert_str_plain", 13),
+    ] {
+        let mut ed = test_ed("alpha\nbeta\ngamma\n");
+        ed.set_read_only(true);
+        // Somewhere in the middle, so every action has something to do.
+        ed.bs_mut().cursor = crate::buffer::Pos { row: 1, col: 2 };
+        ed.bs_mut().mark = Some(crate::buffer::Pos { row: 0, col: 0 });
+        let before = lines(&ed);
+        match act {
+            0 => ed.insert_char('X'),
+            1 => ed.newline(),
+            2 => ed.backspace(),
+            3 => ed.delete_at(),
+            4 => ed.cut(),
+            5 => ed.paste(),
+            6 => ed.paste_text("pasted"),
+            7 => ed.delete_char_cut(),
+            8 => ed.undo(),
+            9 => ed.redo(),
+            10 => ed.justify(),
+            11 => ed.sort_lines(),
+            12 => ed.do_read("some-file.txt".to_string()),
+            _ => ed.paste_text("plain"),
+        };
+        assert_eq!(lines(&ed), before, "{label} changed the buffer");
+        let said = ed.status_text().unwrap_or_default();
+        assert!(
+            said.contains("Read-only"),
+            "{label} did not say why: {said:?}"
+        );
+    }
+}
+
+/// A save is refused, and the file on disk is untouched — the whole point of
+/// the mode's being at the keystroke rather than at the save.
+#[test]
+fn read_only_refuses_the_save_and_leaves_the_file_alone() {
+    let d = temp_dir("ro_save");
+    let path = d.0.join("log.txt");
+    fs::write(&path, "one\ntwo\n").unwrap();
+    let buf = Buffer::from_file(&path).unwrap();
+    let mut ed = Editor::new(buf, config::Config::default());
+
+    ed.set_read_only(true);
+    ed.bs_mut().buf.modified = true;
+    ed.save_to(path.clone());
+    assert_eq!(fs::read(&path).unwrap(), b"one\ntwo\n", "the file changed");
+    let said = ed.status_text().unwrap_or_default();
+    assert!(said.contains("Read-only"), "no reason given: {said:?}");
+
+    // `start_write` is refused too, so no name is even asked for.
+    ed.start_write();
+    assert!(
+        ed.prompt.is_none(),
+        "a write prompt opened in read-only mode"
+    );
+
+    // And turning it off restores both editing and saving.
+    ed.set_read_only(false);
+    ed.insert_char('!');
+    assert!(lines(&ed)[0].starts_with('!'), "editing did not come back");
+    ed.save_to(path.clone());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"!one\ntwo\n".to_vec().as_slice().to_vec()
+    );
+}
+
+/// Navigation and search are not editing: they must still work, because that
+/// is the point of opening a file you will not change.
+#[test]
+fn read_only_still_moves_and_searches() {
+    let mut ed = test_ed("alpha\nbeta\ngamma\n");
+    ed.set_read_only(true);
+    ed.bs_mut().cursor = crate::buffer::Pos { row: 0, col: 0 };
+    ed.handle_key(KeyEvent::new(KeyCode::Down, Mods::NONE));
+    assert_eq!(ed.bs().cursor.row, 1, "movement works");
+    ed.bs_mut().cursor = crate::buffer::Pos { row: 2, col: 0 };
+    assert_eq!(ed.bs().cursor.row, 2);
+    // The mark is view state, not document state: it may be set.
+    ed.toggle_mark();
+    assert!(ed.bs().mark.is_some(), "a mark is not an edit");
+    assert_eq!(lines(&ed), vec!["alpha", "beta", "gamma"]);
+}
+
+/// The title says the buffer cannot be written — the one thing a reader must
+/// know before typing into it.
+#[test]
+fn the_title_says_view_when_read_only() {
+    let mut ed = test_ed("x\n");
+    let t = ui::title_for_test(&mut ed, 80);
+    assert!(!t.contains("VIEW"), "{t:?}");
+    ed.set_read_only(true);
+    let t = ui::title_for_test(&mut ed, 80);
+    assert!(t.contains("VIEW"), "{t:?}");
+    // And it sits beside the mark rather than replacing it.
+    ed.toggle_mark();
+    let t = ui::title_for_test(&mut ed, 80);
+    assert!(t.contains("VIEW") && t.contains('M'), "{t:?}");
+}

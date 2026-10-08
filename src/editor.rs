@@ -1288,7 +1288,39 @@ impl Editor {
         }
     }
 
+    /// Make this document a view: read it, navigate it, search it, but do not
+    /// edit it or write it. See TODO.md §20.6 for why a tailed log opens this
+    /// way and why the refusal is at the keystroke rather than at the save.
+    pub fn set_read_only(&mut self, on: bool) {
+        self.bs_mut().read_only = on;
+    }
+
+    /// Refuse `what` because this buffer is read-only. Returns true when it
+    /// refused, so a caller writes `if self.refuse_read_only("cut") { return; }`.
+    ///
+    /// **One gate, called from every mutation, because a read-only mode that
+    /// guards nine of ten ways to change a buffer is worse than none at all** —
+    /// the tenth loses the user's work silently, which is the exact failure the
+    /// mode exists to prevent.
+    ///
+    /// The list it guards is not a guess: it is every function that records an
+    /// undo step (`begin_action`'s callers, 12 of them) plus `undo`/`redo`, which
+    /// restore rather than record, plus the two write paths. Derive it again the
+    /// same way when adding a mutation — `grep -n 'begin_action(' src/editor.rs`
+    /// — because a new mutation that forgets this gate is a hole, not a bug in
+    /// the gate.
+    pub(crate) fn refuse_read_only(&mut self, what: &str) -> bool {
+        if !self.bs().read_only {
+            return false;
+        }
+        self.flash(&format!("Read-only buffer — {what} refused"));
+        true
+    }
+
     pub(crate) fn undo(&mut self) {
+        if self.refuse_read_only("undo") {
+            return;
+        }
         if let Some(step) = self.bs_mut().undo.pop_back() {
             let bs = self.bs_mut();
             let start = step.after_start.min(bs.buf.row_count());
@@ -1305,6 +1337,9 @@ impl Editor {
     }
 
     pub(crate) fn redo(&mut self) {
+        if self.refuse_read_only("redo") {
+            return;
+        }
         if let Some(step) = self.bs_mut().redo.pop_back() {
             let bs = self.bs_mut();
             let start = step.start.min(bs.buf.row_count());
@@ -1342,6 +1377,9 @@ impl Editor {
     /// Insert text at the cursor as one undo step, without triggering
     /// completion (used by completion_accept).
     fn insert_str_plain(&mut self, s: &str) {
+        if self.refuse_read_only("typing") {
+            return;
+        }
         let (first, last) = match self.sel_span() {
             Some((a, b)) => (a, b + 1),
             None => (self.bs().cursor.row, self.bs().cursor.row + 1),
@@ -1898,6 +1936,9 @@ impl Editor {
     }
 
     pub(crate) fn insert_char(&mut self, ch: char) {
+        if self.refuse_read_only("typing") {
+            return;
+        }
         let (first, last) = match self.sel_span() {
             Some((a, b)) => (a, b + 1),
             None => (self.bs().cursor.row, self.bs().cursor.row + 1),
@@ -1916,6 +1957,9 @@ impl Editor {
     }
 
     pub(crate) fn newline(&mut self) {
+        if self.refuse_read_only("a new line") {
+            return;
+        }
         let (first, last) = match self.sel_span() {
             Some((a, b)) => (a, b + 1),
             None => (self.bs().cursor.row, self.bs().cursor.row + 1),
@@ -1968,6 +2012,9 @@ impl Editor {
     }
 
     pub(crate) fn backspace(&mut self) {
+        if self.refuse_read_only("backspace") {
+            return;
+        }
         let c = self.bs().cursor;
         let sel = self.sel_span();
         let had_popup = self.completion.is_some();
@@ -2037,6 +2084,9 @@ impl Editor {
     }
 
     pub(crate) fn delete_at(&mut self) {
+        if self.refuse_read_only("deletion") {
+            return;
+        }
         let c = self.bs().cursor;
         let sel = self.sel_span();
         let can_delete =
@@ -2068,6 +2118,9 @@ impl Editor {
     // ---------- cut / paste ----------
 
     pub(crate) fn cut(&mut self) {
+        if self.refuse_read_only("cut") {
+            return;
+        }
         let (first, last) = match self.bs().mark {
             Some(mark) => {
                 let (a, b) = normalize(mark, self.bs().cursor);
@@ -2136,6 +2189,9 @@ impl Editor {
     }
 
     pub(crate) fn paste(&mut self) {
+        if self.refuse_read_only("paste") {
+            return;
+        }
         if self.cut.is_empty() {
             return;
         }
@@ -2172,6 +2228,9 @@ impl Editor {
     /// E1: bracketed paste. \r is stripped, newlines split into rows; the
     /// whole paste (including selection replacement) is ONE undo step.
     pub fn paste_text(&mut self, s: &str) {
+        if self.refuse_read_only("paste") {
+            return;
+        }
         let frags: Vec<Vec<char>> = s
             .replace('\r', "")
             .split('\n')
@@ -2228,6 +2287,9 @@ impl Editor {
     }
 
     pub(crate) fn delete_char_cut(&mut self) {
+        if self.refuse_read_only("deletion") {
+            return;
+        }
         let c = self.bs().cursor;
         if c.col < self.bs().buf.line_len(c.row) {
             self.begin_action(ActionKind::Delete, c.row, c.row + 1);
@@ -2537,6 +2599,9 @@ impl Editor {
     // ---------- write / read / backup ----------
 
     pub(crate) fn start_write(&mut self) {
+        if self.refuse_read_only("writing") {
+            return;
+        }
         let name = self
             .bs()
             .buf
@@ -2552,6 +2617,9 @@ impl Editor {
     }
 
     pub(crate) fn do_write(&mut self, name: String) {
+        if self.refuse_read_only("writing") {
+            return;
+        }
         if name.trim().is_empty() {
             return;
         }
@@ -2580,6 +2648,9 @@ impl Editor {
     /// else wrote that file since it was read: then ask (y overwrites, n
     /// cancels, d shows what differs) — see `answer_external`.
     pub(crate) fn save_to(&mut self, path: PathBuf) {
+        if self.refuse_read_only("writing") {
+            return;
+        }
         if self.changed_on_disk(&path) {
             self.pending_write = Some(path);
             self.prompt = Some(Prompt {
@@ -2743,6 +2814,9 @@ impl Editor {
     }
 
     pub(crate) fn do_read(&mut self, name: String) {
+        if self.refuse_read_only("reading a file in") {
+            return;
+        }
         if name.trim().is_empty() {
             return;
         }
@@ -3063,6 +3137,9 @@ impl Editor {
     // ---------- justify / sort ----------
 
     pub(crate) fn justify(&mut self) {
+        if self.refuse_read_only("justify") {
+            return;
+        }
         // text_w is the full viewport since D6 unified it with draw; the -2
         // keeps the historical wrap width (it used to be subtracted at the
         // size-plumbing site).
@@ -3111,6 +3188,9 @@ impl Editor {
     }
 
     pub(crate) fn sort_lines(&mut self) {
+        if self.refuse_read_only("sort") {
+            return;
+        }
         let (top, bot) = match self.bs().mark {
             Some(mark) => {
                 let (a, b) = normalize(mark, self.bs().cursor);

@@ -457,7 +457,17 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
 
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
-    let flags = if bs.mark.is_some() { "M" } else { "" };
+    // **`VIEW` says the buffer cannot be written**, which is the one thing about
+    // it a reader must know before typing: a tailed log is being written by
+    // something else, and an edit that cannot be saved is work they will lose
+    // (TODO.md §20.6). Beside the mark, which is the other piece of state worth
+    // seeing at a glance.
+    let flags = match (bs.read_only, bs.mark.is_some()) {
+        (true, true) => "VIEW M",
+        (true, false) => "VIEW",
+        (false, true) => "M",
+        (false, false) => "",
+    };
     put(
         buf,
         at(0, 0, width, 1),
@@ -937,6 +947,19 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
         s[fstart + i] = c;
     }
     s.into_iter().collect()
+}
+
+/// The title bar for a test, without a terminal: what `draw` would put on row 0.
+#[cfg(test)]
+pub(crate) fn title_for_test(ed: &mut crate::editor::Editor, width: u16) -> String {
+    let bs = ed.bs();
+    let flags = match (bs.read_only, bs.mark.is_some()) {
+        (true, true) => "VIEW M",
+        (true, false) => "VIEW",
+        (false, true) => "M",
+        (false, false) => "",
+    };
+    title_line(width, &ed.title_text(), bs.buf.modified, flags)
 }
 
 /// A frame drawn for a test: the cells and where the cursor went, read the way

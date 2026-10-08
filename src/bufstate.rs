@@ -62,6 +62,14 @@ pub struct BufferState {
     pub search_matches: Option<Vec<(Pos, usize)>>,
     /// Single active async ^T job (D7): spawn, poll, insert stdout.
     pub exec_job: Option<exec::ExecJob>,
+    /// **A view, not a document.** Every way to change this buffer is refused
+    /// with a line saying so, and so is the save — a tailed file is one that
+    /// something else is writing, so an edit that cannot be saved is work the
+    /// user loses, and the loss is silent until they try (TODO.md §20.6).
+    ///
+    /// Nav, search and everything that only moves still work: that is the
+    /// point of opening a file you will not edit.
+    pub read_only: bool,
     /// Horizontal scroll of the text window, in DISPLAY cols (E3/F2).
     /// Always 0 while soft wrap is on (lines wrap instead of scrolling).
     pub scroll_x: usize,
@@ -153,6 +161,7 @@ impl BufferState {
             },
             search_matches: None,
             exec_job: None,
+            read_only: false,
             scroll_x: 0,
             wrap_prefix: Vec::new(),
             wrap_rows: Vec::new(),

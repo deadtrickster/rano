@@ -135,16 +135,24 @@ impl Line {
     /// this is what letibot's string painter wrote and what its tests pin, and a
     /// string is pasted into other strings — one that ends in a reset cannot leave
     /// its attributes open in the next. Content escapes are dropped, as everywhere
-    /// in `render`; [`Palette::None`] writes the plain text and nothing else.
+    /// in `render`; [`Palette::None`] writes no colour.
+    ///
+    /// Two things on a span are not colours and are written under every palette, the way
+    /// letibot's rows always carried them: a **link** (OSC 8, opened before the span and
+    /// closed after it, so a cut row never leaves one open) and the **raw** placeholder
+    /// colours of a kitty image (the id and the placement are addresses — a picture with
+    /// its colour dropped is a picture of nothing), set before the text and unset after it
+    /// with `39`/`59`, as [`crate::term::graphics::image_rows`] spells them.
     pub fn to_ansi(&self, palette: Palette) -> String {
         let mut out = String::with_capacity(self.ansi_capacity());
         for sp in &self.spans {
             let seq = self.style.patch(&sp.style).look(palette).sgr();
-            out.push_str(&seq);
-            for_each_cell(&sp.content, |c| out.push_str(c.text));
-            if !seq.is_empty() {
-                out.push_str(crate::width::text::RESET);
-            }
+            let close = if seq.is_empty() {
+                ""
+            } else {
+                crate::width::text::RESET
+            };
+            push_span_ansi(&mut out, sp, &seq, close, "");
         }
         out
     }
@@ -169,14 +177,51 @@ impl Line {
             String::with_capacity(self.ansi_capacity() + restore.len() * self.spans.len());
         for sp in &self.spans {
             let seq = sp.style.look(palette).sgr();
-            out.push_str(&seq);
-            for_each_cell(&sp.content, |c| out.push_str(c.text));
-            if !seq.is_empty() {
-                out.push_str(crate::width::text::RESET);
-                out.push_str(&restore);
-            }
+            let close = if seq.is_empty() {
+                ""
+            } else {
+                crate::width::text::RESET
+            };
+            push_span_ansi(
+                &mut out,
+                sp,
+                &seq,
+                close,
+                if seq.is_empty() { "" } else { &restore },
+            );
         }
         out
+    }
+}
+
+/// One span of a row as ANSI: its link opened, its raw placeholder colours set, its own
+/// sequence, the text (escapes in the content dropped), then `close` and `restore` when a
+/// sequence was opened, the raw colours unset and the link closed.
+fn push_span_ansi(out: &mut String, sp: &Span, seq: &str, close: &str, restore: &str) {
+    if let Some(url) = &sp.style.link {
+        out.push_str("\x1b]8;;");
+        out.push_str(url);
+        out.push_str("\x1b\\");
+    }
+    let raw = sp.style.raw;
+    if let Some([r, g, b]) = raw.fg_rgb {
+        out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+    }
+    if let Some(u) = raw.underline {
+        out.push_str(&format!("\x1b[58;5;{u}m"));
+    }
+    out.push_str(seq);
+    for_each_cell(&sp.content, |c| out.push_str(c.text));
+    out.push_str(close);
+    out.push_str(restore);
+    if raw.fg_rgb.is_some() {
+        out.push_str("\x1b[39m");
+    }
+    if raw.underline.is_some() {
+        out.push_str("\x1b[59m");
+    }
+    if sp.style.link.is_some() {
+        out.push_str("\x1b]8;;\x1b\\");
     }
 }
 
@@ -407,6 +452,28 @@ mod tests {
             Span::role(a, Role::Keyword),
             Span::role(b, Role::Code),
         ])
+    }
+
+    /// A link and a picture's placeholder colours are not colours: they are written under
+    /// every palette, and a picture's row is the bytes `image_rows` spells.
+    #[test]
+    fn to_ansi_writes_links_and_placeholder_colours_under_every_palette() {
+        let l = Line::new(vec![Span::styled(
+            "a.rs",
+            Style::new().link("file:///w/a.rs"),
+        )]);
+        for p in [Palette::Colour, Palette::None] {
+            assert_eq!(
+                l.to_ansi(p),
+                "\x1b]8;;file:///w/a.rs\x1b\\a.rs\x1b]8;;\x1b\\"
+            );
+        }
+        let lines = crate::term::graphics::image_lines(0x01_02_03, 3, 2);
+        let rows = crate::term::graphics::image_rows(0x01_02_03, 3, 2);
+        for (l, r) in lines.iter().zip(&rows) {
+            assert_eq!(&l.to_ansi(Palette::None), r);
+            assert_eq!(&l.to_ansi_inside(Palette::Colour), r);
+        }
     }
 
     /// Inside a register, a plain span is bare text and a styled one closes back to the

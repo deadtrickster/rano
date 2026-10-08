@@ -25,16 +25,72 @@ pub fn clean(s: &str) -> Cow<'_, str> {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());
-    wt::for_each_cell(s, |c| {
-        for ch in c.text.chars() {
-            if ch != '\n' && wt::is_control(ch) {
-                out.push(' ');
-            } else {
-                out.push(ch);
-            }
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            // `ESC` introduces a sequence; the sequence goes with it. **Whole**: the first
+            // version of letibot's sanitiser turned the `ESC` into a space and left `[31m`
+            // on the line — five columns of visible garbage where the terminal measured
+            // none, and a wrap that counted them.
+            '\u{1b}' => match it.peek().copied() {
+                Some('[') => {
+                    it.next();
+                    skip_csi(&mut it);
+                }
+                Some(']') => {
+                    it.next();
+                    skip_osc(&mut it);
+                }
+                // Any other two-byte sequence (`ESC ( B`, `ESC =`): one more character
+                // goes with it, if there is one.
+                Some('\n') | None => {}
+                Some(_) => {
+                    it.next();
+                }
+            },
+            // The C1 forms mean the same with no `ESC` in front: `CSI` (U+009B) and `OSC`
+            // (U+009D) introduce, `ST` (U+009C) is a bare terminator.
+            '\u{9b}' => skip_csi(&mut it),
+            '\u{9d}' => skip_osc(&mut it),
+            '\u{9c}' => {}
+            '\n' => out.push('\n'),
+            c if wt::is_control(c) => out.push(' '),
+            c => out.push(c),
         }
-    });
+    }
     Cow::Owned(out)
+}
+
+/// A `CSI` sequence's body, the introducer already consumed: `0x20..=0x3f` are parameters
+/// and intermediates, and one byte in `0x40..=0x7e` ends it.
+fn skip_csi(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while it.peek().is_some_and(|c| ('\u{20}'..='\u{3f}').contains(c)) {
+        it.next();
+    }
+    if it.peek().is_some_and(|c| ('\u{40}'..='\u{7e}').contains(c)) {
+        it.next();
+    }
+}
+
+/// An `OSC` string, the introducer already consumed: it ends at `BEL` or at `ST`, and one
+/// that never ends takes the rest of the line with it — which is what a terminal would do
+/// with it too. A newline ends the line it was on, so it ends the string here.
+fn skip_osc(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(&c) = it.peek() {
+        if c == '\n' {
+            return;
+        }
+        it.next();
+        if c == '\u{7}' {
+            return;
+        }
+        if c == '\u{1b}' {
+            if it.peek() == Some(&'\\') {
+                it.next();
+            }
+            return;
+        }
+    }
 }
 
 /// [`clean`] for text that must be one line: a newline becomes a space too.
@@ -290,6 +346,23 @@ pub fn wrapped(s: &str, w: usize, r: Role) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// letibot `sanitize::an_escape_sequence_goes_whole_and_never_leaves_its_body_behind`,
+    /// with the C1 spellings: not one byte of a sequence's body is left as text, a lone
+    /// control is a space, and the newlines stay.
+    #[test]
+    fn an_escape_sequence_goes_whole_and_never_leaves_its_body_behind() {
+        let hostile = "a\u{1b}[31mred\u{1b}[0m \u{1b}[8mdim \u{1b}[2J clear \
+                       \u{1b}[?1002h mouse \u{1b}]0;title\u{7} \u{9b}31m \u{9c} \u{7f} end\nnext";
+        let safe = clean(hostile);
+        assert_eq!(safe, "ared dim  clear  mouse      end\nnext");
+        assert_eq!(
+            clean("a\u{1b}[31mred\u{1b}[0m \u{1b}[8mdim \u{1b}[2Jclear"),
+            "ared dim clear"
+        );
+        assert_eq!(clean("tab\there"), "tab here");
+        assert!(matches!(clean("plain\ntext"), Cow::Borrowed(_)));
+    }
 
     /// letibot `app/tests/commands.rs::a_path_is_shortened_at_a_separator_and_a_pattern_is_not`.
     #[test]

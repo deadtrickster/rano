@@ -759,7 +759,10 @@ impl WritingCall {
         truncate(
             &Line::new(vec![
                 Span::role(spin, Role::Pending),
-                Span::role(" writing a tool call", Role::Pending),
+                // The space between the spinner and the words is unpainted, as letibot's
+                // row has always had it: two pending runs either side of a plain space.
+                Span::raw(" "),
+                Span::role("writing a tool call", Role::Pending),
                 Span::role(" · ctrl-x for the raw form", Role::Faint),
             ]),
             width,
@@ -1292,6 +1295,11 @@ mod tests {
         let w = WritingCall { now_ms: 0 }.line(80);
         assert_eq!(w.plain(), "⠋ writing a tool call · ctrl-x for the raw form");
         assert_eq!(role_of(&w, "writing"), Some(Role::Pending));
+        assert_eq!(
+            w.to_ansi(crate::style::Palette::Colour),
+            "\x1b[33m⠋\x1b[0m \x1b[33mwriting a tool call\x1b[0m\x1b[2m · ctrl-x for the raw form\x1b[0m",
+            "letibot's bytes: the space between spinner and words is unpainted"
+        );
         let raw = RawCall {
             raw: "<function=bash>\x1b[2J<parameter=cmd>ls".into(),
         }

@@ -29,6 +29,9 @@ pub mod highlight;
 // (mode over global), where-is. Pure data — command names, not functions — so
 // a host can stack its own map over the editor's.
 pub mod keymap;
+// A model's markdown reply, rendered while it streams: a bounded parse window,
+// a block model, and a painter to ratatui lines (ported from letibot's TUI).
+pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;

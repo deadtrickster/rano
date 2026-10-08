@@ -41,6 +41,7 @@ use crate::style::Role;
 pub mod card;
 pub mod decision;
 pub mod fit;
+pub mod header;
 pub mod jobs;
 pub mod outcome;
 pub mod pane;

@@ -1,6 +1,6 @@
-//! **The turn's status row**: what the model is doing, and a stuck turn said out loud.
+//! **The turn's status row**: what the model is doing — green while it goes, yellow when slow.
 //!
-//! Ported from letibot's `crates/tui/src/ui/turn_status.rs` (`turn_status`, `stuck_line`) and
+//! Ported from letibot's `crates/tui/src/ui/turn_status.rs` (`turn_status`) and
 //! the prefill half of `letibot_ui::progress` (`Prefill`, `bar`, `prefill_line`), which nothing
 //! else draws. Whether a turn is busy or generating, and the clocks, are the host's; this row
 //! is a pure function of them — no clock is read here, so a replay draws what the live head did.
@@ -8,8 +8,8 @@
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
 
-use super::header::{dur_human, thousands};
-use super::text::{clean_line, duration, spinner, trim_to};
+use super::header::thousands;
+use super::text::{duration, spinner, trim_to};
 
 /// The server's prefill progress, as it arrives.
 ///
@@ -177,7 +177,14 @@ pub struct TurnStatus {
     /// It used to be keyed off the last event's timestamp, and a spinner that only moves when a
     /// token arrives is a snapshot of one — a tool running thirty silent seconds froze it.
     pub now_ms: u64,
+    /// **The turn is slow**: generating and silent past [`SLOW_AFTER_MS`]. The host decides —
+    /// only it knows whether the turn should be emitting (a silent `cargo test` is a call, not
+    /// a stall). It turns the row yellow; it adds no words.
+    pub slow: bool,
 }
+
+/// How long a generating turn may be silent before its row turns yellow.
+pub const SLOW_AFTER_MS: u64 = 15_000;
 
 impl TurnStatus {
     /// The row; empty when nothing is running (the row is reserved by the fit ladder either way).
@@ -189,11 +196,23 @@ impl TurnStatus {
     /// **No count on this row.** *"i dont care about those chars"* / *"just dont show me
     /// them"*: a row whose job is to say the turn is alive needs the spinner and the clock, and
     /// a figure the reader has to interpret is the row asking to be studied.
+    ///
+    /// **Green while it is going, yellow when it is slow** — and nothing more. Ruled by the
+    /// operator, 2026-10-08: *"we have Responding in yellow which is a warning color … I dont
+    /// want notification that it is slow yet we continue … let usual Responding be green and
+    /// when we detect delays - yellow it"*. A turn that has really failed ends with
+    /// `TurnFailed` and stops this row; a slow one only changes its colour, so there is no
+    /// sentence about it (the `stuck_line` that said *"nothing received for 17s"* is gone).
     pub fn line(&self, w: usize) -> Line {
         if !self.busy {
             return Line::default();
         }
-        let spin = Span::role(spinner(self.now_ms).to_string(), Role::Pending);
+        let tone = if self.slow {
+            Role::Pending
+        } else {
+            Role::Success
+        };
+        let spin = Span::role(spinner(self.now_ms).to_string(), tone);
         match self.prefill {
             Some(pp) if pp.total > 0 && pp.processed < pp.total => {
                 let mut l = Line::new(vec![spin, Span::raw(" ")]);
@@ -213,11 +232,8 @@ impl TurnStatus {
                 // way; the stack is what lets a host that prints strings write the row as
                 // the nesting it always was.
                 let l = Line::new(vec![
-                    Span::styled(
-                        spinner(self.now_ms).to_string(),
-                        Style::of(Role::Pending).role(Role::Pending),
-                    ),
-                    Span::role(format!(" Responding{since}"), Role::Pending),
+                    Span::styled(spinner(self.now_ms).to_string(), Style::of(tone).role(tone)),
+                    Span::role(format!(" Responding{since}"), tone),
                 ]);
                 crate::render::text::truncate_owned(l, w)
             }
@@ -232,36 +248,6 @@ impl crate::render::Widget for TurnStatus {
             buf.set_line(area.x, area.y, &self.line(w), w);
         }
     }
-}
-
-/// **A turn that is generating and silent**, said out loud. `quiet_ms` is how long nothing has
-/// arrived; the host passes it only while the turn is *generating* (not merely busy — a
-/// `cargo test` that runs silently for two minutes is a call, not a stall, and gated on busy
-/// this line would fire through every long command, which trains a reader to ignore it).
-///
-/// When a turn *fails*, the engine publishes a `Warning` and nothing else, so the turn stays
-/// running and a head spun its spinner at a dead session indefinitely; this says so after 15 s.
-/// A row of its own and not inlaid: a sentence truncated to fit a border is a disclosure that
-/// lost the words that mattered.
-///
-/// letibot painted it `sgr::YELLOW`; here [`Role::Attention`] (yellow, and it needs a person).
-pub fn stuck_line(model: &str, quiet_ms: u64, w: usize) -> Option<Line> {
-    if quiet_ms <= 15_000 {
-        return None;
-    }
-    Some(Line::styled(
-        trim_to(
-            &format!(
-                "{} — nothing received for {}. The turn is still marked running; \
-                 esc esc interrupts it.",
-                clean_line(model),
-                dur_human(quiet_ms)
-            ),
-            w,
-        ),
-        // Yellow, as letibot's stuck line is — not the bold attention register.
-        Role::Pending,
-    ))
 }
 
 #[cfg(test)]
@@ -364,6 +350,7 @@ mod tests {
             prefill: None,
             elapsed_ms: Some(elapsed),
             now_ms: now,
+            slow: false,
         }
     }
 
@@ -380,7 +367,7 @@ mod tests {
         assert_ne!(glyph(&first.plain()), glyph(&second.plain()));
         assert!(busy(3_000, 4_000).line(160).plain().contains("3.0s"));
         assert!(!second.plain().contains("chars") && !second.plain().contains(" tok"));
-        assert_eq!(role_of(&second, "Responding"), Some(Role::Pending));
+        assert_eq!(role_of(&second, "Responding"), Some(Role::Success));
     }
 
     /// letibot `app/tests/turn.rs` — a busy turn counts from the prompt through its calls, and
@@ -519,9 +506,9 @@ mod tests {
         }
     }
 
-    /// letibot's bytes: the spinner painted inside the pending row.
+    /// letibot's bytes: the spinner painted inside the row, in the row's own colour.
     #[test]
-    fn the_spinner_is_stacked_inside_the_pending_row() {
+    fn the_spinner_is_stacked_inside_the_row() {
         let t = TurnStatus {
             busy: true,
             elapsed_ms: Some(3_000),
@@ -530,22 +517,22 @@ mod tests {
         let l = t.line(80);
         assert_eq!(
             l.spans[0].style.roles().collect::<Vec<_>>(),
-            vec![Role::Pending, Role::Pending]
+            vec![Role::Success, Role::Success]
         );
         assert_eq!(l.plain(), "⠋ Responding · 3.0s");
     }
 
-    /// letibot `app/tests/turn.rs` — a silent generating turn is said out loud after 15 s.
+    /// **Green while going, yellow when slow, and the same words either way**: a slow turn
+    /// changes the row's colour and says nothing more about it.
     #[test]
-    fn a_silent_turn_is_said_out_loud_after_fifteen_seconds() {
-        assert!(stuck_line("glm", 15_000, 120).is_none());
-        let l = stuck_line("glm", 40_000, 120).unwrap();
-        assert!(
-            l.plain().contains("nothing received for 40.0s"),
-            "{}",
-            l.plain()
-        );
-        assert_eq!(role_of(&l, "glm"), Some(Role::Pending));
-        assert!(stuck_line("glm", 40_000, 30).unwrap().width() <= 30);
+    fn a_slow_turn_is_yellow_and_says_nothing_else() {
+        let going = busy(20_000, 21_000);
+        let slow = TurnStatus {
+            slow: true,
+            ..going
+        };
+        assert_eq!(role_of(&going.line(120), "Responding"), Some(Role::Success));
+        assert_eq!(role_of(&slow.line(120), "Responding"), Some(Role::Pending));
+        assert_eq!(going.line(120).plain(), slow.line(120).plain());
     }
 }

@@ -31,6 +31,16 @@ pub fn role_for_capture(name: &str) -> Role {
         "type" | "constructor" | "label" => Role::TypeName,
         "keyword" | "include" | "preproc" | "variable.builtin" => Role::Keyword,
         "function" => Role::FuncName,
+        // A diff file's own lines (`syntax`'s diff query names them for what they
+        // are rather than borrowing `@keyword`). Without these a ```diff fence
+        // in rendered markdown came out plain: every name here starts `diff.`,
+        // and `diff` is no role. Green and red are the sign colours the diff
+        // renderers already give `+` and `-`; a hunk header is cyan, as the
+        // editor's theme draws it; a file header anchors a scan.
+        "diff.plus" => Role::Success,
+        "diff.minus" => Role::Failure,
+        "diff.hunk" => Role::Code,
+        "diff.file" => Role::Strong,
         _ => match name.split_once('.') {
             Some((prefix, _)) => role_for_capture(prefix),
             None => Role::Plain,
@@ -81,6 +91,20 @@ mod tests {
         ] {
             assert_eq!(role_for_capture(name), want, "{name}");
         }
+    }
+
+    #[test]
+    fn a_diff_file_s_lines_have_roles() {
+        assert_eq!(role_for_capture("diff.plus"), Role::Success);
+        assert_eq!(role_for_capture("diff.minus"), Role::Failure);
+        assert_eq!(role_for_capture("diff.hunk"), Role::Code);
+        assert_eq!(role_for_capture("diff.file"), Role::Strong);
+        let g = role_grid(
+            &["--- a/f", "+++ b/f", "@@ -1 +1 @@", "-old", "+new"],
+            Some(Lang::Diff),
+        );
+        assert_eq!(g[3].first(), Some(&Role::Failure), "{g:?}");
+        assert_eq!(g[4].first(), Some(&Role::Success), "{g:?}");
     }
 
     /// A dotted name falls back to its prefix, one level at a time — which is what

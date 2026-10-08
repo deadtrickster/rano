@@ -38,6 +38,15 @@ pub const NOTE_LINES: usize = 3;
 /// The mark goes with the colour, because colour is a no-op under a replay, a pipe and a
 /// light theme, and three registers that collapse to one appearance in half the terminals
 /// they are read in are one register with extra steps.
+///
+/// **Routine is not failure** — letibot's R19, the operator's ruling of 2026-09-22: *"routine
+/// is painted as failure"* — `compacted`, `auto_compact`, `daemon_stopping` and a fourth
+/// arrived on a head that had just attached, all four in the red a denial gets, and four
+/// notes read as a wall. A housekeeping notice and a refused call must not look alike, and
+/// the argument is not taste: a person met by a red block on every restart learns to skip
+/// it, and the block is where a real denial lives. So routine is a `·` and faint, and the
+/// code is kept, because it is the word a reader greps the log for. Which codes are routine
+/// is the host's log's table, not this widget's opinion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteClass {
     Routine,

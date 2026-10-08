@@ -306,7 +306,7 @@ impl Editor {
         }
         let k = &self.keymaps;
         for (title, maps) in [
-            ("Diff view", vec![&k.diff, &k.save]),
+            ("Diff view", vec![&k.diff, &k.save, &k.review]),
             ("Patch and conflict views", vec![&k.patch, &k.conflict]),
             ("Lists", vec![&k.list, &k.buffers]),
             ("M-x", vec![&k.palette]),

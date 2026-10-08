@@ -728,6 +728,9 @@ pub struct Keymaps {
     pub save: Keymap,
     pub patch: Keymap,
     pub conflict: Keymap,
+    /// A host's review ([`Editor::open_review`]): send from the view, and M-P
+    /// closes it as it opened it.
+    pub review: Keymap,
     pub list: Keymap,
     pub buffers: Keymap,
     pub page: Keymap,
@@ -868,6 +871,10 @@ impl Keymaps {
             .bind("B", "conflict-take-both-theirs-first")
             .bind("c", "conflict-compare")
             .bind("M-p", "diff-close");
+        let mut review = Keymap::new("review");
+        review
+            .bind("M-s", "send-position")
+            .bind("M-p", "diff-close");
 
         let mut list = Keymap::new("list");
         list.bind("RET", "list-accept")
@@ -923,6 +930,7 @@ impl Keymaps {
             save,
             patch,
             conflict,
+            review,
             list,
             buffers,
             page,
@@ -1022,6 +1030,7 @@ impl Editor {
                 DiffKind::Save => &k.save,
                 DiffKind::Patch => &k.patch,
                 DiffKind::Conflict => &k.conflict,
+                DiffKind::Review => &k.review,
             };
             return vec![own, &k.diff];
         }
@@ -1223,6 +1232,7 @@ mod tests {
             &k.save,
             &k.patch,
             &k.conflict,
+            &k.review,
             &k.list,
             &k.buffers,
             &k.page,

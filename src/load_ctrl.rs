@@ -146,8 +146,9 @@ impl Editor {
     }
 
     /// Whether a load is in flight. Used by the loop to keep adopting, and by
-    /// the status line to say so rather than looking frozen.
-    pub(crate) fn loading(&self) -> bool {
+    /// the status line to say so rather than looking frozen — and by a host
+    /// that opened a file and wants to know whether its text has all arrived.
+    pub fn loading(&self) -> bool {
         self.bs().load.is_some()
     }
 

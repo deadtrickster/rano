@@ -115,6 +115,12 @@ pub struct BufferState {
     /// to whatever had arrived. Per buffer, so a position waiting for its rows
     /// cannot land in another buffer that became current meanwhile.
     pub goto: Option<Pos>,
+    /// **The change a host opened this buffer to review** ([`Editor::open_review`]), kept
+    /// so `M-P` can show it again after the reader has gone back to the text. A snapshot
+    /// of the change as the host saw it made, not a diff against the buffer now.
+    ///
+    /// [`Editor::open_review`]: crate::editor::Editor::open_review
+    pub review: Option<crate::review::Change>,
     pub(crate) undo: VecDeque<UndoStep>,
     pub(crate) redo: VecDeque<UndoStep>,
     pub(crate) pending: Option<UndoStep>,
@@ -158,6 +164,7 @@ impl BufferState {
             load: None,
             pending_load: None,
             goto: None,
+            review: None,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             pending: None,

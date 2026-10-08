@@ -91,6 +91,9 @@ pub mod patch;
 pub mod render;
 pub mod sidediff;
 pub mod style;
+// A change a host hands the editor to review (`Editor::open_review`): the
+// file opened on the change, and the change drawn over it as a diff view.
+pub mod review;
 // The row store (§15, §16.3): the editor's `Buffer` is built on `Rows`, which
 // is stage A of that migration.
 pub mod rows;

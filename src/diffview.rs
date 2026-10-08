@@ -7,7 +7,10 @@
 //! - **M-P on a diff or patch buffer**: the patch drawn file by file, hunk by
 //!   hunk, at each file's own line numbers ([`crate::patch`]);
 //! - **M-P on a buffer with merge conflicts**: ours against theirs, side by
-//!   side ([`crate::conflict`]).
+//!   side ([`crate::conflict`]);
+//! - **a host's review** ([`Editor::open_review`]): one change to the file,
+//!   as the host saw it made, at the file's own line numbers — and M-P on that
+//!   buffer shows it again ([`crate::review`]).
 //!
 //! The sources are kept and the lines re-rendered only when the width or the
 //! view changes — a diff and a highlight of two whole files is not per-frame
@@ -44,6 +47,11 @@ pub enum Source {
         compare: Compare,
         /// Each conflict's header row in `lines`, from the last render.
         sections: Vec<usize>,
+    },
+    /// A change a host asked the reader to review.
+    Review {
+        name: String,
+        change: crate::review::Change,
     },
 }
 
@@ -105,6 +113,15 @@ impl DiffView {
                     Vec::new()
                 }
             },
+            Source::Review { name, change } => render_edit_view(
+                name,
+                &change.before,
+                &change.after,
+                change.before_start.max(1),
+                change.after_start.max(1),
+                &cfg,
+                view,
+            ),
         };
         self.width = width;
         self.top = self.top.min(self.lines.len().saturating_sub(1));
@@ -128,6 +145,9 @@ impl DiffView {
             Source::Patch { name, .. } => {
                 format!(" Patch {name} ({view})   s: split/unified  Esc: back to the text")
             }
+            Source::Review { name, .. } => format!(
+                " Review {name} ({view})   s: split/unified  M-S: send your place  Esc: to the change in the text"
+            ),
             Source::Conflict {
                 current,
                 sections,
@@ -169,7 +189,7 @@ impl Editor {
         });
     }
 
-    fn open_view(&mut self, source: Source) {
+    pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
         self.diff_view = Some(DiffView::new(source, self.diff_split, self.text_w));
     }
@@ -199,7 +219,7 @@ impl Editor {
             || looks_like_a_patch(&text)
         {
             self.open_view(Source::Patch { name, text });
-        } else {
+        } else if !self.show_review() {
             self.flash("Nothing to render: not a diff or patch, and no merge conflicts");
         }
     }
@@ -264,6 +284,7 @@ impl Editor {
             Source::Save { .. } => DiffKind::Save,
             Source::Patch { .. } => DiffKind::Patch,
             Source::Conflict { .. } => DiffKind::Conflict,
+            Source::Review { .. } => DiffKind::Review,
         })
     }
 }
@@ -287,6 +308,7 @@ pub(crate) enum DiffKind {
     Save,
     Patch,
     Conflict,
+    Review,
 }
 
 /// What a command does in the conflict view, beyond scrolling.

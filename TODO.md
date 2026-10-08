@@ -2724,3 +2724,60 @@ the block is open and unsettled until its end line arrives.
 **Lazily** is the operative word: the block boundary is computed when the bytes
 arrive, and the *rendering* of it (folding, colouring the frames, marking the
 frames that matter) waits until the block is settled and is on screen.
+
+### 20.6 Read-only while tailing, which is new machinery
+
+*"it is like i should be able to tail anyfile right, which makes is readonly btw"*
+
+**There is no read-only facility in the codebase** — nothing named `read_only`,
+`readonly` or `View` anywhere in `src/`. So this is not a flag to flip; it is the
+first one, and it needs a decision before it needs code:
+
+- **Refuse the edit** (nano's `-v`, which the operator will know): typing, cut,
+  paste and undo are all declined with a line saying why, and a save is refused.
+- **Allow the edit in memory and refuse only the save.** Cheaper to build, and it
+  is a trap: you are following a file that *something else is writing*, so an
+  edit that cannot be saved is work the user will lose, and the loss is silent
+  until they try.
+
+**Recommended: refuse the edit.** A tail is a view of a file someone else owns,
+and the honest thing is to say so at the keystroke rather than at the save. The
+title already has a modified flag, so "VIEW" belongs beside it.
+
+### 20.7 Which files default to this mode
+
+*"the usual logs must be put to this mode by default"* — so a predicate, in
+`syntax::lang_for`'s shadow (name and path, never content):
+
+- the file name ends in `.log`, which is what `/home/dead/logs/` is full of;
+- **or** the path is under `/var/log/`, where the names are `syslog`, `messages`,
+  `auth.log` and `kern.log` — half of which have no extension at all.
+
+**Deliberately NOT a content sniff.** Deciding "this looks like a log" from bytes
+means a source file with a timestamp in a comment opens read-only, and being
+wrong in that direction is much worse than not tailing a log you asked for
+explicitly. `-f`/`--follow` is the escape hatch from the predicate, and
+`--edit`/`--no-follow` the escape hatch from it.
+
+This is the increment I would do LAST of the three, despite being the smallest,
+because it is the one that changes behaviour for files nobody asked about.
+
+### 20.8 Docker output, and why it is a different problem
+
+Two shapes, and only one of them is a file:
+
+- **The `json-file` driver** (the default): each line is
+  `{"log":"…","stream":"stdout","time":"…"}`, at
+  `/var/lib/docker/containers/<id>/<id>-json.log`. It is a *file*, and its name
+  ends in `.log`, so §20.7 already tails it — and shows JSON, which is not what
+  the operator means by "concerns some docker outputs".
+- **The multiplexed stream** (8-byte frame header: stream byte, three zeros, a
+  big-endian length) is what `docker logs` and `attach` speak over the API. It is
+  **not** what is in the file, so it is not a file-format problem.
+
+So the docker case is a **reader**: unwrap the `log` field and show that, with the
+stream and time as the record's own fields — the same "block heuristic" shape as
+§20.5, on a format whose per-line structure is known exactly. It is a separate
+increment, and I would want a real `*-json.log` in hand before writing it rather
+than a remembered schema. There is no readable one on this machine to check
+against.

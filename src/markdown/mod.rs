@@ -22,7 +22,7 @@
 //! - [`parse`] — [`IncrementalMarkdown`], the window that keeps the cost of a
 //!   push bounded, and the [`Block`] model it produces; [`lex`] for text rendered
 //!   once.
-//! - [`line`] — [`MdLine`] and [`MdSpan`], and the plain-text and ANSI writers.
+//! - [`line`](mod@line) — [`MdLine`] and [`MdSpan`], and the plain-text and ANSI writers.
 //! - [`render`] — one block to rows: [`render_block`], [`render_blocks`].
 //! - [`view`] — [`MarkdownView`], a growing document's rows with each settled
 //!   block rendered once per width.

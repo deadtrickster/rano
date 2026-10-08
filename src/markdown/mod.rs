@@ -23,10 +23,12 @@
 //!   push bounded, and the [`Block`] model it produces; [`lex`] for text rendered
 //!   once.
 //! - [`line`] — [`MdLine`] and [`MdSpan`], and the plain-text and ANSI writers.
+//! - [`render`] — one block to rows: [`render_block`], [`render_blocks`].
 //! - [`wrap`] — wrapping and truncating spans by display columns.
 
 pub mod line;
 pub mod parse;
+pub mod render;
 pub mod wrap;
 
 #[cfg(test)]
@@ -37,3 +39,4 @@ pub use parse::{
     Align, Block, DEFAULT_MAX_UNFROZEN, IncrementalMarkdown, InlineStyle, Run, lex, runs_text,
     stable_boundary, stable_boundary_with, tail_cut,
 };
+pub use render::{RenderOptions, render_block, render_blocks, render_bounded};

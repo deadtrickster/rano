@@ -32,15 +32,22 @@ use super::text::{trim_to, visible_width};
 pub fn box_edge(w: usize, open: char, close: char, left: &Line, right: &Line) -> Line {
     let w = w.max(4);
     let inner = w - 2;
-    let faint = |s: String| Span::role(s, Role::Faint);
-    let mut out = Line::new(vec![faint(open.to_string())]);
+    // **The edge is one faint register, and the legends are inlaid in it**: the frame's
+    // own glyphs are plain text under the line's faint style, and a legend's spans are its
+    // own looks over it. That is letibot's edge exactly — `p.painted(Faint, …)` around the
+    // whole edge, a legend that closes and re-opens the faint — and it is the cells a
+    // buffer draws: a legend in the pending register reads dim yellow, as the string did.
+    let mut out = Line {
+        spans: vec![Span::raw(open.to_string())],
+        style: Style::of(Role::Faint),
+    };
     let mut left_cols = 0;
     if left.width() > 0 && inner >= 10 {
-        out.push(faint("─ ".into()));
+        out.push(Span::raw("─ "));
         let l = crate::render::text::truncate(left, inner - 4);
         left_cols = 3 + l.width();
         out.spans.extend(spans_of(&l));
-        out.push(faint(" ".into()));
+        out.push(Span::raw(" "));
     }
     let mut right_spans = Vec::new();
     let mut right_cols = 0;
@@ -51,15 +58,15 @@ pub fn box_edge(w: usize, open: char, close: char, left: &Line, right: &Line) ->
         if room >= 4 {
             let r = crate::render::text::truncate(right, room);
             right_cols = r.width() + 3;
-            right_spans.push(faint(" ".into()));
+            right_spans.push(Span::raw(" "));
             right_spans.extend(spans_of(&r));
-            right_spans.push(faint(" ─".into()));
+            right_spans.push(Span::raw(" ─"));
         }
     }
     let fill = inner.saturating_sub(left_cols + right_cols);
-    out.push(faint("─".repeat(fill)));
+    out.push(Span::raw("─".repeat(fill)));
     out.spans.extend(right_spans);
-    out.push(faint(close.to_string()));
+    out.push(Span::raw(close.to_string()));
     out
 }
 
@@ -147,9 +154,11 @@ pub struct BoxBottom {
 impl BoxBottom {
     pub fn line(&self, w: usize) -> Line {
         let mut right = Line::default();
+        // The separator is the edge's own text: it sits in the edge's faint register (a
+        // string host writes it bare between the pieces, as letibot's edge did).
         let sep = |l: &mut Line| {
             if l.width() > 0 {
-                l.push(Span::role(" · ", Role::Faint));
+                l.push(Span::raw(" · "));
             }
         };
         if self.alarmed {
@@ -310,6 +319,21 @@ mod tests {
         assert_eq!(jobs_fact(1, 0).as_deref(), Some("1 job running"));
         assert_eq!(jobs_fact(0, 0), None);
         assert!(!BoxTop::default().line(100).plain().contains("running"));
+    }
+
+    /// letibot's bytes: one faint run, the legend closing and re-opening it.
+    #[test]
+    fn an_edge_is_one_faint_register_with_its_legend_inlaid() {
+        let l = BoxTop {
+            subagents_running: 1,
+            ..BoxTop::default()
+        }
+        .line(30);
+        assert_eq!(
+            l.to_ansi_inside(crate::style::Palette::Colour),
+            "╭─────── \x1b[33m1 subagent running\x1b[0m\x1b[2m ─╮"
+        );
+        assert_eq!(l.style, Style::of(Role::Faint));
     }
 
     #[test]

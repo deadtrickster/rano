@@ -427,7 +427,7 @@ mod tests {
         b.set_line(0, 0, &Line::raw("ab"), 6);
         assert_eq!(b.emit(Palette::Colour)[0], "ab");
         b.set_style(Rect::new(0, 0, 6, 1), &Style::of(Role::UserBlock));
-        assert_eq!(b.emit(Palette::Colour)[0], "\x1b[7mab    \x1b[0m");
+        assert_eq!(b.emit(Palette::Colour)[0], "\x1b[40mab    \x1b[0m");
     }
 
     #[test]

@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(
             l[0].to_ansi(Palette::Colour),
             format!(
-                "\x1b[34m▌\x1b[0m \x1b[7mwhy is the prefix cache missing?{}09:41\x1b[0m",
+                "\x1b[34m▌\x1b[0m \x1b[40mwhy is the prefix cache missing?{}09:41\x1b[0m",
                 " ".repeat(60 - 2 - 32 - 5)
             )
         );

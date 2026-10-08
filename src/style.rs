@@ -430,7 +430,17 @@ impl Palette {
             Role::Heading => Look::fg(Slot(6)).with(A::BOLD),
             Role::Subheading => Look::fg(Slot(4)).with(A::BOLD),
             Role::UserAccent => Look::fg(Slot(4)),
-            Role::UserBlock => Look::attrs(A::REVERSE),
+            // **A band, not an inverse.** Reverse video painted the operator's rows as a
+            // bar of the theme's foreground — on a gray base the loudest thing on the
+            // screen (the operator, 2026-10-08, building a theme on the title bar's gray).
+            // The band is the theme's slot 0 behind the text as it is: on a dark theme a
+            // lift a hair above the background; on a light one slot 7, since a light
+            // theme's slot 0 is black. The `▌` accent beside it says *whose* row this is
+            // even on a theme whose slot 0 is the background itself.
+            Role::UserBlock => Look {
+                bg: Some(Slot(if light { 7 } else { 0 })),
+                ..Look::PLAIN
+            },
             Role::Success => Look::fg(Slot(2)),
             Role::Pending => Look::fg(Slot(3)),
             Role::Failure => Look::fg(Slot(1)),
@@ -530,11 +540,11 @@ impl Palette {
 
     /// **Reverse video** as a look: plain for [`Palette::None`].
     ///
-    /// The program's reverse (`mc`'s selected row) and [`Role::UserBlock`] are one
-    /// look, because a terminal has one way to say reverse and the two must not drift
-    /// into disagreeing about what it looks like.
+    /// The program's reverse (`mc`'s selected row, a pane's highlighted entry) — the
+    /// same look as [`Role::Selected`]. [`Role::UserBlock`] used to be this too, and is a
+    /// band now: the operator's own rows are not a selection.
     pub fn reverse_look(self) -> Look {
-        self.look(Role::UserBlock)
+        self.look(Role::Selected)
     }
 
     /// The opening SGR sequence for a role — letibot's `Palette::open`. Empty for
@@ -587,7 +597,7 @@ mod tests {
             (Role::Heading, "\x1b[1;36m"),
             (Role::Subheading, "\x1b[1;34m"),
             (Role::UserAccent, "\x1b[34m"),
-            (Role::UserBlock, "\x1b[7m"),
+            (Role::UserBlock, "\x1b[40m"),
             (Role::Success, "\x1b[32m"),
             (Role::Pending, "\x1b[33m"),
             (Role::Failure, "\x1b[31m"),
@@ -693,13 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn reverse_is_one_style_for_the_program_and_the_user_block() {
+    fn reverse_is_the_programs_and_the_user_block_is_a_band() {
         assert_eq!(Palette::Colour.reverse_look(), Look::attrs(Attrs::REVERSE));
-        assert_eq!(
-            Palette::Colour.reverse_look(),
-            Palette::Colour.look(Role::UserBlock)
-        );
         assert_eq!(Palette::Colour.reverse_look().sgr(), "\x1b[7m");
+        // The user block is no longer the program's inverse: it is a band on slot 0.
+        assert_eq!(Palette::Colour.look(Role::UserBlock).sgr(), "\x1b[40m");
         assert_eq!(Palette::None.reverse_look(), Look::PLAIN);
     }
 
@@ -737,11 +745,13 @@ mod tests {
         }
     }
 
-    /// **A light theme changes the two absolute colours and nothing else.**
+    /// **A light theme changes the two absolute colours and the user band, and nothing
+    /// else.** The band is slot 7 there, because a light theme's slot 0 is black.
     #[test]
-    fn the_light_palette_differs_only_in_the_diff_backgrounds() {
+    fn the_light_palette_differs_only_in_the_diff_backgrounds_and_the_band() {
+        assert_eq!(Palette::Light.open(Role::UserBlock), "\x1b[47m");
         for r in Role::ALL {
-            if matches!(r, Role::Added | Role::Removed) {
+            if matches!(r, Role::Added | Role::Removed | Role::UserBlock) {
                 continue;
             }
             assert_eq!(Palette::Light.look(r), Palette::Colour.look(r), "{r:?}");

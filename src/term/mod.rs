@@ -16,7 +16,9 @@ pub mod event;
 pub mod features;
 pub mod graphics;
 pub mod links;
+pub mod terminal;
 
 pub use decode::{decode, decode_prefix, legacy_bytes};
 pub use event::{Event, KeyCode, KeyEvent, Mods, MouseButton, MouseEvent, MouseKind};
 pub use features::Features;
+pub use terminal::{Mouse, Options, Progress, Terminal, WriteStats};

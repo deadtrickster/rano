@@ -426,7 +426,9 @@ fn run(tool: &Tool, input: &Path, out: &Path, max_px: u32, limits: Limits) -> Re
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
-            let limit = |what: libc::c_int, value: u64| {
+            // No type on `what`: the RLIMIT_ constants are `c_int` on macOS and glibc's own
+            // unsigned `__rlimit_resource_t` on Linux, and an annotation is a compile error on one.
+            let limit = |what, value: u64| {
                 let rl = libc::rlimit {
                     rlim_cur: value,
                     rlim_max: value,

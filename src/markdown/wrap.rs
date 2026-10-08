@@ -15,6 +15,9 @@ use crate::render::Span;
 /// One display cell: a grapheme cluster, the span it came from, its columns.
 struct Cell<'a> {
     span: usize,
+    /// Where `text` starts in its span's content, so a run of cells from one span
+    /// can be cut back out of it as one slice (see [`collect`]).
+    at: usize,
     text: &'a str,
     cols: usize,
 }
@@ -41,6 +44,7 @@ fn cells(spans: &[Span]) -> Vec<Cell<'_>> {
             for c in crate::width::Clusters::new(&chars[from..to], 1) {
                 out.push(Cell {
                     span: i,
+                    at: at[from + c.start],
                     text: &s.content[at[from + c.start]..at[from + c.end]],
                     cols: c.w,
                 });
@@ -48,6 +52,7 @@ fn cells(spans: &[Span]) -> Vec<Cell<'_>> {
             if to < chars.len() {
                 out.push(Cell {
                     span: i,
+                    at: at[to],
                     text: &s.content[at[to]..at[to + 1]],
                     cols: usize::from(chars[to] == '\t'),
                 });
@@ -85,11 +90,27 @@ pub fn wrap(spans: &[Span], cols: usize) -> Vec<Vec<Span>> {
     out
 }
 
+/// The cells back as spans: each run of adjacent cells from one span is cut out of
+/// that span's text as **one** slice. Per cell would be a `String` per grapheme — a
+/// three-row paragraph cost some 350 allocations that way, every frame it was the
+/// live tail, which is the cost letibot's `frame_allocations` test exists to catch.
 fn collect(spans: &[Span], cs: &[Cell]) -> Vec<Span> {
     let mut row: Vec<Span> = Vec::new();
-    for c in cs {
-        let s = &spans[c.span];
-        push_span(&mut row, Span::styled(c.text, s.style.clone()));
+    let mut i = 0;
+    while i < cs.len() {
+        let (span, from) = (cs[i].span, cs[i].at);
+        let mut to = from + cs[i].text.len();
+        let mut j = i + 1;
+        while j < cs.len() && cs[j].span == span && cs[j].at == to {
+            to += cs[j].text.len();
+            j += 1;
+        }
+        let s = &spans[span];
+        push_span(
+            &mut row,
+            Span::styled(&s.content[from..to], s.style.clone()),
+        );
+        i = j;
     }
     row
 }

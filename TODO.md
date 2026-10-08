@@ -2612,3 +2612,115 @@ after all"*, and *"not only macOS - linux too"*.
   full-width one. Whether M-P should offer one is not decided.
 - [ ] **Animated pictures** are first frames: the converters are asked for one, and a GIF
   that moves previews as a still.
+
+## 20. Log mode: tail first, and cheap when nobody is looking
+
+Asked 2026-10-09, after the memory measurements that showed a 2 GiB log costing
+~17 GB:
+
+> *"lets start with log mode. i had it for emacs once - we tail by default, we
+> detect starting size, we try to remember the size at the open and quickly scan
+> the lines count in the background so that tailing is making line numbers cheap
+> and we dont color anything really except when the lines settled. there is an
+> interesting case with killer stacktraces tho. but again - we can do it lazily"*
+
+and then, which is the stricter half:
+
+> *"we can have a pane for tailing jobs, and if the file is not being rendered
+> right now it must be extremely cheap - just do lines bookkeeping and some simple
+> blocks heuristics"*
+
+**This is where "pay for what you see" pays off most**, because a log is the shape
+that maximises rows per byte and therefore maximises every per-row cost (§16.3).
+A tailed log nobody is looking at should cost its line bookkeeping and nothing
+else: no decoded rows, no wrap geometry, no parse tree, no style grid.
+
+### 20.1 The four ideas, and what each one is for
+
+1. **Tail by default.** Open showing the last screenful. For a log the end is
+   what you want, and it is also the only part that is cheap to find.
+2. **Size at open, remembered.** Everything after it is *new*, which is what
+   makes following well-defined: `size_at_open` is the line between "this row can
+   be styled like a file" and "this row is still arriving".
+3. **Line count in the background.** Tailing makes line numbers a problem, not a
+   feature: the tail starts at row 0 of *what we read*, but the user's line 1 is
+   the file's line 1. A background scan from 0 to `size_at_open` fixes the numbering
+   — and it is the same sparse index §16.3 needs, so it is not extra work, it is
+   that work arriving first.
+4. **Settle before styling.** Nothing below `size_at_open` is styled, and a row
+   with no newline after it yet is not styled either — it is still being written.
+   Styling a row that is about to change is work thrown away, and it is also a
+   lie: half a stack trace is not a stack trace yet.
+
+### 20.2 Landed: finding the tail without reading the file
+
+`loader::tail_offset(file, size, rows, window)` — the byte offset at which the
+last `rows` rows begin — and `loader::read_from(file, from)`.
+
+**It scans backwards from the end**, so a 2 GiB log opens showing its last
+screenful for a few hundred KiB of reading. The window widens by 4× until it
+holds more than `rows` newlines or reaches the start of the file, so the awkward
+shapes are correct rather than special: a file of one enormous row (the killer
+stack trace with no breaks), a trailing newline or none, CRLF, blank lines.
+
+Tested against a **forward-reading reference** over 12 file shapes × 6 row counts
+× 3 window sizes, plus a read-back test (the bytes from the offset *are* the last
+rows) and a cost test on a 12 MB file. And the tests were verified to fail: an
+off-by-one that lets a trailing newline begin a row fails all three, naming the
+case — `one_nl: rows=1 window=16 — got 2, reference 0`.
+
+### 20.3 The increments, in order
+
+- [x] **A** — `tail_offset` + `read_from`, with the reference tests. `landed`
+- [ ] **B** — `LoadJob::spawn_from(path, offset)` (a seek before the existing
+      reader) and `-f`/`--follow` in `parse_args`, scrolling to the end when the
+      first batch lands.
+- [ ] **C** — the background line count. Until it answers, the status line must
+      not claim a line number it does not know: showing "Ln 1" for the file's
+      line 4 000 000 is a lie, and a tail view without numbering is fine.
+- [ ] **D** — follow. Poll `size()`, read the growth, append. A trailing partial
+      line is **held back** until its newline arrives, which is what makes
+      "settled" a fact rather than a guess.
+- [ ] **E** — settle-before-styling: no highlight below `size_at_open`, none for
+      an unsettled row, and the first style pass for a settled block happens once
+      rather than per append.
+- [ ] **F** — the tail pane, on the existing `agent::pane` framework, with the
+      not-rendered budget below.
+
+### 20.4 The not-rendered budget, which is the point
+
+A tailed file that is not on screen keeps:
+
+| kept | why |
+|---|---|
+| the sparse line index | line count, and row → byte |
+| the size at open, and the current size | what is new |
+| **block heuristics** | see below |
+
+and keeps **no** decoded rows, no wrap geometry, no highlight grid, no parse tree.
+
+**Block heuristics** are the cheap half: a row is classified from its own bytes —
+does it start a block, continue one, or end one — with no parse and no state
+beyond the open block. For a log that is enough to know where a stack trace
+begins and ends, where a timestamped record starts, and where a blank line
+separates. Cost is one pass over the new bytes, at read time, with nothing
+retained but the boundaries.
+
+That is what makes the pane affordable: when you look at it, it has structure
+already, and rendering decodes only the rows on screen.
+
+### 20.5 The stack-trace case, done lazily
+
+A killer stack trace is the awkward shape in three ways at once: it is long, so
+it costs rows; it is multi-row as ONE logical block, so styling each row
+separately is wrong; and when tailed it may be half-written, so the top frame you
+can see is not the first one.
+
+Heuristics handle it without a parser: `^\s+(at |\s+file |\s+\.\.\.)` and friends
+continue a block, a line that does not continue it ends the block, and a block
+ends at the first line that does not match. The partial case is the same rule —
+the block is open and unsettled until its end line arrives.
+
+**Lazily** is the operative word: the block boundary is computed when the bytes
+arrive, and the *rendering* of it (folding, colouring the frames, marking the
+frames that matter) waits until the block is settled and is on screen.

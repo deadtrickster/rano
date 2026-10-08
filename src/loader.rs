@@ -26,7 +26,7 @@
 //! by an edit, and by opening another file.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -224,6 +224,96 @@ fn decode_row(
 ///
 /// It never re-reads and never holds the whole file: `pending` is one partial
 /// row, and a row is sent as soon as it is complete.
+/// Where the tail of a file begins: the byte offset of the first of its last
+/// `rows` rows.
+///
+/// **Not yet called** — increment B of TODO.md §20.3 wires it to `-f`. It is
+/// landed first because the off-by-ones are the whole difficulty and they are
+/// testable in isolation, against a forward-reading reference, without a
+/// terminal, a loader or a buffer in the picture.
+#[allow(dead_code)]
+///
+/// **Scans backwards from the end, so the cost is the tail and not the file.**
+/// That is the whole point for a log: a 2 GiB file opens showing its last
+/// screenful for a read of a few hundred KiB, where reading from the start to
+/// find it costs the whole file. `bench_cold_open`'s 37 µs for a first
+/// screenful is the precedent — this is the same idea applied to the other end.
+///
+/// The window widens by 4x until it holds more than `rows` newlines or reaches
+/// the start of the file, so a file of one enormous row (a stack trace with no
+/// breaks, an unterminated line) is correct rather than special — it just reads
+/// more to get there, and reports 0 because that row's start IS the file's.
+///
+/// Returns `size` when there is nothing to show, so a caller can read from it
+/// and get nothing.
+pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::Result<u64> {
+    if size == 0 || rows == 0 {
+        return Ok(size);
+    }
+    let mut window = window.max(1);
+    loop {
+        let win_start = size.saturating_sub(window);
+        file.seek(SeekFrom::Start(win_start))?;
+        let mut buf = vec![0u8; (size - win_start) as usize];
+        file.read_exact(&mut buf)?;
+
+        // Row starts in this window, absolute. A start is the file's beginning,
+        // or one past a newline — and never past EOF, because a trailing newline
+        // does not begin a row.
+        let mut starts: usize = 0;
+        for (i, b) in buf.iter().enumerate() {
+            if *b == b'\n' && win_start + i as u64 + 1 < size {
+                starts += 1;
+            }
+        }
+        let total_starts = starts + if win_start == 0 { 1 } else { 0 };
+
+        if total_starts > rows || win_start == 0 {
+            // Walk back to the `rows`-th row start from the end.
+            let mut remaining = rows;
+            for i in (0..buf.len()).rev() {
+                if buf[i] != b'\n' {
+                    continue;
+                }
+                let abs = win_start + i as u64 + 1;
+                if abs >= size {
+                    continue; // a trailing newline begins nothing
+                }
+                if remaining == 1 {
+                    return Ok(abs);
+                }
+                remaining -= 1;
+            }
+            // Fewer rows in the window than asked for: start at the first full
+            // row of the window. A partial first row is skipped by construction,
+            // because we only ever return a position one past a newline.
+            if win_start == 0 {
+                return Ok(0);
+            }
+            return Ok(buf
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|i| win_start + i as u64 + 1)
+                .unwrap_or(size));
+        }
+        window = window.saturating_mul(4);
+    }
+}
+
+/// The rows of `[from, size)` — the tail a caller reads after [`tail_offset`].
+///
+/// Not yet called; see `tail_offset`.
+///
+/// Split from the offset so the two can be tested apart: this is the read, and
+/// it is deliberately a plain forward read from a byte the caller already has.
+#[allow(dead_code)]
+pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(from))?;
+    let mut out = Vec::new();
+    file.read_to_end(&mut out)?;
+    Ok(out)
+}
+
 fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
     use crate::encoding::{self, Encoding, Scope};
     let mut buf = vec![0u8; CHUNK];
@@ -327,6 +417,182 @@ fn read_all(mut file: File, tx: &mpsc::Sender<LoadMsg>, cancel: &AtomicBool) {
         let _ = tx.send(LoadMsg::Rows(batch));
     }
     let _ = tx.send(LoadMsg::Done { crlf });
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new(name: &str, body: &[u8]) -> Self {
+            let p = std::env::temp_dir().join(format!("rano_tail_{name}"));
+            fs::write(&p, body).expect("write");
+            Temp(p)
+        }
+        fn path(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    /// The obvious reading: every row, in order.
+    fn rows_of(body: &[u8]) -> Vec<&[u8]> {
+        let mut out: Vec<&[u8]> = Vec::new();
+        let mut start = 0usize;
+        for (i, b) in body.iter().enumerate() {
+            if *b == b'\n' {
+                out.push(&body[start..i]);
+                start = i + 1;
+            }
+        }
+        if start < body.len() {
+            out.push(&body[start..]);
+        }
+        out
+    }
+
+    /// The start byte of the last `rows` rows, by reading the whole file.
+    fn reference(body: &[u8], rows: usize) -> u64 {
+        if body.is_empty() || rows == 0 {
+            return body.len() as u64;
+        }
+        let all = rows_of(body);
+        if all.len() <= rows {
+            return 0;
+        }
+        // Offset of the first of the last `rows` rows.
+        let want = all.len() - rows;
+        let mut seen = 0usize;
+        let mut start = 0usize;
+        for (i, b) in body.iter().enumerate() {
+            if *b == b'\n' {
+                seen += 1;
+                if seen == want {
+                    start = i + 1;
+                    break;
+                }
+            }
+        }
+        start as u64
+    }
+
+    /// **The property: the backward scan agrees with reading the file forwards.**
+    /// Driven over the shapes where the off-by-ones live — trailing newline or
+    /// not, fewer rows than asked, exactly as many, a lone enormous row, CRLF —
+    /// and over a range of `rows`, against a reference that reads everything.
+    #[test]
+    fn the_tail_offset_matches_a_forward_read() {
+        let bodies: Vec<(&str, Vec<u8>)> = vec![
+            ("empty", b"".to_vec()),
+            ("one", b"a".to_vec()),
+            ("one_nl", b"a\n".to_vec()),
+            ("two", b"a\nb".to_vec()),
+            ("two_nl", b"a\nb\n".to_vec()),
+            ("ten", b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj".to_vec()),
+            ("ten_nl", b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".to_vec()),
+            ("blanks", b"\n\n\n\n".to_vec()),
+            ("crlf", b"a\r\nb\r\nc\r\n".to_vec()),
+            ("huge_row", {
+                let mut v = vec![b'x'; 5_000];
+                v.push(b'\n');
+                v.extend_from_slice(b"short\n");
+                v
+            }),
+            ("trailing_blanks", b"a\n\n\n".to_vec()),
+            (
+                "no_nl_many",
+                (0..500)
+                    .map(|i| format!("row {i}\n"))
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
+        ];
+        for (label, body) in bodies {
+            let t = Temp::new(&format!("{label}.txt"), &body);
+            let size = body.len() as u64;
+            for rows in [1usize, 2, 3, 7, 64, 1000] {
+                // A window small enough that widening is exercised, and one big
+                // enough that it is not.
+                for window in [16u64, 64, 4096] {
+                    let mut f = File::open(t.path()).expect("open");
+                    let got = tail_offset(&mut f, size, rows, window).expect("tail_offset");
+                    let want = reference(&body, rows);
+                    assert_eq!(
+                        got, want,
+                        "{label}: rows={rows} window={window} — got {got}, reference {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the bytes from that offset are the last `rows` rows, exactly — the
+    /// offset is only useful if reading from it gives what was asked for.
+    #[test]
+    fn reading_from_the_offset_gives_the_last_rows() {
+        let body: Vec<u8> = (0..300)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let t = Temp::new("readback.txt", &body);
+        let size = body.len() as u64;
+        for rows in [1usize, 5, 50] {
+            let mut f = File::open(t.path()).expect("open");
+            let off = tail_offset(&mut f, size, rows, 128).expect("tail_offset");
+            let mut g = File::open(t.path()).expect("open");
+            let bytes = read_from(&mut g, off).expect("read");
+            let got = rows_of(&bytes);
+            assert_eq!(got.len(), rows, "rows={rows}");
+            let want = rows_of(&body);
+            assert_eq!(
+                got,
+                &want[want.len() - rows..],
+                "rows={rows}: the bytes from the offset are not the last rows"
+            );
+        }
+    }
+
+    /// **The cost is the tail, not the file.** A file far larger than the window
+    /// still answers immediately, because the scan goes backwards from the end
+    /// and never looks at the beginning.
+    #[test]
+    fn a_large_file_costs_the_window_not_the_file() {
+        let body: Vec<u8> = (0..400_000)
+            .map(|i| format!("2026-10-09T12:00:00 INFO row {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let t = Temp::new("large.txt", &body);
+        let size = body.len() as u64;
+        assert!(
+            size > 10 * 1024 * 1024,
+            "the fixture must be big: {size} bytes"
+        );
+        let mut f = File::open(t.path()).expect("open");
+        let t0 = std::time::Instant::now();
+        let off = tail_offset(&mut f, size, 40, 64 * 1024).expect("tail_offset");
+        let dt = t0.elapsed();
+        // The last 40 rows of `row 399xxx` lines.
+        assert!(
+            off > size - 64 * 1024,
+            "the offset should be in the tail: {off}"
+        );
+        let want = reference(&body, 40);
+        assert_eq!(off, want);
+        // Generous: this is a 12 MB file and the scan reads 64 KiB of it. The
+        // point is that it is not proportional to the file, so a bound well
+        // under a full read is the assertion.
+        assert!(
+            dt.as_millis() < 200,
+            "tail_offset took {dt:?} on a {size}-byte file — that is not a tail scan"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2785,6 +2785,9 @@ impl Editor {
         if path.is_empty() {
             return true;
         }
+        // **A view was of the buffer that was current**: opening a file gives that one up,
+        // whether the new file lands in a new buffer or replaces it.
+        self.close_view();
         let path = PathBuf::from(expand_tilde(path));
         // Already open in another buffer: switch to it. (Re-opening the
         // CURRENT file in single-buffer mode still re-reads it from disk —
@@ -2957,11 +2960,10 @@ impl Editor {
         self.adjust_scroll_x();
         let name = self.buffer_name(i);
         self.flash(&format!("Buffer: {name}"));
-        // Switching to a buffer that is a picture shows the picture, as opening it does: the
-        // text is not a reading of those bytes, and a reader who wants it is one Esc away.
-        if self.diff_view.is_none() {
-            self.preview_if_picture();
-        }
+        // The view that was up belonged to the buffer that was current (see `close_view`), and
+        // a buffer that is a picture is shown as its picture, as opening one is.
+        self.close_view();
+        self.preview_if_picture();
     }
 
     /// What the status line and the buffer list call buffer `i`.
@@ -3030,6 +3032,8 @@ impl Editor {
     /// `buffers`: the M-, stack loses the entries that pointed into the
     /// closed buffer, and later indices shift down by one.
     pub(crate) fn remove_current_buffer(&mut self) {
+        // The view belonged to this buffer: it goes with it, pictures and all.
+        self.close_view();
         if self.buffers.len() < 2 {
             return;
         }

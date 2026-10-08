@@ -204,13 +204,14 @@ the buffer holds, not an edit of it.
 - **A picture file** (`.png`, or anything a converter on the machine can turn
   into one — a JPEG, a GIF, an SVG) **opens as the picture**: not as the text of
   its bytes, which is a lossy decode of something that is not text and no reading
-  at all. Esc is that text (the file as a save would write it, unmodified, if you
-  want it), `M-P` is the picture again, and switching back to the buffer shows it
-  again too. It is drawn at a box that follows the window: half its width, and
-  narrower in a narrow pane; a resize redraws it at the new box. Pictures need a
-  terminal that takes inline images (the kitty graphics protocol): Ghostty does,
-  and `RANO_TERM_FEATURES=images` turns them on anywhere else. Without one the
-  file is read as text and nothing is said about it — `M-P` says why.
+  at all. Esc (or `M-P`) **closes that buffer**, and when it is the only one the
+  picture stays and says so — the bytes of a PNG are not what you are being
+  taken back to. It is drawn at a box that follows the window: half its width,
+  and narrower in a narrow pane; a resize redraws it at the new box. Pictures
+  need a terminal that takes inline images (the kitty graphics protocol):
+  Ghostty does, and `RANO_TERM_FEATURES=images` turns them on anywhere else.
+  Without one the file is read as text and nothing is said about it — `M-P` says
+  why.
 - **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
   without diff3's `|||||||` base) is shown one conflict per section, with ours
   and theirs lined up and the surrounding lines of the file for context. Each
@@ -225,6 +226,10 @@ the buffer holds, not an edit of it.
 
 `s` switches between unified and two panels, and the choice sticks for the
 session. Both are syntax-coloured in the file's language.
+
+A preview is not a place with no way out: `F8` (open file), `M-W` (close the
+buffer), `M-<` / `M->` (previous / next buffer) and `M-x` reach through it, and
+anything that makes another buffer current closes the view with it.
 
 #### Pictures in other formats
 

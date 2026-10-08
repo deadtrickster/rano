@@ -2390,9 +2390,24 @@ markdown preview mode and when i open files. letibot already does that"*.
   that changed nothing sends nothing and a picture that closed takes its bytes
   with it. Gated on `Features::images` (Ghostty), with
   `RANO_TERM_FEATURES=images` as the override.
-- [x] **The split key says why not** on all three one-column views. `s` is the
-  shared diff map's, and `Source::has_a_split` is asked first: it flashes the
-  reason rather than re-rendering the same rows.
+- [x] **A picture file opens as the picture**, and **escaping it leaves the file rather
+  than the view** — the operator, twice: *"for images go straight for preview - because
+  we show this text instead of proper binary editor which is pointless anyway"*, and then
+  *"right, but when I press Esc it shows me text still"*. So Esc and M-P on a picture run
+  `close_buffer`: the picture's buffer goes, the file beside it is what is left, and the
+  last buffer (rano is never empty) keeps the picture with `close_buffer`'s word about how
+  to leave — never the bytes of a PNG. Whatever happens, the buffer underneath stays the
+  file as a save would write it, unmodified.
+- [x] **A view is not a trap** — the operator: *"also f8 doesnt work in preview mode"*. The
+  view's maps were the whole stack, so every global key was dead in a preview: no F8, no
+  buffer switching, no M-x. A `view` keymap (F8, M-W, M-x, M-<, M->) is now stacked *under*
+  each view's own map — deliberately not under the save question, which is waiting for an
+  answer — and `close_view` runs wherever another buffer becomes current (`open_file`,
+  `set_current`, `remove_current_buffer`), so a preview of the file you left is not drawn
+  over the text of the one you are in.
+- [x] **The split key says why not** on all three one-column views. `s` is the shared diff
+  map's, and `Source::has_a_split` is asked first: it flashes the reason rather than
+  re-rendering the same rows.
 - [x] The command's label is "Preview" rather than "Diff Preview" (the name
   `diff-preview` stays, so a host rebinding it survives).
 

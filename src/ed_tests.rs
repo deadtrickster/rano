@@ -765,6 +765,11 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     let header = ed.diff_view.as_ref().unwrap().header();
     assert!(header.contains("Picture"), "{header}");
     assert!(header.contains("sun.png"), "{header}");
+    // The text under the view was never touched.
+    assert_eq!(
+        lines(&ed)[0],
+        "the buffer is the file's bytes, and they are not the picture"
+    );
     // Uploaded once, then placed where the rows draw it.
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");
@@ -789,17 +794,24 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     assert!(rows.len() <= crate::term::graphics::IMAGE_MAX_ROWS as usize);
     let out = graphics(&mut ed);
     assert!(out[1].contains("c=15,"), "placed 15 wide: {:?}", out[1]);
-    // Closing drops it, bytes and all.
+    // **M-P on a picture is the way out of it**, as Esc is: there is no text behind a
+    // picture worth toggling back to, so the key that opened it in the first place closes
+    // the *file* — and with nothing behind it the picture stays and says how to leave.
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
-    assert!(ed.diff_view.is_none());
+    assert!(ed.diff_view.is_some(), "the only buffer is the picture");
+    assert!(ed.status_text().unwrap().contains("Last buffer"));
+    // With a file beside it, the same key closes the picture's buffer and drops the bytes.
+    let other = d.0.join("notes.txt");
+    fs::write(&other, "text\n").unwrap();
+    ed.config.multibuffer = true;
+    assert!(ed.open_at(&other, 1, None).is_ok());
+    ed.set_current(0);
+    assert!(graphics(&mut ed).len() >= 3, "back to the picture");
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_none(), "the picture's buffer went with it");
     let out = graphics(&mut ed);
-    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out.len(), 1, "and the bytes go with it: {out:?}");
     assert!(out[0].contains("a=d,d=I"), "{:?}", out[0]);
-    // The text was never touched.
-    assert_eq!(
-        lines(&ed)[0],
-        "the buffer is the file's bytes, and they are not the picture"
-    );
 }
 
 /// **A markdown preview draws the pictures the document names**, under the row that
@@ -922,13 +934,25 @@ fn opening_a_picture_shows_the_picture() {
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Picture"));
     // The terminal was told, as it is for M-P.
     assert_eq!(graphics(&mut ed).len(), 2);
-    // Esc is the text underneath — unmodified, so a save writes the file back as it was.
+    // **Escaping the picture leaves the file, not the view** — the text of a PNG is not a
+    // reading of it — and with nothing behind it the picture stays and says how to leave.
     press(&mut ed, KeyCode::Esc, Mods::NONE);
-    assert!(ed.diff_view.is_none());
-    assert!(!ed.bs().buf.modified);
-    assert_eq!(ed.bs().buf.name.as_deref(), Some(file.as_path()));
-    // And switching back to the buffer shows the picture again. (Multibuffer, so the
-    // second file lands beside the picture instead of replacing it.)
+    assert!(ed.diff_view.is_some(), "the picture is the only thing here");
+    assert!(ed.status_text().unwrap().contains("Last buffer"));
+    assert!(!ed.bs().buf.modified, "and the file was never touched");
+    // **And the keys that reach past a view work in one**: F8 used to do nothing at all
+    // while a preview was up. It opens the prompt; the view is still there behind it.
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    assert_eq!(
+        ed.prompt.as_ref().map(|p| p.kind),
+        Some(PromptKind::OpenName)
+    );
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(ed.prompt.is_none());
+    assert!(ed.diff_view.is_some(), "and the picture is still up");
+    // With a file beside it, escaping the picture **closes that buffer** and leaves the
+    // other one — the file it was, not the text of its bytes. (Multibuffer, so the second
+    // file lands beside the picture instead of replacing it.)
     ed.config.multibuffer = true;
     let other = d.0.join("notes.txt");
     fs::write(&other, "plain text\n").unwrap();
@@ -938,6 +962,20 @@ fn opening_a_picture_shows_the_picture() {
     assert!(
         ed.diff_view.is_some(),
         "back to the picture, as the picture"
+    );
+    // The picture comes back: the drop of the one held (the view closed with the file), then
+    // the upload and the placement again.
+    let out = graphics(&mut ed);
+    assert!(out.iter().any(|c| c.contains("a=d,d=I")), "{out:?}");
+    assert!(out.iter().any(|c| c.contains("a=t,f=100")), "{out:?}");
+    assert!(out.last().unwrap().contains("a=p,U=1"), "{out:?}");
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(ed.diff_view.is_none(), "the picture's buffer went with it");
+    assert_eq!(ed.buffers.len(), 1);
+    assert_eq!(
+        ed.bs().buf.name.as_deref(),
+        Some(other.as_path()),
+        "and the file beside it is current"
     );
     // A terminal that takes no pictures says nothing *about pictures* on the way in — the
     // reader is told by M-P, not by a flash every time a file opens — and the file is then

@@ -370,6 +370,15 @@ impl Editor {
         self.sync_image();
     }
 
+    /// **A view belongs to the buffer it was opened on.** Anything that makes another buffer
+    /// current closes it — otherwise a preview of the file you just left stays drawn over the
+    /// text of the one you are in — and the pictures it was holding go with it.
+    pub(crate) fn close_view(&mut self) {
+        if self.diff_view.take().is_some() {
+            self.sync_image();
+        }
+    }
+
     /// **Opening a picture shows the picture.** What a PNG's *text* is is a lossy decode of
     /// bytes that are not text, and this editor has no byte view — so a file whose name says
     /// it is a picture opens with its view up, rather than making the reader press M-P to see
@@ -588,12 +597,24 @@ impl Editor {
             }
             // Leaving: back to the save question, or back to the text.
             DiffAct::Close => {
-                // Nothing is open now, so a picture the terminal holds is one nobody
-                // draws: it goes, with its bytes.
-                self.sync_image();
                 if v.answers_save() {
+                    self.sync_image();
                     self.reask_external();
+                    return;
                 }
+                if matches!(v.source, Source::Picture { .. }) {
+                    // **Escaping a picture leaves the *file*, not the view**: there is no text
+                    // behind it worth having (see `preview_if_picture`). The view goes back up
+                    // first so that the last buffer — which stays, rano never being empty —
+                    // keeps the picture with `close_buffer`'s word about how to leave, rather
+                    // than dropping the reader into the bytes of a PNG.
+                    self.diff_view = Some(v);
+                    self.close_buffer();
+                    return;
+                }
+                // Nothing is open now, so a picture the terminal holds is one nobody draws:
+                // it goes, with its bytes.
+                self.sync_image();
                 return;
             }
             // Split ↔ unified, remembered for the next diff. A view with one

@@ -735,6 +735,14 @@ pub struct Keymaps {
     /// A picture: one column, and no keys but its own scrolling — the same `s` rule as
     /// `markdown`.
     pub picture: Keymap,
+    /// **The keys that reach past a view.** A view's own maps were the whole stack, so F8
+    /// did nothing at all while a preview was up: a reader looking at a picture could not
+    /// open another file, switch buffers, close one, or reach M-x. These are the keys that
+    /// mean the same thing wherever they are pressed; a view's own bindings still win,
+    /// because this map is stacked under them. Deliberately NOT stacked over the save
+    /// question (`DiffKind::Save`), which is waiting for an answer rather than being read —
+    /// these keys would walk away from it.
+    pub view: Keymap,
     pub conflict: Keymap,
     /// A host's review ([`Editor::open_review`]): send from the view, and M-P
     /// closes it as it opened it.
@@ -871,6 +879,12 @@ impl Keymaps {
         markdown.bind("M-p", "diff-close");
         let mut picture = Keymap::new("picture");
         picture.bind("M-p", "diff-close");
+        let mut view = Keymap::new("view");
+        view.bind("<f8>", "open-file")
+            .bind("M-w", "close-buffer")
+            .bind("M-x", "execute-extended-command")
+            .bind("M-<", "prev-buffer")
+            .bind("M->", "next-buffer");
         let mut conflict = Keymap::new("conflicts");
         conflict
             .bind("n", "conflict-next")
@@ -943,6 +957,7 @@ impl Keymaps {
             patch,
             markdown,
             picture,
+            view,
             conflict,
             review,
             list,
@@ -1048,7 +1063,14 @@ impl Editor {
                 DiffKind::Conflict => &k.conflict,
                 DiffKind::Review => &k.review,
             };
-            return vec![own, &k.diff];
+            // **The keys that reach past a view** — F8, M-W, M-x, M-< / M-> — are stacked
+            // under the view's own, so a preview is not a place with no way out but Esc. The
+            // save question is the exception: it is waiting for an answer, and these keys
+            // would walk away from a save that has not been decided.
+            return match kind {
+                DiffKind::Save => vec![own, &k.diff],
+                _ => vec![own, &k.diff, &k.view],
+            };
         }
         if self.picker.is_some() {
             return if self.picker_is_buffers() {

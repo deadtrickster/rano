@@ -185,7 +185,10 @@ impl Header {
         // **While a turn runs the duration is the turn's, and only the duration** — the host
         // decides which (letibot: two clocks for one turn, `Responding · 151s` beside `4.5s`,
         // read as a clock). This draws what it is given.
-        if let Some(ms) = self.duration_ms.filter(|ms| *ms > 0) {
+        // The host decides whether there is a duration: a running turn's elapsed is shown
+        // from its first millisecond (`0 ms`), and an idle head's last wall time only when
+        // one was measured.
+        if let Some(ms) = self.duration_ms {
             right.push(dur_human(ms));
         }
         if let Some(n) = self.out_tokens.filter(|n| *n > 0) {

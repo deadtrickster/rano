@@ -343,7 +343,7 @@ fn run(
             terminal.draw(|f| ui::draw_in(f, f.area(), &ed))?;
             dirty = false;
         }
-        if ed.quit {
+        if ed.wants_quit() {
             break Ok(());
         }
         // The idle wait is the long one, because a keystroke is what ends

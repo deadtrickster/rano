@@ -311,4 +311,29 @@ mod tests {
         ed.handle_key(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(ed.wants_quit(), "an unmodified editor exits at once");
     }
+
+    #[test]
+    fn a_host_opens_a_file_at_a_position_and_ticks_it_in() {
+        // The whole embedding flow, short of a terminal: an empty editor, a
+        // pane, a file opened at line 40 column 3, and ticks until it is read.
+        let path = std::env::temp_dir().join(format!("rano_host_open_{}.txt", std::process::id()));
+        let text: String = (1..=80).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &text).unwrap();
+        let mut ed = Editor::new(Buffer::new(), Config::default());
+        ed.set_area(crate::editor::Area::new(5, 2, 60, 20));
+        ed.open_at(&path, 40, Some(3)).unwrap();
+        for _ in 0..500 {
+            ed.tick(Instant::now());
+            if !ed.loading() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        ed.tick(Instant::now());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ed.bs().buf.name.as_deref(), Some(path.as_path()));
+        assert_eq!(ed.bs().cursor, Pos { row: 39, col: 2 });
+        let s = ed.bs().scroll;
+        assert!(s <= 39 && 39 < s + ed.text_h, "in view: scroll {s}");
+    }
 }

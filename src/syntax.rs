@@ -1726,11 +1726,10 @@ impl Default for Highlighter {
 // Stream: an append-only document, incrementally parsed
 // ---------------------------------------------------------------------------
 //
-// `dead_code` is allowed item by item across this section on purpose. It is
-// the public API of the *library* target (`rano::syntax::Stream`, lib.rs) for
-// other crates to use — the editor binary compiles this module privately and
-// has no use for the engine yet, so the lint would otherwise fire for every
-// type, method and helper here.
+// `dead_code` is allowed item by item across this section. It is the public
+// API of the library (`rano::syntax::Stream`) for other crates to use; the
+// allowances date from when the binary compiled this module privately as well,
+// and the editor itself still has no use for the engine.
 
 /// A node of a [`Stream`]'s tree, as plain data.
 ///

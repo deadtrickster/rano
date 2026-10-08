@@ -17,6 +17,38 @@
 //! - [`width`] — display width: how many columns a character takes, where a
 //!   line's wrap segments begin, and which clusters may never be split.
 //! - [`editor`] / [`ui`] — the editor and its renderer, for a host to embed.
+//!
+//! Embedding the editor as a pane, in outline:
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use std::time::Instant;
+//! use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+//! use rano::buffer::Buffer;
+//! use rano::editor::{Area, Editor, KeyOutcome};
+//! use rano::{config, keymap::Keymap, ui};
+//!
+//! let mut ed = Editor::new(Buffer::new(), config::load());
+//! let mut host = Keymap::new("host");
+//! host.bind("C-q", "close-pane"); // not an editor command: handed back
+//! ed.push_keymap(host);
+//! ed.open_at(Path::new("src/main.rs"), 120, Some(5)).ok();
+//! let pane = ratatui::layout::Rect::new(0, 1, 80, 30);
+//! ed.set_area(Area::new(pane.x, pane.y, pane.width, pane.height));
+//! # let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 31)).unwrap();
+//! // Each iteration of the host's loop:
+//! if ed.tick(Instant::now()) {
+//!     terminal.draw(|f| ui::draw_in(f, pane, &ed)).unwrap();
+//! }
+//! let wait = ed.next_wakeup(); // poll input for at most this long
+//! # let _ = wait;
+//! match ed.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)) {
+//!     KeyOutcome::Host(cmd) if cmd == "close-pane" => { /* close the pane */ }
+//!     KeyOutcome::Unhandled => { /* try the host's own bindings */ }
+//!     _ => {}
+//! }
+//! if ed.wants_quit() { /* ^X: close the pane */ }
+//! ```
 
 pub mod buffer;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,

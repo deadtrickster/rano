@@ -316,7 +316,7 @@ mod tests {
     use crate::BufferState;
     use crate::buffer::Buffer;
     use crate::config;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::term::{KeyCode, KeyEvent, Mods};
 
     fn buf(text: &str, name: Option<&Path>) -> Buffer {
         let mut b = Buffer::new();
@@ -325,7 +325,7 @@ mod tests {
         b
     }
 
-    fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) {
+    fn press(ed: &mut Editor, code: KeyCode, mods: Mods) {
         ed.handle_key(KeyEvent::new(code, mods));
     }
 
@@ -364,13 +364,13 @@ mod tests {
     fn buffer_list_starts_on_the_current_buffer_and_switches() {
         let mut ed = three_buffers();
         ed.cur = 1;
-        press(&mut ed, KeyCode::Char('l'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('l'), Mods::ALT);
         let p = ed.picker.as_ref().expect("M-L opens the list");
         assert_eq!(p.items.len(), 3);
         assert_eq!(p.sel, 1);
         assert!(p.items[2].label.contains("rano_pk_c.txt"));
-        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
-        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Down, Mods::NONE);
+        press(&mut ed, KeyCode::Enter, Mods::NONE);
         assert!(ed.picker.is_none());
         assert_eq!(ed.cur, 2);
         assert_eq!(lines(&ed), vec!["c"]);
@@ -379,9 +379,9 @@ mod tests {
     #[test]
     fn buffer_list_escape_changes_nothing() {
         let mut ed = three_buffers();
-        press(&mut ed, KeyCode::Char('l'), KeyModifiers::ALT);
-        press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-        press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char('l'), Mods::ALT);
+        press(&mut ed, KeyCode::End, Mods::NONE);
+        press(&mut ed, KeyCode::Esc, Mods::NONE);
         assert!(ed.picker.is_none());
         assert_eq!(ed.cur, 0);
     }
@@ -400,8 +400,8 @@ mod tests {
     fn delete_in_the_buffer_list_closes_the_selected_buffer() {
         let mut ed = three_buffers();
         ed.open_buffer_list();
-        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
-        press(&mut ed, KeyCode::Delete, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Down, Mods::NONE);
+        press(&mut ed, KeyCode::Delete, Mods::NONE);
         assert_eq!(ed.buffers.len(), 2);
         let p = ed.picker.as_ref().expect("the list stays open");
         assert_eq!(p.items.len(), 2);
@@ -451,17 +451,17 @@ mod tests {
             p.items[2].label
         );
         assert_eq!(p.sel, 0, "starts on the usage under the cursor");
-        press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::End, Mods::NONE);
+        press(&mut ed, KeyCode::Enter, Mods::NONE);
         assert_eq!(ed.cur, 1, "b.rs opened as a buffer");
         assert_eq!(ed.bs().cursor, Pos { row: 1, col: 11 });
         // Asking again and choosing b.rs reuses its buffer.
         ed.show_usages(vec![loc(&b, 1, 11)], Pos { row: 1, col: 11 });
-        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Enter, Mods::NONE);
         assert_eq!(ed.buffers.len(), 2, "no second copy of b.rs");
         // M-, unwinds both jumps, back to where the first list was opened.
-        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
-        press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char(','), Mods::ALT);
+        press(&mut ed, KeyCode::Char(','), Mods::ALT);
         assert_eq!(ed.cur, 0);
         assert_eq!(ed.bs().cursor, from);
         std::fs::remove_dir_all(&d).ok();
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn find_usages_without_a_server_says_so() {
         let mut ed = Editor::new(buf("x", None), config::Config::default());
-        press(&mut ed, KeyCode::Char('?'), KeyModifiers::ALT);
+        press(&mut ed, KeyCode::Char('?'), Mods::ALT);
         assert!(ed.picker.is_none());
         assert_eq!(ed.status_text(), Some("No LSP server".to_string()));
     }

@@ -28,9 +28,9 @@
 //! ```no_run
 //! use std::path::Path;
 //! use std::time::Instant;
-//! use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 //! use rano::buffer::Buffer;
 //! use rano::editor::{Area, Editor, KeyOutcome};
+//! use rano::term::KeyEvent;
 //! use rano::{config, keymap::Keymap, ui};
 //!
 //! let mut ed = Editor::new(Buffer::new(), config::load());
@@ -51,7 +51,7 @@
 //! }
 //! let wait = ed.next_wakeup(); // poll input for at most this long
 //! # let _ = wait;
-//! match ed.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)) {
+//! match ed.handle_key(KeyEvent::ctrl('q')) {
 //!     KeyOutcome::Host(cmd) if cmd == "close-pane" => { /* close the pane */ }
 //!     KeyOutcome::Unhandled => { /* try the host's own bindings */ }
 //!     _ => {}

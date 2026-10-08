@@ -1672,10 +1672,7 @@ mod tests {
         // x = 0.
         let mut e = ed("text");
         e.set_area(PANE.into());
-        e.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('x'),
-            crossterm::event::KeyModifiers::ALT,
-        ));
+        e.handle_key(crate::term::KeyEvent::alt(crate::term::KeyCode::Char('x')));
         assert!(e.palette.is_some(), "M-x opens the palette");
         let t = draw_pane(&e);
         outside_is_untouched(&t);
@@ -1683,15 +1680,15 @@ mod tests {
 
     #[test]
     fn a_click_is_mapped_through_the_panes_origin() {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use crate::term::{Mods, MouseButton, MouseEvent, MouseKind};
         let mut e = ed("aa\nbb\ncc\ndd");
         e.show_line_numbers = false;
         e.set_area(PANE.into());
         let click = |x: u16, y: u16| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: x,
-            row: y,
-            modifiers: KeyModifiers::NONE,
+            kind: MouseKind::Press(MouseButton::Left),
+            x,
+            y,
+            mods: Mods::NONE,
         };
         // Pane row 3 is buffer row 2 (the title takes pane row 0).
         assert!(e.handle_mouse(click(PANE.x + 1, PANE.y + 3)));

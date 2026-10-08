@@ -18,9 +18,9 @@
 use crate::buffer::Buffer;
 use crate::config;
 use crate::editor::Editor;
+use crate::term::{KeyCode, KeyEvent, Mods};
 use crate::ui;
 use crate::width;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -163,7 +163,7 @@ fn bench() {
         // grows by one character per iteration, which is what typing does.
         let keys = 3;
         let (kmed, kp95) = time(keys, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
         });
 
         let mut terminal =
@@ -238,12 +238,12 @@ fn bench_breakdown() {
         println!("    {:>22}  {}", "hl.refresh (whole doc)", ms(t));
         // The edit alone: the buffer mutation and the undo snapshot.
         let (t, _) = time(3, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
         });
         println!("    {:>22}  {}", "edit only", ms(t));
         // The frame's highlight, which is where the remaining cost lives.
         let (t, _) = time(3, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
         });
         println!("    {:>22}  {}", "edit + highlight", ms(t));
@@ -1546,13 +1546,13 @@ fn bench_scroll_profile() {
     let first = t.elapsed();
 
     let use_wheel = |e: &mut Editor| {
-        let me = |kind| crossterm::event::MouseEvent {
+        let me = |kind| crate::term::MouseEvent {
             kind,
-            column: 0,
-            row: 0,
-            modifiers: crossterm::event::KeyModifiers::NONE,
+            x: 0,
+            y: 0,
+            mods: crate::term::Mods::NONE,
         };
-        e.handle_mouse(me(crossterm::event::MouseEventKind::ScrollDown))
+        e.handle_mouse(me(crate::term::MouseKind::WheelDown))
     };
 
     // One pass: scroll to the bottom, then back to the top, timing every frame.
@@ -1579,11 +1579,11 @@ fn bench_scroll_profile() {
         }
         for _ in 0..notches {
             let t = Instant::now();
-            e.handle_mouse(crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::ScrollUp,
-                column: 0,
-                row: 0,
-                modifiers: crossterm::event::KeyModifiers::NONE,
+            e.handle_mouse(crate::term::MouseEvent {
+                kind: crate::term::MouseKind::WheelUp,
+                x: 0,
+                y: 0,
+                mods: crate::term::Mods::NONE,
             });
             e.adjust_scroll(e.text_h);
             e.adjust_scroll_x();
@@ -1682,7 +1682,7 @@ fn bench_threshold_cliff() {
         // A keypress: the edit plus the frame's highlight, which is where the
         // threshold decides which path runs.
         let (t_key, _) = time(5, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
         });
         // And a viewport window, for comparison.

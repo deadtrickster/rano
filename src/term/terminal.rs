@@ -2,8 +2,8 @@
 //! painter.
 //!
 //! Ported from letibot's `crates/tui/src/backend/terminal.rs`; the comments are its, with
-//! "the head" meaning whatever program draws through this — letibot's TUI, and rano's editor
-//! once it is off crossterm. [`Terminal::draw_buffer`] is the new entry: a
+//! "the head" meaning whatever program draws through this — letibot's TUI, and rano's own
+//! binary. [`Terminal::draw_buffer`] is the new entry: a
 //! [`crate::render::Buffer`] emitted under a palette and painted as rows.
 //!
 //! Fifty lines of `termios` instead of a TUI framework, for the same reason

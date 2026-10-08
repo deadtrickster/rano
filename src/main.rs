@@ -358,14 +358,14 @@ fn run(
         for ev in terminal.events() {
             match ev {
                 Event::Key(k) => {
-                    ed.handle_key(k.into());
+                    ed.handle_key(k);
                     dirty = true;
                 }
                 Event::Paste(t) => {
                     ed.paste_text(&t);
                     dirty = true;
                 }
-                Event::Mouse(m) => dirty |= ed.handle_mouse(m.into()),
+                Event::Mouse(m) => dirty |= ed.handle_mouse(m),
                 Event::Background { light } => {
                     palette = if light {
                         Palette::Light

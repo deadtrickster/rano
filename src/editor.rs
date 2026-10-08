@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::render::Style;
 use crate::style::Role;
-use crossterm::event::{MouseButton, MouseEvent};
+use crate::term::{MouseButton, MouseEvent, MouseKind};
 
 use crate::BufferState;
 use crate::RowWrap;
@@ -1736,11 +1736,11 @@ impl Editor {
     pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
         let mut m = m;
         if !self.area.is_empty() {
-            if !self.area.contains(m.column, m.row) {
+            if !self.area.contains(m.x, m.y) {
                 return false;
             }
-            m.column -= self.area.x;
-            m.row -= self.area.y;
+            m.x -= self.area.x;
+            m.y -= self.area.y;
         }
         // The list overlay is keyboard-only; the text under it is not there
         // to click.
@@ -1748,11 +1748,10 @@ impl Editor {
             return false;
         }
         self.ensure_wrap_prefix();
-        use crossterm::event::MouseEventKind as K;
         match m.kind {
-            K::ScrollUp => self.wheel(-3),
-            K::ScrollDown => self.wheel(3),
-            K::Down(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+            MouseKind::WheelUp => self.wheel(-3),
+            MouseKind::WheelDown => self.wheel(3),
+            MouseKind::Press(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();
                     bs.cursor = bs.buf.clamp(p);
@@ -1762,7 +1761,7 @@ impl Editor {
                 }
                 None => false,
             },
-            K::Drag(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+            MouseKind::Drag(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();
                     bs.cursor = bs.buf.clamp(p);

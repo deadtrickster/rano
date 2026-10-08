@@ -3,7 +3,7 @@
 //! meaning is written down.
 
 use crate::keymap::Key;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::term::{KeyCode, KeyEvent};
 
 use crate::editor::Editor;
 
@@ -47,8 +47,8 @@ impl Editor {
             .as_ref()
             .is_some_and(|c| !c.items.is_empty())
         {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            let ctrl = key.mods.ctrl();
+            let alt = key.mods.alt();
             let plain = !ctrl && !alt;
             match key.code {
                 KeyCode::Up if plain => {

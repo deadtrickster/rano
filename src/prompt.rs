@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::term::{KeyCode, KeyEvent};
 
 use crate::editor::Editor;
 use crate::search_ctrl::ReplaceState;
@@ -101,8 +101,8 @@ impl Editor {
     }
 
     pub(crate) fn handle_prompt_key(&mut self, mut p: Prompt, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.mods.ctrl();
+        let alt = key.mods.alt();
         let cancel = key.code == KeyCode::Esc || (ctrl && matches!(key.code, KeyCode::Char('g')));
 
         match p.kind {

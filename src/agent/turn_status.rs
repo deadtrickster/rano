@@ -5,7 +5,7 @@
 //! else draws. Whether a turn is busy or generating, and the clocks, are the host's; this row
 //! is a pure function of them — no clock is read here, so a replay draws what the live head did.
 
-use crate::render::{Line, Span};
+use crate::render::{Line, Span, Style};
 use crate::style::Role;
 
 use super::header::{dur_human, thousands};
@@ -208,8 +208,15 @@ impl TurnStatus {
                     None => " · started before this head attached".to_string(),
                     Some(ms) => format!(" · {}", duration(ms)),
                 };
+                // **The spinner inside the pending row**, as letibot drew it: the row painted
+                // pending with a painted spinner in it. The cells are one pending run either
+                // way; the stack is what lets a host that prints strings write the row as
+                // the nesting it always was.
                 let l = Line::new(vec![
-                    spin,
+                    Span::styled(
+                        spinner(self.now_ms).to_string(),
+                        Style::of(Role::Pending).role(Role::Pending),
+                    ),
                     Span::role(format!(" Responding{since}"), Role::Pending),
                 ]);
                 crate::render::text::truncate(&l, w)
@@ -252,7 +259,8 @@ pub fn stuck_line(model: &str, quiet_ms: u64, w: usize) -> Option<Line> {
             ),
             w,
         ),
-        Role::Attention,
+        // Yellow, as letibot's stuck line is — not the bold attention register.
+        Role::Pending,
     ))
 }
 
@@ -422,6 +430,22 @@ mod tests {
         }
     }
 
+    /// letibot's bytes: the spinner painted inside the pending row.
+    #[test]
+    fn the_spinner_is_stacked_inside_the_pending_row() {
+        let t = TurnStatus {
+            busy: true,
+            elapsed_ms: Some(3_000),
+            ..TurnStatus::default()
+        };
+        let l = t.line(80);
+        assert_eq!(
+            l.spans[0].style.roles().collect::<Vec<_>>(),
+            vec![Role::Pending, Role::Pending]
+        );
+        assert_eq!(l.plain(), "⠋ Responding · 3.0s");
+    }
+
     /// letibot `app/tests/turn.rs` — a silent generating turn is said out loud after 15 s.
     #[test]
     fn a_silent_turn_is_said_out_loud_after_fifteen_seconds() {
@@ -432,7 +456,7 @@ mod tests {
             "{}",
             l.plain()
         );
-        assert_eq!(role_of(&l, "glm"), Some(Role::Attention));
+        assert_eq!(role_of(&l, "glm"), Some(Role::Pending));
         assert!(stuck_line("glm", 40_000, 30).unwrap().width() <= 30);
     }
 }

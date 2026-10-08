@@ -49,6 +49,7 @@ pub mod jobs;
 pub mod outcome;
 pub mod pane;
 pub mod picker;
+pub mod quit;
 pub mod text;
 pub mod tool_row;
 pub mod turn_status;

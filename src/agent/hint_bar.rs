@@ -30,6 +30,10 @@ pub enum HintMode {
     Jobs,
     /// A decision card is open.
     Deciding,
+    /// The host's editor pane is open and has the keyboard.
+    Editor,
+    /// The host's editor pane is open and the composer has the keyboard.
+    EditorBehind,
     #[default]
     Conversation,
 }
@@ -66,6 +70,16 @@ impl HintMode {
             HintMode::Jobs => "↑↓ moves · enter reads a job, or unfolds finished · esc closes",
             HintMode::Deciding => {
                 "a row number answers · ↑↓ then enter · or type an option · /help"
+            }
+            // **The pane's own keys, and the two that leave it.** The editor's own bar is two
+            // rows above this one and names its keys; this row names what the HOST adds: the
+            // way to the composer, the send that lands there, and the way out. `^X` is the
+            // editor's own exit, kept because it asks about unsaved edits.
+            HintMode::Editor => {
+                "ctrl-] to the composer · alt-s sends your place to it · alt-p the change · ctrl-q closes (asks to save)"
+            }
+            HintMode::EditorBehind => {
+                "ctrl-] back to the editor · enter sends · the editor keeps your place · /help"
             }
             // **What a chord says must be what the chord does** (R40). This bar read `ctrl-t
             // long output` while `/t`, which DOES the conversation-wide unfold, was on the bar
@@ -181,6 +195,29 @@ mod tests {
         let s = quit.line(80).plain();
         assert!(!s.contains("again"), "{s}");
         assert_eq!(s.trim(), "1/2 or ↑↓ then enter · esc stays");
+    }
+
+    /// **An editor pane names the way back to whichever side does not have the keys**, so a
+    /// reader who lands in either knows the one chord that crosses.
+    #[test]
+    fn the_editor_pane_names_the_chord_that_crosses_to_the_other_side() {
+        let on = HintBar {
+            mode: HintMode::Editor,
+            ..HintBar::default()
+        };
+        let s = on.line(200).plain();
+        assert!(s.contains("ctrl-] to the composer"), "{s}");
+        assert!(s.contains("ctrl-q closes"), "{s}");
+        let behind = HintBar {
+            mode: HintMode::EditorBehind,
+            ..HintBar::default()
+        };
+        assert!(
+            behind
+                .line(200)
+                .plain()
+                .contains("ctrl-] back to the editor")
+        );
     }
 
     /// letibot `app/tests/transcript.rs::the_notes_chord_is_advertised_where_it_can_be_seen_and_reaches_nothing_else`

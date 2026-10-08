@@ -137,7 +137,7 @@ the config writes them nano's way (`^X`, `M-P`).
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current — unless it has unsaved edits, which keeps it); `name:line[:col]` jumps there |
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
-| `M-P` | Preview a diff/patch buffer, a markdown file as prose with its pictures, a PNG as a picture, or a file's merge conflicts side by side |
+| `M-P` | Preview a diff/patch buffer, a markdown file as prose with its pictures, a picture as a picture, or a file's merge conflicts side by side |
 | `M-S` | Send the file, cursor and selection to `send_command` (see [Talking to a host](#talking-to-a-host)) |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
@@ -202,12 +202,15 @@ the buffer holds, not an edit of it.
   draws nothing and says nothing: the alt text is what is left of it. This view
   is one column, so `s` says there is nothing to split rather than doing nothing.
 - **A picture file** (`.png`, or anything a converter on the machine can turn
-  into one — a JPEG, a GIF, an SVG) is drawn as the picture it is, in the
-  terminal, at a box that follows the window: half its width, and narrower in a
-  narrow pane; a resize redraws it at the new box. Pictures need a terminal that
-  takes inline images (the kitty graphics protocol): Ghostty does, and
-  `RANO_TERM_FEATURES=images` turns them on anywhere else. Without one M-P says
-  so instead of drawing placeholder cells.
+  into one — a JPEG, a GIF, an SVG) **opens as the picture**: not as the text of
+  its bytes, which is a lossy decode of something that is not text and no reading
+  at all. Esc is that text (the file as a save would write it, unmodified, if you
+  want it), `M-P` is the picture again, and switching back to the buffer shows it
+  again too. It is drawn at a box that follows the window: half its width, and
+  narrower in a narrow pane; a resize redraws it at the new box. Pictures need a
+  terminal that takes inline images (the kitty graphics protocol): Ghostty does,
+  and `RANO_TERM_FEATURES=images` turns them on anywhere else. Without one the
+  file is read as text and nothing is said about it — `M-P` says why.
 - **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
   without diff3's `|||||||` base) is shown one conflict per section, with ours
   and theirs lined up and the surrounding lines of the file for context. Each

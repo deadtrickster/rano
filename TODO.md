@@ -2373,10 +2373,16 @@ markdown preview mode and when i open files. letibot already does that"*.
   and drawn as rows of placeholder cells under the row that names them
   (`splice_pictures` + `picture_anchor`, ported from letibot's
   `transcript::assistant`). A reference that cannot be read draws nothing.
-- [x] **M-P on a PNG** draws the file as the picture it is — the buffer's own
-  text is a lossy decode of those bytes, so the file is read from disk, by name
-  (`.png` first, then the bytes' signature), and a `.png` that is not one is
-  refused by name.
+- [x] **M-P on a picture file** draws the file as the picture it is — the buffer's own
+  text is a lossy decode of those bytes, so the file is read from disk, by name (a
+  picture extension first, then the bytes' signature), and a `.png` that is not one is
+  refused by name. And **opening a picture file shows the picture**: the operator,
+  *"for images go straight for preview - because we show this text instead of proper
+  binary editor which is pointless anyway"* — so `preview_if_picture` runs on every way a
+  file becomes current (`open_file`, `start_load`, `load_now`, `set_current`). The buffer
+  underneath stays the file as a save would write it, unmodified, so Esc is that text and
+  M-P is the picture again; a terminal that takes no pictures opens the file as text and
+  says nothing about it (M-P is where a reader is told why).
 - [x] **The plumbing** (`Editor::images`, `images_held`, `take_graphics`,
   `sync_image`, `term::graphics::image_delete`): the editor queues the kitty
   upload/placement/delete commands and the host writes them before the frame that

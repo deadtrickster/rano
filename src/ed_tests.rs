@@ -903,6 +903,54 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     }
 }
 
+/// **A picture file opens as the picture**, not as the text of its bytes: what M-P would
+/// show is what opening it shows, because a lossy decode of a PNG is not a reading of it
+/// and this editor has no byte view. The buffer underneath is the file as it is, so Esc
+/// lands in that text and M-P shows the picture again.
+#[test]
+fn opening_a_picture_shows_the_picture() {
+    let d = temp_dir("open_png");
+    let file = d.0.join("sun.png");
+    write_png(&file, SUN_PNG_W, SUN_PNG_H);
+    let mut ed = test_ed("");
+    ed.text_w = 120;
+    ed.text_h = 20;
+    ed.images = true;
+    assert!(ed.open_at(&file, 1, None).is_ok());
+    let rows = picture_rows(&ed);
+    assert!(rows[0].starts_with('\u{10EEEE}'), "{:?}", rows[0]);
+    assert!(ed.diff_view.as_ref().unwrap().header().contains("Picture"));
+    // The terminal was told, as it is for M-P.
+    assert_eq!(graphics(&mut ed).len(), 2);
+    // Esc is the text underneath — unmodified, so a save writes the file back as it was.
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(ed.diff_view.is_none());
+    assert!(!ed.bs().buf.modified);
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(file.as_path()));
+    // And switching back to the buffer shows the picture again. (Multibuffer, so the
+    // second file lands beside the picture instead of replacing it.)
+    ed.config.multibuffer = true;
+    let other = d.0.join("notes.txt");
+    fs::write(&other, "plain text\n").unwrap();
+    assert!(ed.open_at(&other, 1, None).is_ok());
+    assert!(ed.diff_view.is_none(), "a text file opens as text");
+    ed.set_current(0);
+    assert!(
+        ed.diff_view.is_some(),
+        "back to the picture, as the picture"
+    );
+    // A terminal that takes no pictures says nothing *about pictures* on the way in — the
+    // reader is told by M-P, not by a flash every time a file opens — and the file is then
+    // read as text like any other.
+    let mut ed = test_ed("");
+    ed.images = false;
+    assert!(ed.open_at(&file, 1, None).is_ok());
+    assert!(ed.diff_view.is_none());
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(!msg.contains("pictures"), "{msg}");
+    assert!(msg.starts_with("Read"), "the ordinary reading: {msg}");
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

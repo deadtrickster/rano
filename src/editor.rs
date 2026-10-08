@@ -2834,6 +2834,10 @@ impl Editor {
         } else {
             self.flash(&format!("Read {} lines", count));
         }
+        // **A picture is its own reading**: the text just loaded is a lossy decode of bytes
+        // that are not text, so the picture opens over it. The flash above still says what
+        // was read, under the view.
+        self.preview_if_picture();
         true
     }
 
@@ -2953,6 +2957,11 @@ impl Editor {
         self.adjust_scroll_x();
         let name = self.buffer_name(i);
         self.flash(&format!("Buffer: {name}"));
+        // Switching to a buffer that is a picture shows the picture, as opening it does: the
+        // text is not a reading of those bytes, and a reader who wants it is one Esc away.
+        if self.diff_view.is_none() {
+            self.preview_if_picture();
+        }
     }
 
     /// What the status line and the buffer list call buffer `i`.

@@ -370,6 +370,26 @@ impl Editor {
         self.sync_image();
     }
 
+    /// **Opening a picture shows the picture.** What a PNG's *text* is is a lossy decode of
+    /// bytes that are not text, and this editor has no byte view — so a file whose name says
+    /// it is a picture opens with its view up, rather than making the reader press M-P to see
+    /// what they asked for. The buffer underneath is still the file as a save would write it
+    /// (unmodified), so Esc lands in the text and M-P shows the picture again.
+    ///
+    /// **Nothing is said when the terminal takes no pictures**: an automatic step that
+    /// flashed on every open would be noise, and M-P is how a reader is told why.
+    pub(crate) fn preview_if_picture(&mut self) -> bool {
+        if !self.images || self.bs().buf.name.is_none() {
+            return false;
+        }
+        if crate::image::kind(self.bs().buf.name.as_deref()).is_none() {
+            return false;
+        }
+        let name = self.buffer_name(self.cur);
+        self.open_picture(name);
+        self.diff_view.is_some()
+    }
+
     /// **M-P on a picture file**: read it and open the view that draws it, or say why
     /// not. What stops it is said rather than drawn — a picture is the one view whose
     /// failure the reader cannot see for themselves.

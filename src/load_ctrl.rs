@@ -37,6 +37,10 @@ impl Editor {
         self.lsp_sync();
         self.highlight_dirty = true;
         self.ensure_wrap_prefix();
+        // **A picture opens as the picture** — the rows arriving underneath are a lossy
+        // decode of bytes that are not text (see `Editor::preview_if_picture`). Done before
+        // the loader's rows land, because the view reads the file, not the buffer.
+        self.preview_if_picture();
         Ok(())
     }
 
@@ -214,6 +218,9 @@ impl Editor {
                 self.highlight_dirty = true;
                 self.diag_dirty = true;
                 self.lsp_sync();
+                // A reload of a picture is that picture again (a revert, or a buffer that
+                // waited its turn behind another file).
+                self.preview_if_picture();
             }
             Err(e) => self.flash(&format!("Cannot read {}: {e}", path.display())),
         }

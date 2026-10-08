@@ -1656,6 +1656,49 @@ file, so `Encoding` travels with the buffer exactly as `crlf` does.
 rows, not 1.5 ms); every row renders identically to today (verified, not
 asserted). No size threshold anywhere: there is no "too big" mode.
 
+#### What the 835 MB is made of, measured 2026-10-09
+
+Asked as *"why would it spend 10gb on 2gb file?"*, which is a fair challenge to a
+number this section had been carrying without saying where it came from. Four
+200 MiB files of the same size and different LINE LENGTHS, opened in the editor,
+peak `VmHWM` from `/proc`:
+
+| line length | rows | peak | × file |
+|---|---|---|---|
+| 22 B | 9.53M | **1608 MiB** | **8.04×** |
+| 80 B | 2.62M | 1048 MiB | 5.24× |
+| 512 B | 410k | 844 MiB | 4.22× |
+| 4096 B | 51k | 810 MiB | **4.05×** |
+
+**The floor is `char`.** It is a Unicode scalar value: four bytes, whatever the
+file's encoding. ASCII is one byte. So the text alone is 4× — that is 8 GB of the
+10 for a 2 GB file, and it is why the long-line file sits at 4.05× with nothing
+else left to explain.
+
+**The rest is per row, which is why short lines cost more.** A `Vec<char>` header
+is 24 bytes, so a 2 GB file of 22-byte lines has 97M of them (2.2 GB of headers)
+where 4 KB lines have 524k (12 MB). Measured directly: building the rows alone —
+9.53M rows × 21 chars as `Vec<Vec<char>>` — costs **1093 MiB**, against the
+editor's 1608 MiB on the same shape.
+
+**And ~515 MiB of that is still unattributed** — about 54 bytes per row, absent
+for the long-line file, so per-row state rather than content. The wrap table was
+the hypothesis (`RowWrap` is 32 bytes plus 8 of `wrap_prefix`, per row, and it
+exists for every row whether or not it wraps). A `wrap = false` run showed no
+difference, but the harness for it did not survive to confirm the config was
+read, so **the hypothesis is untested rather than disproved** — do not quote it as
+either.
+
+So the honest answer is a RANGE, not the number this section carried: a 2 GB file
+costs **8 GB to 15 GB**, and ~10 GB for log-shaped 80-byte lines per the model
+(8192 + 614 + 1024 MiB). The "~10 GB" was right for that shape by luck rather
+than by measurement.
+
+**Which also says what the fix is not.** Lazy decode does not reduce the 4× — it
+avoids it, by not holding the rows at all and decoding the window. That is why
+this is a store change and not a tweak, and why the 4× is not a defect: `Vec<char>`
+is what makes character indexing O(1), which the cursor and column model need.
+
 **The store, and why each piece is there** — both parts measured:
 
 - **Chunked**: rows in chunks of 1,024, so a structural edit shifts one chunk

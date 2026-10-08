@@ -40,6 +40,7 @@ use crate::style::Role;
 
 pub mod card;
 pub mod decision;
+pub mod jobs;
 pub mod outcome;
 pub mod pane;
 pub mod text;

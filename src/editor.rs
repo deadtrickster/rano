@@ -461,11 +461,7 @@ impl Editor {
             self.bs_mut().scroll_x = 0;
             return;
         }
-        let gutter = if self.show_line_numbers {
-            ui::gutter_width(self.bs().buf.row_count())
-        } else {
-            0
-        };
+        let gutter = self.gutter_w();
         let view_w = self.text_w.saturating_sub(gutter).max(1);
         let tab_width = self.tab_width;
         let row = self
@@ -508,12 +504,26 @@ impl Editor {
 
     /// Width of the text viewport in display cols (gutter excluded).
     pub(crate) fn view_w(&self) -> usize {
-        let g = if self.show_line_numbers {
-            ui::gutter_width(self.bs().buf.row_count())
+        self.text_w.saturating_sub(self.gutter_w()).max(1)
+    }
+
+    /// The gutter's width in display cols, or 0 when line numbers are off.
+    ///
+    /// **One place, because four call sites must agree**: the draw, the mouse →
+    /// position mapping, `view_w` and `adjust_scroll_x` all ask how far the text
+    /// starts from the left edge, and a gutter that is one column wider in one
+    /// of them puts the cursor, the click or the wrap width one column off.
+    ///
+    /// The width is measured from the buffer's line SPAN and not its row count,
+    /// because a tail's numbers are the file's: `BufferState::line_span` is the
+    /// file's last line once the background count has answered, and the rows in
+    /// the buffer until it does.
+    pub(crate) fn gutter_w(&self) -> usize {
+        if self.show_line_numbers {
+            ui::gutter_width(self.bs().line_span())
         } else {
             0
-        };
-        self.text_w.saturating_sub(g).max(1)
+        }
     }
 
     /// Rebuild the visual-row prefix table when the buffer or the wrap width
@@ -1773,11 +1783,7 @@ impl Editor {
         if row >= bs.buf.row_count() {
             return None;
         }
-        let g = if self.show_line_numbers {
-            ui::gutter_width(bs.buf.row_count())
-        } else {
-            0
-        };
+        let g = self.gutter_w();
         let x = pane_col as usize;
         if x < g {
             return Some(Pos { row, col: 0 });
@@ -3336,6 +3342,11 @@ impl Editor {
             && f.until > Instant::now()
         {
             return Some(f.text.clone());
+        }
+        // After the flash, because it is a number arriving late rather than a
+        // state the screen is in — see `counting_text`.
+        if let Some(s) = self.counting_text() {
+            return Some(s);
         }
         if let Some(job) = &self.bs().exec_job {
             return Some(format!("Running: {}", job.cmd));

@@ -374,12 +374,11 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     let bs = ed.bs();
 
     // F4: line-number gutter shrinks the text viewport; E3: scroll_x is the
-    // left edge of the text window in display cols.
-    let g = if ed.show_line_numbers {
-        gutter_width(bs.buf.row_count())
-    } else {
-        0
-    };
+    // left edge of the text window in display cols. Both widths come from the
+    // editor, so the draw, the click mapping and the wrap width cannot disagree
+    // — and for a tail the width follows the FILE's last line, once the
+    // background count has said what it is (TODO.md §20.1's idea 3).
+    let g = ed.gutter_w();
     let view_w = (width as usize).saturating_sub(g);
 
     // Merged diagnostics, computed ONCE per frame: the per-character style
@@ -480,8 +479,17 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         for (i, (r, seg)) in vis.iter().enumerate() {
             // The number sits on the first wrap segment of a row only;
             // continuation rows stay blank (nano).
+            //
+            // The number is the FILE's, which for an ordinary buffer is the
+            // row plus one, and for a tail is `lines_before + row + 1` — and
+            // for a tail nobody has counted yet it is **nothing**: a blank cell
+            // rather than `r + 1`, because the tail's row 1 is somewhere in the
+            // middle of a file whose length is not known (§20.3 C).
             let s = if *r < bs.buf.row_count() && *seg == 0 {
-                format!("{:>w$} ", r + 1, w = g - 1)
+                match bs.line_number(*r) {
+                    Some(n) => format!("{:>w$} ", n, w = g - 1),
+                    None => " ".repeat(g),
+                }
             } else {
                 " ".repeat(g)
             };
@@ -706,7 +714,13 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         // wraps it in "[ ... ]" when it fits with room to spare (start_col
         // > 1); only the text is reversed.
         let cur = &ed.bs().cursor;
-        let pos_txt = format!("Ln {}, Col {}", cur.row + 1, cur.col + 1);
+        // `?` and not `1`: a tail's row is not the file's line until the
+        // background count has said which line it is, and claiming the first
+        // one is the lie §20.3 C exists to stop (TODO.md §20.1's idea 3).
+        let pos_txt = match ed.bs().line_number(cur.row) {
+            Some(n) => format!("Ln {}, Col {}", n, cur.col + 1),
+            None => format!("Ln ?, Col {}", cur.col + 1),
+        };
         let pos_w = pos_txt.chars().count();
         if let Some(msg) = ed.status_text() {
             let avail = (width as usize).saturating_sub(pos_w + 1);

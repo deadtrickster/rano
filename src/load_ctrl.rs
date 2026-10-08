@@ -8,6 +8,7 @@
 
 use crate::buffer::Buffer;
 use crate::editor::Editor;
+use crate::linecount::{Counted, LineCountJob};
 use crate::loader::{
     ADOPT_BUDGET as budget, Adopted, LoadJob, TAIL_ROWS, TAIL_WINDOW, Tail, tail_offset,
 };
@@ -74,6 +75,8 @@ impl Editor {
             // otherwise one line after this returns.
             bs.tail = None;
             bs.read_only = false;
+            bs.lines_before = Some(0);
+            bs.line_count = None;
         }
         // A new file is a new language, a new LSP session and a new highlight.
         self.lsp_sync();
@@ -106,10 +109,70 @@ impl Editor {
         let size = file.metadata()?.len();
         let from = tail_offset(&mut file, size, TAIL_ROWS, TAIL_WINDOW)?;
         self.start_load_from(path, from)?;
-        let bs = self.bs_mut();
-        bs.tail = Some(Tail { size_at_open: size });
-        bs.read_only = true;
+        {
+            let bs = self.bs_mut();
+            bs.tail = Some(Tail { size_at_open: size });
+            bs.read_only = true;
+            // The tail's row 1 is the file's row `lines_before + 1`, and nothing
+            // knows `lines_before` yet — so the numbering is honestly unknown
+            // until the scan below answers, and the gutter says so rather than
+            // saying `1` (TODO.md §20.3 C).
+            bs.lines_before = None;
+        }
+        self.start_line_count(path, from);
         Ok(())
+    }
+
+    /// Start the background count of the file's lines before byte `upto` — the
+    /// tail's offset, so **only the bytes above the tail are scanned**: the
+    /// rows below it are the ones already in the buffer.
+    ///
+    /// A failure here is not fatal and is not flashed: the only consequence is
+    /// that the numbering stays unknown, which `BufferState::line_number`
+    /// already expresses, and an error banner at open for a file that read
+    /// perfectly would be a worse answer than a blank gutter.
+    fn start_line_count(&mut self, path: &Path, upto: u64) {
+        let job = LineCountJob::spawn(path.to_path_buf(), upto).ok();
+        self.bs_mut().line_count = job;
+    }
+
+    /// Adopt the line count if it has answered. Never blocks.
+    ///
+    /// Returns whether the frame needs redrawing. A `Progress` one does: the
+    /// status line counts up, which is how a long scan on a 2 GiB log is told
+    /// apart from a hung one.
+    pub(crate) fn line_count_poll(&mut self) -> bool {
+        let Some(job) = self.bs_mut().line_count.as_mut() else {
+            return false;
+        };
+        match job.poll() {
+            Counted::Nothing => false,
+            Counted::Progress(_) => true,
+            Counted::Done(n) => {
+                let bs = self.bs_mut();
+                bs.line_count = None;
+                bs.lines_before = Some(n);
+                true
+            }
+            // Cancelled, or its worker went away: no number, and no guess. The
+            // gutter stays blank for the rest of the session, which is the
+            // honest half of a cancelled scan.
+            Counted::Stopped => {
+                self.bs_mut().line_count = None;
+                false
+            }
+            Counted::Failed(e) => {
+                self.bs_mut().line_count = None;
+                self.flash(&format!("Cannot count the file's lines: {e}"));
+                true
+            }
+        }
+    }
+
+    /// A line count is in flight. Used by the loop to keep the wait short, and
+    /// by the status line to say why the numbers are missing.
+    pub(crate) fn counting(&self) -> bool {
+        self.bs().line_count.is_some()
     }
 
     /// Adopt whatever the loader has ready, bounded by
@@ -192,6 +255,11 @@ impl Editor {
                             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
                             bs.scroll = 0;
                             bs.edit_gen = bs.edit_gen.wrapping_add(1);
+                            // The file is whole now, so it is not a tail and
+                            // there is nothing left to count.
+                            bs.tail = None;
+                            bs.lines_before = Some(0);
+                            bs.line_count = None;
                         }
                         Err(e) => self.flash(&format!("Read failed: {e}")),
                     }
@@ -268,9 +336,27 @@ impl Editor {
         ))
     }
 
-    /// Abandon an in-flight load: `^C`, an edit, or another file.
+    /// The status-line text for a tail's line count in flight, or `None`.
+    ///
+    /// **Deliberately not `loading_text`'s**, because a load in flight and a
+    /// count in flight are not equally important: a load is the difference
+    /// between a frozen frame and a working one, while a count is a number
+    /// arriving late. So this one loses to a flash — a refusal such as
+    /// "Read-only buffer — typing refused" must never be displaced by it — and
+    /// it is said only while the gutter has nothing to say (§20.3 C).
+    pub(crate) fn counting_text(&self) -> Option<String> {
+        let job = self.bs().line_count.as_ref()?;
+        Some(format!("Counting lines… {} so far", job.counted))
+    }
+
+    /// Abandon an in-flight read — rows or line count: `^C`, an edit, or
+    /// another file. Both, because both are work whose answer the caller has
+    /// just stopped waiting for.
     pub(crate) fn cancel_load(&mut self) {
         if let Some(job) = self.bs().load.as_ref() {
+            job.cancel();
+        }
+        if let Some(job) = self.bs().line_count.as_ref() {
             job.cancel();
         }
     }
@@ -318,6 +404,10 @@ impl Editor {
                 // just replaced with the file itself. Read-only is left alone —
                 // that was asked for, and a whole read does not unask it.
                 bs.tail = None;
+                // And every row of the file is here, so the file's line 1 is
+                // row 0 and there is nothing left to count.
+                bs.lines_before = Some(0);
+                bs.line_count = None;
                 self.highlight_dirty = true;
                 self.diag_dirty = true;
                 self.lsp_sync();

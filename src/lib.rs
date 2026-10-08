@@ -152,6 +152,7 @@ mod help;
 // What a host's loop calls between events: `Editor::tick`, `next_wakeup`.
 mod host;
 mod keys;
+mod linecount;
 mod load_ctrl;
 mod loader;
 pub mod logblocks;

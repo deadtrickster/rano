@@ -3973,6 +3973,133 @@ fn a_plain_open_is_not_a_tail() {
     assert_eq!(rows[0], "line 1");
 }
 
+/// Pump the line count the way the run loop does.
+fn settle_count(ed: &mut Editor) {
+    for _ in 0..1000 {
+        ed.line_count_poll();
+        if !ed.counting() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the line count never finished");
+}
+
+/// **A tail's rows are not the file's lines, and the editor says so rather
+/// than guessing** (TODO.md §20.1's idea 3, §20.3 C). The count is what turns
+/// the buffer's row 0 into the file's line 1001.
+#[test]
+fn a_tail_numbering_is_unknown_until_the_count_answers() {
+    // 1200 rows: the tail is rows 1001..1200, so the first row's number is
+    // 1001 — and until the count lands there is no number at all.
+    let n = crate::loader::TAIL_ROWS + 1000;
+    let (_d, path) = numbered_log("tail_count", n);
+    let mut ed = test_ed("");
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+
+    assert!(
+        ed.bs().line_number(0).is_none(),
+        "a line number before anything counted it"
+    );
+    assert!(ed.counting(), "no count was started");
+    let said = ed.counting_text().unwrap_or_default();
+    assert!(said.contains("Counting lines"), "{said:?}");
+    // A flash wins over the count: a refusal must never be hidden by a number
+    // arriving late.
+    ed.flash("something happened");
+    assert_eq!(ed.status_text().as_deref(), Some("something happened"));
+
+    settle_count(&mut ed);
+    assert_eq!(ed.bs().line_number(0), Some(1001));
+    assert_eq!(
+        ed.bs().line_number(crate::loader::TAIL_ROWS - 1),
+        Some(n as u64)
+    );
+    assert!(!ed.counting(), "the job outlived its answer");
+
+    // And an ordinary buffer names its own rows from 1, which is the same
+    // question with a known answer.
+    let ed = test_ed("a\nb\nc\n");
+    assert_eq!(ed.bs().line_number(0), Some(1));
+    assert_eq!(ed.bs().line_number(2), Some(3));
+}
+
+/// The two places a line number reaches the glass: the gutter and the status
+/// line. Both are blank/`?` while the count is in flight, and both become the
+/// FILE's numbers when it lands — including the gutter's WIDTH, which has to
+/// grow from three digits to four for the numbers to fit.
+#[test]
+fn the_gutter_and_the_status_line_wait_for_the_count() {
+    let n = crate::loader::TAIL_ROWS + 1000; // 1200 rows → 4 digits
+    let (_d, path) = numbered_log("tail_render", n);
+    let mut ed = test_ed("");
+    ed.show_line_numbers = true;
+    ed.text_w = 100;
+    ed.text_h = 24;
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    // Deliberately NOT `tick` first: `tick` is what adopts the count, and the
+    // point of this half of the test is the frame drawn before it has arrived.
+    // (`settle` pumps the loader only, so the count is finished on its thread
+    // and not yet installed.)
+
+    let (before_first, before_status) = {
+        let screen = ui::Screen::of(&ed, 100, 30);
+        let row = |y: u16| -> String { (0..100).map(|x| screen[(x, y)].symbol.clone()).collect() };
+        (row(1), row(27))
+    };
+    assert!(
+        before_first.starts_with("    line 1001"),
+        "the gutter claimed a number: {before_first:?}"
+    );
+    assert!(
+        before_status.contains("Ln ?"),
+        "the status line claimed a number: {before_status:?}"
+    );
+
+    settle_count(&mut ed);
+    // The tail lands at the bottom, so row 1 of the SCREEN is not row 0 of the
+    // buffer; put the view AND the cursor on the first row, so the numbers
+    // under test are that row's.
+    {
+        let bs = ed.bs_mut();
+        bs.scroll = 0;
+        bs.cursor = Pos { row: 0, col: 0 };
+    }
+    let (after_first, after_status) = {
+        let screen = ui::Screen::of(&ed, 100, 30);
+        let row = |y: u16| -> String { (0..100).map(|x| screen[(x, y)].symbol.clone()).collect() };
+        (row(1), row(27))
+    };
+    assert!(
+        after_first.starts_with("1001 line 1001"),
+        "the gutter is not the file's numbering, at the file's width: {after_first:?}"
+    );
+    assert!(
+        after_status.contains("Ln 1001"),
+        "the status line is not the file's numbering: {after_status:?}"
+    );
+}
+
+/// A plain open has nothing to wait for: its numbering is known from the first
+/// frame, because its row 1 IS the file's line 1.
+#[test]
+fn a_plain_open_is_numbered_from_the_first_frame() {
+    let (_d, path) = numbered_log("tail_plain_numbering", 5);
+    let mut ed = test_ed("");
+    ed.show_line_numbers = true;
+    ed.text_w = 100;
+    ed.text_h = 24;
+    ed.start_load(&path).expect("open");
+    settle(&mut ed);
+    ed.tick(Instant::now());
+    let screen = ui::Screen::of(&ed, 100, 30);
+    let row = |y: u16| -> String { (0..100).map(|x| screen[(x, y)].symbol.clone()).collect() };
+    assert!(row(1).starts_with(" 1 line 1"), "{:?}", row(1));
+    assert!(row(27).contains("Ln 1, Col 1"), "{:?}", row(27));
+}
+
 /// **The status line must not claim a line count it does not know** (§20.3 C).
 /// "Read 200 lines" is a lie about a file with 500 in it — and it is the
 /// measured line count of the file, not of the tail, that §20.1's background

@@ -2684,13 +2684,26 @@ case — `one_nl: rows=1 window=16 — got 2, reference 0`.
       readonly btw" is one thought. Its status line says `Tailing — showing the
       last N lines` and not `Read N lines`: N is the tail we asked for, not the
       file's line count.
-      **Left to C, and visible in that measurement's output**: the gutter and the
-      status line number the tail from 1, so a 400 000-row file reads `Ln 200`.
-      §20.1's idea 3 is the increment that makes that number true — or that stops
-      claiming it until it is.
-- [ ] **C** — the background line count. Until it answers, the status line must
-      not claim a line number it does not know: showing "Ln 1" for the file's
-      line 4 000 000 is a lie, and a tail view without numbering is fine.
+      **C's to fix, and C did it** (see below): the gutter and the status line
+      numbered the tail from 1, so a 400 000-row file read `Ln 200`.
+- [x] **C** — the background line count, and the numbering it makes honest.
+      `src/linecount.rs` counts the newlines in the bytes BEFORE the tail — one
+      pass, one 64 KiB buffer, nothing decoded, nothing allocated per row — and
+      `BufferState::lines_before` is `None` until it answers. Every place a line
+      number reaches the glass goes through `BufferState::line_number`, so a tail
+      nobody has counted has a blank gutter and `Ln ?`, and a counted one has the
+      FILE's numbers: the top row of the screen of a 4 000 000-row log reads
+      `3998001`, and the gutter is as wide as the file's last line needs.
+      `landed`
+      **Measured on one 344 MB log of 4 000 000 rows, `-f` against a plain open:
+      5 MB RSS against 1.6 GB — 327×.** The megabyte over B's 4 MB is the whole
+      price of the count. The count itself is faster than a frame can be captured
+      at that size (the file is 344 MB and the first frame is already numbered),
+      so the *unknown* state is a test's to hold rather than a hand's — which is
+      the good case, not a gap.
+      Cancelled, the scan reports `Stopped` and installs nothing: a partial count
+      stated as the file's line count is a wrong number said confidently, which
+      is worse than the blank gutter it replaces.
 - [ ] **D** — follow. Poll `size()`, read the growth, append. A trailing partial
       line is **held back** until its newline arrives, which is what makes
       "settled" a fact rather than a guess.

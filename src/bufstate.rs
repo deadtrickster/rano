@@ -80,6 +80,21 @@ pub struct BufferState {
     /// `pub(crate)` like [`Self::load`], for the same reason: it names a type
     /// from a module the crate does not export.
     pub(crate) tail: Option<crate::loader::Tail>,
+    /// **How many complete rows the file has BEFORE this buffer's first row.**
+    ///
+    /// `Some(0)` is an ordinary document, whose row 1 is the file's line 1.
+    /// `Some(n)` is a tail whose background scan has answered: the file has `n`
+    /// rows above the tail, so buffer row `r` is file line `n + r + 1`
+    /// (TODO.md §20.1's idea 3).
+    ///
+    /// **`None` is the honest third state**, and the reason this is an `Option`
+    /// rather than a number that starts at zero: while the scan is in flight the
+    /// numbering is *unknown*, and `Ln 1` for a screenful taken from the end of
+    /// a 400 000-row log is a claim about a file nobody has counted (§20.3 C).
+    /// A blank gutter and `Ln ?` are worse to look at and true.
+    pub(crate) lines_before: Option<u64>,
+    /// The scan that will fill [`Self::lines_before`] in, while it runs.
+    pub(crate) line_count: Option<crate::linecount::LineCountJob>,
     /// Horizontal scroll of the text window, in DISPLAY cols (E3/F2).
     /// Always 0 while soft wrap is on (lines wrap instead of scrolling).
     pub scroll_x: usize,
@@ -146,6 +161,30 @@ pub struct BufferState {
 }
 
 impl BufferState {
+    /// The number row `row` has **in the file**, 1-based — or `None` when
+    /// nobody has counted the file's lines yet (see [`Self::lines_before`]).
+    ///
+    /// The one place a line number is derived, because a gutter, a status line
+    /// and anything that later labels a row must agree about a tail: its row 1
+    /// is not the file's line 1, and before the count it is not a number at all.
+    pub fn line_number(&self, row: usize) -> Option<u64> {
+        self.lines_before.map(|before| before + row as u64 + 1)
+    }
+
+    /// The largest line number this buffer could show, for the gutter's width.
+    ///
+    /// The file's true last line when the count is known, and the buffer's own
+    /// row count when it is not. Erring narrow is deliberate: the number will
+    /// arrive, and a gutter that starts one digit too wide never gives the
+    /// column back.
+    pub fn line_span(&self) -> usize {
+        let rows = self.buf.row_count();
+        match self.lines_before {
+            Some(before) => rows.saturating_add(usize::try_from(before).unwrap_or(usize::MAX)),
+            None => rows,
+        }
+    }
+
     pub(crate) fn new(buf: Buffer) -> Self {
         let mut buf = buf;
         if buf.rows_is_empty() {
@@ -173,6 +212,8 @@ impl BufferState {
             exec_job: None,
             read_only: false,
             tail: None,
+            lines_before: Some(0),
+            line_count: None,
             scroll_x: 0,
             wrap_prefix: Vec::new(),
             wrap_rows: Vec::new(),

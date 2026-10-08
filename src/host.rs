@@ -40,6 +40,10 @@ impl Editor {
         // The load is bounded per call, never waiting, and reports its own
         // state changes.
         let mut dirty = self.load_poll();
+        // A tail's line count, which decides whether the gutter can state a
+        // number at all (TODO.md §20.3 C). After the load poll, because the
+        // tail's own rows are what the count is an offset into.
+        dirty |= self.line_count_poll();
         dirty |= self.diag_flush(now);
         dirty |= self.tick_status();
         dirty |= self.lsp_poll();
@@ -110,7 +114,7 @@ impl Editor {
     pub fn next_wakeup(&self) -> Duration {
         let wait = if self.load_saturated {
             Duration::ZERO
-        } else if self.loading() {
+        } else if self.loading() || self.counting() {
             LOADING_WAIT
         } else {
             IDLE_WAIT

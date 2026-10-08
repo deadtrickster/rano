@@ -54,6 +54,7 @@ pub mod pane;
 pub mod picker;
 pub mod queue;
 pub mod quit;
+pub mod subagents;
 pub mod text;
 pub mod tool_row;
 pub mod turn_status;

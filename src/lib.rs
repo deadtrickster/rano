@@ -75,6 +75,8 @@ mod exec;
 mod exec_ctrl;
 pub mod export;
 mod help;
+// What a host's loop calls between events: `Editor::tick`, `next_wakeup`.
+mod host;
 mod keys;
 mod load_ctrl;
 mod loader;

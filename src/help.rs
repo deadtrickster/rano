@@ -187,7 +187,7 @@ impl Editor {
     }
 
     /// Re-render a help page after a resize. Returns whether it changed.
-    pub fn refresh_info_view(&mut self) -> bool {
+    pub(crate) fn refresh_info_view(&mut self) -> bool {
         let w = self.text_w;
         let Some(mut v) = self.info.take() else {
             return false;

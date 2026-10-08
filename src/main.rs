@@ -3,7 +3,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -321,38 +321,18 @@ fn run(
     }
     ed.add_deferred_buffers_at(&rest);
     // D6 dirty-draw: redraw only when something changed. Any handled key,
-    // paste or resize dirties (coarse); the pollers below report their own
+    // paste or resize dirties (coarse); `tick` reports the editor's own
     // state changes. text_w is the FULL viewport width now (draw renders
     // full-width lines); justify keeps its old wrap width via a -2 there.
     let mut dirty = true;
     let result = loop {
         let size = terminal.size()?;
         dirty |= ed.set_area(Area::new(0, 0, size.width, size.height));
-        // Before the scroll: `--line` CENTRES the target, and centring sets
-        // the scroll. Running `adjust_scroll` first would then pull the view
-        // back to the nearest edge, which is the opposite of centring. It is
-        // also why this waits for the row — see `apply_startup_pos`.
-        // A file from the command line whose buffer just became current.
-        dirty |= ed.start_pending_load();
-        dirty |= ed.refresh_prompt_hints();
-        dirty |= ed.refresh_diff_view();
-        dirty |= ed.refresh_info_view();
-        // A prefix's card appears after a pause: redraw when it becomes due.
-        let card = ed.pending_card().is_some();
-        if card != ed.pending.card_shown {
-            ed.pending.card_shown = card;
-            dirty = true;
-        }
-        ed.apply_startup_pos();
-        ed.adjust_scroll(ed.text_h);
-        ed.adjust_scroll_x();
+        // The pollers, the overlays' refreshes, the scroll and the frame's
+        // highlight: everything between two events, the same call a host
+        // embedding the editor makes.
+        dirty |= ed.tick(Instant::now());
         if dirty {
-            // The frame's highlight, after the scroll the window is measured
-            // against. Lazy on purpose: a burst of keystrokes between two
-            // frames costs one highlight here rather than one per key, and a
-            // huge file's first highlight is this window rather than the whole
-            // document.
-            ed.ensure_highlight();
             // Hide the physical cursor while the frame paints: the backend
             // moves it across the cells it writes, and on a fast scroll that
             // sweep shows as a ghost cursor blinking at painted cells (often
@@ -366,29 +346,10 @@ fn run(
         if ed.quit {
             break Ok(());
         }
-        // While a file is arriving the loop must come back promptly to adopt
-        // it, or the text appears in 200 ms lumps and the load looks like a
-        // stutter rather than a stream. 8 ms is a frame at 120 Hz; otherwise the
-        // idle wait is the long one, because a keystroke is what ends it.
-        //
-        // And when the loader is SATURATED — it filled the adoption budget, so
-        // more was ready — wait not at all: the budget is what keeps one
-        // iteration short, not what paces the load. Without this the loop slept
-        // 8 ms per 4096 rows and a 2.6M-line file took ten seconds instead of
-        // one, with the disk idle in between.
-        let wait = if ed.load_saturated {
-            0
-        } else if ed.loading() {
-            8
-        } else {
-            200
-        };
-        // Come back when a prefix's card is due, not at the next keystroke.
-        let wait = match ed.card_due() {
-            Some(d) => wait.min(d.as_millis() as u64 + 1),
-            None => wait,
-        };
-        if event::poll(Duration::from_millis(wait))? {
+        // The idle wait is the long one, because a keystroke is what ends
+        // it; `next_wakeup` shortens it while a file streams in or a
+        // prefix's card is due.
+        if event::poll(ed.next_wakeup())? {
             match event::read()? {
                 Event::Key(k) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                     ed.handle_key(k);
@@ -403,16 +364,6 @@ fn run(
                 _ => {}
             }
         }
-        // The load, beside the other pollers: bounded per iteration, never
-        // waiting, and it reports its own state changes.
-        dirty |= ed.load_poll();
-        dirty |= ed.diag_flush(Instant::now());
-        dirty |= ed.tick_status();
-        dirty |= ed.lsp_poll();
-        dirty |= ed.lsp_flush(Instant::now());
-        ed.completion_retry_poll();
-        dirty |= ed.exec_poll();
-        dirty |= ed.update_poll();
     };
     disable_raw_mode()?;
     execute!(

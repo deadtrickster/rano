@@ -18,7 +18,7 @@ impl Editor {
     /// later handshake never sends a stale extra change (the adopt path in
     /// lsp_poll re-flags dirty to catch up with the current text). Returns
     /// whether a change actually went out (dirty-draw, D6).
-    pub fn lsp_flush(&mut self, now: Instant) -> bool {
+    pub(crate) fn lsp_flush(&mut self, now: Instant) -> bool {
         let bs = self.bs_mut();
         if !bs.lsp_dirty || now < bs.lsp_last_send + Duration::from_millis(300) {
             return false;
@@ -109,7 +109,7 @@ impl Editor {
     /// `lsp_diags`. Rano has a single open document, so the latest report
     /// for it is simply the latest one. Returns whether diagnostics were
     /// replaced (dirty-draw, D6).
-    pub fn lsp_poll(&mut self) -> bool {
+    pub(crate) fn lsp_poll(&mut self) -> bool {
         let mut dirty = false;
         let pending = self.bs_mut().lsp_starting.take();
         if let Some((tag, rx)) = pending {

@@ -203,7 +203,7 @@ pub struct Editor {
     /// the config and `RANO_AUTOUPDATE`. Nothing here runs in tests, because
     /// `Editor::new` does not start the check; `run()` does.
     pub update: crate::update_ctrl::UpdateCheck,
-    pub load_saturated: bool,
+    pub(crate) load_saturated: bool,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
     pub(crate) highlight_dirty: bool,
@@ -348,7 +348,7 @@ impl Editor {
 
     /// Recompute the live path suggestions when the open prompt is a
     /// file-name prompt whose text changed. Returns whether they changed.
-    pub fn refresh_prompt_hints(&mut self) -> bool {
+    pub(crate) fn refresh_prompt_hints(&mut self) -> bool {
         let want = self.prompt.as_ref().filter(|p| {
             matches!(
                 p.kind,
@@ -383,7 +383,7 @@ impl Editor {
         });
     }
 
-    pub fn adjust_scroll(&mut self, text_h: usize) {
+    pub(crate) fn adjust_scroll(&mut self, text_h: usize) {
         if text_h == 0 {
             return;
         }
@@ -420,7 +420,7 @@ impl Editor {
     /// scroll_x and the viewport width are both in display cols; the
     /// viewport excludes the gutter when line numbers are shown (F4).
     /// M-\: with soft wrap on, lines wrap instead of scrolling sideways.
-    pub fn adjust_scroll_x(&mut self) {
+    pub(crate) fn adjust_scroll_x(&mut self) {
         if self.wrap {
             self.bs_mut().scroll_x = 0;
             return;
@@ -751,7 +751,7 @@ impl Editor {
 
     /// Wait until the buffer has `p.row`, then put the cursor there and centre
     /// the line. No-op once applied.
-    pub fn apply_startup_pos(&mut self) {
+    pub(crate) fn apply_startup_pos(&mut self) {
         let Some(p) = self.bs().goto else {
             return;
         };
@@ -898,7 +898,7 @@ impl Editor {
     /// makes a fast typist cost one highlight per painted frame instead of one
     /// per keystroke — and it is what lets a huge file open at all, since the
     /// first highlight is then the viewport window rather than the document.
-    pub fn ensure_highlight(&mut self) {
+    pub(crate) fn ensure_highlight(&mut self) {
         // The wrap table first: `highlight_covers_viewport` reads the viewport in
         // VISUAL rows when wrap is on, so a stale table would answer the question
         // about the wrong rows. `highlight_now` already did this; the check now
@@ -921,7 +921,7 @@ impl Editor {
     /// measured 402 ms per key on a 2.09 MB file (`bench_threshold_cliff`).
     ///
     /// Returns whether diagnostics changed, for the dirty-draw pass.
-    pub fn diag_flush(&mut self, now: Instant) -> bool {
+    pub(crate) fn diag_flush(&mut self, now: Instant) -> bool {
         if !self.diag_dirty || now < self.diag_last_edit + Duration::from_millis(300) {
             return false;
         }
@@ -1474,7 +1474,7 @@ impl Editor {
     /// Fire a scheduled completion re-request once its timer elapses. The
     /// popup must still be open on the cursor's row with a completable
     /// prefix, otherwise the wait is dropped.
-    pub fn completion_retry_poll(&mut self) {
+    pub(crate) fn completion_retry_poll(&mut self) {
         let Some(t) = self.completion_retry else {
             return;
         };
@@ -3167,7 +3167,7 @@ impl Editor {
 
     /// Expire an overdue status flash / cursor-position display. Returns
     /// whether anything visible was cleared (dirty-draw, D6).
-    pub fn tick_status(&mut self) -> bool {
+    pub(crate) fn tick_status(&mut self) -> bool {
         let mut dirty = false;
         if let Some(f) = &self.status
             && f.until <= Instant::now()

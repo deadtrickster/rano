@@ -119,7 +119,7 @@ impl crate::editor::Editor {
     /// only printed on exit, so the session said nothing and `M-V` was
     /// undiscoverable — found by running the binary and watching the status line
     /// stay empty, not by reading the code.
-    pub fn update_poll(&mut self) -> bool {
+    pub(crate) fn update_poll(&mut self) -> bool {
         if !self.update.poll() {
             return false;
         }

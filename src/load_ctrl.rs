@@ -47,7 +47,7 @@ impl Editor {
     /// keeps the loop's iteration short and the keyboard live while a 184 MB
     /// file is still arriving. When the budget is exhausted it says so, so the
     /// loop can skip its idle wait and keep going — see `load_saturated`.
-    pub fn load_poll(&mut self) -> bool {
+    pub(crate) fn load_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().load.as_mut() else {
             return false;
         };
@@ -147,7 +147,7 @@ impl Editor {
 
     /// Whether a load is in flight. Used by the loop to keep adopting, and by
     /// the status line to say so rather than looking frozen.
-    pub fn loading(&self) -> bool {
+    pub(crate) fn loading(&self) -> bool {
         self.bs().load.is_some()
     }
 
@@ -177,7 +177,7 @@ impl Editor {
     /// made the buffer current — M->, the buffer list, a close, ^X's save
     /// prompt — the file starts arriving on the next frame. Returns whether
     /// anything changed.
-    pub fn start_pending_load(&mut self) -> bool {
+    pub(crate) fn start_pending_load(&mut self) -> bool {
         let Some(path) = self.bs_mut().pending_load.take() else {
             return false;
         };

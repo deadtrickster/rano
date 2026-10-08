@@ -39,7 +39,7 @@ impl Editor {
     /// spawn row as ONE undo step, or flash the failure (no undo step, no
     /// edit invalidation). Returns whether state changed, for a later
     /// dirty-draw pass.
-    pub fn exec_poll(&mut self) -> bool {
+    pub(crate) fn exec_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().exec_job.as_mut() else {
             return false;
         };

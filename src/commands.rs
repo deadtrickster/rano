@@ -1084,7 +1084,7 @@ impl Editor {
 
     /// The prefix card to show now, if any: the map a pending prefix leads to,
     /// once it has waited [`CARD_DELAY`] (or at once for help).
-    pub fn pending_card(&self) -> Option<(&Keymap, Vec<Key>)> {
+    pub(crate) fn pending_card(&self) -> Option<(&Keymap, Vec<Key>)> {
         let since = self.pending.since?;
         match lookup(&self.active_keymaps(), &self.pending.keys) {
             Lookup::Prefix(m)
@@ -1098,7 +1098,7 @@ impl Editor {
 
     /// Whether a prefix is waiting for its card's delay to pass, so the loop
     /// knows to come back and draw it.
-    pub fn card_due(&self) -> Option<Duration> {
+    pub(crate) fn card_due(&self) -> Option<Duration> {
         let since = self.pending.since?;
         CARD_DELAY.checked_sub(since.elapsed())
     }

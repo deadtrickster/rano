@@ -205,7 +205,7 @@ impl Editor {
     }
 
     /// Re-render after a resize. Returns whether anything changed.
-    pub fn refresh_diff_view(&mut self) -> bool {
+    pub(crate) fn refresh_diff_view(&mut self) -> bool {
         let w = self.text_w;
         match self.diff_view.as_mut() {
             Some(v) if v.width != w => {

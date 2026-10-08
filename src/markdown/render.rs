@@ -96,6 +96,11 @@ pub(crate) struct CodePaint {
     stream: Option<Stream>,
     /// The language resolved, for the block's title bar.
     lang: Option<Lang>,
+    /// The info string this was built for, as the fence spelled it. A streamed
+    /// fence's info string arrives a few bytes at a time — "```" first, then
+    /// "```ru", then "```rust" — so the highlighter built on the first frame was
+    /// built for the wrong language. See [`CodePaint::is_for`].
+    info: String,
     /// The fence's text as it has been seen, and how much of it has been pushed.
     /// `text` only ever grows at its end while the fence is open, so the delta
     /// is the new bytes and nothing else.
@@ -121,6 +126,7 @@ impl CodePaint {
         CodePaint {
             stream: resolved.map(Stream::new),
             lang: resolved,
+            info: lang.to_string(),
             text: String::new(),
             pushed: 0,
         }
@@ -158,14 +164,36 @@ impl CodePaint {
         if closed {
             src.push('\n');
         }
+        // The delta is only a delta if what was pushed is still a prefix of the
+        // fence. It is, for a fence growing at its end; it is not when the
+        // parse window has moved a different fence under this block's index.
+        // Then the parse starts again rather than appending one fence to
+        // another and colouring the rows by a document nobody wrote.
+        if !src.starts_with(&self.text[..self.pushed.min(self.text.len())]) {
+            self.stream = self.lang.map(Stream::new);
+            self.pushed = 0;
+        }
         if src.len() > self.pushed {
-            // Always a character boundary: the text only grows at its end.
+            // A character boundary: what was pushed is a prefix of `src`.
             if let Some(stream) = self.stream.as_mut() {
                 stream.push(&src[self.pushed..]);
             }
             self.pushed = src.len();
         }
         self.text = src;
+    }
+
+    /// Whether this highlighter was built for a fence with this info string.
+    ///
+    /// **Found while porting, and present in letibot:** the cache kept the
+    /// highlighter it built on the first frame a fence appeared, and on that
+    /// frame the model had usually written only the backticks. So the fence was
+    /// highlighted as "no language" — plain — for the rest of its life,
+    /// including after it settled, since the settled render reuses the same
+    /// highlighter. A one-shot render of the same text was coloured, which is
+    /// how a test comparing the two found it.
+    pub(crate) fn is_for(&self, info: &str) -> bool {
+        self.info == info
     }
 
     /// The fence's rows, as spans.
@@ -223,6 +251,13 @@ impl CodePaint {
         }
         out
     }
+
+    /// How many times this block has been parsed. A frame that draws a settled
+    /// fence must not re-parse it, so this stays at the number of deltas that
+    /// arrived and does not grow with the number of frames.
+    pub(crate) fn parses(&self) -> u64 {
+        self.stream.as_ref().map(|s| s.parse_calls()).unwrap_or(0)
+    }
 }
 
 fn plain_text(chars: &[char]) -> MdSpan {
@@ -233,7 +268,7 @@ fn plain_text(chars: &[char]) -> MdSpan {
 ///
 /// One-shot: a fresh highlighter per call, which is right for a block that is
 /// rendered once (a settled transcript row, a frozen prefix) and wrong for one
-/// that is rendered every frame. `MarkdownView` is the second
+/// that is rendered every frame. [`super::view::MarkdownView`] is the second
 /// case and keeps the highlighter between frames; the output of the two paths is
 /// identical, because it is the same parser fed the same bytes in the same order.
 pub fn render_block(b: &Block, width: usize, opts: &RenderOptions) -> Vec<MdLine> {
@@ -252,7 +287,7 @@ pub fn render_bounded(b: &Block, width: usize, opts: &RenderOptions) -> Vec<MdLi
 }
 
 /// A whole document: every block bounded, a blank row between blocks, none
-/// trailing. The one-shot form of `MarkdownView::lines`, for text
+/// trailing. The one-shot form of [`super::view::MarkdownView::lines`], for text
 /// rendered once.
 pub fn render_blocks<'a>(
     blocks: impl IntoIterator<Item = &'a Block>,
@@ -500,7 +535,7 @@ fn table_lines(
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0))
         .max(1);
-    fn cell<'a>(r: &'a [Vec<Run>], i: usize) -> &'a [Run] {
+    fn cell(r: &[Vec<Run>], i: usize) -> &[Run] {
         r.get(i).map(Vec::as_slice).unwrap_or(&[])
     }
 

@@ -24,11 +24,14 @@
 //!   once.
 //! - [`line`] — [`MdLine`] and [`MdSpan`], and the plain-text and ANSI writers.
 //! - [`render`] — one block to rows: [`render_block`], [`render_blocks`].
+//! - [`view`] — [`MarkdownView`], a growing document's rows with each settled
+//!   block rendered once per width.
 //! - [`wrap`] — wrapping and truncating spans by display columns.
 
 pub mod line;
 pub mod parse;
 pub mod render;
+pub mod view;
 pub mod wrap;
 
 #[cfg(test)]
@@ -40,3 +43,4 @@ pub use parse::{
     stable_boundary, stable_boundary_with, tail_cut,
 };
 pub use render::{RenderOptions, render_block, render_blocks, render_bounded};
+pub use view::{Decor, MarkdownView};

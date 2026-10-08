@@ -146,7 +146,7 @@ impl DiffView {
                 format!(" Patch {name} ({view})   s: split/unified  Esc: back to the text")
             }
             Source::Review { name, .. } => format!(
-                " Review {name} ({view})   s: split/unified  M-S: send your place  Esc: to the change in the text"
+                " Review {name} ({view})   s: split/unified  M-s: send your place  Esc: to the change in the text"
             ),
             Source::Conflict {
                 current,

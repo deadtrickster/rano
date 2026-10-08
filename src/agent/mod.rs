@@ -52,6 +52,7 @@ pub mod notes;
 pub mod outcome;
 pub mod pane;
 pub mod picker;
+pub mod queue;
 pub mod quit;
 pub mod text;
 pub mod tool_row;

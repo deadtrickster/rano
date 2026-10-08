@@ -261,7 +261,7 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     let (cells, owner) = flatten(line);
     let mut used = 0usize;
     let mut k = 0usize;
-    while k < cells.len() && used + cells[k].cols <= cols - 1 {
+    while k < cells.len() && used + cells[k].cols < cols {
         used += cells[k].cols;
         k += 1;
     }
@@ -303,12 +303,12 @@ pub fn ellipsise_left(line: &Line, cols: usize) -> Line {
         start = i;
     }
     const NUDGE: usize = 6;
-    if start < cells.len() && !cells[start].text.starts_with('/') {
-        if let Some(next) = cells[start..].iter().position(|c| c.text.starts_with('/'))
-            && next <= NUDGE
-        {
-            start += next;
-        }
+    if start < cells.len()
+        && !cells[start].text.starts_with('/')
+        && let Some(next) = cells[start..].iter().position(|c| c.text.starts_with('/'))
+        && next <= NUDGE
+    {
+        start += next;
     }
     let mut out = rebuild(line, &cells[start..], &owner[start..]);
     // The ellipsis is drawn in the style of what follows it, so a dim path stays dim.

@@ -199,6 +199,18 @@ fn main() {
         .or(args.positions.first().copied().flatten())
         .map(to_pos);
     let mut cfg = config::load();
+    // The theme the config names, and its own `color.` lines, before anything is drawn. What
+    // cannot be used is said on stderr rather than dropped: a typo must not look like a
+    // deliberate default.
+    let themes = config::config_path()
+        .parent()
+        .map(|d| d.join("themes"))
+        .unwrap_or_default();
+    let (theme, problems) = rano::theme::resolve(&themes, cfg.theme.as_deref(), &cfg.colors);
+    for p in &problems {
+        eprintln!("rano: {p}");
+    }
+    rano::theme::set_active(theme);
     // The other files become buffers of their own, read when first visited.
     // Naming several files is asking for several buffers, so the session is
     // multibuffer whatever the config says: F8 and jumps then add buffers

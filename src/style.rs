@@ -203,6 +203,9 @@ pub enum Hue {
     /// An absolute xterm-cube index. Only the diff tints use one; see the module
     /// header, and the test that holds them to it.
     Cube(u8),
+    /// An exact colour, written as truecolor. The default table never uses one; a
+    /// [`crate::theme::Theme`] may, to look the same whatever the terminal's palette.
+    Rgb(u8, u8, u8),
 }
 
 impl Hue {
@@ -218,6 +221,9 @@ impl Hue {
             }
             Hue::Slot(n) | Hue::Cube(n) => {
                 let _ = write!(out, "{};5;{n}", if bg { 48 } else { 38 });
+            }
+            Hue::Rgb(r, g, b) => {
+                let _ = write!(out, "{};2;{r};{g};{b}", if bg { 48 } else { 38 });
             }
         }
     }
@@ -409,9 +415,20 @@ pub enum Palette {
 }
 
 impl Palette {
-    /// The one table: what `r` looks like. [`Look::PLAIN`] for [`Palette::None`] and
-    /// for [`Role::Plain`], so patching either over something changes nothing.
+    /// **What `r` looks like**: the active [`crate::theme::Theme`]'s look when it names
+    /// the role, the default table ([`Palette::base_look`]) otherwise. [`Look::PLAIN`] for
+    /// [`Palette::None`] whatever is installed, so a replay diff and a CI log stay plain.
     pub fn look(self, r: Role) -> Look {
+        if self == Palette::None {
+            return Look::PLAIN;
+        }
+        crate::theme::override_for(r).unwrap_or_else(|| self.base_look(r))
+    }
+
+    /// The one table: what `r` looks like with no theme. [`Look::PLAIN`] for
+    /// [`Palette::None`] and for [`Role::Plain`], so patching either over something
+    /// changes nothing.
+    pub fn base_look(self, r: Role) -> Look {
         use Attrs as A;
         use Hue::Slot;
         if self == Palette::None {

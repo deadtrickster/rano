@@ -91,6 +91,7 @@ pub mod patch;
 pub mod render;
 pub mod sidediff;
 pub mod style;
+pub mod theme;
 // A change a host hands the editor to review (`Editor::open_review`): the
 // file opened on the change, and the change drawn over it as a diff view.
 pub mod review;

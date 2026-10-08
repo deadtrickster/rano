@@ -22,6 +22,12 @@ pub struct Config {
     /// Write keys nano's way (`^X`, `M-U`) instead of emacs's (`C-x`, `M-u`)
     /// in the bar, the help pages and `M-x`: `key_notation = nano`.
     pub nano_keys: bool,
+    /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file. See
+    /// [`crate::theme`].
+    pub theme: Option<String>,
+    /// `color.ROLE = "look"` lines, in file order: one role overridden on top of the
+    /// theme. Kept as written; [`crate::theme::resolve`] reads and reports them.
+    pub colors: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -35,6 +41,8 @@ impl Default for Config {
             autoupdate: None,
             send_command: None,
             nano_keys: false,
+            theme: None,
+            colors: Vec::new(),
         }
     }
 }
@@ -123,6 +131,13 @@ fn parse_config(text: &str) -> Config {
             "send_command" => {
                 cfg.send_command = (!value.is_empty()).then(|| value.to_string());
             }
+            "theme" => {
+                cfg.theme = (!value.is_empty()).then(|| value.to_string());
+            }
+            _ if key.starts_with("color.") => {
+                cfg.colors
+                    .push((key["color.".len()..].to_string(), value.to_string()));
+            }
             _ => {}
         }
     }
@@ -139,6 +154,23 @@ fn parse_bool(value: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `theme` names a file; `color.ROLE` lines are kept in order for the theme to read.
+    #[test]
+    fn a_theme_and_colour_lines_are_read() {
+        let c = parse_config(
+            "theme = gray\ncolor.user_block = \"bg:#2f363b\"\ncolor.heading = \"fg:4 bold\"\n",
+        );
+        assert_eq!(c.theme.as_deref(), Some("gray"));
+        assert_eq!(
+            c.colors,
+            vec![
+                ("user_block".to_string(), "bg:#2f363b".to_string()),
+                ("heading".to_string(), "fg:4 bold".to_string())
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -211,7 +243,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_and_comments_ignored() {
-        let cfg = parse_config("# hi\ntheme = dark\ntab_width = 2 # inline");
+        let cfg = parse_config("# hi\ncolour_scheme = dark\ntab_width = 2 # inline");
         assert_eq!(
             cfg,
             Config {

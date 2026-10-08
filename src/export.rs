@@ -222,6 +222,7 @@ fn hex(h: Hue) -> String {
         (0xff, 0xff, 0xff),
     ];
     let (r, g, b) = match h {
+        Hue::Rgb(r, g, b) => (r, g, b),
         Hue::Slot(n) | Hue::Cube(n) if n < 16 => SLOTS[n as usize],
         Hue::Slot(n) | Hue::Cube(n) if n < 232 => {
             let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };

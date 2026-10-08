@@ -572,6 +572,26 @@ mod tests {
         assert!(p[3].contains('}'), "{p:?}");
     }
 
+    /// **No colour means no escapes, and the signs still carry the change.**
+    #[test]
+    fn no_colour_means_no_escapes_and_the_signs_survive() {
+        let rows: Vec<String> = render_split(&["a"], &["b"], &sc(80, Palette::None, 1, 1))
+            .iter()
+            .map(|l| l.to_ansi(Palette::None))
+            .collect();
+        for r in &rows {
+            assert!(!r.contains('\x1b'), "{r:?}");
+        }
+        assert!(
+            rows.iter().any(|r| r.contains('-') && r.contains('a')),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains('+') && r.contains('b')),
+            "{rows:?}"
+        );
+    }
+
     #[test]
     fn an_insertion_has_no_left_and_a_deletion_no_right() {
         let old = ["a", "b"];

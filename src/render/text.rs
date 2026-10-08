@@ -376,8 +376,14 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     }
     let mut out = rebuild(line, &cells[..k], &owner[..k]);
     let at = owner.get(k).copied().unwrap_or(line.spans.len() - 1);
-    out.spans
-        .push(Span::styled("…", line.spans[at].style.clone()));
+    let style = &line.spans[at].style;
+    // **Into the run it ends, when it is the same run** — the shape a string truncate
+    // writes (`…` before the run's reset, not a second run of its own), so a host that
+    // prints rows sends the bytes it always did.
+    match out.spans.last_mut() {
+        Some(last) if &last.style == style => last.content.push('…'),
+        _ => out.spans.push(Span::styled("…", style.clone())),
+    }
     out
 }
 
@@ -548,6 +554,10 @@ mod tests {
         assert_eq!(t.plain(), "你…");
         assert_eq!(truncate(&Line::raw("short"), 10).plain(), "short");
         assert_eq!(truncate(&Line::raw("short"), 0).width(), 0);
+        // The ellipsis joins the run it ends: one faint run, as a string truncate writes it.
+        let t = truncate(&Line::new(vec![Span::role("abcdef", Role::Faint)]), 4);
+        assert_eq!(t.spans.len(), 1);
+        assert_eq!(t.to_ansi(Palette::Colour), "\x1b[2mabc…\x1b[0m");
     }
 
     #[test]

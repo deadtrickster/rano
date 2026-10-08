@@ -2728,7 +2728,15 @@ impl Editor {
         // never one with unsaved edits: that one stays, and the file gets a
         // buffer of its own, so opening a file cannot throw work away.
         let kept = !self.config.multibuffer && self.bs().buf.modified;
-        if self.config.multibuffer || kept {
+        // **An untouched scratch is replaced, multibuffer or not.** The buffer a bare `rano`
+        // (or a host's pane) starts with has no name, no edits and no text; keeping it beside
+        // the file left a `[1/2]` nobody asked for, which the letibot head's pane showed on
+        // its first open.
+        let scratch = {
+            let b = &self.bs().buf;
+            b.name.is_none() && !b.modified && b.row_count() <= 1 && b.text().is_empty()
+        };
+        if (self.config.multibuffer && !scratch) || kept {
             self.buffers.push(BufferState::new(buf));
             self.cur = self.buffers.len() - 1;
         } else {

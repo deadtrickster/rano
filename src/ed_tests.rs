@@ -2852,6 +2852,31 @@ fn open_file_multibuffer_pushes() {
     assert_eq!(ed.bs().buf.name, Some(f2));
 }
 
+/// **An untouched scratch is replaced even with multibuffer on**: the empty, unnamed buffer a
+/// bare `rano` or a host's pane starts with is not kept beside the file as a `[1/2]`.
+#[test]
+fn open_file_multibuffer_replaces_an_untouched_scratch() {
+    let d = temp_dir("open_scratch");
+    let f = d.0.join("b.txt");
+    fs::write(&f, "x\ny").unwrap();
+    let cfg = config::Config {
+        multibuffer: true,
+        ..config::Config::default()
+    };
+    let mut ed = Editor::new(buf_with(""), cfg);
+    ed.open_at(&f, 2, None).unwrap();
+    assert_eq!(ed.buffers.len(), 1);
+    assert_eq!(ed.bs().buf.name, Some(f.clone()));
+    // A scratch with text in it is work, and keeps its place.
+    let cfg = config::Config {
+        multibuffer: true,
+        ..config::Config::default()
+    };
+    let mut ed = Editor::new(buf_with("notes"), cfg);
+    ed.open_at(&f, 1, None).unwrap();
+    assert_eq!(ed.buffers.len(), 2);
+}
+
 #[test]
 fn open_file_replaces_when_disabled() {
     let d = temp_dir("open_single");

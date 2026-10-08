@@ -1,5 +1,7 @@
 //! What a host's loop calls between events: [`Editor::tick`], and
-//! [`Editor::next_wakeup`] to know when to call it again.
+//! [`Editor::next_wakeup`] to know when to call it again. Also the rest of
+//! what a host asks of the editor: its own keymaps over the editor's, and
+//! whether the editor wants to be closed.
 //!
 //! The binary's run loop used to make some twenty calls of its own between
 //! two events — the loader, the language server, `^T` jobs, the update
@@ -11,6 +13,7 @@
 use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
+use crate::keymap::Keymap;
 
 /// How long an idle editor may be left without a tick. Nothing is waiting on
 /// it then, but the pollers are how a language server's reply, a finished
@@ -70,6 +73,29 @@ impl Editor {
         // it does not need to know whether a frame will be drawn.
         self.ensure_highlight();
         dirty
+    }
+
+    /// Stack a host's keymap over the editor's. Its bindings win over the
+    /// editor's key by key, in every mode; a binding to a name that is not an
+    /// editor command comes back from [`Self::handle_key`] as
+    /// [`crate::editor::KeyOutcome::Host`] for the host to run, and one to an
+    /// editor command (`save`, `exit`, ...) simply runs it — which is how a
+    /// host rebinds.
+    pub fn push_keymap(&mut self, map: Keymap) {
+        self.host_keymaps.push(map);
+    }
+
+    /// Take the last map [`Self::push_keymap`] stacked, if any.
+    pub fn pop_keymap(&mut self) -> Option<Keymap> {
+        self.host_keymaps.pop()
+    }
+
+    /// The editor has been asked to exit (`^X`, after any save prompt) and
+    /// wants to be closed. The binary quits; a host closes the pane. The
+    /// editor itself does nothing more once this is set — tearing down is
+    /// the host's.
+    pub fn wants_quit(&self) -> bool {
+        self.quit
     }
 
     /// How long a host may wait for input before it must tick again.
@@ -194,5 +220,95 @@ mod tests {
     #[test]
     fn an_idle_editor_waits_the_idle_wait() {
         assert_eq!(ed("x").next_wakeup(), IDLE_WAIT);
+    }
+
+    // ---- keys a host routes ----
+
+    use crate::editor::KeyOutcome;
+    use crate::keymap::Keymap;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn text(ed: &Editor) -> Vec<String> {
+        ed.bs().buf.rows().map(|r| r.iter().collect()).collect()
+    }
+
+    #[test]
+    fn an_unbound_key_is_handed_back_and_changes_nothing() {
+        let mut ed = ed("abc");
+        let out = ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE));
+        assert_eq!(out, KeyOutcome::Unhandled);
+        assert_eq!(text(&ed), vec!["abc"]);
+        assert!(ed.pending.keys.is_empty());
+        assert!(
+            ed.status_text().is_none(),
+            "nothing was reported to the reader"
+        );
+    }
+
+    #[test]
+    fn typing_and_commands_are_handled() {
+        let mut ed = ed("");
+        let typed = ed.handle_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(typed, KeyOutcome::Handled);
+        assert_eq!(text(&ed), vec!["a"]);
+        let moved = ed.handle_key(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(moved, KeyOutcome::Handled);
+        // A prefix waiting for its next key is the editor's too.
+        let prefix = ed.handle_key(key(KeyCode::Char('t'), KeyModifiers::ALT));
+        assert_eq!(prefix, KeyOutcome::Handled);
+    }
+
+    #[test]
+    fn a_host_chord_comes_back_by_name_in_every_mode() {
+        let mut ed = ed("abc");
+        let mut map = Keymap::new("host");
+        map.bind("C-q", "host-close-pane");
+        ed.push_keymap(map);
+        let close = || key(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(
+            ed.handle_key(close()),
+            KeyOutcome::Host("host-close-pane".into())
+        );
+        assert_eq!(text(&ed), vec!["abc"]);
+        // Over a mode as well: M-x's own map is in effect there.
+        ed.handle_key(key(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert!(ed.palette.is_some());
+        assert_eq!(
+            ed.handle_key(close()),
+            KeyOutcome::Host("host-close-pane".into())
+        );
+    }
+
+    #[test]
+    fn a_host_map_does_not_stop_typing_and_can_rebind() {
+        let mut ed = ed("");
+        let mut map = Keymap::new("host");
+        // An editor command under a host's key: it simply runs.
+        map.bind("<f12>", "undo");
+        ed.push_keymap(map);
+        // Unbound characters are still typed: what decides that is the
+        // editor's own map, not the host's on top of it.
+        ed.handle_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(text(&ed), vec!["z"]);
+        let out = ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE));
+        assert_eq!(out, KeyOutcome::Handled);
+        assert_eq!(text(&ed), vec![""], "F12 ran undo");
+        // Popped, F12 is unbound again.
+        assert_eq!(ed.pop_keymap().map(|m| m.name), Some("host".into()));
+        assert_eq!(
+            ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE)),
+            KeyOutcome::Unhandled
+        );
+    }
+
+    #[test]
+    fn exit_is_reported_as_wanting_to_quit() {
+        let mut ed = ed("x");
+        assert!(!ed.wants_quit());
+        ed.handle_key(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(ed.wants_quit(), "an unmodified editor exits at once");
     }
 }

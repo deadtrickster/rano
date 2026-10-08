@@ -14,6 +14,7 @@ use crate::BufferState;
 use crate::RowWrap;
 use crate::buffer::{Buffer, DiskStamp, Pos};
 use crate::config;
+pub use crate::keys::KeyOutcome;
 use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
 use crate::search_ctrl::ReplaceState;
@@ -115,6 +116,10 @@ pub struct Editor {
     /// The keymaps in effect: the global layer and each mode's (see
     /// `commands.rs`). A host can rebind by editing them.
     pub keymaps: crate::commands::Keymaps,
+    /// A host's own maps, stacked over `keymaps` (see `Editor::push_keymap`).
+    /// Kept apart from the editor's so a host never has to know which of
+    /// the editor's maps is in effect to put a chord above all of them.
+    pub(crate) host_keymaps: Vec<crate::keymap::Keymap>,
     /// A key sequence under way: a prefix pressed, or `describe-key` waiting.
     pub pending: crate::commands::Pending,
     /// `M-x`, while it is open.
@@ -288,6 +293,7 @@ impl Editor {
             prompt: None,
             prompt_hints: None,
             keymaps: crate::commands::Keymaps::standard(),
+            host_keymaps: Vec::new(),
             pending: Default::default(),
             palette: None,
             info: None,

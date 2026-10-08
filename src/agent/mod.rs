@@ -44,6 +44,7 @@ pub mod composer;
 pub mod decision;
 pub mod fit;
 pub mod header;
+pub mod help;
 pub mod hint_bar;
 pub mod jobs;
 pub mod outcome;

@@ -41,6 +41,7 @@ use crate::style::Role;
 pub mod card;
 pub mod decision;
 pub mod outcome;
+pub mod pane;
 pub mod text;
 pub mod tool_row;
 

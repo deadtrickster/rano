@@ -9,7 +9,8 @@
 //! columns and a combining mark never lands alone on a row — and the three break
 //! rules below.
 
-use super::line::{MdSpan, push_span};
+use super::line::push_span;
+use crate::render::Span;
 
 /// One display cell: a grapheme cluster, the span it came from, its columns.
 struct Cell<'a> {
@@ -18,14 +19,14 @@ struct Cell<'a> {
     cols: usize,
 }
 
-fn cells(spans: &[MdSpan]) -> Vec<Cell<'_>> {
+fn cells(spans: &[Span]) -> Vec<Cell<'_>> {
     let mut out = Vec::new();
     for (i, s) in spans.iter().enumerate() {
-        let chars: Vec<char> = s.text.chars().collect();
+        let chars: Vec<char> = s.content.chars().collect();
         // Byte offset of every char, plus the end, so a cluster's char range
         // becomes a slice of the span's own text.
-        let mut at: Vec<usize> = s.text.char_indices().map(|(b, _)| b).collect();
-        at.push(s.text.len());
+        let mut at: Vec<usize> = s.content.char_indices().map(|(b, _)| b).collect();
+        at.push(s.content.len());
         // A **control character is not a combining mark**: it measures zero
         // columns for the same reason one does, and that is the whole of the
         // resemblance. The editor's cluster walk lets it join the cluster before
@@ -40,14 +41,14 @@ fn cells(spans: &[MdSpan]) -> Vec<Cell<'_>> {
             for c in crate::width::Clusters::new(&chars[from..to], 1) {
                 out.push(Cell {
                     span: i,
-                    text: &s.text[at[from + c.start]..at[from + c.end]],
+                    text: &s.content[at[from + c.start]..at[from + c.end]],
                     cols: c.w,
                 });
             }
             if to < chars.len() {
                 out.push(Cell {
                     span: i,
-                    text: &s.text[at[to]..at[to + 1]],
+                    text: &s.content[at[to]..at[to + 1]],
                     cols: usize::from(chars[to] == '\t'),
                 });
             }
@@ -71,7 +72,7 @@ fn cells(spans: &[MdSpan]) -> Vec<Cell<'_>> {
 ///
 /// Trailing blanks at a break are dropped: invisible, and a painter that fills a
 /// row's background would paint one column further than the text goes.
-pub fn wrap(spans: &[MdSpan], cols: usize) -> Vec<Vec<MdSpan>> {
+pub fn wrap(spans: &[Span], cols: usize) -> Vec<Vec<Span>> {
     let cs = cells(spans);
     let rows = break_cells(&cs, cols.max(4));
     let mut out = Vec::with_capacity(rows.len());
@@ -84,18 +85,11 @@ pub fn wrap(spans: &[MdSpan], cols: usize) -> Vec<Vec<MdSpan>> {
     out
 }
 
-fn collect(spans: &[MdSpan], cs: &[Cell]) -> Vec<MdSpan> {
-    let mut row: Vec<MdSpan> = Vec::new();
+fn collect(spans: &[Span], cs: &[Cell]) -> Vec<Span> {
+    let mut row: Vec<Span> = Vec::new();
     for c in cs {
         let s = &spans[c.span];
-        push_span(
-            &mut row,
-            MdSpan {
-                text: c.text.to_string(),
-                role: s.role,
-                attrs: s.attrs,
-            },
-        );
+        push_span(&mut row, Span::styled(c.text, s.style.clone()));
     }
     row
 }
@@ -104,7 +98,7 @@ fn collect(spans: &[MdSpan], cs: &[Cell]) -> Vec<MdSpan> {
 ///
 /// When something is dropped the last column becomes `…`, so the elision is
 /// visible rather than silent. It takes the look of the first cell it replaces.
-pub fn truncate(spans: &[MdSpan], cols: usize) -> Vec<MdSpan> {
+pub fn truncate(spans: &[Span], cols: usize) -> Vec<Span> {
     let cs = cells(spans);
     if cs.iter().map(|c| c.cols).sum::<usize>() <= cols {
         return spans.to_vec();
@@ -123,14 +117,7 @@ pub fn truncate(spans: &[MdSpan], cols: usize) -> Vec<MdSpan> {
     }
     let mut row = collect(spans, &cs[..cut]);
     let look = &spans[cs[cut.min(cs.len() - 1)].span];
-    push_span(
-        &mut row,
-        MdSpan {
-            text: "…".into(),
-            role: look.role,
-            attrs: look.attrs,
-        },
-    );
+    push_span(&mut row, Span::styled("…", look.style.clone()));
     row
 }
 
@@ -236,31 +223,30 @@ fn break_cells(cs: &[Cell], cols: usize) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::line::{Attrs, MdLine, spans_width, text_width};
+    use super::super::line::{span, spans_width, text_width};
     use super::*;
+    use crate::render::{Line, Style};
+    use crate::style::Attrs;
     use crate::style::Role;
 
-    fn texts(rows: &[Vec<MdSpan>]) -> Vec<String> {
-        rows.iter().map(|r| MdLine::new(r.clone()).text()).collect()
+    fn texts(rows: &[Vec<Span>]) -> Vec<String> {
+        rows.iter().map(|r| Line::new(r.clone()).plain()).collect()
     }
 
     #[test]
     fn words_wrap_at_spaces_and_trailing_blanks_go() {
-        let rows = wrap(&[MdSpan::plain("one two three four")], 9);
+        let rows = wrap(&[Span::raw("one two three four")], 9);
         assert_eq!(texts(&rows), ["one two", "three", "four"]);
     }
 
     /// A piece of a styled span cut onto the next row is still that span's role.
     #[test]
     fn a_role_survives_the_break() {
-        let spans = [
-            MdSpan::plain("a "),
-            MdSpan::new("long code span", Role::Code),
-        ];
+        let spans = [Span::raw("a "), span("long code span", Role::Code)];
         let rows = wrap(&spans, 8);
         assert_eq!(texts(&rows), ["a long", "code", "span"]);
-        assert_eq!(rows[1][0].role, Role::Code);
-        assert_eq!(rows[0][1].role, Role::Code);
+        assert_eq!(rows[1][0].style.top(), Role::Code);
+        assert_eq!(rows[0][1].style.top(), Role::Code);
     }
 
     #[test]
@@ -269,39 +255,33 @@ mod tests {
         // real width, wrapped by the terminal into a row nobody counted.
         assert_eq!(text_width("你好"), 4);
         assert_eq!(text_width("héllo"), 5);
-        let rows = wrap(&[MdSpan::plain("你好世界这是一个测试用的句子没有空格")], 10);
+        let rows = wrap(&[Span::raw("你好世界这是一个测试用的句子没有空格")], 10);
         assert!(rows.len() > 1);
         for r in &rows {
             assert!(spans_width(r) <= 10, "{r:?}");
         }
         // …and a truncation never splits a cluster.
-        assert_eq!(spans_width(&truncate(&[MdSpan::plain("你好世界")], 5)), 5);
+        assert_eq!(spans_width(&truncate(&[Span::raw("你好世界")], 5)), 5);
     }
 
     #[test]
     fn an_unbreakable_run_is_hard_broken() {
-        let rows = wrap(&[MdSpan::plain("abcdefghij")], 4);
+        let rows = wrap(&[Span::raw("abcdefghij")], 4);
         assert_eq!(texts(&rows), ["abcd", "efgh", "ij"]);
     }
 
     #[test]
     fn a_newline_is_a_hard_break() {
-        let rows = wrap(&[MdSpan::plain("a\nb")], 20);
+        let rows = wrap(&[Span::raw("a\nb")], 20);
         assert_eq!(texts(&rows), ["a", "b"]);
     }
 
     #[test]
     fn truncation_marks_what_it_dropped_in_the_look_it_dropped() {
-        let bold = Attrs {
-            bold: true,
-            ..Attrs::NONE
-        };
-        let t = truncate(
-            &[MdSpan::plain("ab"), MdSpan::plain("cdef").with_attrs(bold)],
-            4,
-        );
-        assert_eq!(MdLine::new(t.clone()).text(), "abc…");
-        assert!(t.last().unwrap().attrs.bold);
-        assert_eq!(truncate(&[MdSpan::plain("abc")], 3).len(), 1);
+        let bold = Style::new().bold();
+        let t = truncate(&[Span::raw("ab"), Span::styled("cdef", bold)], 4);
+        assert_eq!(Line::new(t.clone()).plain(), "abc…");
+        assert!(t.last().unwrap().style.attrs.contains(Attrs::BOLD));
+        assert_eq!(truncate(&[Span::raw("abc")], 3).len(), 1);
     }
 }

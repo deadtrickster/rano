@@ -14,7 +14,6 @@
 //! reparsing it. How much of the document that actually saves is the
 //! grammar's decision rather than this crate's — see the note on `Stream`.
 
-use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -25,6 +24,8 @@ use tree_sitter::{
 use tree_sitter_language::LanguageFn;
 
 use crate::buffer::{Buffer, Pos};
+use crate::render::Style;
+use crate::style::Role;
 
 // tree-sitter-dockerfile is vendored (see `vendor/`) and compiled by
 // `build.rs`: the crate binds tree-sitter 0.20, whose `language()` returns a
@@ -929,21 +930,22 @@ fn version(src: &str, parts: &[Part], side: Part) -> String {
         .join("\n")
 }
 
-/// A conflict marker line: dim, as git and emacs's smerge leave them — the
-/// sides' tints are what shows where a conflict is.
+/// A conflict marker line: faint, as git and emacs's smerge leave them dim —
+/// the sides' tints are what shows where a conflict is.
 fn conflict_marker_style() -> Style {
-    Style::default().fg(rgb(0x7f, 0x84, 0x8e))
+    Style::of(Role::Faint)
 }
 
-/// The background a side of a conflict is tinted with, under its own syntax
-/// colours: ours red and theirs green, as the conflict view draws them (ours
-/// is its left, `-` side), and the base yellow. The same dark cube colours as
-/// the diff views' rows.
-fn conflict_tint(p: Part) -> Option<Color> {
+/// The role a side of a conflict sits in, under its own syntax colours: ours
+/// removed (red) and theirs added (green), as the conflict view draws them (ours
+/// is its left, `-` side) — the diff views' own tints. The base is faint rather
+/// than a third tint: the role table allows the cube exactly two backgrounds, and
+/// the base is the version both sides moved away from, which is what faint says.
+fn conflict_tint(p: Part) -> Option<Role> {
     match p {
-        Part::Ours => Some(Color::Indexed(52)),
-        Part::Theirs => Some(Color::Indexed(22)),
-        Part::Base => Some(Color::Indexed(58)),
+        Part::Ours => Some(Role::Removed),
+        Part::Theirs => Some(Role::Added),
+        Part::Base => Some(Role::Faint),
         Part::Text | Part::Marker => None,
     }
 }
@@ -980,11 +982,6 @@ fn char_col(src: &str, lo: usize, b: usize, ascii: bool) -> usize {
     } else {
         src[lo..b].chars().count()
     }
-}
-
-/// One-Dark-ish palette for a dark background.
-fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::Rgb(r, g, b)
 }
 
 /// The byte ranges of a markdown block tree's inline content, **grouped by
@@ -1048,55 +1045,45 @@ fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
     out
 }
 
+/// The editor's colours for a capture: **roles**, so the reader's theme decides
+/// what they look like, the same way it does for the diff views and rendered
+/// markdown.
+///
+/// The names [`crate::highlight::role_for_capture`] knows are taken from it —
+/// one table, so the same Rust is not coloured two ways on one screen. What is
+/// here first is the vocabulary only the editor's queries use: the rest of
+/// nvim-treesitter's keyword family, markdown's own names (the distinctions are
+/// nano's markdown mode's: code and literals as code, emphasis and strong
+/// weighted, links in the link colour, struck text faint), and the punctuation
+/// that tells a delimiter from what it delimits.
 fn theme(name: &str) -> Style {
-    match name {
-        "comment" => Style::default().fg(rgb(0x7f, 0x84, 0x8e)),
-        "string" => Style::default().fg(rgb(0x98, 0xc3, 0x79)),
-        "string.escape" | "escape" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "number" | "constant" | "boolean" | "float" | "field" => {
-            Style::default().fg(rgb(0xd1, 0x9a, 0x66))
-        }
-        "type" | "constructor" | "label" | "module" | "namespace" => {
-            Style::default().fg(rgb(0xe5, 0xc0, 0x7b))
-        }
-        "attribute" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "keyword" | "include" | "preproc" | "conditional" | "repeat" | "exception"
-        | "storageclass" | "media" | "supports" | "keyframes" | "charset" | "import" => {
-            Style::default().fg(rgb(0xc6, 0x78, 0xdd))
-        }
-        "operator" | "punctuation" => Style::default().fg(rgb(0xab, 0xbb, 0xbf)),
-        "property" => Style::default().fg(rgb(0xd1, 0x9a, 0x66)),
-        "function" | "method" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
-        "variable.builtin" | "tag" | "error" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
-        // Diffs, git's way: removed red, added green, hunk headers cyan, the
-        // file headers in the text's own colour, bold.
-        "diff.minus" => Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
-        "diff.plus" => Style::default().fg(rgb(0x98, 0xc3, 0x79)),
-        "diff.hunk" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "diff.file" => Style::default().add_modifier(Modifier::BOLD),
-        // Markdown's own vocabulary (nvim-treesitter names, which is what the
-        // inline query uses). The distinctions are nano's markdown mode's:
-        // code and literals in cyan, emphasis and strong visually weighted,
-        // links and URLs in the link colour, struck text dimmed.
-        "text.literal" => Style::default().fg(rgb(0x56, 0xb6, 0xc2)),
-        "text.emphasis" => Style::default()
-            .fg(rgb(0x98, 0xc3, 0x79))
-            .add_modifier(Modifier::ITALIC),
-        "text.strong" => Style::default()
-            .fg(rgb(0xe5, 0xc0, 0x7b))
-            .add_modifier(Modifier::BOLD),
-        "text.uri" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
-        "text.reference" => Style::default().fg(rgb(0x61, 0xaf, 0xef)),
-        "text.strike" => Style::default()
-            .fg(rgb(0x7f, 0x84, 0x8e))
-            .add_modifier(Modifier::CROSSED_OUT),
-        // Dotted names we didn't match exactly fall back to their prefix
-        // (e.g. "type.builtin" -> "type", "punctuation.bracket" -> "punctuation").
-        _ => match name.split_once('.') {
-            Some((prefix, _)) => theme(prefix),
-            None => Style::default(),
+    let role = match name {
+        "boolean" | "float" | "field" => Role::NumberLit,
+        "module" | "namespace" => Role::TypeName,
+        // An attribute is a directive to the compiler, as `preproc` is.
+        "attribute" | "conditional" | "repeat" | "exception" | "storageclass" | "media"
+        | "supports" | "keyframes" | "charset" | "import" | "tag" => Role::Keyword,
+        "operator" | "punctuation" => Role::Punctuation,
+        "method" => Role::FuncName,
+        "error" => Role::Failure,
+        "text.literal" => Role::Code,
+        "text.emphasis" => return Style::new().italic(),
+        "text.strong" => Role::Strong,
+        "text.uri" | "text.reference" => Role::Link,
+        "text.strike" => Role::Faint,
+        _ => match crate::highlight::role_for_capture(name) {
+            // A dotted name neither table matched exactly falls back to its
+            // prefix here too ("punctuation.bracket" -> "punctuation").
+            Role::Plain => {
+                return match name.split_once('.') {
+                    Some((prefix, _)) => theme(prefix),
+                    None => Style::new(),
+                };
+            }
+            r => r,
         },
-    }
+    };
+    Style::of(role)
 }
 
 pub struct Highlighter {
@@ -1281,9 +1268,11 @@ impl Highlighter {
             let Some(row) = grid.get_mut(i) else { continue };
             if *p == Part::Marker {
                 row.fill(conflict_marker_style());
-            } else if let Some(bg) = conflict_tint(*p) {
+            } else if let Some(tint) = conflict_tint(*p) {
+                // The tint under the syntax role, so the code keeps its colours.
+                let under = Style::of(tint);
                 for cell in row.iter_mut() {
-                    *cell = cell.bg(bg);
+                    *cell = under.patch(cell);
                 }
             }
         }
@@ -1449,10 +1438,10 @@ impl Highlighter {
         };
         let row = self.line_styles.get(row_idx)?;
         let st = row.get(col_idx)?;
-        if *st == Style::default() {
+        if *st == Style::new() {
             None
         } else {
-            Some(*st)
+            Some(st.clone())
         }
     }
 
@@ -1574,7 +1563,7 @@ impl Highlighter {
     fn build_styles(src: &str, tree: &Tree, query: &Query) -> Vec<Vec<Style>> {
         let mut line_styles: Vec<Vec<Style>> = line_char_counts(src)
             .into_iter()
-            .map(|n| vec![Style::default(); n])
+            .map(|n| vec![Style::new(); n])
             .collect();
         Self::apply_styles(src, tree, query, 0, &mut line_styles);
         line_styles
@@ -1592,11 +1581,11 @@ impl Highlighter {
     ) {
         Self::for_each_capture(src, tree, query, row_base, |r, cs, name| {
             let style = theme(name);
-            if style == Style::default() {
+            if style == Style::new() {
                 return;
             }
             for cell in &mut line_styles[r][cs] {
-                *cell = style;
+                cell.clone_from(&style);
             }
         });
     }
@@ -2797,15 +2786,17 @@ mod tests {
         // Git's colours, not the grammar's arbitrary ones: a deletion is red
         // (it was the keyword violet), an addition green, the hunk cyan, and
         // both file names one bold style (`---` was violet, `+++` green).
-        let fg = |r: usize| style_at(&hl, r, 0).and_then(|s| s.fg);
-        let red = Some(rgb(0xe0, 0x6c, 0x75));
-        assert_eq!(fg(3), red, "-old");
-        assert_eq!(fg(4), Some(rgb(0x98, 0xc3, 0x79)), "+new");
-        assert_eq!(fg(2), Some(rgb(0x56, 0xb6, 0xc2)), "@@");
+        let role = |r: usize| style_at(&hl, r, 0).map(|s| s.top());
+        assert_eq!(role(3), Some(Role::Failure), "-old");
+        assert_eq!(role(4), Some(Role::Success), "+new");
+        assert_eq!(role(2), Some(Role::Code), "@@");
         for r in [0, 1] {
             let s = style_at(&hl, r, 0).expect("file header styled");
-            assert!(s.add_modifier.contains(Modifier::BOLD), "row {r}: {s:?}");
-            assert_eq!(s.fg, None, "row {r}: the text's own colour");
+            assert_eq!(
+                s,
+                Style::of(Role::Strong),
+                "row {r}: bold in its own colour"
+            );
         }
         // `diff --git` is a file header too, not red.
         let b = buf_named(
@@ -2814,15 +2805,12 @@ mod tests {
         );
         hl.refresh(&b);
         let s = style_at(&hl, 0, 0).expect("styled");
-        assert!(
-            s.add_modifier.contains(Modifier::BOLD) && s.fg.is_none(),
-            "{s:?}"
-        );
+        assert_eq!(s, Style::of(Role::Strong), "{s:?}");
         // The metadata (`index`, modes) is dim, past the word itself.
         let dim = (0..30)
-            .filter_map(|c| style_at(&hl, 1, c).and_then(|s| s.fg))
+            .filter_map(|c| style_at(&hl, 1, c).map(|s| s.top()))
             .next();
-        assert_eq!(dim, Some(rgb(0x7f, 0x84, 0x8e)), "index line dim");
+        assert_eq!(dim, Some(Role::Comment), "index line dim");
     }
 
     const DIFF3: &str = "impl Client {\n    pub fn new(base_url: &str) -> Self {\n        Client {\n            base_url: base_url.to_string(),\n<<<<<<< HEAD\n            timeout: Duration::from_secs(30),\n||||||| 83b737f\n            timeout: Duration::from_secs(10),\n=======\n            timeout: Duration::from_secs(5),\n>>>>>>> feature/retry\n        }\n    }\n\n    pub fn get(&self, path: &str) -> u32 {\n        1\n    }\n}\n";
@@ -2865,26 +2853,23 @@ mod tests {
             }
         }
         // `timeout` lines and `pub fn get` after the conflict are code again.
-        let fn_kw = style_at(&hl, 14, 8).and_then(|s| s.fg);
-        assert_eq!(
-            fn_kw,
-            Some(theme("keyword").fg.unwrap()),
-            "pub fn after the conflict"
-        );
+        let fn_kw = style_at(&hl, 14, 8).map(|s| s.top());
+        assert_eq!(fn_kw, Some(Role::Keyword), "pub fn after the conflict");
         let num = style_at(&hl, 5, 41).expect("ours' 30");
-        assert_eq!(num.fg, theme("number").fg, "30 is still a number");
-        assert_eq!(num.bg, Some(Color::Indexed(52)), "ours is red");
         assert_eq!(
-            style_at(&hl, 7, 41).and_then(|s| s.bg),
-            Some(Color::Indexed(58)),
-            "base"
+            num.roles().collect::<Vec<_>>(),
+            vec![Role::Removed, Role::NumberLit],
+            "30 is still a number, and ours is red"
         );
-        assert_eq!(
-            style_at(&hl, 9, 41).and_then(|s| s.bg),
-            Some(Color::Indexed(22)),
-            "theirs"
+        let tint = |row| style_at(&hl, row, 41).and_then(|s| s.roles().next());
+        assert_eq!(tint(7), Some(Role::Faint), "base");
+        assert_eq!(tint(9), Some(Role::Added), "theirs");
+        assert!(
+            style_at(&hl, 3, 12).is_none_or(|s| !s
+                .roles()
+                .any(|r| matches!(r, Role::Added | Role::Removed | Role::Faint))),
+            "shared text"
         );
-        assert_eq!(style_at(&hl, 3, 12).and_then(|s| s.bg), None, "shared text");
         assert!(hl.parse_for_diagnostics(&b));
         let rows: Vec<Vec<char>> = DIFF3.lines().map(|l| l.chars().collect()).collect();
         // The conflict is the one diagnostic: no errors from the sides.
@@ -4636,10 +4621,10 @@ fn main() {}
         // destination deliberately share the link colour, because they are
         // one construct (nano colours an inline link all one colour too).
         let kinds = [
-            ("strong", strong),
-            ("code", code),
-            ("emphasis", emphasis),
-            ("strike", strike),
+            ("strong", &strong),
+            ("code", &code),
+            ("emphasis", &emphasis),
+            ("strike", &strike),
         ];
         for (i, (an, a)) in kinds.iter().enumerate() {
             for (bn, b) in &kinds[i + 1..] {
@@ -4647,34 +4632,30 @@ fn main() {}
             }
         }
         assert_eq!(link, url, "a link and its destination are one construct");
-        for (name, style) in [("link", link), ("url", url)] {
-            assert_ne!(style, strong, "{name} must not read as emphasis");
-            assert_ne!(style, code, "{name} must not read as code");
+        for (name, style) in [("link", &link), ("url", &url)] {
+            assert_ne!(style, &strong, "{name} must not read as emphasis");
+            assert_ne!(style, &code, "{name} must not read as code");
         }
         // And no construct wears the delimiter's grey, or prose's default.
         let delimiter = style_in(DOC, 2, "**bold**", 0).expect("delimiters are coloured");
         for (name, style) in [
-            ("strong", strong),
-            ("code", code),
-            ("emphasis", emphasis),
-            ("link", link),
-            ("strike", strike),
+            ("strong", &strong),
+            ("code", &code),
+            ("emphasis", &emphasis),
+            ("link", &link),
+            ("strike", &strike),
         ] {
-            assert_ne!(style, delimiter, "{name} must not wear the delimiter grey");
-            assert_ne!(
-                style,
-                Style::default(),
-                "{name} must not read as plain prose"
-            );
+            assert_ne!(style, &delimiter, "{name} must not wear the delimiter grey");
+            assert_ne!(style, &Style::new(), "{name} must not read as plain prose");
         }
         // And each carries the weight nano's markdown mode gives it.
-        assert!(strong.add_modifier.contains(Modifier::BOLD), "strong");
-        assert!(emphasis.add_modifier.contains(Modifier::ITALIC), "emphasis");
+        assert_eq!(strong.top(), Role::Strong, "strong");
         assert!(
-            strike.add_modifier.contains(Modifier::CROSSED_OUT),
-            "strike"
+            emphasis.attrs.contains(crate::style::Attrs::ITALIC),
+            "emphasis"
         );
-        assert_eq!(code.fg, theme("text.literal").fg, "code spans read as code");
+        assert_eq!(strike.top(), Role::Faint, "strike");
+        assert_eq!(code, theme("text.literal"), "code spans read as code");
     }
 
     #[test]
@@ -4685,39 +4666,33 @@ fn main() {}
         let heading = style_in(DOC, 0, "Head", 0).expect("heading text is coloured");
         let inner_code = style_in(DOC, 0, "`x`", 1).expect("code inside a heading");
         assert_ne!(heading, inner_code, "the code span must not be swallowed");
-        assert_eq!(inner_code.fg, theme("text.literal").fg);
+        assert_eq!(inner_code, theme("text.literal"));
         // The marker keeps the block pass's colour.
-        assert_eq!(
-            style_in(DOC, 0, "#", 0).map(|s| s.fg),
-            Some(theme("keyword").fg),
-        );
+        assert_eq!(style_in(DOC, 0, "#", 0), Some(theme("keyword")));
     }
 
     #[test]
     fn block_structure_still_works() {
         // The inline pass must not undo what the block pass established.
         assert_eq!(
-            style_in(DOC, 4, "> quote", 0).map(|s| s.fg),
-            Some(theme("punctuation.bracket").fg),
+            style_in(DOC, 4, "> quote", 0),
+            Some(theme("punctuation.bracket")),
             "block quote marker",
         );
         assert_eq!(
-            style_in(DOC, 6, "- item", 0).map(|s| s.fg),
-            Some(theme("punctuation.bracket").fg),
+            style_in(DOC, 6, "- item", 0),
+            Some(theme("punctuation.bracket")),
             "list marker",
         );
         assert_eq!(
-            style_in(DOC, 14, "---", 0).map(|s| s.fg),
-            Some(theme("comment").fg),
+            style_in(DOC, 14, "---", 0),
+            Some(theme("comment")),
             "thematic break",
         );
         // A fenced body reads as code (nano colours the whole fence).
         assert!(style_in(DOC, 9, "fn main", 0).is_some(), "fence body");
         // Raw HTML is a tag.
-        assert_eq!(
-            style_in(DOC, 12, "<div>html</div>", 0).map(|s| s.fg),
-            Some(theme("tag").fg),
-        );
+        assert_eq!(style_in(DOC, 12, "<div>html</div>", 0), Some(theme("tag")),);
     }
 
     #[test]

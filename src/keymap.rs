@@ -20,7 +20,7 @@
 //! by spaces: `M-t t`. [`Key::nano`] writes the same key the way nano's bar does
 //! (`^X`, `M-U`, `F8`).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::term::{KeyCode, KeyEvent};
 
 /// One chord: a key and its modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,12 +62,13 @@ impl Key {
     }
 
     /// A terminal key event as a key, with the terminal's own spellings undone:
-    /// `C-\` arrives as `C-4` and `C-/` / `C-_` as `C-7` (the bytes 0x1c and
-    /// 0x1f), and a character's shift is already its case.
+    /// `C-/` arrives as `C-_` (the byte 0x1f, which is also what `C-7` sends),
+    /// some terminals spell `C-\` as `C-4`, and a character's shift is already
+    /// its case.
     pub fn from_event(e: &KeyEvent) -> Key {
-        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = e.modifiers.contains(KeyModifiers::ALT);
-        let mut shift = e.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = e.mods.ctrl();
+        let alt = e.mods.alt();
+        let mut shift = e.mods.shift();
         let code = match e.code {
             KeyCode::Char('4') if ctrl => KeyCode::Char('\\'),
             KeyCode::Char('7') | KeyCode::Char('_') if ctrl => KeyCode::Char('/'),
@@ -115,7 +116,8 @@ impl Key {
 
     /// Parse one chord in emacs notation.
     pub fn parse(s: &str) -> Option<Key> {
-        let mut k = Key::plain(KeyCode::Null);
+        // A placeholder: every path below either sets the code or returns None.
+        let mut k = Key::plain(KeyCode::Esc);
         let mut rest = s;
         loop {
             // A modifier prefix is a letter and a dash with something after it
@@ -421,7 +423,9 @@ pub fn where_is(stack: &[&Keymap], command: &str) -> Vec<Vec<Key>> {
 mod tests {
     use super::*;
 
-    fn ev(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+    use crate::term::Mods;
+
+    fn ev(code: KeyCode, m: Mods) -> KeyEvent {
         KeyEvent::new(code, m)
     }
 
@@ -454,24 +458,51 @@ mod tests {
     /// The terminal's spellings come out as the keys a person pressed.
     #[test]
     fn terminal_events_normalise() {
-        let c = KeyModifiers::CONTROL;
+        let c = Mods::CTRL;
         assert_eq!(Key::from_event(&ev(KeyCode::Char('4'), c)), Key::ctrl('\\'));
         assert_eq!(Key::from_event(&ev(KeyCode::Char('7'), c)), Key::ctrl('/'));
         assert_eq!(Key::from_event(&ev(KeyCode::Char('_'), c)), Key::ctrl('/'));
-        let shifted = ev(KeyCode::Char('<'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let shifted = ev(KeyCode::Char('<'), Mods::ALT | Mods::SHIFT);
         assert_eq!(Key::from_event(&shifted), Key::meta('<'));
         assert_eq!(
-            Key::from_event(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)).emacs(),
+            Key::from_event(&ev(KeyCode::BackTab, Mods::SHIFT)).emacs(),
             "S-TAB"
         );
         assert_eq!(
-            Key::from_event(&ev(KeyCode::Char('a'), KeyModifiers::NONE)).printable(),
+            Key::from_event(&ev(KeyCode::Char('a'), Mods::NONE)).printable(),
             Some('a')
         );
         assert_eq!(
             Key::from_event(&ev(KeyCode::Char('a'), c)).printable(),
             None
         );
+    }
+
+    fn decoded(bytes: &[u8]) -> Key {
+        match &crate::term::decode(bytes)[..] {
+            [crate::term::Event::Key(k)] => Key::from_event(k),
+            other => panic!("{bytes:?} -> {other:?}"),
+        }
+    }
+
+    /// **The keymap reads the terminal decoder's keys as the keys it binds.** The
+    /// spellings checked are the ones a decoder could get wrong for an emacs map:
+    /// `0x1c` is Ctrl+`\` and `0x1f` (Ctrl+`/` on most keyboards) is Ctrl+`_`, which
+    /// must land on `C-\` and `C-/`; a NUL is `C-SPC`; Shift+Tab arrives as its own
+    /// sequence; and the kitty keyboard's `CSI 99;5u` is plain `C-c`.
+    #[test]
+    fn the_keymap_sees_the_keys_the_decoder_reports() {
+        assert_eq!(decoded(b"\x18"), Key::ctrl('x'));
+        assert_eq!(decoded(b"\x1bx"), Key::meta('x'));
+        assert_eq!(decoded(b"\x1c"), Key::ctrl('\\'));
+        assert_eq!(decoded(b"\x1f"), Key::ctrl('/'));
+        assert_eq!(decoded(b"\x00"), Key::ctrl(' '));
+        assert_eq!(decoded(b"A"), Key::plain(KeyCode::Char('A')));
+        let tab = decoded(b"\x1b[Z");
+        assert_eq!((tab.code, tab.shift), (KeyCode::Tab, true));
+        let up = decoded(b"\x1b[1;2A");
+        assert_eq!((up.code, up.shift, up.ctrl), (KeyCode::Up, true, false));
+        assert_eq!(decoded(b"\x1b[99;5u"), Key::ctrl('c'));
     }
 
     #[test]

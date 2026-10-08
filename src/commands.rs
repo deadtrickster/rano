@@ -1080,7 +1080,7 @@ impl Editor {
                     }
                 } else if seq.len() > 1 {
                     // C-g and ESC are how a prefix is abandoned, as in emacs.
-                    if key == Key::ctrl('g') || key == Key::plain(crossterm::event::KeyCode::Esc) {
+                    if key == Key::ctrl('g') || key == Key::plain(crate::term::KeyCode::Esc) {
                         self.flash("Quit");
                     } else {
                         self.flash(&format!("{} is undefined", seq_emacs(&seq)));

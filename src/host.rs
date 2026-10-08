@@ -129,7 +129,7 @@ mod tests {
     use super::*;
     use crate::buffer::{Buffer, Pos};
     use crate::config::Config;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::term::{KeyCode, KeyEvent, Mods};
 
     fn ed(text: &str) -> Editor {
         let mut buf = Buffer::new();
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn tick_shows_a_prefix_card_once_it_is_due() {
         let mut ed = ed("- [ ] task");
-        ed.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT));
+        ed.handle_key(KeyEvent::new(KeyCode::Char('t'), Mods::ALT));
         assert!(!ed.tick(Instant::now()), "the card waits a moment");
         // The loop is told to come back when it is due, not later.
         let due = ed.card_due().expect("waiting for its card");
@@ -209,7 +209,7 @@ mod tests {
         ed.text_h = 10;
         ed.tick(Instant::now());
         ed.bs_mut().cursor = Pos { row: 0, col: 11 };
-        ed.handle_key(KeyEvent::new(KeyCode::Char('('), KeyModifiers::NONE));
+        ed.handle_key(KeyEvent::new(KeyCode::Char('('), Mods::NONE));
         let now = Instant::now();
         ed.tick(now);
         assert!(ed.bs().syntax_diags.is_empty(), "not within the debounce");
@@ -227,7 +227,7 @@ mod tests {
     use crate::editor::KeyOutcome;
     use crate::keymap::Keymap;
 
-    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+    fn key(code: KeyCode, mods: Mods) -> KeyEvent {
         KeyEvent::new(code, mods)
     }
 
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn an_unbound_key_is_handed_back_and_changes_nothing() {
         let mut ed = ed("abc");
-        let out = ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE));
+        let out = ed.handle_key(key(KeyCode::F(12), Mods::NONE));
         assert_eq!(out, KeyOutcome::Unhandled);
         assert_eq!(text(&ed), vec!["abc"]);
         assert!(ed.pending.keys.is_empty());
@@ -251,13 +251,13 @@ mod tests {
     #[test]
     fn typing_and_commands_are_handled() {
         let mut ed = ed("");
-        let typed = ed.handle_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        let typed = ed.handle_key(key(KeyCode::Char('a'), Mods::NONE));
         assert_eq!(typed, KeyOutcome::Handled);
         assert_eq!(text(&ed), vec!["a"]);
-        let moved = ed.handle_key(key(KeyCode::Left, KeyModifiers::NONE));
+        let moved = ed.handle_key(key(KeyCode::Left, Mods::NONE));
         assert_eq!(moved, KeyOutcome::Handled);
         // A prefix waiting for its next key is the editor's too.
-        let prefix = ed.handle_key(key(KeyCode::Char('t'), KeyModifiers::ALT));
+        let prefix = ed.handle_key(key(KeyCode::Char('t'), Mods::ALT));
         assert_eq!(prefix, KeyOutcome::Handled);
     }
 
@@ -267,14 +267,14 @@ mod tests {
         let mut map = Keymap::new("host");
         map.bind("C-q", "host-close-pane");
         ed.push_keymap(map);
-        let close = || key(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        let close = || key(KeyCode::Char('q'), Mods::CTRL);
         assert_eq!(
             ed.handle_key(close()),
             KeyOutcome::Host("host-close-pane".into())
         );
         assert_eq!(text(&ed), vec!["abc"]);
         // Over a mode as well: M-x's own map is in effect there.
-        ed.handle_key(key(KeyCode::Char('x'), KeyModifiers::ALT));
+        ed.handle_key(key(KeyCode::Char('x'), Mods::ALT));
         assert!(ed.palette.is_some());
         assert_eq!(
             ed.handle_key(close()),
@@ -291,15 +291,15 @@ mod tests {
         ed.push_keymap(map);
         // Unbound characters are still typed: what decides that is the
         // editor's own map, not the host's on top of it.
-        ed.handle_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+        ed.handle_key(key(KeyCode::Char('z'), Mods::NONE));
         assert_eq!(text(&ed), vec!["z"]);
-        let out = ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE));
+        let out = ed.handle_key(key(KeyCode::F(12), Mods::NONE));
         assert_eq!(out, KeyOutcome::Handled);
         assert_eq!(text(&ed), vec![""], "F12 ran undo");
         // Popped, F12 is unbound again.
         assert_eq!(ed.pop_keymap().map(|m| m.name), Some("host".into()));
         assert_eq!(
-            ed.handle_key(key(KeyCode::F(12), KeyModifiers::NONE)),
+            ed.handle_key(key(KeyCode::F(12), Mods::NONE)),
             KeyOutcome::Unhandled
         );
     }
@@ -308,7 +308,7 @@ mod tests {
     fn exit_is_reported_as_wanting_to_quit() {
         let mut ed = ed("x");
         assert!(!ed.wants_quit());
-        ed.handle_key(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        ed.handle_key(key(KeyCode::Char('x'), Mods::CTRL));
         assert!(ed.wants_quit(), "an unmodified editor exits at once");
     }
 

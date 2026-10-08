@@ -13,8 +13,8 @@
 //!   the look, for text painted as a string.
 //! - `crate::render`'s emitter — a cell buffer's rows, with minimal SGR transitions
 //!   between cells.
-//! - [`Palette::style`] — the ratatui `Style` the editor and `diff`/`sidediff` still
-//!   draw with. Transitional: it goes when the editor moves off ratatui.
+//! - [`Palette::style`] — a role as a `crate::render` style, for the renderers that
+//!   build lines (the diff views, markdown); the look is the emitter's business.
 //!
 //! # Name the roles, not the colours
 //!
@@ -111,11 +111,39 @@ pub enum Role {
     TypeName,
     /// Syntax: a function name at its definition or call site.
     FuncName,
+    /// Syntax: an operator or punctuation. Named so a delimiter is told from the
+    /// text it delimits (markdown's `**`, a quote's `>`), but drawn in the reader's
+    /// own foreground: the editor's grey for it was a hair off the default text
+    /// colour, and no theme slot is that close.
+    Punctuation,
+    /// A link or a reference in prose (a markdown URL), where it is text rather
+    /// than an OSC 8 hyperlink.
+    Link,
+    /// A key as the reader would press it: a card's `C-x`, which-key's entries,
+    /// the keys column of `M-x`.
+    Key,
+    /// The editor's chrome, nano's way: the title, prompt and function bars and
+    /// an overlay's header row, in reverse video (what nano itself emits).
+    Bar,
+    /// The current row of a list or a popup, in reverse video like nano's.
+    Selected,
+    /// The search match the cursor is on: nano's black on yellow.
+    Match,
+    /// The marked region. Two explicit theme colours rather than reverse, so the
+    /// selection is visible on terminals whose reverse comes out white on white.
+    Selection,
+    /// A diagnostic of error severity: the gutter number, and (underlined) the
+    /// code it is about.
+    DiagError,
+    /// A diagnostic of warning severity.
+    DiagWarning,
+    /// A diagnostic of any lesser severity (information, hint).
+    DiagNote,
 }
 
 impl Role {
     /// Every role, for tests and for anything that lists them.
-    pub const ALL: [Role; 22] = [
+    pub const ALL: [Role; 32] = [
         Role::Plain,
         Role::Faint,
         Role::Strong,
@@ -138,6 +166,16 @@ impl Role {
         Role::Comment,
         Role::TypeName,
         Role::FuncName,
+        Role::Punctuation,
+        Role::Link,
+        Role::Key,
+        Role::Bar,
+        Role::Selected,
+        Role::Match,
+        Role::Selection,
+        Role::DiagError,
+        Role::DiagWarning,
+        Role::DiagNote,
     ];
 
     /// The role whose **foreground** this role stands for.
@@ -229,7 +267,7 @@ impl std::ops::BitOr for Attrs {
 }
 
 /// What a role looks like under a palette: medium-neutral, so a string painter, a
-/// cell emitter and the ratatui adapter all read the same table.
+/// cell emitter and an export all read the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Look {
     pub fg: Option<Hue>,
@@ -386,11 +424,48 @@ impl Palette {
             Role::Comment => Look::attrs(A::DIM),
             Role::TypeName => Look::fg(Slot(6)),
             Role::FuncName => Look::fg(Slot(4)),
+            Role::Punctuation => Look::PLAIN,
+            Role::Link => Look::fg(Slot(4)),
+            Role::Key => Look::fg(Slot(6)),
+            // The editor's reverse video is the terminal's one reverse, the same
+            // look as `UserBlock` and `reverse_look`: legible on any theme.
+            Role::Bar | Role::Selected => Look::attrs(A::REVERSE),
+            Role::Match => Look {
+                fg: Some(Slot(0)),
+                bg: Some(Slot(3)),
+                attrs: A::NONE,
+            },
+            // Bright white on bright black: the editor's selection was
+            // `White`-on-`DarkGray`, and those are the theme's slots 15 and 8.
+            Role::Selection => Look {
+                fg: Some(Slot(15)),
+                bg: Some(Slot(8)),
+                attrs: A::NONE,
+            },
+            Role::DiagError => Look::fg(Slot(1)),
+            Role::DiagWarning => Look::fg(Slot(3)),
+            Role::DiagNote => Look::fg(Slot(4)),
         }
     }
 
     pub fn is_colour(self) -> bool {
         matches!(self, Palette::Colour | Palette::Light)
+    }
+
+    /// **A role as a [`crate::render::Style`] under this palette**: the role
+    /// itself on a colour palette, and nothing at all under [`Palette::None`].
+    ///
+    /// A render style names a meaning, and its look is chosen only when a buffer
+    /// is emitted — so `Colour` and `Light` give the same style here. `None` is the
+    /// one palette a renderer has to know about at build time: a diff handed
+    /// `Palette::None` promises plain lines (the `+`/`-` glyph carries the change),
+    /// and they stay plain whatever buffer, palette or host they end up in.
+    pub fn style(self, r: Role) -> crate::render::Style {
+        if self == Palette::None {
+            crate::render::Style::new()
+        } else {
+            crate::render::Style::of(r)
+        }
     }
 
     /// **A program's own background slot**, `0`–`15`, as a look: plain for
@@ -445,88 +520,6 @@ impl Palette {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The ratatui adapter. Transitional: the editor and `diff`/`sidediff` still draw
-// with ratatui, and these are the functions they (and letibot's pinned rano) call.
-// It reads the same table as everything above, so it cannot drift from it; it
-// goes when the last ratatui caller does.
-// ---------------------------------------------------------------------------
-
-use ratatui::style::{Color, Modifier, Style};
-
-impl Hue {
-    fn ratatui(self) -> Color {
-        match self {
-            Hue::Slot(n) => match n {
-                0 => Color::Black,
-                1 => Color::Red,
-                2 => Color::Green,
-                3 => Color::Yellow,
-                4 => Color::Blue,
-                5 => Color::Magenta,
-                6 => Color::Cyan,
-                7 => Color::Gray,
-                8 => Color::DarkGray,
-                9 => Color::LightRed,
-                10 => Color::LightGreen,
-                11 => Color::LightYellow,
-                12 => Color::LightBlue,
-                13 => Color::LightMagenta,
-                14 => Color::LightCyan,
-                15 => Color::White,
-                n => Color::Indexed(n),
-            },
-            Hue::Cube(n) => Color::Indexed(n),
-        }
-    }
-}
-
-impl Look {
-    /// This look as a ratatui [`Style`].
-    pub fn ratatui(&self) -> Style {
-        let mut s = Style::new();
-        if let Some(f) = self.fg {
-            s = s.fg(f.ratatui());
-        }
-        if let Some(b) = self.bg {
-            s = s.bg(b.ratatui());
-        }
-        for (a, m) in [
-            (Attrs::BOLD, Modifier::BOLD),
-            (Attrs::DIM, Modifier::DIM),
-            (Attrs::ITALIC, Modifier::ITALIC),
-            (Attrs::UNDERLINE, Modifier::UNDERLINED),
-            (Attrs::REVERSE, Modifier::REVERSED),
-        ] {
-            if self.attrs.contains(a) {
-                s = s.add_modifier(m);
-            }
-        }
-        s
-    }
-}
-
-impl Palette {
-    /// The ratatui style for a role: [`Palette::look`], adapted.
-    pub fn style(self, r: Role) -> Style {
-        self.look(r).ratatui()
-    }
-
-    /// [`Palette::background_look`] as a ratatui style. Slots go out as
-    /// `Color::Indexed`, which is the slot number on the wire.
-    pub fn background(self, slot: u8) -> Style {
-        match self.background_look(slot).bg {
-            Some(Hue::Slot(n)) => Style::new().bg(Color::Indexed(n)),
-            _ => Style::new(),
-        }
-    }
-
-    /// [`Palette::reverse_look`] as a ratatui style.
-    pub fn reverse(self) -> Style {
-        self.reverse_look().ratatui()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,7 +527,7 @@ mod tests {
     #[test]
     fn the_none_palette_styles_nothing() {
         for r in Role::ALL {
-            assert_eq!(Palette::None.style(r), Style::new(), "{r:?}");
+            assert_eq!(Palette::None.style(r), crate::render::Style::new(), "{r:?}");
             assert_eq!(Palette::None.look(r), Look::PLAIN, "{r:?}");
             assert_eq!(Palette::None.paint(r, "x"), "x");
         }
@@ -542,9 +535,11 @@ mod tests {
 
     /// **The port's parity check**: the sequences spelled from the look are letibot's
     /// table, byte for byte, so a letibot caller moving to this file sees no change.
+    /// The rows from `Punctuation` on are the editor's own roles, which letibot never had:
+    /// the colours its ratatui code named, as the theme slots they always were.
     #[test]
     fn the_spelled_sequences_are_letibots_table() {
-        let table: [(Role, &str); 22] = [
+        let table: [(Role, &str); 32] = [
             (Role::Plain, ""),
             (Role::Faint, "\x1b[2m"),
             (Role::Strong, "\x1b[1m"),
@@ -567,6 +562,16 @@ mod tests {
             (Role::Comment, "\x1b[2m"),
             (Role::TypeName, "\x1b[36m"),
             (Role::FuncName, "\x1b[34m"),
+            (Role::Punctuation, ""),
+            (Role::Link, "\x1b[34m"),
+            (Role::Key, "\x1b[36m"),
+            (Role::Bar, "\x1b[7m"),
+            (Role::Selected, "\x1b[7m"),
+            (Role::Match, "\x1b[30;43m"),
+            (Role::Selection, "\x1b[97;100m"),
+            (Role::DiagError, "\x1b[31m"),
+            (Role::DiagWarning, "\x1b[33m"),
+            (Role::DiagNote, "\x1b[34m"),
         ];
         for (r, want) in table {
             assert_eq!(Palette::Colour.open(r), want, "{r:?}");
@@ -577,7 +582,7 @@ mod tests {
     fn every_role_closes_what_it_opens() {
         for r in Role::ALL {
             let s = Palette::Colour.paint(r, "abc");
-            if r != Role::Plain {
+            if !Palette::Colour.look(r).is_plain() {
                 assert!(s.ends_with(crate::width::text::RESET), "{r:?} -> {s:?}");
             }
             assert_eq!(crate::width::text::width(&s), 3, "{r:?} changed the width");
@@ -618,28 +623,23 @@ mod tests {
                     "{r:?} uses SGR parameter {n}, which is not a theme slot: {o:?}"
                 );
             }
-            // And the ratatui side of the same rule.
-            let s = Palette::Colour.style(r);
-            for c in [s.fg, s.bg].into_iter().flatten() {
-                assert!(!matches!(c, Color::Indexed(_)), "{r:?} paints {c:?}");
+            // And the look's side of the same rule, whatever medium spells it.
+            let l = Palette::Colour.look(r);
+            for h in [l.fg, l.bg].into_iter().flatten() {
+                assert!(matches!(h, Hue::Slot(n) if n < 16), "{r:?} paints {h:?}");
             }
         }
     }
 
     #[test]
     fn a_program_background_is_its_theme_slot_and_nothing_past_sixteen() {
-        assert_eq!(
-            Palette::Colour.background(4),
-            Style::new().bg(Color::Indexed(4))
-        );
-        assert_eq!(
-            Palette::Colour.background(15),
-            Style::new().bg(Color::Indexed(15))
-        );
-        assert_eq!(Palette::Colour.background(16), Style::new());
-        assert_eq!(Palette::Colour.background(255), Style::new());
+        let bg = |p: Palette, n| p.background_look(n).bg;
+        assert_eq!(bg(Palette::Colour, 4), Some(Hue::Slot(4)));
+        assert_eq!(bg(Palette::Colour, 15), Some(Hue::Slot(15)));
+        assert_eq!(Palette::Colour.background_look(16), Look::PLAIN);
+        assert_eq!(Palette::Colour.background_look(255), Look::PLAIN);
         for slot in 0..=255u8 {
-            assert_eq!(Palette::None.background(slot), Style::new(), "{slot}");
+            assert_eq!(Palette::None.background_look(slot), Look::PLAIN, "{slot}");
         }
         // Spelled the way a terminal spells them: the eight, then the bright eight at 100.
         for (slot, n) in (0u8..16).zip((40..48).chain(100..108)) {
@@ -653,16 +653,13 @@ mod tests {
 
     #[test]
     fn reverse_is_one_style_for_the_program_and_the_user_block() {
+        assert_eq!(Palette::Colour.reverse_look(), Look::attrs(Attrs::REVERSE));
         assert_eq!(
-            Palette::Colour.reverse(),
-            Style::new().add_modifier(Modifier::REVERSED)
-        );
-        assert_eq!(
-            Palette::Colour.reverse(),
-            Palette::Colour.style(Role::UserBlock)
+            Palette::Colour.reverse_look(),
+            Palette::Colour.look(Role::UserBlock)
         );
         assert_eq!(Palette::Colour.reverse_look().sgr(), "\x1b[7m");
-        assert_eq!(Palette::None.reverse(), Style::new());
+        assert_eq!(Palette::None.reverse_look(), Look::PLAIN);
     }
 
     #[test]
@@ -670,8 +667,8 @@ mod tests {
         assert_eq!(Role::Added.foreground(), Role::Success);
         assert_eq!(Role::Removed.foreground(), Role::Failure);
         assert_eq!(Role::Keyword.foreground(), Role::Keyword);
-        assert_eq!(Palette::Colour.style(Role::Success).fg, Some(Color::Green));
-        assert_eq!(Palette::Colour.style(Role::Failure).fg, Some(Color::Red));
+        assert_eq!(Palette::Colour.look(Role::Success).fg, Some(Hue::Slot(2)));
+        assert_eq!(Palette::Colour.look(Role::Failure).fg, Some(Hue::Slot(1)));
     }
 
     /// Roles that mean different things have to *look* different, or moving to sixteen
@@ -687,6 +684,9 @@ mod tests {
             (Role::Keyword, Role::StringLit),
             (Role::Keyword, Role::NumberLit),
             (Role::TypeName, Role::FuncName),
+            (Role::Match, Role::Selection),
+            (Role::DiagError, Role::DiagWarning),
+            (Role::DiagWarning, Role::DiagNote),
         ] {
             assert_ne!(
                 Palette::Colour.look(a),

@@ -12,7 +12,7 @@
 //! - [`syntax`] — tree-sitter highlighting: language detection, the
 //!   capture walk, and [`syntax::Highlighter::classes`] for callers that
 //!   own their palette rather than borrowing rano's.
-//! - [`diff`] / [`sidediff`] — line diffs drawn as ratatui lines, unified or
+//! - [`diff`] / [`sidediff`] — line diffs drawn as [`render`] lines, unified or
 //!   in two panels, with [`style`]'s roles and [`highlight`]'s syntax mapping.
 //! - [`width`] — display width: how many columns a character takes, where a
 //!   line's wrap segments begin, and which clusters may never be split;
@@ -28,9 +28,9 @@
 //! ```no_run
 //! use std::path::Path;
 //! use std::time::Instant;
-//! use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 //! use rano::buffer::Buffer;
 //! use rano::editor::{Area, Editor, KeyOutcome};
+//! use rano::term::KeyEvent;
 //! use rano::{config, keymap::Keymap, ui};
 //!
 //! let mut ed = Editor::new(Buffer::new(), config::load());
@@ -38,16 +38,20 @@
 //! host.bind("C-q", "close-pane"); // not an editor command: handed back
 //! ed.push_keymap(host);
 //! ed.open_at(Path::new("src/main.rs"), 120, Some(5)).ok();
-//! let pane = ratatui::layout::Rect::new(0, 1, 80, 30);
-//! ed.set_area(Area::new(pane.x, pane.y, pane.width, pane.height));
-//! # let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 31)).unwrap();
+//! let pane = rano::render::Rect::new(0, 1, 80, 30);
+//! ed.set_area(pane.into());
+//! // The host's frame: one cell buffer for the whole screen, reused.
+//! let mut frame = rano::render::Buffer::empty(rano::render::Rect::new(0, 0, 80, 31));
 //! // Each iteration of the host's loop:
 //! if ed.tick(Instant::now()) {
-//!     terminal.draw(|f| ui::draw_in(f, pane, &ed)).unwrap();
+//!     // The editor paints its pane and says where the cursor goes
+//!     // (column, row); the host emits the frame, e.g. through
+//!     // `rano::term::Terminal::draw_buffer`.
+//!     let _cursor = ui::draw_in(&mut frame, pane, &ed);
 //! }
 //! let wait = ed.next_wakeup(); // poll input for at most this long
 //! # let _ = wait;
-//! match ed.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)) {
+//! match ed.handle_key(KeyEvent::ctrl('q')) {
 //!     KeyOutcome::Host(cmd) if cmd == "close-pane" => { /* close the pane */ }
 //!     KeyOutcome::Unhandled => { /* try the host's own bindings */ }
 //!     _ => {}
@@ -59,7 +63,7 @@ pub mod buffer;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,
 // diffed side by side with the renderers below (the editor's M-P).
 pub mod conflict;
-// Diffs, as ratatui lines: the edit script and the unified view (`diff`), the
+// Diffs, as `render` lines: the edit script and the unified view (`diff`), the
 // two-panel view (`sidediff`), the roles and palette they paint with (`style`),
 // and syntax captures onto those roles (`highlight`). Ported from letibot's
 // `crates/ui` so that text rendering has one home; lib-only, and the editor's
@@ -72,15 +76,14 @@ pub mod highlight;
 // a host can stack its own map over the editor's.
 pub mod keymap;
 // A model's markdown reply, rendered while it streams: a bounded parse window,
-// a block model, and a painter to ratatui lines (ported from letibot's TUI).
+// a block model, and a painter to `render` lines (ported from letibot's TUI).
 pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;
 // The render core: roles-styled spans and lines, a width-correct cell buffer,
 // widgets, and the emitter that turns a buffer into terminal rows per palette.
-// What rano draws with once the editor is off ratatui, and what letibot draws
-// through. No ratatui and no crossterm in it.
+// What rano draws with, and what letibot draws through.
 pub mod render;
 pub mod sidediff;
 pub mod style;

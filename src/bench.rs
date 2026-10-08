@@ -12,17 +12,15 @@
 //! - **frame** — one `ui::draw` into a headless backend, which is what a
 //!   scroll costs per notch.
 //!
-//! Deliberately does not touch a terminal: `TestBackend` counts the same
+//! Deliberately does not touch a terminal: a `render::Buffer` counts the same
 //! cells without a pty, so the numbers are the editor's own work.
 
 use crate::buffer::Buffer;
 use crate::config;
 use crate::editor::Editor;
+use crate::term::{KeyCode, KeyEvent, Mods};
 use crate::ui;
 use crate::width;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -165,13 +163,14 @@ fn bench() {
         // grows by one character per iteration, which is what typing does.
         let keys = 3;
         let (kmed, kp95) = time(keys, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
         });
 
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        let mut terminal =
+            crate::render::Buffer::empty(crate::render::Rect::new(0, 0, width, height));
         let frames = 10;
         let (fmed, _) = time(frames, || {
-            let _ = terminal.draw(|f| ui::draw(f, &e));
+            let _ = ui::draw(&mut terminal, &e);
         });
 
         println!(
@@ -239,12 +238,12 @@ fn bench_breakdown() {
         println!("    {:>22}  {}", "hl.refresh (whole doc)", ms(t));
         // The edit alone: the buffer mutation and the undo snapshot.
         let (t, _) = time(3, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
         });
         println!("    {:>22}  {}", "edit only", ms(t));
         // The frame's highlight, which is where the remaining cost lives.
         let (t, _) = time(3, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
         });
         println!("    {:>22}  {}", "edit + highlight", ms(t));
@@ -575,8 +574,8 @@ fn bench_cold_open() {
         e.text_h = 36;
         e.ensure_wrap_prefix();
         e.ensure_highlight();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
-        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        let mut terminal = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 40));
+        ui::draw(&mut terminal, &e);
         let today = t.elapsed();
 
         // Hand-rolled: the read happens on a worker; the main thread draws a
@@ -593,8 +592,8 @@ fn bench_cold_open() {
         let mut e = Editor::new(Buffer::new(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
-        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        let mut terminal = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 40));
+        ui::draw(&mut terminal, &e);
         let off_thread = t.elapsed();
         let read = rx.recv().expect("worker sent the buffer");
         std::hint::black_box(read.row_count());
@@ -1537,23 +1536,23 @@ fn bench_scroll_profile() {
     let mut e = Editor::new(buf, config::Config::default());
     e.text_w = 120;
     e.text_h = 36;
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+    let mut terminal = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 40));
 
     // The first frame (open + first window highlight).
     let t = Instant::now();
     e.ensure_wrap_prefix();
     e.ensure_highlight();
-    terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+    ui::draw(&mut terminal, &e);
     let first = t.elapsed();
 
     let use_wheel = |e: &mut Editor| {
-        let me = |kind| crossterm::event::MouseEvent {
+        let me = |kind| crate::term::MouseEvent {
             kind,
-            column: 0,
-            row: 0,
-            modifiers: crossterm::event::KeyModifiers::NONE,
+            x: 0,
+            y: 0,
+            mods: crate::term::Mods::NONE,
         };
-        e.handle_mouse(me(crossterm::event::MouseEventKind::ScrollDown))
+        e.handle_mouse(me(crate::term::MouseKind::WheelDown))
     };
 
     // One pass: scroll to the bottom, then back to the top, timing every frame.
@@ -1575,21 +1574,21 @@ fn bench_scroll_profile() {
             e.adjust_scroll(e.text_h);
             e.adjust_scroll_x();
             e.ensure_highlight();
-            terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+            ui::draw(&mut terminal, &e);
             down.push(t.elapsed().as_nanos());
         }
         for _ in 0..notches {
             let t = Instant::now();
-            e.handle_mouse(crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::ScrollUp,
-                column: 0,
-                row: 0,
-                modifiers: crossterm::event::KeyModifiers::NONE,
+            e.handle_mouse(crate::term::MouseEvent {
+                kind: crate::term::MouseKind::WheelUp,
+                x: 0,
+                y: 0,
+                mods: crate::term::Mods::NONE,
             });
             e.adjust_scroll(e.text_h);
             e.adjust_scroll_x();
             e.ensure_highlight();
-            terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+            ui::draw(&mut terminal, &e);
             up.push(t.elapsed().as_nanos());
         }
         eprintln!(
@@ -1627,7 +1626,7 @@ fn bench_scroll_profile() {
         use_wheel(&mut e);
         e.adjust_scroll(e.text_h);
         e.adjust_scroll_x();
-        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        ui::draw(&mut terminal, &e);
         no_hl.push(t.elapsed().as_nanos());
     }
     report("down, no highlight", &no_hl);
@@ -1637,7 +1636,7 @@ fn bench_scroll_profile() {
     e.ensure_highlight();
     for _ in 0..notches.min(2_000) {
         let t = Instant::now();
-        terminal.draw(|f| ui::draw(f, &e)).expect("draw");
+        ui::draw(&mut terminal, &e);
         draw_only.push(t.elapsed().as_nanos());
     }
     report("draw alone", &draw_only);
@@ -1683,7 +1682,7 @@ fn bench_threshold_cliff() {
         // A keypress: the edit plus the frame's highlight, which is where the
         // threshold decides which path runs.
         let (t_key, _) = time(5, || {
-            e.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
         });
         // And a viewport window, for comparison.
@@ -1740,7 +1739,7 @@ fn bench_load_throughput() {
     ed.text_w = 120;
     ed.text_h = 36;
     ed.start_load(p).expect("start load");
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
+    let mut terminal = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 40));
     let mut frames = 0usize;
     let deadline = Instant::now() + Duration::from_secs(120);
     while ed.loading() {
@@ -1750,7 +1749,7 @@ fn bench_load_throughput() {
         ed.adjust_scroll(ed.text_h);
         ed.adjust_scroll_x();
         ed.ensure_highlight();
-        terminal.draw(|f| ui::draw(f, &ed)).expect("draw");
+        ui::draw(&mut terminal, &ed);
         frames += 1;
     }
     let loaded = t.elapsed();

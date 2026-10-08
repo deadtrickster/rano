@@ -38,9 +38,7 @@
 
 // The same tables, walked over a `&str` that may carry escapes: the renderer's
 // side (letibot's `width.rs`, ported). A child module so the tables below stay
-// private and stay one copy. `dead_code` because the binary compiles this file
-// through its own `mod width;` and none of its callers are in the binary.
-#[allow(dead_code)]
+// private and stay one copy.
 pub mod text;
 
 /// Columns one character claims on a terminal: 0, 1 or 2.

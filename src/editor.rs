@@ -7,8 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{MouseButton, MouseEvent};
-use ratatui::style::{Color, Modifier, Style};
+use crate::render::Style;
+use crate::style::Role;
+use crate::term::{MouseButton, MouseEvent, MouseKind};
 
 use crate::BufferState;
 use crate::RowWrap;
@@ -66,10 +67,9 @@ pub(crate) struct UndoStep {
 
 /// A rectangle of terminal cells: where the editor sits on the screen.
 ///
-/// rano's own type rather than ratatui's `Rect` on purpose: ratatui is only
-/// how rano draws today, and the editor's logic (sizing, mouse mapping) and
-/// a host's calls into it should not have to change when that does. The
-/// drawing side converts (`From<ratatui::layout::Rect>`, in `ui`).
+/// The editor's own type rather than the drawing side's rectangle on purpose:
+/// the editor's logic (sizing, mouse mapping) and a host's calls into it should
+/// not change with how it draws. `ui` converts (`From<render::Rect>`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Area {
     pub x: u16,
@@ -1736,11 +1736,11 @@ impl Editor {
     pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
         let mut m = m;
         if !self.area.is_empty() {
-            if !self.area.contains(m.column, m.row) {
+            if !self.area.contains(m.x, m.y) {
                 return false;
             }
-            m.column -= self.area.x;
-            m.row -= self.area.y;
+            m.x -= self.area.x;
+            m.y -= self.area.y;
         }
         // The list overlay is keyboard-only; the text under it is not there
         // to click.
@@ -1748,11 +1748,10 @@ impl Editor {
             return false;
         }
         self.ensure_wrap_prefix();
-        use crossterm::event::MouseEventKind as K;
         match m.kind {
-            K::ScrollUp => self.wheel(-3),
-            K::ScrollDown => self.wheel(3),
-            K::Down(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+            MouseKind::WheelUp => self.wheel(-3),
+            MouseKind::WheelDown => self.wheel(3),
+            MouseKind::Press(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();
                     bs.cursor = bs.buf.clamp(p);
@@ -1762,7 +1761,7 @@ impl Editor {
                 }
                 None => false,
             },
-            K::Drag(MouseButton::Left) => match self.mouse_pos(m.row, m.column) {
+            MouseKind::Drag(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
                 Some(p) => {
                     let bs = self.bs_mut();
                     bs.cursor = bs.buf.clamp(p);
@@ -3039,14 +3038,14 @@ impl Editor {
             && a <= p
             && p < b
         {
-            return Style::default().fg(Color::Black).bg(Color::Yellow);
+            return Style::of(Role::Match);
         }
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
             if a <= p && p < b {
-                // Explicit colors (not REVERSED) so the selection is visible
+                // Explicit colors (not reverse) so the selection is visible
                 // on terminals whose reverse-video comes out white-on-white.
-                return Style::default().fg(Color::White).bg(Color::DarkGray);
+                return Style::of(Role::Selection);
             }
         }
         // Diagnostics: underline in severity color. Search match and
@@ -3054,19 +3053,24 @@ impl Editor {
         // units and can drift on astral chars (accepted limitation).
         for d in diags {
             if d.line == p.row && d.col <= p.col && p.col < d.end_col {
-                let c = match d.severity {
-                    1 => Color::Red,
-                    2 => Color::Yellow,
-                    _ => Color::Blue,
-                };
-                return Style::default().fg(c).add_modifier(Modifier::UNDERLINED);
+                return Style::of(diag_role(d.severity)).underline();
             }
         }
         // Syntax highlighting (tree-sitter), below search/selection priority.
         if let Some(s) = self.bs().hl.style_at(p) {
             return s;
         }
-        Style::default()
+        Style::new()
+    }
+}
+
+/// The role a diagnostic's severity paints with (LSP numbering: 1 error,
+/// 2 warning, anything else lesser), in the gutter and under the code.
+pub(crate) fn diag_role(severity: u64) -> Role {
+    match severity {
+        1 => Role::DiagError,
+        2 => Role::DiagWarning,
+        _ => Role::DiagNote,
     }
 }
 

@@ -11,18 +11,19 @@
 //! section of letibot's design brief (`docs/` in that repository), and "the
 //! operator" is the person whose screen found the defect being described.
 //!
-//! The painter's output is [`MdLine`]s of role-tagged [`MdSpan`]s rather than a
-//! TUI library's styled text: a span says what its text means — a
-//! [`crate::style::Role`] plus markdown's inline attributes — and the host's
-//! palette decides what that looks like, at the edge. [`line::to_plain`] and
-//! [`line::to_ansi`] are that edge for a host that prints strings, and for tests.
+//! The painter's output is [`crate::render::Line`]s of role-tagged spans: a span
+//! says what its text means — a [`crate::style::Role`] plus markdown's inline
+//! attributes — and the host's palette decides what that looks like, at the edge.
+//! A host drawing cells renders the lines into a [`crate::render::Buffer`];
+//! [`line::to_plain`] and [`line::to_ansi`] are the edge for a host that prints
+//! strings, and for tests.
 //!
 //! # The parts
 //!
 //! - [`parse`] — [`IncrementalMarkdown`], the window that keeps the cost of a
 //!   push bounded, and the [`Block`] model it produces; [`lex`] for text rendered
 //!   once.
-//! - [`line`](mod@line) — [`MdLine`] and [`MdSpan`], and the plain-text and ANSI writers.
+//! - [`line`](mod@line) — the span helpers, and the plain-text and ANSI writers.
 //! - [`render`] — one block to rows: [`render_block`], [`render_blocks`].
 //! - [`view`] — [`MarkdownView`], a growing document's rows with each settled
 //!   block rendered once per width.
@@ -37,7 +38,7 @@ pub mod wrap;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub use line::{Attrs, MdLine, MdSpan, line_to_ansi, to_ansi, to_plain};
+pub use line::{STRUCK, base, line_to_ansi, span, to_ansi, to_plain};
 pub use parse::{
     Align, Block, DEFAULT_MAX_UNFROZEN, IncrementalMarkdown, InlineStyle, Run, lex, runs_text,
     stable_boundary, stable_boundary_with, tail_cut,

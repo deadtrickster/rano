@@ -4,7 +4,7 @@
 //! — a code fence in a frame with the grammar's name on it, a list indented by
 //! the column the model wrote it at, a table whose columns give way widest
 //! first — and so is the reasoning for each, kept beside the code it explains.
-//! What changed is the output: role-tagged [`MdLine`]s instead of ANSI strings
+//! What changed is the output: role-tagged [`Line`]s instead of ANSI strings
 //! (see [`super::line`] for why), so every `paint(role, …)` there is a span with
 //! that role here, and every reset that used to end a block's colour early has
 //! nothing to correspond to.
@@ -24,7 +24,9 @@
 use crate::style::Role;
 use crate::syntax::{Lang, Stream};
 
-use super::line::{Attrs, MdLine, MdSpan, push_span, spans_width};
+use crate::render::{Line, Span, Style};
+
+use super::line::{STRUCK, based_line, push_span, span, spans_width};
 use super::parse::{Align, Block, InlineStyle, Run};
 use super::wrap::{truncate, wrap};
 
@@ -35,7 +37,8 @@ use super::wrap::{truncate, wrap};
 /// host decides something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
-    /// The register the whole reply is drawn in: every row's [`MdLine::base`].
+    /// The register the whole reply is drawn in: every row's own style, under
+    /// its spans (see [`super::line::base`]).
     ///
     /// `None` is the top level. `Some(Role::Reasoning)` is a model's
     /// working-out, and it is the whole reason the field exists: in letibot a
@@ -202,7 +205,7 @@ impl CodePaint {
     /// run is tagged with the role its capture name maps to. A run with no
     /// capture is plain: what is not drawn is the reader's own foreground, which
     /// is right for punctuation.
-    fn lines(&mut self) -> Vec<Vec<MdSpan>> {
+    fn lines(&mut self) -> Vec<Vec<Span>> {
         // A closed fence's text ends with the newline `feed` appended, and a
         // `split` on that gives a phantom empty row in the box. The rows a
         // *fence* has is what it was written with.
@@ -210,7 +213,7 @@ impl CodePaint {
         let rows: Vec<Vec<char>> = src.split('\n').map(|l| l.chars().collect()).collect();
         let plain = |chars: &[char]| {
             let mut v = Vec::new();
-            push_span(&mut v, MdSpan::plain(chars.iter().collect::<String>()));
+            push_span(&mut v, Span::raw(chars.iter().collect::<String>()));
             v
         };
         let Some(stream) = self.stream.as_mut() else {
@@ -224,7 +227,7 @@ impl CodePaint {
                 out.push(plain(chars));
                 continue;
             }
-            let mut painted: Vec<MdSpan> = Vec::new();
+            let mut painted: Vec<Span> = Vec::new();
             let mut cursor = 0usize;
             for s in mine {
                 let (start, end) = (s.start.min(chars.len()), s.end.min(chars.len()));
@@ -239,7 +242,7 @@ impl CodePaint {
                 }
                 push_span(
                     &mut painted,
-                    MdSpan::new(
+                    span(
                         chars[start..end].iter().collect::<String>(),
                         crate::highlight::role_for_capture(&s.name),
                     ),
@@ -260,8 +263,8 @@ impl CodePaint {
     }
 }
 
-fn plain_text(chars: &[char]) -> MdSpan {
-    MdSpan::plain(chars.iter().collect::<String>())
+fn plain_text(chars: &[char]) -> Span {
+    Span::raw(chars.iter().collect::<String>())
 }
 
 /// Render one block to rows, unbounded.
@@ -271,7 +274,7 @@ fn plain_text(chars: &[char]) -> MdSpan {
 /// that is rendered every frame. [`super::view::MarkdownView`] is the second
 /// case and keeps the highlighter between frames; the output of the two paths is
 /// identical, because it is the same parser fed the same bytes in the same order.
-pub fn render_block(b: &Block, width: usize, opts: &RenderOptions) -> Vec<MdLine> {
+pub fn render_block(b: &Block, width: usize, opts: &RenderOptions) -> Vec<Line> {
     let mut paint = code_paint_for(b);
     based(render_block_with(b, width, paint.as_mut()), opts)
 }
@@ -281,7 +284,7 @@ pub fn render_block(b: &Block, width: usize, opts: &RenderOptions) -> Vec<MdLine
 ///
 /// The shape is title, elision count, tail. Never a silent truncation: the count
 /// is the disclosure.
-pub fn render_bounded(b: &Block, width: usize, opts: &RenderOptions) -> Vec<MdLine> {
+pub fn render_bounded(b: &Block, width: usize, opts: &RenderOptions) -> Vec<Line> {
     let mut paint = code_paint_for(b);
     render_bounded_with(b, width, opts, paint.as_mut())
 }
@@ -293,13 +296,13 @@ pub fn render_blocks<'a>(
     blocks: impl IntoIterator<Item = &'a Block>,
     width: usize,
     opts: &RenderOptions,
-) -> Vec<MdLine> {
+) -> Vec<Line> {
     let mut out = Vec::new();
     for b in blocks {
         out.extend(render_bounded(b, width, opts));
         out.push(blank(opts));
     }
-    while out.last().is_some_and(MdLine::is_empty) {
+    while out.last().is_some_and(Line::is_empty) {
         out.pop();
     }
     out
@@ -307,11 +310,8 @@ pub fn render_blocks<'a>(
 
 /// The row between two blocks. It carries the register too, so a host that
 /// fills a row's background in it does not leave a gap in a reasoning pane.
-pub(crate) fn blank(opts: &RenderOptions) -> MdLine {
-    MdLine {
-        spans: Vec::new(),
-        base: opts.base,
-    }
+pub(crate) fn blank(opts: &RenderOptions) -> Line {
+    based_line(Vec::new(), opts.base)
 }
 
 pub(crate) fn code_paint_for(b: &Block) -> Option<CodePaint> {
@@ -321,9 +321,9 @@ pub(crate) fn code_paint_for(b: &Block) -> Option<CodePaint> {
     }
 }
 
-fn based(mut lines: Vec<MdLine>, opts: &RenderOptions) -> Vec<MdLine> {
+fn based(mut lines: Vec<Line>, opts: &RenderOptions) -> Vec<Line> {
     for l in &mut lines {
-        l.base = opts.base;
+        l.style = based_line(Vec::new(), opts.base).style;
     }
     lines
 }
@@ -333,7 +333,7 @@ pub(crate) fn render_bounded_with(
     width: usize,
     opts: &RenderOptions,
     code: Option<&mut CodePaint>,
-) -> Vec<MdLine> {
+) -> Vec<Line> {
     let limit = opts.max_block_lines;
     let full = render_block_with(b, width, code);
     if full.len() <= limit || limit < 3 {
@@ -342,21 +342,21 @@ pub(crate) fn render_bounded_with(
     let keep = limit - 2;
     let elided = full.len() - keep;
     let mut out = Vec::with_capacity(limit);
-    let mut title = vec![MdSpan::new("▸ ", Role::Faint)];
-    for s in truncate(&[MdSpan::new(b.title(), Role::Faint)], width) {
+    let mut title = vec![span("▸ ", Role::Faint)];
+    for s in truncate(&[span(b.title(), Role::Faint)], width) {
         push_span(&mut title, s);
     }
-    out.push(MdLine::new(title));
+    out.push(Line::new(title));
     out.push(faint(format!("  … {elided} lines elided …")));
     out.extend(full[full.len() - keep..].iter().cloned());
     based(out, opts)
 }
 
-fn faint(s: impl Into<String>) -> MdLine {
-    MdLine::new(vec![MdSpan::new(s, Role::Faint)])
+fn faint(s: impl Into<String>) -> Line {
+    Line::new(vec![span(s, Role::Faint)])
 }
 
-fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> Vec<MdLine> {
+fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> Vec<Line> {
     let w = width.max(MIN_WIDTH);
     match b {
         // Coloured by level, with the hashes kept and de-emphasised.
@@ -373,13 +373,13 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
                 _ => Role::Strong,
             };
             let mut spans = vec![
-                MdSpan::new("#".repeat(*level as usize), Role::Faint),
-                MdSpan::plain(" "),
+                span("#".repeat(*level as usize), Role::Faint),
+                Span::raw(" "),
             ];
             for s in runs_spans(runs, role) {
                 push_span(&mut spans, s);
             }
-            vec![MdLine::new(truncate(&spans, w))]
+            vec![Line::new(truncate(&spans, w))]
         }
         Block::Paragraph { lines } => rows(wrap(&runs_spans(&joined_runs(lines), Role::Plain), w)),
         Block::Code {
@@ -417,9 +417,9 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
             };
             out.push(faint(head));
             for l in painted {
-                let mut spans = vec![MdSpan::new("│ ", Role::Faint)];
+                let mut spans = vec![span("│ ", Role::Faint)];
                 spans.extend(l);
-                out.push(MdLine::new(spans));
+                out.push(Line::new(spans));
             }
             out.push(faint(if *closed {
                 "└─"
@@ -463,20 +463,20 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
                 // this arithmetic rather than being prepended to the output row,
                 // so a wrapped sub-item's continuation lines line up under its own
                 // text instead of under its parent's.
-                let pad = nest + spans_width(&[MdSpan::plain(marker.as_str())]);
+                let pad = nest + spans_width(&[Span::raw(marker.as_str())]);
                 let body = wrap(&runs_spans(it, Role::Plain), w.saturating_sub(pad));
                 for (j, line) in body.into_iter().enumerate() {
                     let mut spans = Vec::new();
                     if j == 0 {
-                        push_span(&mut spans, MdSpan::plain(" ".repeat(nest)));
-                        push_span(&mut spans, MdSpan::new(marker.as_str(), marker_role));
+                        push_span(&mut spans, Span::raw(" ".repeat(nest)));
+                        push_span(&mut spans, span(marker.as_str(), marker_role));
                     } else {
-                        push_span(&mut spans, MdSpan::plain(" ".repeat(pad)));
+                        push_span(&mut spans, Span::raw(" ".repeat(pad)));
                     }
                     for s in line {
                         push_span(&mut spans, s);
                     }
-                    out.push(MdLine::new(spans));
+                    out.push(Line::new(spans));
                 }
             }
             out
@@ -489,11 +489,11 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
         )
         .into_iter()
         .map(|l| {
-            let mut spans = vec![MdSpan::new("│ ", Role::Faint)];
+            let mut spans = vec![span("│ ", Role::Faint)];
             for s in l {
                 push_span(&mut spans, s);
             }
-            MdLine::new(spans)
+            Line::new(spans)
         })
         .collect(),
         Block::Table { head, align, rows } => table_lines(head, align, rows, w),
@@ -501,8 +501,8 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
     }
 }
 
-fn rows(v: Vec<Vec<MdSpan>>) -> Vec<MdLine> {
-    v.into_iter().map(MdLine::new).collect()
+fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
+    v.into_iter().map(Line::new).collect()
 }
 
 /// A pipe table, at the width the terminal actually has.
@@ -522,12 +522,7 @@ fn rows(v: Vec<Vec<MdSpan>>) -> Vec<MdLine> {
 /// - **No outer box.** The frame is one faint rule under the header and a faint
 ///   `│` between columns — the same weight as the quote rail and the code fence,
 ///   so a table sits in a turn rather than shouting from it.
-fn table_lines(
-    head: &[Vec<Run>],
-    align: &[Align],
-    rows: &[Vec<Vec<Run>>],
-    w: usize,
-) -> Vec<MdLine> {
+fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to
     // it rather than dropping it.
@@ -539,10 +534,10 @@ fn table_lines(
         r.get(i).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    let head_s: Vec<Vec<MdSpan>> = (0..cols)
+    let head_s: Vec<Vec<Span>> = (0..cols)
         .map(|i| runs_spans(cell(head, i), Role::Strong))
         .collect();
-    let rows_s: Vec<Vec<Vec<MdSpan>>> = rows
+    let rows_s: Vec<Vec<Vec<Span>>> = rows
         .iter()
         .map(|r| {
             (0..cols)
@@ -567,10 +562,10 @@ fn table_lines(
     let widths = fit_columns(&natural, available);
 
     let mut out = Vec::new();
-    let push_row = |cells: &[Vec<MdSpan>], out: &mut Vec<MdLine>| {
+    let push_row = |cells: &[Vec<Span>], out: &mut Vec<Line>| {
         // Wrap every cell to its column, then emit one screen line per wrapped
         // line, padding the cells that ran out.
-        let wrapped: Vec<Vec<Vec<MdSpan>>> = cells
+        let wrapped: Vec<Vec<Vec<Span>>> = cells
             .iter()
             .zip(&widths)
             .map(|(c, wd)| {
@@ -580,10 +575,10 @@ fn table_lines(
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line in 0..height {
-            let mut row: Vec<MdSpan> = Vec::new();
+            let mut row: Vec<Span> = Vec::new();
             for i in 0..cols {
                 if i > 0 {
-                    push_span(&mut row, MdSpan::new(" │ ", Role::Faint));
+                    push_span(&mut row, span(" │ ", Role::Faint));
                 }
                 let text = wrapped[i].get(line).cloned().unwrap_or_default();
                 pad(
@@ -597,7 +592,7 @@ fn table_lines(
             // in a copy-paste; the columns are already established by the ones
             // before it.
             trim_end(&mut row);
-            out.push(MdLine::new(row));
+            out.push(Line::new(row));
         }
     };
 
@@ -667,26 +662,26 @@ fn fit_columns(natural: &[usize], available: usize) -> Vec<usize> {
     widths
 }
 
-fn pad(row: &mut Vec<MdSpan>, text: Vec<MdSpan>, width: usize, align: Align) {
+fn pad(row: &mut Vec<Span>, text: Vec<Span>, width: usize, align: Align) {
     let slack = width.saturating_sub(spans_width(&text));
     let (left, right) = match align {
         Align::Left => (0, slack),
         Align::Right => (slack, 0),
         Align::Center => (slack / 2, slack - slack / 2),
     };
-    push_span(row, MdSpan::plain(" ".repeat(left)));
+    push_span(row, Span::raw(" ".repeat(left)));
     for s in text {
         push_span(row, s);
     }
-    push_span(row, MdSpan::plain(" ".repeat(right)));
+    push_span(row, Span::raw(" ".repeat(right)));
 }
 
 /// Drop trailing whitespace, across spans.
-fn trim_end(row: &mut Vec<MdSpan>) {
+fn trim_end(row: &mut Vec<Span>) {
     while let Some(last) = row.last_mut() {
-        let t = last.text.trim_end().len();
-        last.text.truncate(t);
-        if last.text.is_empty() {
+        let t = last.content.trim_end().len();
+        last.content.truncate(t);
+        if last.content.is_empty() {
             row.pop();
         } else {
             break;
@@ -707,28 +702,27 @@ fn trim_end(row: &mut Vec<MdSpan>) {
 /// code role — its colour is what says "this is code" — and keeps the weight of
 /// a heading or a table header it sits in, so it does not read as a dip in the
 /// middle of one.
-pub fn runs_spans(runs: &[Run], container: Role) -> Vec<MdSpan> {
+pub fn runs_spans(runs: &[Run], container: Role) -> Vec<Span> {
     let heavy = matches!(container, Role::Heading | Role::Subheading | Role::Strong);
     let mut out = Vec::new();
     for r in runs {
-        let a = |bold: bool, italic: bool, struck: bool| Attrs {
-            bold,
-            italic,
-            underline: false,
-            struck,
+        let on = |s: Style, bold: bool, italic: bool, struck: bool| {
+            let s = if bold { s.bold() } else { s };
+            let mut s = if italic { s.italic() } else { s };
+            if struck {
+                s.attrs = s.attrs | STRUCK;
+            }
+            s
         };
-        let (role, attrs) = match r.style {
-            InlineStyle::Plain => (container, Attrs::NONE),
-            InlineStyle::Bold => (container, a(true, false, false)),
-            InlineStyle::Italic => (container, a(false, true, false)),
-            InlineStyle::BoldItalic => (container, a(true, true, false)),
-            InlineStyle::Code => (Role::Code, a(heavy, false, false)),
-            InlineStyle::Strikethrough => (container, a(false, false, true)),
+        let style = match r.style {
+            InlineStyle::Plain => Style::of(container),
+            InlineStyle::Bold => on(Style::of(container), true, false, false),
+            InlineStyle::Italic => on(Style::of(container), false, true, false),
+            InlineStyle::BoldItalic => on(Style::of(container), true, true, false),
+            InlineStyle::Code => on(Style::of(Role::Code), heavy, false, false),
+            InlineStyle::Strikethrough => on(Style::of(container), false, false, true),
         };
-        push_span(
-            &mut out,
-            MdSpan::new(r.text.as_str(), role).with_attrs(attrs),
-        );
+        push_span(&mut out, Span::styled(r.text.as_str(), style));
     }
     out
 }

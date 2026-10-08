@@ -4,7 +4,6 @@ version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-crossterm = "0.29.0"
 # gzip, for reading a release asset. Pure Rust (miniz_oxide): a decompressor that
 # cannot deadlock, which is not true of shelling out to `gzip` and pumping its
 # pipes by hand. See `update::extract_binary` for what that cost twice.
@@ -13,7 +12,6 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # terminal layer needs. Already in the tree (through tree-sitter's and others'
 # dependencies), so this is a direct edge to a crate already built, not a new one.
 libc = "0.2"
-ratatui = "0.30.2"
 tree-sitter = "0.27"
 tree-sitter-language = "0.1"
 tree-sitter-rust = "0.24"

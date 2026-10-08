@@ -16,9 +16,9 @@
 
 use std::collections::HashMap;
 
-use super::line::{MdLine, MdSpan};
 use super::parse::{Block, IncrementalMarkdown};
 use super::render::{CodePaint, RenderOptions, blank, render_bounded_with};
+use crate::render::{Line, Span};
 
 /// A per-row decoration applied to everything a [`MarkdownView`] produces.
 ///
@@ -33,7 +33,7 @@ pub struct Decor {
     /// Prepended to every row. Its width must be subtracted from the width the
     /// host renders at, or the block is one row taller than the space reserved
     /// for it.
-    pub prefix: Vec<MdSpan>,
+    pub prefix: Vec<Span>,
 }
 
 impl Decor {
@@ -41,15 +41,15 @@ impl Decor {
     /// cached block — the live tail of a folded reasoning pane — has to decorate
     /// it the same way, and the only way to guarantee that is for there to be
     /// one function.
-    pub fn apply(&self, l: MdLine) -> MdLine {
+    pub fn apply(&self, l: Line) -> Line {
         if self.prefix.is_empty() {
             return l;
         }
         let mut spans = self.prefix.clone();
         spans.extend(l.spans);
-        MdLine {
+        Line {
             spans,
-            base: l.base,
+            style: l.style,
         }
     }
 }
@@ -69,7 +69,7 @@ impl Decor {
 ///     let _rows = settled.len() + tail.len();
 /// }
 /// let rows = view.lines(&md, 80, &opts);
-/// assert_eq!(rows[0].text(), "# Title");
+/// assert_eq!(rows[0].plain(), "# Title");
 /// ```
 #[derive(Debug, Default)]
 pub struct MarkdownView {
@@ -86,7 +86,7 @@ pub struct MarkdownView {
     /// will never be rendered again.
     codes: HashMap<usize, CodePaint>,
     /// Rows for the blocks that were frozen when they were rendered.
-    stable_lines: Vec<MdLine>,
+    stable_lines: Vec<Line>,
     /// How many of the document's stable blocks are already in `stable_lines`.
     rendered_blocks: usize,
     /// Instrumentation: blocks handed to the renderer over this view's life.
@@ -133,11 +133,11 @@ impl MarkdownView {
         md: &IncrementalMarkdown,
         width: usize,
         opts: &RenderOptions,
-    ) -> Vec<MdLine> {
+    ) -> Vec<Line> {
         let (stable, tail) = self.split(md, width, opts);
         let mut out = stable.to_vec();
         out.extend(tail);
-        while out.last().is_some_and(MdLine::is_empty) {
+        while out.last().is_some_and(Line::is_empty) {
             out.pop();
         }
         out
@@ -157,7 +157,7 @@ impl MarkdownView {
         md: &IncrementalMarkdown,
         width: usize,
         opts: &RenderOptions,
-    ) -> (&[MdLine], Vec<MdLine>) {
+    ) -> (&[Line], Vec<Line>) {
         if self.width != width || self.opts != Some(*opts) {
             // A resize is the only thing that invalidates the prefix — and a
             // change of bound, which is a resize of a different axis: the same
@@ -199,7 +199,7 @@ impl MarkdownView {
             tail.push(blank(opts));
             self.blocks_rendered += 1;
         }
-        while tail.last().is_some_and(MdLine::is_empty) {
+        while tail.last().is_some_and(Line::is_empty) {
             tail.pop();
         }
         (&self.stable_lines, tail)
@@ -225,12 +225,13 @@ impl MarkdownView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::line::base;
     use crate::markdown::render::render_blocks;
     use crate::markdown::testing::MARKDOWN;
     use crate::style::Role;
 
-    fn text(lines: &[MdLine]) -> Vec<String> {
-        lines.iter().map(MdLine::text).collect()
+    fn text(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
     }
 
     fn opts() -> RenderOptions {
@@ -338,11 +339,11 @@ mod tests {
         }
         assert!(md.stable_count() >= 1, "the fence settled");
         let rows = view.lines(&md, 72, &opts());
-        assert_eq!(rows[0].text(), "┌─ rust");
+        assert_eq!(rows[0].plain(), "┌─ rust");
         assert!(
             rows.iter()
                 .flat_map(|l| &l.spans)
-                .any(|s| s.role == Role::Keyword),
+                .any(|s| s.style.top() == Role::Keyword),
             "{rows:?}"
         );
     }
@@ -350,7 +351,7 @@ mod tests {
     #[test]
     fn a_decorated_view_puts_the_rail_on_every_line_including_the_frozen_ones() {
         let d = Decor {
-            prefix: vec![MdSpan::new("┃ ", Role::Faint)],
+            prefix: vec![Span::role("┃ ", Role::Faint)],
         };
         let mut md = IncrementalMarkdown::new();
         md.push("one paragraph\n\nanother paragraph\n\nand a third that is still open");
@@ -358,7 +359,7 @@ mod tests {
         let lines = view.lines(&md, 40, &opts());
         assert!(md.stable_count() > 0, "some of it must be frozen");
         for l in lines.iter().filter(|l| !l.is_empty()) {
-            assert!(l.text().starts_with("┃ "), "{l:?}");
+            assert!(l.plain().starts_with("┃ "), "{l:?}");
         }
     }
 
@@ -369,13 +370,13 @@ mod tests {
         md.push(MARKDOWN);
         let mut view = MarkdownView::new();
         let top = view.lines(&md, 72, &opts());
-        assert!(top.iter().all(|l| l.base.is_none()));
+        assert!(top.iter().all(|l| base(l).is_none()));
         let inside = RenderOptions {
             base: Some(Role::Reasoning),
             ..opts()
         };
         let r = view.lines(&md, 72, &inside);
-        assert!(r.iter().all(|l| l.base == Some(Role::Reasoning)));
+        assert!(r.iter().all(|l| base(l) == Some(Role::Reasoning)));
         assert_eq!(text(&top), text(&r));
     }
 

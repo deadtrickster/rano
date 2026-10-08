@@ -2,8 +2,8 @@
 //! painter.
 //!
 //! Ported from letibot's `crates/tui/src/backend/terminal.rs`; the comments are its, with
-//! "the head" meaning whatever program draws through this — letibot's TUI, and rano's editor
-//! once it is off crossterm. [`Terminal::draw_buffer`] is the new entry: a
+//! "the head" meaning whatever program draws through this — letibot's TUI, and rano's own
+//! binary. [`Terminal::draw_buffer`] is the new entry: a
 //! [`crate::render::Buffer`] emitted under a palette and painted as rows.
 //!
 //! Fifty lines of `termios` instead of a TUI framework, for the same reason
@@ -428,6 +428,24 @@ impl Terminal {
         } else {
             (100, 30)
         }
+    }
+
+    /// **Wait up to `timeout` for input**, and say whether any is there to read.
+    ///
+    /// [`Terminal::events`] waits ~100 ms when nothing comes, which is the right pace for
+    /// letibot's loop and the wrong one for a host whose own work has a shorter deadline:
+    /// rano's editor asks for no wait at all while a file streams in (sleeping between
+    /// batches made a 2.6M-line file take ten seconds instead of one). So a host polls
+    /// here with its own deadline and reads only when this says there is something.
+    pub fn poll(&self, timeout: std::time::Duration) -> bool {
+        let mut fds = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let n = unsafe { libc::poll(&mut fds, 1, ms) };
+        n > 0 && fds.revents & libc::POLLIN != 0
     }
 
     /// Read whatever input is available, as events. Returns after at most ~100 ms of quiet.

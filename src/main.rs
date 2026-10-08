@@ -5,20 +5,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
 use rano::buffer::{Buffer, Pos};
 use rano::editor::{Area, Editor};
+use rano::render::{self, Palette, Rect};
 use rano::send_ctrl::split_position;
+use rano::term::{self, Event, Terminal};
 use rano::{config, export, send_ctrl, syntax, ui};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 /// The command line, parsed.
 ///
@@ -286,18 +278,18 @@ fn run(
     pos: Option<Pos>,
     cfg: config::Config,
 ) -> io::Result<()> {
-    // Panic guard: restore the terminal, then report the panic normally.
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        prev(info);
-    }));
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    execute!(io::stdout(), EnableBracketedPaste)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    // Raw mode, the alternate screen, bracketed paste and mouse buttons (the
+    // wheel scrolls, a drag selects). `Terminal::enter_with` installs the panic
+    // hook that restores the terminal before the message prints, and `Drop`
+    // restores it on every other way out. The cursor keeps the terminal's own
+    // shape: the block cursor is letibot's choice, not the editor's.
+    let terminal = Terminal::enter_with(term::Options {
+        mouse: term::Mouse::Buttons,
+        block_cursor: false,
+    })?;
+    // Until the terminal answers the background question (if it can), the dark
+    // palette; the two differ only in the diff tints.
+    let mut palette = Palette::Colour;
     let mut ed = Editor::new(buf, cfg);
     // One request at startup, off the main thread. `run` rather than
     // `Editor::new` because it is a property of RUNNING, not of being — no test
@@ -314,44 +306,58 @@ fn run(
     {
         // The one load failure reported before a frame is drawn: there is
         // nothing on screen yet to attach a status line to.
-        disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        drop(terminal);
         eprintln!("rano: cannot read {}: {}", path.display(), e);
         std::process::exit(1);
     }
     ed.add_deferred_buffers_at(&rest);
+    let mut frame = render::Buffer::empty(Rect::default());
     // D6 dirty-draw: redraw only when something changed. Any handled key,
     // paste or resize dirties (coarse); `tick` reports the editor's own
     // state changes. text_w is the FULL viewport width now (draw renders
     // full-width lines); justify keeps its old wrap width via a -2 there.
     let mut dirty = true;
-    let result = loop {
-        let size = terminal.size()?;
-        dirty |= ed.set_area(Area::new(0, 0, size.width, size.height));
+    loop {
+        // The terminal reports no resize event; the size is asked every turn,
+        // which is one ioctl, and a change re-lays the editor out.
+        let (w, h) = terminal.size();
+        let (w, h) = (
+            w.min(u16::MAX as usize) as u16,
+            h.min(u16::MAX as usize) as u16,
+        );
+        dirty |= ed.set_area(Area::new(0, 0, w, h));
+        if frame.area() != Rect::new(0, 0, w, h) {
+            frame.resize(Rect::new(0, 0, w, h));
+            dirty = true;
+        }
         // The pollers, the overlays' refreshes, the scroll and the frame's
         // highlight: everything between two events, the same call a host
         // embedding the editor makes.
         dirty |= ed.tick(Instant::now());
         if dirty {
-            // Hide the physical cursor while the frame paints: the backend
-            // moves it across the cells it writes, and on a fast scroll that
-            // sweep shows as a ghost cursor blinking at painted cells (often
-            // a line start, column 0, mid-screen). draw() re-shows it at the
-            // positioned spot, or leaves it hidden when ui::draw skips
-            // positioning (edit point outside the viewport).
-            terminal.hide_cursor()?;
-            terminal.draw(|f| ui::draw_in(f, f.area(), &ed))?;
+            // Only the rows that changed reach the glass; the cursor is
+            // hidden while they are written and shown where the editor says,
+            // or left hidden (the edit point is outside the view).
+            let cursor = ui::draw(&mut frame, &ed);
+            terminal.draw_buffer(
+                &frame,
+                palette,
+                cursor.map(|(x, y)| (y as usize, x as usize)),
+            );
             dirty = false;
         }
         if ed.wants_quit() {
-            break Ok(());
+            break;
         }
         // The idle wait is the long one, because a keystroke is what ends
         // it; `next_wakeup` shortens it while a file streams in or a
         // prefix's card is due.
-        if event::poll(ed.next_wakeup())? {
-            match event::read()? {
-                Event::Key(k) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+        if !terminal.poll(ed.next_wakeup()) {
+            continue;
+        }
+        for ev in terminal.events() {
+            match ev {
+                Event::Key(k) => {
                     ed.handle_key(k);
                     dirty = true;
                 }
@@ -359,19 +365,20 @@ fn run(
                     ed.paste_text(&t);
                     dirty = true;
                 }
-                Event::Resize(..) => dirty = true,
                 Event::Mouse(m) => dirty |= ed.handle_mouse(m),
-                _ => {}
+                Event::Background { light } => {
+                    palette = if light {
+                        Palette::Light
+                    } else {
+                        Palette::Colour
+                    };
+                    dirty = true;
+                }
+                Event::FocusGained | Event::FocusLost => {}
             }
         }
-    };
-    disable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        DisableBracketedPaste,
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    }
+    drop(terminal);
     // The update offer is announced HERE, on the way out, and that is deliberate.
     // Installing replaces the running executable, so it takes effect on the next
     // start — and a notice that had to be caught before the screen was torn down
@@ -382,7 +389,7 @@ fn run(
     {
         println!("{}", u.message());
     }
-    result
+    Ok(())
 }
 
 #[cfg(test)]

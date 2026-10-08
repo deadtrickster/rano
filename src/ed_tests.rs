@@ -11,9 +11,10 @@ use crate::config;
 use crate::editor::Editor;
 use crate::editor::{DefBack, Flash};
 use crate::prompt::{PromptKind, complete_path, expand_tilde};
+use crate::render::Style;
+use crate::style::Role;
+use crate::term::{KeyCode, KeyEvent, Mods, MouseButton, MouseEvent, MouseKind};
 use crate::{editor, lsp, ui};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::style::{Color, Modifier, Style};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -31,16 +32,16 @@ fn test_ed(text: &str) -> Editor {
     ed
 }
 
-fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) {
+fn press(ed: &mut Editor, code: KeyCode, mods: Mods) {
     ed.handle_key(KeyEvent::new(code, mods));
 }
 
-fn me(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+fn me(kind: MouseKind, row: u16, col: u16) -> MouseEvent {
     MouseEvent {
         kind,
-        column: col,
-        row,
-        modifiers: KeyModifiers::NONE,
+        x: col,
+        y: row,
+        mods: Mods::NONE,
     }
 }
 
@@ -72,9 +73,9 @@ fn temp_dir(tag: &str) -> TempDir {
 fn move_left_bol_clamps_to_prev_row_end() {
     let mut ed = test_ed("ab\ncdef");
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
-    press(&mut ed, KeyCode::Left, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Left, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec!["a", "cdef"]);
 }
 
@@ -83,11 +84,11 @@ fn move_left_bol_clamps_to_prev_row_end() {
 #[test]
 fn prompt_multibyte_backspace_no_panic() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     assert!(ed.prompt.is_some());
-    press(&mut ed, KeyCode::Char('é'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('a'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('é'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('a'), Mods::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "é");
     assert_eq!(p.cursor, 1);
@@ -96,9 +97,9 @@ fn prompt_multibyte_backspace_no_panic() {
 #[test]
 fn prompt_multibyte_insert_no_panic() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('é'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('é'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "éx");
     assert_eq!(p.cursor, 2);
@@ -107,11 +108,11 @@ fn prompt_multibyte_insert_no_panic() {
 #[test]
 fn prompt_mid_string_multibyte_edit() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('é'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('a'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Left, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('é'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('a'), Mods::NONE);
+    press(&mut ed, KeyCode::Left, Mods::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "éxa");
     assert_eq!(p.cursor, 2);
@@ -120,13 +121,13 @@ fn prompt_mid_string_multibyte_edit() {
 #[test]
 fn prompt_ascii_edit_still_works() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for c in ['a', 'b', 'c'] {
-        press(&mut ed, KeyCode::Char(c), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char(c), Mods::NONE);
     }
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Left, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
+    press(&mut ed, KeyCode::Left, Mods::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "axb");
     assert_eq!(p.cursor, 2);
@@ -138,7 +139,7 @@ fn prompt_ascii_edit_still_works() {
 #[test]
 fn show_loc_expires() {
     let mut ed = test_ed("hi");
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('c'), Mods::CTRL);
     assert_eq!(ed.status_text(), Some("Line 1, Col 1".to_string()));
     ed.loc_until = Some(Instant::now() - Duration::from_secs(1));
     ed.tick_status();
@@ -148,9 +149,9 @@ fn show_loc_expires() {
 #[test]
 fn goto_still_shows_loc() {
     let mut ed = test_ed("a\nb\nc");
-    press(&mut ed, KeyCode::Char('7'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('3'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('7'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('3'), Mods::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 2, col: 0 });
     let st = ed.status_text().unwrap();
     assert!(st.contains("Line 3"), "status: {st}");
@@ -162,13 +163,13 @@ fn prompt_reopen_multibyte_query_cursor_ok() {
     // so search for something absent; the seeded cursor must be a CHAR
     // index (byte length would start past EOL for "éé").
     let mut ed = test_ed("abc");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for c in "éé".chars() {
-        press(&mut ed, KeyCode::Char(c), KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Char(c), Mods::NONE);
     }
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().search.query, "éé");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "éé");
     assert_eq!(p.cursor, 2);
@@ -179,14 +180,14 @@ fn prompt_reopen_multibyte_query_cursor_ok() {
 #[test]
 fn sort_lines_case_insensitive_and_region() {
     let mut ed = test_ed("b\nA\nc\na\nB");
-    press(&mut ed, KeyCode::Char('a'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::F(9), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('a'), Mods::ALT);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
+    press(&mut ed, KeyCode::F(9), Mods::NONE);
     assert_eq!(lines(&ed), vec!["A", "b", "c", "a", "B"]);
     assert!(ed.bs().mark.is_none());
     let mut ed = test_ed("B\na\nA\nb");
-    press(&mut ed, KeyCode::F(9), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(9), Mods::NONE);
     assert_eq!(lines(&ed), vec!["a", "A", "B", "b"]);
 }
 
@@ -248,7 +249,7 @@ fn save_asks_when_the_file_changed_on_disk() {
         "one\ntwo\nthree from elsewhere\n"
     );
     // y writes, and the next save is quiet: the stamp is the new file's.
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
     press_text(&mut ed, "Y");
     ed.save_to(f.clone());
@@ -259,10 +260,10 @@ fn save_asks_when_the_file_changed_on_disk() {
 #[test]
 fn no_to_the_external_change_keeps_the_file_and_disarms_quit() {
     let (_d, f, mut ed) = externally_changed("ext_no");
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(!ed.quit);
     assert!(!ed.quit_after_save);
     assert!(ed.bs().buf.modified);
@@ -278,14 +279,14 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     ed.text_w = 100;
     ed.text_h = 20;
     ed.save_to(f.clone());
-    press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('d'), Mods::NONE);
     let text = |ed: &Editor| -> Vec<String> {
         ed.diff_view
             .as_ref()
             .expect("diff view")
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     };
     // Unified first (the session's default): the file's name, the hunk, and
@@ -300,7 +301,7 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
         "{rows:?}"
     );
     // s: two panels, the disk's line on the left and the buffer's on the right.
-    press(&mut ed, KeyCode::Char('s'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('s'), Mods::NONE);
     assert!(ed.diff_split, "the choice is remembered");
     let rows = text(&ed);
     let pair = rows.iter().find(|r| r.contains("Xone")).expect("the pair");
@@ -312,21 +313,18 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     assert!(ed.refresh_diff_view());
     assert!(!ed.refresh_diff_view());
     // Drawn over the text, with the header naming the view.
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
     ed.text_h = 8;
-    term.draw(|fr| ui::draw(fr, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     assert!(row(1).contains("Saving would change"), "{}", row(1));
     assert!((2..9).any(|y| row(y).contains("Xone")));
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
     // y from the diff itself answers the question.
-    press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('d'), Mods::NONE);
     assert!(ed.diff_view.is_some());
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(fs::read_to_string(&f).unwrap(), "Xone\ntwo\n");
 }
@@ -337,7 +335,7 @@ fn diff_view_text(ed: &Editor) -> Vec<String> {
         .expect("diff view")
         .lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
         .collect()
 }
 
@@ -349,16 +347,16 @@ fn m_p_previews_a_patch_buffer_and_closes_again() {
     ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_preview.patch"));
     ed.text_w = 100;
     ed.text_h = 20;
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     let rows = diff_view_text(&ed);
     assert!(rows.contains(&"src/a.rs".to_string()), "{rows:?}");
     assert!(rows.contains(&"8 -    old();".to_string()), "{rows:?}");
     assert!(rows.contains(&"8 +    new();".to_string()), "{rows:?}");
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Patch"));
     // y and n are not answers here; M-P closes and leaves no prompt.
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(ed.diff_view.is_some());
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.prompt.is_none());
     // The text is untouched: the preview is a view, not an edit.
@@ -374,7 +372,7 @@ fn m_p_shows_merge_conflicts_ours_against_theirs() {
     ed.text_w = 100;
     ed.text_h = 20;
     ed.diff_split = true;
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     let rows = diff_view_text(&ed);
     assert!(rows[0].starts_with("1 conflict"), "{rows:?}");
     let pair = rows
@@ -393,7 +391,7 @@ fn m_p_shows_merge_conflicts_ours_against_theirs() {
             .header()
             .contains("Conflict 1/1")
     );
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_none());
 }
 
@@ -404,7 +402,7 @@ fn conflict_ed() -> Editor {
     ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_resolve.rs"));
     ed.text_w = 120;
     ed.text_h = 30;
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_some());
     ed
 }
@@ -421,18 +419,18 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
             .header()
             .contains("Conflict 1/2")
     );
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     let v = ed.diff_view.as_ref().unwrap();
     assert!(v.header().contains("Conflict 2/2"), "{}", v.header());
     // Scrolled to it: the first row shown is its header, marked current.
     let first: String = v.lines[v.top]
         .spans
         .iter()
-        .map(|s| s.content.as_ref())
+        .map(|s| s.content.as_str())
         .collect();
     assert!(first.starts_with("▶ Conflict 2 of 2"), "{first:?}");
     // Past the last one it stays.
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(
         ed.diff_view
             .as_ref()
@@ -441,7 +439,7 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
             .contains("Conflict 2/2")
     );
     // c: base against ours shows the base's line.
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('c'), Mods::NONE);
     let rows = diff_view_text(&ed);
     assert!(
         ed.diff_view
@@ -451,7 +449,7 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
             .contains("base/ours")
     );
     assert!(rows.iter().any(|r| r.contains("zero()")), "{rows:?}");
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('p'), Mods::NONE);
     assert!(
         ed.diff_view
             .as_ref()
@@ -464,7 +462,7 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
 #[test]
 fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
     let mut ed = conflict_ed();
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('t'), Mods::NONE);
     assert_eq!(
         lines(&ed)[..3],
         ["fn main() {", "    let sum = 1;", "    mid();"],
@@ -476,7 +474,7 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
     assert!(v.header().contains("Conflict 1/1"), "{}", v.header());
     assert!(ed.status_text().unwrap().contains("1 conflict left"));
     // b: both, ours first — the last one, so the view closes.
-    press(&mut ed, KeyCode::Char('b'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('b'), Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert!(ed.status_text().unwrap().contains("All conflicts resolved"));
     assert_eq!(
@@ -491,28 +489,24 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
         ]
     );
     // Each take is one undo step.
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert!(lines(&ed).contains(&"<<<<<<< HEAD".to_string()));
     assert!(lines(&ed).contains(&"    let sum = 1;".to_string()));
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
 }
 
 // ---- keymaps, M-x, help pages, which-key ----
 
 fn screen(ed: &Editor, w: u16, h: u16) -> Vec<String> {
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-    term.draw(|f| ui::draw(f, ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    (0..h)
-        .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
-        .collect()
+    let s = ui::Screen::of(ed, w, h);
+    (0..h).map(|y| s.row(y)).collect()
 }
 
 #[test]
 fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
     let mut ed = test_ed("- [ ] task");
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('t'), Mods::ALT);
     assert_eq!(ed.pending.keys.len(), 1, "M-t is a prefix");
     assert!(ed.pending_card().is_none(), "its card waits a moment");
     assert!(ed.card_due().is_some());
@@ -529,15 +523,15 @@ fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
     );
     // The bar shows what can follow, too.
     assert!(ed.bar_items().iter().any(|(k, t)| k == "t" && t == "Tick"));
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('t'), Mods::NONE);
     assert!(ed.pending.keys.is_empty());
     assert_eq!(lines(&ed)[0], "- [x] task", "M-t t ticked it");
     // ESC abandons a prefix; an unbound key says so.
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('t'), Mods::ALT);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert_eq!(ed.status_text().as_deref(), Some("Quit"));
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('q'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('t'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('q'), Mods::NONE);
     assert_eq!(ed.status_text().as_deref(), Some("M-t q is undefined"));
     assert_eq!(lines(&ed)[0], "- [x] task", "nothing was typed");
 }
@@ -547,14 +541,14 @@ fn the_help_key_shows_its_card_at_once_and_opens_pages() {
     let mut ed = test_ed("text");
     ed.text_w = 100;
     ed.text_h = 30;
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     assert!(ed.pending_card().is_some(), "help shows at once");
-    press(&mut ed, KeyCode::Char('b'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('b'), Mods::NONE);
     let v = ed.info.as_ref().expect("the bindings page");
     let text: Vec<String> = v
         .lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
         .collect();
     assert!(
         text.iter()
@@ -571,13 +565,13 @@ fn the_help_key_shows_its_card_at_once_and_opens_pages() {
             .any(|r| r.contains("Conflict view") || r.contains("Patch and conflict"))
     );
     // A page's own keys, and q closes it; typing does not reach the text.
-    press(&mut ed, KeyCode::Char('z'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["text"]);
-    press(&mut ed, KeyCode::Char('q'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('q'), Mods::NONE);
     assert!(ed.info.is_none());
     // C-g C-g: the overview.
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     assert_eq!(ed.info.as_ref().unwrap().title, "Help");
 }
 
@@ -593,35 +587,35 @@ fn describe_key_says_what_a_key_runs_even_through_a_prefix() {
             .map(|l| {
                 l.spans
                     .iter()
-                    .map(|s| s.content.as_ref())
+                    .map(|s| s.content.as_str())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('k'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     let p = page(&ed);
     assert!(p.contains("C-k runs Cut") && p.contains("(cut)"), "{p}");
     assert_eq!(lines(&ed), vec!["text"], "described, not run");
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('k'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('t'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     assert!(page(&ed).contains("M-t x runs Decline"), "{}", page(&ed));
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('g'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('k'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('z'), Mods::CTRL);
     assert!(page(&ed).contains("C-z is not bound"), "{}", page(&ed));
 }
 
 #[test]
 fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
     let mut ed = test_ed("text");
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     assert!(ed.palette.is_some());
     press_text(&mut ed, "wri out");
     assert_eq!(lines(&ed), vec!["text"], "the query is not the text");
@@ -636,7 +630,7 @@ fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
             .any(|r| r.contains("Write Out") && r.contains("C-o")),
         "{rows:#?}"
     );
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.palette.is_none());
     assert_eq!(
         ed.prompt.as_ref().map(|p| p.kind),
@@ -644,15 +638,15 @@ fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
     );
     ed.prompt = None;
     // Recently run comes first among equals; an empty query lists all.
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     assert_eq!(ed.palette.as_ref().unwrap().items[0], "write-out");
     assert!(ed.palette.as_ref().unwrap().items.len() > 40);
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.palette.is_none());
     // Nothing matches: Enter says so and runs nothing.
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     press_text(&mut ed, "qqqq");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.status_text().unwrap().contains("No command matches"));
 }
 
@@ -669,9 +663,9 @@ fn a_view_puts_its_own_keys_on_the_bar() {
         "{bar:?}"
     );
     // A key the view does not bind is ignored, not typed.
-    press(&mut ed, KeyCode::Char('z'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(
         ed.bar_items()
             .iter()
@@ -682,7 +676,7 @@ fn a_view_puts_its_own_keys_on_the_bar() {
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");
-    press(&mut ed, KeyCode::Char('p'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.status_text().unwrap().starts_with("Nothing to render"));
 }
@@ -702,7 +696,7 @@ fn a_timestamp_only_change_says_so_in_the_diff() {
         .unwrap();
     ed.save_to(f.clone());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
-    press(&mut ed, KeyCode::Char('d'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('d'), Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
     assert!(
@@ -717,17 +711,17 @@ fn a_timestamp_only_change_says_so_in_the_diff() {
 
 fn press_text(ed: &mut Editor, s: &str) {
     for c in s.chars() {
-        press(ed, KeyCode::Char(c), KeyModifiers::NONE);
+        press(ed, KeyCode::Char(c), Mods::NONE);
     }
 }
 
 fn replace_via_prompt(ed: &mut Editor, find: &str, with: &str, answer: char) {
-    press(ed, KeyCode::Char('4'), KeyModifiers::CONTROL);
+    press(ed, KeyCode::Char('4'), Mods::CTRL);
     press_text(ed, find);
-    press(ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(ed, KeyCode::Enter, Mods::NONE);
     press_text(ed, with);
-    press(ed, KeyCode::Enter, KeyModifiers::NONE);
-    press(ed, KeyCode::Char(answer), KeyModifiers::NONE);
+    press(ed, KeyCode::Enter, Mods::NONE);
+    press(ed, KeyCode::Char(answer), Mods::NONE);
 }
 
 #[test]
@@ -735,30 +729,30 @@ fn undo_types_coalesce() {
     let mut ed = test_ed("");
     press_text(&mut ed, "abc");
     assert_eq!(lines(&ed), vec!["abc"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec![""]);
 }
 
 #[test]
 fn undo_backspace_run() {
     let mut ed = test_ed("ab");
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec![""]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["ab"]);
 }
 
 #[test]
 fn undo_redo_roundtrip() {
     let mut ed = test_ed("ab");
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::End, Mods::NONE);
+    press(&mut ed, KeyCode::Char('c'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["ab"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
-    press(&mut ed, KeyCode::Char('e'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["abc"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
 }
@@ -767,36 +761,36 @@ fn undo_redo_roundtrip() {
 fn undo_repeated_cut_coalesce() {
     let mut ed = test_ed("1\n2\n3\n4");
     for _ in 0..3 {
-        press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     }
     assert_eq!(lines(&ed), vec!["4"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["1", "2", "3", "4"]);
 }
 
 #[test]
 fn undo_partial_then_full_cut() {
     let mut ed = test_ed("hello");
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(lines(&ed), vec!["he"]);
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(lines(&ed), vec![""]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["hello"]);
 }
 
 #[test]
 fn undo_paste_roundtrip() {
     let mut ed = test_ed("ab\ncd");
-    press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('u'), Mods::CTRL);
     assert_eq!(lines(&ed), vec!["abcd"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["cd"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
-    press(&mut ed, KeyCode::Char('e'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["abcd"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
 }
@@ -806,7 +800,7 @@ fn undo_replace_all_one_step() {
     let mut ed = test_ed("aa\naa");
     replace_via_prompt(&mut ed, "aa", "x", 'a');
     assert_eq!(lines(&ed), vec!["x", "x"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["aa", "aa"]);
 }
 
@@ -814,7 +808,7 @@ fn undo_replace_all_one_step() {
 fn undo_limit_trims() {
     let mut ed = test_ed("a");
     for _ in 0..600 {
-        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Enter, Mods::NONE);
     }
     // CURRENT snapshot impl coalesces a run of Enters into one step (1
     // step here); D3 makes Newline never coalesce (500 steps). The plan's
@@ -825,13 +819,13 @@ fn undo_limit_trims() {
 #[test]
 fn undo_selection_overwrite() {
     let mut ed = test_ed("abcd");
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('a'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('X'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Char('a'), Mods::ALT);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Char('X'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["aXd"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["abcd"]);
     assert!(ed.bs().mark.is_none());
 }
@@ -839,26 +833,26 @@ fn undo_selection_overwrite() {
 #[test]
 fn undo_delete_selection() {
     let mut ed = test_ed("abcd");
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('a'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Char('a'), Mods::ALT);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec!["ad"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["abcd"]);
 }
 
 #[test]
 fn undo_newline_join() {
     let mut ed = test_ed("ab");
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec!["ab"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["ab", ""]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["ab"]);
 }
 
@@ -868,23 +862,23 @@ fn undo_read_empty_replace() {
     let src = d.0.join("in.txt");
     fs::write(&src, "x\ny\n").unwrap();
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('r'), Mods::CTRL);
     press_text(&mut ed, &src.display().to_string());
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["x", "y"]);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec![""]);
 }
 
 #[test]
 fn undo_redo_after_new_edit() {
     let mut ed = test_ed("ab");
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
+    press(&mut ed, KeyCode::Char('c'), Mods::NONE);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["abx"]);
-    press(&mut ed, KeyCode::Char('e'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["abx"]);
 }
 
@@ -1149,14 +1143,14 @@ fn completion_nav_wraps_and_esc_closes() {
     let mut ed = test_ed("pri\n");
     ed.bs_mut().cursor = Pos { row: 0, col: 3 };
     ed.completion = Some(popup(vec![citem("print!", 3), citem("println!", 3)], 0, 0));
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     assert_eq!(ed.completion.as_ref().unwrap().sel, 1);
     assert_eq!(ed.bs().cursor.col, 3, "cursor must not move");
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(ed.completion.as_ref().unwrap().sel, 0);
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('n'), Mods::CTRL);
     assert_eq!(ed.completion.as_ref().unwrap().sel, 1);
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.completion.is_none());
 }
 
@@ -1165,7 +1159,7 @@ fn completion_enter_accepts_not_newline() {
     let mut ed = test_ed("pri\n");
     ed.bs_mut().cursor = Pos { row: 0, col: 3 };
     ed.completion = Some(popup(vec![citem("print!", 3)], 0, 0));
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["print!"]);
     assert_eq!(ed.bs().cursor.col, 6);
 }
@@ -1179,9 +1173,9 @@ fn completion_typing_backspace_and_space_lifecycle() {
     ed.completion = Some(popup(vec![citem("pr", 6)], 0, 0));
     press_text(&mut ed, "i");
     assert!(ed.completion.is_some(), "identifier char keeps popup");
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert!(ed.completion.is_some(), "backspace inside word keeps popup");
-    press(&mut ed, KeyCode::Char(' '), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char(' '), Mods::NONE);
     assert!(ed.completion.is_none(), "space closes popup");
 }
 
@@ -1196,9 +1190,9 @@ fn named_ed(text: &str, path: &str) -> Editor {
 #[test]
 fn jump_definition_without_lsp_flashes() {
     let mut ed = test_ed("fn main() {}\n");
-    press(&mut ed, KeyCode::Char('.'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('.'), Mods::ALT);
     assert_eq!(ed.status_text(), Some("No LSP server".to_string()));
-    press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char(','), Mods::ALT);
     assert_eq!(ed.status_text(), Some("No jump to return to".to_string()));
 }
 
@@ -1218,7 +1212,7 @@ fn goto_location_same_file_pushes_stack_and_moves() {
     assert!(ed.def_back[0].buf.is_none());
     assert_eq!(ed.def_back[0].idx, Some(0), "the origin buffer is recorded");
     // M-, returns to the origin row.
-    press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char(','), Mods::ALT);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 3 });
     assert!(ed.def_back.is_empty());
 }
@@ -1265,7 +1259,7 @@ fn goto_location_multibuffer_keeps_origin_and_back_switches() {
     ed.goto_location(loc, Pos { row: 0, col: 6 });
     assert_eq!(ed.cur, 1, "target opened as a new buffer");
     assert_eq!(lines(&ed), vec!["fn t() {}"]);
-    press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char(','), Mods::ALT);
     assert_eq!(ed.cur, 0);
     assert_eq!(lines(&ed), vec!["fn a() {}"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 6 });
@@ -1287,22 +1281,21 @@ fn diag_underline_style() {
     let mut ed = test_ed("fn main() {}\n");
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 1)];
     let s = ed.char_style_with(Pos { row: 0, col: 0 }, &ed.all_diags());
-    assert_eq!(s.fg, Some(Color::Red));
-    assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(s, Style::of(Role::DiagError).underline());
     let s = ed.char_style_with(Pos { row: 0, col: 3 }, &ed.all_diags());
-    assert_eq!(s.fg, None);
-    assert!(!s.add_modifier.contains(Modifier::UNDERLINED));
+    assert!(!s.roles().any(|r| r == Role::DiagError));
+    assert!(!s.attrs.contains(crate::style::Attrs::UNDERLINE));
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 2)];
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
-            .fg,
-        Some(Color::Yellow)
+            .top(),
+        Role::DiagWarning
     );
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 3)];
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
-            .fg,
-        Some(Color::Blue)
+            .top(),
+        Role::DiagNote
     );
 }
 
@@ -1314,7 +1307,7 @@ fn diag_style_priority() {
     ed.bs_mut().cursor = Pos { row: 0, col: 3 };
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+        Style::of(Role::Selection)
     );
     ed.bs_mut().mark = None;
     ed.bs_mut().search.query = "fn".to_string();
@@ -1322,7 +1315,7 @@ fn diag_style_priority() {
     ed.bs_mut().search.current = 0;
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+        Style::of(Role::Match)
     );
 }
 
@@ -1335,7 +1328,7 @@ fn diag_style_priority() {
 fn tab_matches_space_indent() {
     let mut ed = test_ed("    a\n\n");
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
-    press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    a", "    "]);
     assert_eq!(ed.bs().cursor.col, 4);
 }
@@ -1344,7 +1337,7 @@ fn tab_matches_space_indent() {
 fn tab_aligns_to_next_unit_mid_line() {
     let mut ed = test_ed("    a\n  x");
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
-    press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    a", "    x"]);
 }
 
@@ -1352,7 +1345,7 @@ fn tab_aligns_to_next_unit_mid_line() {
 fn tab_uses_tab_char_when_file_does() {
     let mut ed = test_ed("\ta\n\tb\n\n");
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
-    press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
     assert_eq!(lines(&ed), vec!["\ta", "\tb", "\t"]);
 }
 
@@ -1360,7 +1353,7 @@ fn tab_uses_tab_char_when_file_does() {
 fn backspace_deletes_indent_run() {
     let mut ed = test_ed("    a\n    x");
     ed.bs_mut().cursor = Pos { row: 1, col: 4 };
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(ed.bs().cursor.col, 0);
     assert_eq!(lines(&ed), vec!["    a", "x"]);
 }
@@ -1369,7 +1362,7 @@ fn backspace_deletes_indent_run() {
 fn backspace_mid_text_still_one_char() {
     let mut ed = test_ed("    ab");
     ed.bs_mut().cursor = Pos { row: 0, col: 6 };
-    press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    a"]);
 }
 
@@ -1442,7 +1435,7 @@ fn jump_next_diag_wraps() {
 fn jump_next_diag_empty_flashes() {
     let mut ed = test_ed("a\nb");
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
-    press(&mut ed, KeyCode::Char('d'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('d'), Mods::ALT);
     let st = ed.status_text().unwrap();
     assert!(st.contains("No diagnostics"), "status: {st}");
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
@@ -1470,7 +1463,7 @@ fn exec_async_inserts_output_one_undo() {
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
     let st = ed.status_text().unwrap();
     assert!(st.contains("Ran: printf hi"), "status: {st}");
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec![""]);
 }
 
@@ -1515,7 +1508,7 @@ fn paste_text_single_and_multiline() {
 fn paste_text_one_undo() {
     let mut ed = test_ed("");
     ed.paste_text("ab\ncd");
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec![""]);
 }
 
@@ -1533,21 +1526,21 @@ fn filter_region_uppercases() {
     let mut ed = test_ed("hello\nworld");
     ed.bs_mut().cursor = Pos { row: 0, col: 5 };
     ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
-    press(&mut ed, KeyCode::Char('|'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('|'), Mods::ALT);
     assert!(ed.prompt.is_some());
     press_text(&mut ed, "tr a-z A-Z");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["HELLO", "world"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
     assert!(ed.bs().mark.is_none());
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["hello", "world"]);
 }
 
 #[test]
 fn filter_no_selection_flashes() {
     let mut ed = test_ed("hello");
-    press(&mut ed, KeyCode::Char('|'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('|'), Mods::ALT);
     let st = ed.status_text().unwrap();
     assert!(st.contains("No selection"), "status: {st}");
     assert!(ed.prompt.is_none());
@@ -1558,9 +1551,9 @@ fn filter_failure_no_undo() {
     let mut ed = test_ed("hello\nworld");
     ed.bs_mut().cursor = Pos { row: 0, col: 5 };
     ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
-    press(&mut ed, KeyCode::Char('|'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('|'), Mods::ALT);
     press_text(&mut ed, "false");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     let st = ed.status_text().unwrap();
     assert!(st.contains("Exit code"), "status: {st}");
     assert_eq!(lines(&ed), vec!["hello", "world"]);
@@ -1574,12 +1567,12 @@ fn filter_failure_no_undo() {
 fn alt_d_jumps_diag_alt_arrows_words() {
     let mut ed = test_ed("ab cd ef");
     ed.bs_mut().lsp_diags = vec![diag(0, 3, 5, 1)];
-    press(&mut ed, KeyCode::Char('d'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('d'), Mods::ALT);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
     let mut ed = test_ed("ab cd");
-    press(&mut ed, KeyCode::Right, KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Right, Mods::ALT);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
-    press(&mut ed, KeyCode::Left, KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Left, Mods::ALT);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
 }
 
@@ -1591,10 +1584,10 @@ fn scroll_x_follows_cursor() {
     ed.wrap = false; // horizontal scrolling needs wrap off
     ed.show_line_numbers = false;
     ed.text_w = 10;
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
     ed.adjust_scroll_x();
     assert_eq!(ed.bs().scroll_x, 31);
-    press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Home, Mods::NONE);
     ed.adjust_scroll_x();
     assert_eq!(ed.bs().scroll_x, 0);
 }
@@ -1606,7 +1599,7 @@ fn scroll_x_with_tabs() {
     ed.wrap = false; // horizontal scrolling needs wrap off
     ed.show_line_numbers = false;
     ed.text_w = 4;
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
     ed.adjust_scroll_x();
     assert_eq!(ed.bs().scroll_x, 6);
 }
@@ -1617,9 +1610,9 @@ fn scroll_x_with_tabs() {
 fn m_n_toggles_line_numbers() {
     let mut ed = test_ed("hi");
     assert!(ed.show_line_numbers, "line numbers default to on");
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('n'), Mods::ALT);
     assert!(!ed.show_line_numbers);
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('n'), Mods::ALT);
     assert!(ed.show_line_numbers);
 }
 
@@ -1629,9 +1622,9 @@ fn m_n_toggles_line_numbers() {
 fn m_backslash_toggles_wrap() {
     let mut ed = test_ed("hi");
     assert!(ed.wrap, "soft wrap defaults to on (nano)");
-    press(&mut ed, KeyCode::Char('\\'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('\\'), Mods::ALT);
     assert!(!ed.wrap);
-    press(&mut ed, KeyCode::Char('\\'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('\\'), Mods::ALT);
     assert!(ed.wrap);
 }
 
@@ -1669,11 +1662,11 @@ fn wrap_table_and_motion_handle_wide_characters() {
     // End goes to the end of the VISUAL row — a cluster boundary, never
     // the middle of a glyph — and Down carries that offset across.
     ed.bs_mut().cursor = Pos { row: 0, col: 0 };
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
-    press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Home, Mods::NONE);
     ed.bs_mut().cursor = Pos { row: 0, col: 1 };
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 3 },
@@ -1688,15 +1681,15 @@ fn mouse_pos_maps_wide_columns_to_the_clicked_character() {
     ed.text_w = 4;
     ed.ensure_wrap_prefix();
     // Pane column 1 is the left cell of 中; column 3 is inside 文.
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 1, 1)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 1)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 1, 3)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 1 });
     // Pane row 2 is the second visual row: its column 3 is inside 语.
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 3)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
     // Past the last cell of the final row → end of line.
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 3, 4)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 5 });
 }
 
@@ -1709,7 +1702,7 @@ fn wheel_scrolls_wide_rows_by_visual_row() {
     ed.text_w = 4;
     ed.text_h = 1; // otherwise the sheet fits and there is nowhere to scroll
     ed.ensure_wrap_prefix();
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3, "one buffer row is three visual rows");
     // The cursor is pinned onto the edge it would have crossed.
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
@@ -1822,7 +1815,7 @@ fn f8_takes_a_line_after_the_name() {
         text: format!("{}:3", f.display()),
         cursor: 0,
     });
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.prompt.is_none(), "{:?}", ed.status_text());
     assert_eq!(ed.bs().buf.name.as_deref(), Some(f.as_path()));
     assert_eq!(ed.bs().cursor.row, 2);
@@ -1835,7 +1828,7 @@ fn m_s_sends_the_file_the_cursor_and_the_selection() {
     let mut ed = test_ed("fn a() {\n    body();\n}");
     ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_send.rs"));
     // No host yet: it says so.
-    press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     assert!(ed.status_text().unwrap().starts_with("Nowhere to send"));
     let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
     let sink = got.clone();
@@ -1844,12 +1837,12 @@ fn m_s_sends_the_file_the_cursor_and_the_selection() {
         Ok("sent".into())
     }));
     ed.bs_mut().cursor = Pos { row: 1, col: 4 };
-    press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     // A selection from (0, 3) to (1, 8): `a() {\n    body`.
     ed.bs_mut().cursor = Pos { row: 0, col: 3 };
     ed.bs_mut().mark = Some(Pos { row: 0, col: 3 });
     ed.bs_mut().cursor = Pos { row: 1, col: 8 };
-    press(&mut ed, KeyCode::Char('s'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     assert_eq!(ed.status_text().as_deref(), Some("sent"));
     let got = got.borrow();
     assert_eq!(got.len(), 2);
@@ -2124,7 +2117,7 @@ fn a_row_that_stops_wrapping_is_still_measured_once() {
     );
     ed.bs_mut().cursor = Pos { row: 0, col: 30 };
     for _ in 0..25 {
-        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Backspace, Mods::NONE);
     }
     ed.ensure_wrap_prefix();
     assert_eq!(ed.bs().wrap_prefix, vec![0, 1, 2], "5 cols → 1 visual row");
@@ -2283,14 +2276,14 @@ fn wheel_scrolls_visual_rows_with_wrap() {
     ed.text_w = 10;
     ed.text_h = 6;
     // 30 visual rows; the cursor (visual 0) is pinned to the top edge.
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 1, col: 0 },
         "pinned to the viewport top"
     );
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 6);
     assert_eq!(ed.bs().cursor, Pos { row: 2, col: 0 });
 }
@@ -2302,27 +2295,27 @@ fn move_up_down_cross_wrap_segments() {
     ed.text_w = 10;
     // row 0 occupies visual rows 0..3; the cursor starts on row 1 (visual 3).
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 22 },
         "up: same col on the visual row above"
     );
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 12 });
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 2 },
         "top of the buffer: no move"
     );
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 12 });
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 22 });
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 1, col: 2 },
@@ -2336,13 +2329,13 @@ fn home_end_use_visual_rows_with_wrap() {
     ed.show_line_numbers = false;
     ed.text_w = 10;
     ed.bs_mut().cursor = Pos { row: 0, col: 15 }; // visual row 1
-    press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Home, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 10 },
         "Home = start of the visual row"
     );
-    press(&mut ed, KeyCode::End, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::End, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 20 },
@@ -2360,10 +2353,10 @@ fn page_keys_move_visual_rows_with_wrap() {
     ed.text_w = 10;
     ed.text_h = 6;
     ed.bs_mut().cursor = Pos { row: 5, col: 0 }; // visual row 15
-    press(&mut ed, KeyCode::PageUp, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::PageUp, Mods::NONE);
     // step 5 → visual row 10 = row 3, segment 1, col 0 → char col 10
     assert_eq!(ed.bs().cursor, Pos { row: 3, col: 10 });
-    press(&mut ed, KeyCode::PageDown, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::PageDown, Mods::NONE);
     // back to visual row 15 = row 5, segment 0
     assert_eq!(ed.bs().cursor, Pos { row: 5, col: 0 });
 }
@@ -2375,10 +2368,10 @@ fn mouse_pos_maps_visual_rows_with_wrap() {
     ed.text_w = 10;
     ed.text_h = 10;
     // pane row 2 = visual row 1 = row 0, segment 1; col 3 → display col 13.
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 3)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 13 });
     // pane row 4 = visual row 3 = row 1, segment 0.
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 4, 2)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 4, 2)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
 }
 
@@ -2441,7 +2434,7 @@ fn auto_indent_copies_indent() {
     };
     let mut ed = Editor::new(buf, cfg);
     ed.bs_mut().cursor = Pos { row: 0, col: 7 };
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    foo", "    "]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
 }
@@ -2515,7 +2508,7 @@ fn auto_indent_off_by_config() {
     let mut ed = test_ed("    foo");
     ed.config.auto_indent = false;
     ed.bs_mut().cursor = Pos { row: 0, col: 7 };
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    foo", ""]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
 }
@@ -2525,13 +2518,13 @@ fn auto_indent_on_by_default_and_electric_after_brace() {
     // Default config: Enter carries the indent...
     let mut ed = test_ed("    foo");
     ed.bs_mut().cursor = Pos { row: 0, col: 7 };
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    foo", "    "]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
     // ...and an opening brace indents one unit deeper.
     let mut ed = test_ed("    if x {");
     ed.bs_mut().cursor = Pos { row: 0, col: 10 };
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    if x {", "        "]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 8 });
 }
@@ -2543,16 +2536,16 @@ fn mouse_click_drag_and_wheel() {
     ed.text_w = 40;
     ed.text_h = 10;
     // Click on "world" (pane row 2, col 2; gutter is 3 wide).
-    assert!(ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 2, 5)));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 5)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
     // Drag extends the selection (pane col 4 → disp 1 → char col 1).
-    assert!(ed.handle_mouse(me(MouseEventKind::Drag(MouseButton::Left), 2, 4)));
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 2, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
     // Title row and status/bar rows are ignored.
-    assert!(!ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 0, 3)));
-    assert!(!ed.handle_mouse(me(MouseEventKind::Down(MouseButton::Left), 22, 3)));
+    assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 0, 3)));
+    assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 22, 3)));
 }
 
 // Wheel — viewport scrolls without moving the edit point; the cursor is
@@ -2564,20 +2557,20 @@ fn mouse_wheel_scrolls_view_not_cursor() {
     ed.text_h = 10; // max_scroll = 30 - 10 = 20
     ed.bs_mut().cursor = Pos { row: 4, col: 1 };
     // Wheel down: the viewport moves, the edit point stays.
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 4, "wheel must not move the cursor");
     // Scrolling past the cursor pins it to the top edge of the view.
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 6);
     assert_eq!(ed.bs().cursor.row, 6, "cursor pinned to the viewport top");
     // Wheel up: the viewport moves back, the cursor stays.
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 6);
     // Cursor on the bottom row of the view: scrolling up pins it there.
     ed.bs_mut().cursor = Pos { row: 12, col: 1 };
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
     assert_eq!(
         ed.bs().cursor.row,
@@ -2585,13 +2578,13 @@ fn mouse_wheel_scrolls_view_not_cursor() {
         "cursor pinned to the viewport bottom"
     );
     // Clamped at the top of the file.
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollUp, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
     assert_eq!(ed.bs().cursor.row, 9);
     // Clamped at the end of the file.
     ed.bs_mut().scroll = 20;
     ed.bs_mut().cursor = Pos { row: 25, col: 1 };
-    assert!(ed.handle_mouse(me(MouseEventKind::ScrollDown, 0, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 20, "scroll clamped at end of file");
     assert_eq!(ed.bs().cursor.row, 25);
 }
@@ -2619,24 +2612,24 @@ fn expand_tilde_leaves_paths() {
 #[test]
 fn search_history_cycles() {
     let mut ed = test_ed("bar");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     press_text(&mut ed, "foo");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.search_hist, vec!["foo".to_string()]);
     // no matches → ^F re-opens the prompt seeded with the old query
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for _ in 0..3 {
-        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Backspace, Mods::NONE);
     }
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "foo");
     assert_eq!(p.cursor, 3);
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "", "past the newest entry restores the draft");
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
+    press(&mut ed, KeyCode::Up, Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "foo", "stays on the oldest entry");
     assert!(ed.prompt.is_some());
@@ -2646,9 +2639,9 @@ fn search_history_cycles() {
 fn prompt_history_dedupes_consecutive() {
     let mut ed = test_ed("");
     for _ in 0..2 {
-        press(&mut ed, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('t'), Mods::CTRL);
         press_text(&mut ed, "true");
-        press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ed, KeyCode::Enter, Mods::NONE);
     }
     assert_eq!(ed.exec_hist, vec!["true".to_string()]);
 }
@@ -2656,8 +2649,8 @@ fn prompt_history_dedupes_consecutive() {
 #[test]
 fn prompt_history_skips_empty() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('o'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.file_hist.is_empty());
 }
 
@@ -2694,9 +2687,9 @@ fn tab_completes_in_prompt() {
     fs::write(d.0.join("alpha.txt"), "").unwrap();
     fs::create_dir_all(d.0.join("alphabet")).unwrap();
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press_text(&mut ed, &format!("{}/alp", d.0.display()));
-    press(&mut ed, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, format!("{}/alpha", d.0.display()));
     assert!(ed.prompt.is_some());
@@ -2708,16 +2701,16 @@ fn tab_completes_in_prompt() {
 #[test]
 fn prompt_word_motion() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('t'), Mods::CTRL);
     press_text(&mut ed, "foo bar_baz");
-    press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Home, Mods::NONE);
+    press(&mut ed, KeyCode::Char('f'), Mods::ALT);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 4);
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('f'), Mods::ALT);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 11);
-    press(&mut ed, KeyCode::Char('b'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('b'), Mods::ALT);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 4);
-    press(&mut ed, KeyCode::Char('b'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('b'), Mods::ALT);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 0);
     assert!(ed.prompt.is_some());
 }
@@ -2725,12 +2718,12 @@ fn prompt_word_motion() {
 #[test]
 fn prompt_ctrl_arrow_word_motion() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('t'), Mods::CTRL);
     press_text(&mut ed, "foo bar_baz");
-    press(&mut ed, KeyCode::Home, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Right, KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Home, Mods::NONE);
+    press(&mut ed, KeyCode::Right, Mods::CTRL);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 4);
-    press(&mut ed, KeyCode::Left, KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Left, Mods::CTRL);
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 0);
     assert!(ed.prompt.is_some());
 }
@@ -2742,11 +2735,11 @@ fn prompt_ctrl_arrow_word_motion() {
 fn regex_search_matches_line_starts() {
     let mut ed = test_ed("ba\naba\nbar");
     ed.search_regex = true;
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     press_text(&mut ed, "^ba");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('f'), Mods::ALT);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 2, col: 0 },
@@ -2757,21 +2750,21 @@ fn regex_search_matches_line_starts() {
 #[test]
 fn case_toggle_search() {
     let mut ed = test_ed("foo\nFOO");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     press_text(&mut ed, "FOO");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 0 },
         "default is case-insensitive"
     );
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('f'), Mods::ALT);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
     ed.bs_mut().search_matches = None; // let ^F re-open the prompt
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
     assert!(ed.search_case_sensitive);
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
     assert_eq!(
         ed.bs().search_matches.as_ref().unwrap().len(),
@@ -2784,9 +2777,9 @@ fn case_toggle_search() {
 fn invalid_regex_flashes() {
     let mut ed = test_ed("abc");
     ed.search_regex = true;
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     press_text(&mut ed, "[");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     let st = ed.status_text().unwrap();
     assert!(st.contains("regex"), "status: {st}");
     assert_eq!(
@@ -2800,29 +2793,29 @@ fn invalid_regex_flashes() {
 #[test]
 fn m_c_m_r_toggle_in_prompt() {
     let mut ed = test_ed("");
-    press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     press_text(&mut ed, "q");
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
     assert!(ed.search_case_sensitive);
     assert!(
         ed.status_text().unwrap().contains("Case sensitive: on"),
         "status: {}",
         ed.status_text().unwrap()
     );
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
     assert!(!ed.search_case_sensitive);
-    press(&mut ed, KeyCode::Char('r'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('r'), Mods::ALT);
     assert!(ed.search_regex);
     assert!(ed.status_text().unwrap().contains("Regex: on"));
-    press(&mut ed, KeyCode::Char('r'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('r'), Mods::ALT);
     assert!(!ed.search_regex);
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "q", "toggle leaves prompt text unchanged");
     assert_eq!(p.cursor, 1);
     // Toggles must not leak into other prompt kinds: M-C types 'c' there.
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Char('o'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('c'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
     assert!(!ed.search_case_sensitive);
     let p = ed.prompt.as_ref().unwrap();
     assert!(p.text.contains('c'), "M-C must type in a WriteName prompt");
@@ -2849,10 +2842,10 @@ fn open_file_multibuffer_pushes() {
         ..config::Config::default()
     };
     let mut ed = Editor::new(buf_with("seed"), cfg);
-    press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
     assert!(ed.prompt.is_some());
     press_text(&mut ed, &f2.display().to_string());
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.buffers.len(), 2);
     assert_eq!(ed.cur, 1);
     assert_eq!(lines(&ed), vec!["x", "y", "z"]);
@@ -2865,9 +2858,9 @@ fn open_file_replaces_when_disabled() {
     let f1 = d.0.join("a.txt");
     fs::write(&f1, "x\ny\nz").unwrap();
     let mut ed = test_ed("seed");
-    press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
     press_text(&mut ed, &f1.display().to_string());
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.buffers.len(), 1);
     assert_eq!(ed.cur, 0);
     assert_eq!(lines(&ed), vec!["x", "y", "z"]);
@@ -2882,9 +2875,9 @@ fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
     let mut ed = test_ed("seed");
     press_text(&mut ed, "EDIT ");
     assert!(ed.bs().buf.modified);
-    press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
     press_text(&mut ed, &f1.display().to_string());
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.buffers.len(), 2, "the edited buffer was not replaced");
     assert_eq!(lines(&ed), vec!["x", "y", "z"]);
     assert!(ed.status_text().unwrap().contains("unsaved edits"));
@@ -2896,9 +2889,9 @@ fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
     // Back in an unmodified buffer, the next open replaces as before.
     let f2 = d.0.join("b.txt");
     fs::write(&f2, "b").unwrap();
-    press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
     press_text(&mut ed, &f2.display().to_string());
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.buffers.len(), 2);
     assert_eq!(lines(&ed), vec!["b"]);
 }
@@ -2906,9 +2899,9 @@ fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
 #[test]
 fn open_missing_file_flashes() {
     let mut ed = test_ed("seed");
-    press(&mut ed, KeyCode::F(8), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
     press_text(&mut ed, "/no/such/file/rano_open_test.txt");
-    press(&mut ed, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
     let st = ed.status_text().unwrap();
     assert!(st.contains("Error:"), "status: {st}");
     assert!(ed.prompt.is_some(), "the open prompt stays open on error");
@@ -2919,13 +2912,13 @@ fn open_missing_file_flashes() {
 fn switch_buffers_wrap() {
     let mut ed = test_ed("a");
     ed.buffers.push(BufferState::new(buf_with("b")));
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     assert_eq!(ed.cur, 1);
     let st = ed.status_text().unwrap();
     assert!(st.contains("Buffer:"), "status: {st}");
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     assert_eq!(ed.cur, 0, "wraps past the last");
-    press(&mut ed, KeyCode::Char('<'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('<'), Mods::ALT);
     assert_eq!(ed.cur, 1, "wraps back past the first");
 }
 
@@ -2934,16 +2927,16 @@ fn per_buffer_state_isolated() {
     let mut ed = test_ed("a\nb");
     ed.buffers.push(BufferState::new(buf_with("x\ny")));
     ed.cur = 1;
-    press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
-    press(&mut ed, KeyCode::Right, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Down, Mods::NONE);
+    press(&mut ed, KeyCode::Right, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 0, col: 0 },
         "buffer 1 keeps its own cursor"
     );
-    press(&mut ed, KeyCode::Char('<'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('<'), Mods::ALT);
     assert_eq!(
         ed.bs().cursor,
         Pos { row: 1, col: 1 },
@@ -2951,12 +2944,12 @@ fn per_buffer_state_isolated() {
     );
     // Undo stacks are per buffer: each M-U hits only the current one.
     press_text(&mut ed, "Z");
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     press_text(&mut ed, "Q");
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["a", "b"], "buffer 1 undoes only its edit");
-    press(&mut ed, KeyCode::Char('<'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('u'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('<'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["x", "y"], "buffer 2 undoes only its edit");
 }
 
@@ -2969,7 +2962,7 @@ fn title_shows_index_when_multibuffer() {
     b2.name = Some(PathBuf::from("/tmp/b.txt"));
     ed.buffers.push(BufferState::new(b2));
     assert_eq!(ed.title_text(), "[1/2] /tmp/a.txt");
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     assert_eq!(ed.title_text(), "[2/2] /tmp/b.txt");
 }
 
@@ -2979,13 +2972,13 @@ fn quit_cycles_modified_buffers() {
     ed.buffers.push(BufferState::new(buf_with("b")));
     ed.buffers[0].buf.modified = true;
     ed.buffers[1].buf.modified = true;
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('x'), Mods::CTRL);
     assert!(matches!(
         ed.prompt.as_ref().map(|p| p.kind),
         Some(PromptKind::ConfirmSave)
     ));
     assert_eq!(ed.cur, 0);
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(!ed.buffers[0].buf.modified, "'n' discards this buffer");
     assert_eq!(ed.cur, 1, "next modified buffer becomes current");
     assert!(matches!(
@@ -2993,7 +2986,7 @@ fn quit_cycles_modified_buffers() {
         Some(PromptKind::ConfirmSave)
     ));
     assert!(!ed.quit);
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(!ed.buffers[1].buf.modified);
     assert!(ed.quit, "all modified buffers dealt with → quit");
 }
@@ -3003,14 +2996,14 @@ fn try_quit_other_modified() {
     let mut ed = test_ed("a");
     ed.buffers.push(BufferState::new(buf_with("b")));
     ed.buffers[1].buf.modified = true;
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    press(&mut ed, KeyCode::Char('x'), Mods::CTRL);
     assert_eq!(ed.cur, 1, "the modified buffer becomes current");
     assert!(matches!(
         ed.prompt.as_ref().map(|p| p.kind),
         Some(PromptKind::ConfirmSave)
     ));
     assert!(!ed.quit);
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(!ed.quit, "cancel abandons the quit");
     assert!(ed.prompt.is_none());
 }
@@ -3027,8 +3020,8 @@ fn quit_save_cycles_to_next_modified() {
     b2.name = Some(f2.clone());
     b2.modified = true;
     ed.buffers.push(BufferState::new(b2));
-    press(&mut ed, KeyCode::Char('x'), KeyModifiers::CONTROL);
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::CTRL);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(f1.exists());
     assert!(!ed.buffers[0].buf.modified);
     assert_eq!(ed.cur, 1, "saved → next modified buffer prompted");
@@ -3036,7 +3029,7 @@ fn quit_save_cycles_to_next_modified() {
         ed.prompt.as_ref().map(|p| p.kind),
         Some(PromptKind::ConfirmSave)
     ));
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(f2.exists());
     assert!(ed.quit, "last buffer saved → quit");
 }
@@ -3059,7 +3052,7 @@ fn named_buffers(names: &[&str]) -> Editor {
 fn close_buffer_removes_it_and_lands_on_the_next() {
     let mut ed = named_buffers(&["/tmp/rano_c0", "/tmp/rano_c1", "/tmp/rano_c2"]);
     ed.cur = 1;
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
     assert_eq!(ed.buffers.len(), 2);
     assert_eq!(ed.cur, 1);
     assert_eq!(
@@ -3067,9 +3060,9 @@ fn close_buffer_removes_it_and_lands_on_the_next() {
         vec!["2"],
         "the following buffer takes its place"
     );
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
     assert_eq!(ed.cur, 0, "closing the last one lands on the new last");
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
     assert_eq!(ed.buffers.len(), 1, "the last buffer stays");
     assert!(ed.status_text().unwrap().contains("^X"));
 }
@@ -3078,15 +3071,15 @@ fn close_buffer_removes_it_and_lands_on_the_next() {
 fn close_modified_buffer_asks_and_n_discards() {
     let mut ed = named_buffers(&["/tmp/rano_m0", "/tmp/rano_m1"]);
     ed.buffers[0].buf.modified = true;
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
     assert!(matches!(
         ed.prompt.as_ref().map(|p| p.kind),
         Some(PromptKind::ConfirmClose)
     ));
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert_eq!(ed.buffers.len(), 2, "cancel keeps it");
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert_eq!(ed.buffers.len(), 1);
     assert_eq!(lines(&ed), vec!["1"]);
 }
@@ -3097,8 +3090,8 @@ fn close_modified_buffer_y_saves_then_closes() {
     let f = d.0.join("a.txt");
     let mut ed = named_buffers(&[f.to_str().unwrap(), "/tmp/rano_cs1"]);
     ed.buffers[0].buf.modified = true;
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert_eq!(fs::read_to_string(&f).unwrap().trim_end(), "0");
     assert_eq!(ed.buffers.len(), 1);
     assert!(!ed.close_after_save);
@@ -3109,13 +3102,13 @@ fn cancelling_the_file_name_of_a_close_forgets_the_close() {
     let mut ed = test_ed("scratch");
     ed.buffers.push(BufferState::new(buf_with("other")));
     ed.bs_mut().buf.modified = true;
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
-    press(&mut ed, KeyCode::Char('y'), KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(matches!(
         ed.prompt.as_ref().map(|p| p.kind),
         Some(PromptKind::WriteName)
     ));
-    press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(!ed.close_after_save, "a later ^O must not close the buffer");
     assert_eq!(ed.buffers.len(), 2);
 }
@@ -3134,7 +3127,7 @@ fn closing_a_buffer_fixes_the_jump_back_stack() {
         pos: Pos { row: 0, col: 1 },
     });
     ed.cur = 1;
-    press(&mut ed, KeyCode::Char('w'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('w'), Mods::ALT);
     assert_eq!(
         ed.def_back.len(),
         1,
@@ -3142,7 +3135,7 @@ fn closing_a_buffer_fixes_the_jump_back_stack() {
     );
     assert_eq!(ed.def_back[0].idx, Some(1), "later indices shift down");
     ed.cur = 0;
-    press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char(','), Mods::ALT);
     assert_eq!(lines(&ed), vec!["2"]);
 }
 
@@ -3162,7 +3155,7 @@ fn extra_files_are_named_now_and_read_when_visited() {
         "a new file has nothing to read"
     );
     assert!(!ed.start_pending_load(), "buffer 0 has nothing pending");
-    press(&mut ed, KeyCode::Char('>'), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     assert!(ed.start_pending_load());
     assert!(ed.bs().pending_load.is_none());
     for _ in 0..200 {
@@ -3209,7 +3202,7 @@ fn definition_into_an_open_buffer_reuses_it() {
     assert_eq!(ed.cur, 1);
     assert_eq!(lines(&ed), vec!["fn t() { edited }"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
-    press(&mut ed, KeyCode::Char(','), KeyModifiers::ALT);
+    press(&mut ed, KeyCode::Char(','), Mods::ALT);
     assert_eq!(ed.cur, 0);
 }
 
@@ -3278,11 +3271,8 @@ fn open_prompt_shows_live_path_hints() {
     });
     assert!(ed.refresh_prompt_hints());
     assert!(!ed.refresh_prompt_hints());
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|f| ui::draw(f, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     // status row is 12 - 3 = 9; the hints sit on the row above it.
     assert!(row(8).contains("alpha.rs  beta.rs  sub/"), "{}", row(8));
     // Typing narrows them.
@@ -3315,11 +3305,8 @@ fn picker_draws_over_the_text() {
     b.name = Some(PathBuf::from("/tmp/rano_draw_b"));
     ed.buffers.push(BufferState::new(b));
     ed.open_buffer_list();
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|f| ui::draw(f, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     assert!(row(1).contains("Buffers (2)"), "{}", row(1));
     assert!(row(2).contains("rano_draw_a"), "{}", row(2));
     assert!(row(3).contains("rano_draw_b"), "{}", row(3));

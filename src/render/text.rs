@@ -13,7 +13,7 @@
 //! [`truncate`] is closed by the emitter where the linked cells end.
 
 use super::style::Style;
-use crate::style::Role;
+use crate::style::{Palette, Role};
 use crate::width::text::{Cell, break_cells, for_each_cell};
 
 /// A run of text in one style.
@@ -113,6 +113,33 @@ impl Line {
             for_each_cell(&sp.content, |c| s.push_str(c.text));
         }
         s
+    }
+
+    /// No text at all (a line of empty spans is still empty).
+    pub fn is_empty(&self) -> bool {
+        self.spans.iter().all(|s| s.content.is_empty())
+    }
+
+    /// **The line as one ANSI string**, for a host that prints strings rather than
+    /// drawing a [`super::Buffer`]: each span opens its own look (the line's style
+    /// patched under it) and closes with a reset.
+    ///
+    /// Per span rather than [`super::Buffer::emit`]'s minimal transitions, because
+    /// this is what letibot's string painter wrote and what its tests pin, and a
+    /// string is pasted into other strings — one that ends in a reset cannot leave
+    /// its attributes open in the next. Content escapes are dropped, as everywhere
+    /// in `render`; [`Palette::None`] writes the plain text and nothing else.
+    pub fn to_ansi(&self, palette: Palette) -> String {
+        let mut out = String::new();
+        for sp in &self.spans {
+            let seq = self.style.patch(&sp.style).look(palette).sgr();
+            out.push_str(&seq);
+            for_each_cell(&sp.content, |c| out.push_str(c.text));
+            if !seq.is_empty() {
+                out.push_str(crate::width::text::RESET);
+            }
+        }
+        out
     }
 }
 

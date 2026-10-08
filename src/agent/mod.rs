@@ -56,6 +56,7 @@ pub mod pane;
 pub mod picker;
 pub mod queue;
 pub mod quit;
+pub mod screens;
 pub mod status;
 pub mod subagents;
 pub mod text;

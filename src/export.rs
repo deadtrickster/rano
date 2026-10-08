@@ -3,7 +3,7 @@
 //!
 //! Why it exists, beyond being a feature: it is the only path that runs the
 //! highlighter and then does NOT draw to a terminal. `rano --export html
-//! big.rs` measures parse + colorisation with ratatui, the terminal and the
+//! big.rs` measures parse + colorisation with the screen, the terminal and the
 //! event loop all out of the picture, which is what makes it possible to say
 //! where a slow file's time actually goes (`--bench` reports both sides of
 //! that line).
@@ -11,10 +11,16 @@
 //! The style source is a closure rather than a [`crate::Editor`], so the same
 //! renderer serves the CLI, an embedder with its own palette, and the tests.
 //! Nothing here knows what a terminal is: it writes bytes.
+//!
+//! A style is a [`crate::render::Style`] — roles — and both coloured formats
+//! read the role table's look under [`Palette::Colour`]: the HTML page is dark,
+//! and an ANSI file is shown by a terminal whose theme then supplies the
+//! sixteen colours, as it does for the editor itself.
 
 use crate::buffer::Pos;
+use crate::render::Style;
+use crate::style::{Attrs, Hue, Look, Palette};
 use crate::width;
-use ratatui::style::{Color, Modifier, Style};
 
 /// Output format for [`render`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,75 +170,70 @@ fn html(
 /// The CSS declarations a style needs, or `None` when it renders as the
 /// page default (so plain text carries no markup at all).
 fn css(style: &Style) -> Option<String> {
+    let look = style.look(Palette::Colour);
     let mut d = String::new();
-    if let Some(c) = style.fg.and_then(hex) {
+    if let Some(c) = look.fg.map(hex) {
         d.push_str(&format!("color:{c}"));
     }
-    if let Some(c) = style.bg.and_then(hex) {
+    if let Some(c) = look.bg.map(hex) {
         if !d.is_empty() {
             d.push(';');
         }
         d.push_str(&format!("background-color:{c}"));
     }
-    let m = style.add_modifier;
     for (bit, css) in [
-        (Modifier::BOLD, "font-weight:bold"),
-        (Modifier::ITALIC, "font-style:italic"),
-        (Modifier::DIM, "opacity:.65"),
-        (Modifier::REVERSED, "filter:invert(1)"),
+        (Attrs::BOLD, "font-weight:bold"),
+        (Attrs::ITALIC, "font-style:italic"),
+        (Attrs::DIM, "opacity:.65"),
+        (Attrs::REVERSE, "filter:invert(1)"),
+        (Attrs::UNDERLINE, "text-decoration:underline"),
     ] {
-        if m.contains(bit) {
+        if look.attrs.contains(bit) {
             if !d.is_empty() {
                 d.push(';');
             }
             d.push_str(css);
         }
     }
-    // Underline and strikethrough share one property, so they are collected.
-    let mut deco: Vec<&str> = Vec::new();
-    if m.contains(Modifier::UNDERLINED) {
-        deco.push("underline");
-    }
-    if m.contains(Modifier::CROSSED_OUT) {
-        deco.push("line-through");
-    }
-    if !deco.is_empty() {
-        if !d.is_empty() {
-            d.push(';');
-        }
-        d.push_str("text-decoration:");
-        d.push_str(&deco.join(" "));
-    }
     if d.is_empty() { None } else { Some(d) }
 }
 
-/// `#rrggbb` for the colours a theme or a selection actually uses. `None` for
-/// the 256-colour palette, which this export does not carry (rano's own
-/// themes are all RGB, so nothing is lost in practice).
-fn hex(c: Color) -> Option<String> {
-    let (r, g, b) = match c {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Black => (0, 0, 0),
-        Color::Red => (0xcd, 0x31, 0x31),
-        Color::Green => (0x0d, 0xbc, 0x79),
-        Color::Yellow => (0xe5, 0xe5, 0x10),
-        Color::Blue => (0x24, 0x72, 0xc8),
-        Color::Magenta => (0xbc, 0x3f, 0xbc),
-        Color::Cyan => (0x11, 0xa8, 0xcd),
-        Color::Gray => (0xe5, 0xe5, 0xe5),
-        Color::DarkGray => (0x66, 0x66, 0x66),
-        Color::LightRed => (0xf1, 0x4c, 0x4c),
-        Color::LightGreen => (0x23, 0xd1, 0x8b),
-        Color::LightYellow => (0xf5, 0xf5, 0x43),
-        Color::LightBlue => (0x3b, 0x8e, 0xea),
-        Color::LightMagenta => (0xd6, 0x70, 0xd6),
-        Color::LightCyan => (0x29, 0xb8, 0xdb),
-        Color::White => (0xff, 0xff, 0xff),
-        // Reset, Indexed, and any future variant: no colour, which the
-        // caller reads as "the page default".
-        _ => return None,
+/// `#rrggbb` for a colour the role table names. The sixteen slots are a
+/// terminal's, and a page has no theme to ask, so they are one common
+/// rendering of them (VS Code's terminal colours); a cube index is the xterm
+/// cube's own RGB, which is what it is on every terminal.
+fn hex(h: Hue) -> String {
+    const SLOTS: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (0xcd, 0x31, 0x31),
+        (0x0d, 0xbc, 0x79),
+        (0xe5, 0xe5, 0x10),
+        (0x24, 0x72, 0xc8),
+        (0xbc, 0x3f, 0xbc),
+        (0x11, 0xa8, 0xcd),
+        (0xe5, 0xe5, 0xe5),
+        (0x66, 0x66, 0x66),
+        (0xf1, 0x4c, 0x4c),
+        (0x23, 0xd1, 0x8b),
+        (0xf5, 0xf5, 0x43),
+        (0x3b, 0x8e, 0xea),
+        (0xd6, 0x70, 0xd6),
+        (0x29, 0xb8, 0xdb),
+        (0xff, 0xff, 0xff),
+    ];
+    let (r, g, b) = match h {
+        Hue::Slot(n) | Hue::Cube(n) if n < 16 => SLOTS[n as usize],
+        Hue::Slot(n) | Hue::Cube(n) if n < 232 => {
+            let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            let n = n - 16;
+            (level(n / 36), level(n / 6 % 6), level(n % 6))
+        }
+        Hue::Slot(n) | Hue::Cube(n) => {
+            let v = 8 + 10 * (n - 232);
+            (v, v, v)
+        }
     };
-    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 fn esc(s: &str) -> String {
@@ -288,83 +289,14 @@ fn ansi(lines: &[Vec<char>], tab_width: usize, style_of: &dyn Fn(Pos) -> Option<
     s
 }
 
+/// The opening sequence for a run's style: the role table's look, spelled as
+/// everywhere else (attributes, then foreground, then background).
 fn sgr(style: &Option<Style>) -> Option<String> {
-    let st = style.as_ref()?;
-    let mut parts: Vec<String> = Vec::new();
-    let m = st.add_modifier;
-    if m.contains(Modifier::BOLD) {
-        parts.push("1".into());
-    }
-    if m.contains(Modifier::DIM) {
-        parts.push("2".into());
-    }
-    if m.contains(Modifier::ITALIC) {
-        parts.push("3".into());
-    }
-    if m.contains(Modifier::UNDERLINED) {
-        parts.push("4".into());
-    }
-    if m.contains(Modifier::REVERSED) {
-        parts.push("7".into());
-    }
-    if m.contains(Modifier::CROSSED_OUT) {
-        parts.push("9".into());
-    }
-    if let Some(c) = st.fg.and_then(fg_code) {
-        parts.push(c);
-    }
-    if let Some(c) = st.bg.and_then(bg_code) {
-        parts.push(c);
-    }
-    if parts.is_empty() {
+    let look: Look = style.as_ref()?.look(Palette::Colour);
+    if look.is_plain() {
         return None;
     }
-    Some(format!("\x1b[{}m", parts.join(";")))
-}
-
-fn fg_code(c: Color) -> Option<String> {
-    let n = named_code(c)?;
-    Some(match n {
-        // Bright variants already carry their own parameter.
-        s if s.starts_with("38;5;") || s.starts_with("38;2;") => s,
-        s => format!("38;5;{s}"),
-    })
-}
-
-fn bg_code(c: Color) -> Option<String> {
-    let n = named_code(c)?;
-    Some(match n {
-        s if s.starts_with("38;5;") || s.starts_with("38;2;") => s.replace("38;", "48;"),
-        s => format!("48;5;{s}"),
-    })
-}
-
-/// The SGR colour parameters a [`Color`] maps to, as a partial sequence.
-fn named_code(c: Color) -> Option<String> {
-    let s = match c {
-        Color::Black => "0".into(),
-        Color::Red => "1".into(),
-        Color::Green => "2".into(),
-        Color::Yellow => "3".into(),
-        Color::Blue => "4".into(),
-        Color::Magenta => "5".into(),
-        Color::Cyan => "6".into(),
-        Color::Gray => "7".into(),
-        Color::DarkGray => "8".into(),
-        Color::LightRed => "9".into(),
-        Color::LightGreen => "10".into(),
-        Color::LightYellow => "11".into(),
-        Color::LightBlue => "12".into(),
-        Color::LightMagenta => "13".into(),
-        Color::LightCyan => "14".into(),
-        Color::White => "15".into(),
-        Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-        Color::Indexed(i) => format!("38;5;{i}"),
-        // Reset, and any future variant: no colour, which the caller reads as
-        // "the page default".
-        _ => return None,
-    };
-    Some(s)
+    Some(look.sgr())
 }
 
 // ------------------------------------------------------------ markdown ----
@@ -464,7 +396,7 @@ fn text(lines: &[Vec<char>], tab_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
+    use crate::style::Role;
 
     fn cs(s: &str) -> Vec<char> {
         s.chars().collect()
@@ -475,13 +407,9 @@ mod tests {
         let lines = vec![cs("let x = 1;\n<<not a tag>>"), cs("\ttabbed & <escaped>")];
         let f = |p: Pos| {
             if p.row == 0 && p.col < 3 {
-                Some(Style::default().fg(Color::Rgb(0xc6, 0x78, 0xdd)))
+                Some(Style::of(Role::Keyword))
             } else if p.row == 1 {
-                Some(
-                    Style::default()
-                        .fg(Color::Rgb(0x98, 0xc3, 0x79))
-                        .add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT),
-                )
+                Some(Style::of(Role::StringLit).bold().underline())
             } else {
                 None
             }
@@ -499,7 +427,7 @@ mod tests {
         assert!(out.ends_with("</html>\n"));
         // The keyword run carries its colour, and only that much of the line.
         assert!(
-            out.contains("<span style=\"color:#c678dd\">let</span>"),
+            out.contains("<span style=\"color:#bc3fbc\">let</span>"),
             "{out}"
         );
         // Everything after it is default, so it is bare text.
@@ -523,7 +451,7 @@ mod tests {
         let (lines, f) = sample();
         let out = render(&lines, 8, "t.rs", Format::Html, &f);
         assert!(out.contains("font-weight:bold"), "{out}");
-        assert!(out.contains("text-decoration:line-through"), "{out}");
+        assert!(out.contains("text-decoration:underline"), "{out}");
     }
 
     #[test]
@@ -546,8 +474,9 @@ mod tests {
     fn ansi_resets_between_runs_and_ends_clean() {
         let (lines, f) = sample();
         let out = render(&lines, 8, "t.rs", Format::Ansi, &f);
-        assert!(out.contains("\x1b[38;2;198;120;221m"), "{out:?}");
-        assert!(out.contains("\x1b[1;9;38;2;152;195;121m"), "{out:?}");
+        // The theme's own slots, as the editor paints them.
+        assert!(out.contains("\x1b[35mlet"), "{out:?}");
+        assert!(out.contains("\x1b[1;4;32m"), "{out:?}");
         // Every line ends reset, so a redirected file cannot leak attributes
         // into whatever is printed after it.
         for line in out.lines() {

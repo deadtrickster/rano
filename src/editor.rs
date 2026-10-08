@@ -7,8 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::render::Style;
+use crate::style::Role;
 use crossterm::event::{MouseButton, MouseEvent};
-use ratatui::style::{Color, Modifier, Style};
 
 use crate::BufferState;
 use crate::RowWrap;
@@ -3039,14 +3040,14 @@ impl Editor {
             && a <= p
             && p < b
         {
-            return Style::default().fg(Color::Black).bg(Color::Yellow);
+            return Style::of(Role::Match);
         }
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
             if a <= p && p < b {
-                // Explicit colors (not REVERSED) so the selection is visible
+                // Explicit colors (not reverse) so the selection is visible
                 // on terminals whose reverse-video comes out white-on-white.
-                return Style::default().fg(Color::White).bg(Color::DarkGray);
+                return Style::of(Role::Selection);
             }
         }
         // Diagnostics: underline in severity color. Search match and
@@ -3054,19 +3055,24 @@ impl Editor {
         // units and can drift on astral chars (accepted limitation).
         for d in diags {
             if d.line == p.row && d.col <= p.col && p.col < d.end_col {
-                let c = match d.severity {
-                    1 => Color::Red,
-                    2 => Color::Yellow,
-                    _ => Color::Blue,
-                };
-                return Style::default().fg(c).add_modifier(Modifier::UNDERLINED);
+                return Style::of(diag_role(d.severity)).underline();
             }
         }
         // Syntax highlighting (tree-sitter), below search/selection priority.
         if let Some(s) = self.bs().hl.style_at(p) {
             return s;
         }
-        Style::default()
+        Style::new()
+    }
+}
+
+/// The role a diagnostic's severity paints with (LSP numbering: 1 error,
+/// 2 warning, anything else lesser), in the gutter and under the code.
+pub(crate) fn diag_role(severity: u64) -> Role {
+    match severity {
+        1 => Role::DiagError,
+        2 => Role::DiagWarning,
+        _ => Role::DiagNote,
     }
 }
 

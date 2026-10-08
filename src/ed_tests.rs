@@ -11,9 +11,10 @@ use crate::config;
 use crate::editor::Editor;
 use crate::editor::{DefBack, Flash};
 use crate::prompt::{PromptKind, complete_path, expand_tilde};
+use crate::render::Style;
+use crate::style::Role;
 use crate::{editor, lsp, ui};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::style::{Color, Modifier, Style};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -1287,22 +1288,21 @@ fn diag_underline_style() {
     let mut ed = test_ed("fn main() {}\n");
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 1)];
     let s = ed.char_style_with(Pos { row: 0, col: 0 }, &ed.all_diags());
-    assert_eq!(s.fg, Some(Color::Red));
-    assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(s, Style::of(Role::DiagError).underline());
     let s = ed.char_style_with(Pos { row: 0, col: 3 }, &ed.all_diags());
-    assert_eq!(s.fg, None);
-    assert!(!s.add_modifier.contains(Modifier::UNDERLINED));
+    assert!(!s.roles().any(|r| r == Role::DiagError));
+    assert!(!s.attrs.contains(crate::style::Attrs::UNDERLINE));
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 2)];
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
-            .fg,
-        Some(Color::Yellow)
+            .top(),
+        Role::DiagWarning
     );
     ed.bs_mut().lsp_diags = vec![diag(0, 0, 2, 3)];
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags())
-            .fg,
-        Some(Color::Blue)
+            .top(),
+        Role::DiagNote
     );
 }
 
@@ -1314,7 +1314,7 @@ fn diag_style_priority() {
     ed.bs_mut().cursor = Pos { row: 0, col: 3 };
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+        Style::of(Role::Selection)
     );
     ed.bs_mut().mark = None;
     ed.bs_mut().search.query = "fn".to_string();
@@ -1322,7 +1322,7 @@ fn diag_style_priority() {
     ed.bs_mut().search.current = 0;
     assert_eq!(
         ed.char_style_with(Pos { row: 0, col: 1 }, &ed.all_diags()),
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+        Style::of(Role::Match)
     );
 }
 

@@ -2,10 +2,11 @@
 //!
 //! Ported from letibot's `crates/ui/src/highlight.rs`. The engine is
 //! [`crate::syntax`]; what lives here is the other half, `capture name → Role`,
-//! for renderers that paint by role (the diffs in [`crate::diff`] and
-//! [`crate::sidediff`]) rather than by the editor's own capture theme. One table:
-//! two copies would drift, and the drift would be invisible — the same Rust
-//! coloured differently in two panes of one screen.
+//! for everything that paints syntax: the diffs in [`crate::diff`] and
+//! [`crate::sidediff`], rendered markdown's fences, and the editor's own theme,
+//! which adds only the names its queries use beyond these. One table: two copies
+//! would drift, and the drift would be invisible — the same Rust coloured
+//! differently in two panes of one screen.
 
 use crate::style::Role;
 use crate::syntax::{Highlighter, Lang};

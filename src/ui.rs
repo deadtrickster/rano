@@ -217,15 +217,18 @@ fn line_to_spans(
     ed: &Editor,
     diags: &[lsp::Diagnostic],
 ) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut spans: Vec<crate::render::Span> = Vec::new();
     let mut run = String::new();
-    let mut run_style: Option<Style> = None;
+    let mut run_style: Option<crate::render::Style> = None;
     for (col, ch) in window {
         let style = ed.char_style_with(Pos { row: abs_row, col }, diags);
-        match run_style {
-            Some(s) if s == style => run.push(ch),
+        match run_style.take() {
+            Some(s) if s == style => {
+                run.push(ch);
+                run_style = Some(s);
+            }
             Some(s) => {
-                spans.push(Span::styled(std::mem::take(&mut run), s));
+                spans.push(crate::render::Span::styled(std::mem::take(&mut run), s));
                 run_style = Some(style);
                 run.push(ch);
             }
@@ -236,9 +239,9 @@ fn line_to_spans(
         }
     }
     if let Some(s) = run_style {
-        spans.push(Span::styled(run, s));
+        spans.push(crate::render::Span::styled(run, s));
     }
-    Line::from(spans)
+    bridge(&crate::render::Line::new(spans))
 }
 
 /// Most rows the live path suggestions take above a file-name prompt.
@@ -440,13 +443,11 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
             // D6: rows with diagnostics carry their severity's color (the
             // most severe wins; the list merges tree-sitter + LSP diags).
             // Every wrap segment of such a row is colored.
-            let fg = match diag_sev[i] {
-                Some(1) => Color::Red,
-                Some(2) => Color::Yellow,
-                Some(_) => Color::Blue,
-                None => Color::DarkGray,
+            let role = match diag_sev[i] {
+                Some(sev) => crate::editor::diag_role(sev),
+                None => crate::style::Role::Faint,
             };
-            nums.push(Line::from(Span::styled(s, Style::default().fg(fg))));
+            nums.push(bridge(&crate::render::Line::styled(s, role)));
         }
         f.render_widget(Paragraph::new(nums), at(0, 1, g as u16, text_h as u16));
     }
@@ -1315,7 +1316,8 @@ mod tests {
         let buf = terminal.backend().buffer();
         assert_eq!(buf.cell((1, 1)).unwrap().fg, Color::Red);
         assert_eq!(buf.cell((1, 2)).unwrap().fg, Color::Yellow);
-        assert_eq!(buf.cell((1, 3)).unwrap().fg, Color::DarkGray);
+        // A row with no diagnostic is faint: dim, in the text's own colour.
+        assert!(buf.cell((1, 3)).unwrap().modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -1459,16 +1461,25 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(30, 24)).unwrap();
         terminal.draw(|f| draw(f, &e)).unwrap();
         let buf = terminal.backend().buffer();
-        let fg = |x: u16, y: u16| buf.cell((x, y)).unwrap().fg;
+        let cell = |x: u16, y: u16| {
+            let c = buf.cell((x, y)).unwrap();
+            (c.fg, c.modifier)
+        };
+        let want = |s: crate::render::Style| {
+            let r = s.look(crate::style::Palette::Colour).ratatui();
+            (r.fg.unwrap_or(Color::Reset), r.add_modifier)
+        };
+        use crate::render::Style as S;
+        use crate::style::Role;
         // Row 3 (pane row 3): "**bold** `code` *it*" — the inner text of each
         // construct, and the delimiters, all distinct.
-        assert_eq!(fg(2, 3), Color::Rgb(0xe5, 0xc0, 0x7b), "strong text");
-        assert_eq!(fg(10, 3), Color::Rgb(0x56, 0xb6, 0xc2), "code span");
-        assert_eq!(fg(17, 3), Color::Rgb(0x98, 0xc3, 0x79), "emphasis");
-        assert_eq!(fg(0, 3), Color::Rgb(0xab, 0xbb, 0xbf), "the `**` delimiter");
+        assert_eq!(cell(2, 3), want(S::of(Role::Strong)), "strong text");
+        assert_eq!(cell(10, 3), want(S::of(Role::Code)), "code span");
+        assert_eq!(cell(17, 3), want(S::new().italic()), "emphasis");
+        assert_eq!(cell(0, 3), want(S::of(Role::Punctuation)), "the delimiter");
         // The heading and the fenced body, on their own rows.
-        assert_eq!(fg(2, 1), Color::Rgb(0xe5, 0xc0, 0x7b), "heading text");
-        assert_eq!(fg(0, 6), Color::Rgb(0x56, 0xb6, 0xc2), "fence body");
+        assert_eq!(cell(2, 1), want(S::of(Role::TypeName)), "heading text");
+        assert_eq!(cell(0, 6), want(S::of(Role::Code)), "fence body");
     }
 
     #[test]

@@ -111,6 +111,11 @@ pub enum Role {
     TypeName,
     /// Syntax: a function name at its definition or call site.
     FuncName,
+    /// Syntax: an operator or punctuation. Named so a delimiter is told from the
+    /// text it delimits (markdown's `**`, a quote's `>`), but drawn in the reader's
+    /// own foreground: the editor's grey for it was a hair off the default text
+    /// colour, and no theme slot is that close.
+    Punctuation,
     /// A link or a reference in prose (a markdown URL), where it is text rather
     /// than an OSC 8 hyperlink.
     Link,
@@ -138,7 +143,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, for tests and for anything that lists them.
-    pub const ALL: [Role; 31] = [
+    pub const ALL: [Role; 32] = [
         Role::Plain,
         Role::Faint,
         Role::Strong,
@@ -161,6 +166,7 @@ impl Role {
         Role::Comment,
         Role::TypeName,
         Role::FuncName,
+        Role::Punctuation,
         Role::Link,
         Role::Key,
         Role::Bar,
@@ -418,6 +424,7 @@ impl Palette {
             Role::Comment => Look::attrs(A::DIM),
             Role::TypeName => Look::fg(Slot(6)),
             Role::FuncName => Look::fg(Slot(4)),
+            Role::Punctuation => Look::PLAIN,
             Role::Link => Look::fg(Slot(4)),
             Role::Key => Look::fg(Slot(6)),
             // The editor's reverse video is the terminal's one reverse, the same
@@ -589,11 +596,11 @@ mod tests {
 
     /// **The port's parity check**: the sequences spelled from the look are letibot's
     /// table, byte for byte, so a letibot caller moving to this file sees no change.
-    /// The rows from `Link` on are the editor's own roles, which letibot never had:
+    /// The rows from `Punctuation` on are the editor's own roles, which letibot never had:
     /// the colours its ratatui code named, as the theme slots they always were.
     #[test]
     fn the_spelled_sequences_are_letibots_table() {
-        let table: [(Role, &str); 31] = [
+        let table: [(Role, &str); 32] = [
             (Role::Plain, ""),
             (Role::Faint, "\x1b[2m"),
             (Role::Strong, "\x1b[1m"),
@@ -616,6 +623,7 @@ mod tests {
             (Role::Comment, "\x1b[2m"),
             (Role::TypeName, "\x1b[36m"),
             (Role::FuncName, "\x1b[34m"),
+            (Role::Punctuation, ""),
             (Role::Link, "\x1b[34m"),
             (Role::Key, "\x1b[36m"),
             (Role::Bar, "\x1b[7m"),
@@ -635,7 +643,7 @@ mod tests {
     fn every_role_closes_what_it_opens() {
         for r in Role::ALL {
             let s = Palette::Colour.paint(r, "abc");
-            if r != Role::Plain {
+            if !Palette::Colour.look(r).is_plain() {
                 assert!(s.ends_with(crate::width::text::RESET), "{r:?} -> {s:?}");
             }
             assert_eq!(crate::width::text::width(&s), 3, "{r:?} changed the width");

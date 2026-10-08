@@ -2782,3 +2782,35 @@ designed here, and not started**: there is no `*-json.log` on this machine to re
 the schema from, and writing it from memory is how the schema above went wrong on
 its first draft. Noted so the shape is not a surprise; built when there is a file
 in hand.
+
+### 20.9 Search, which is what a log is FOR
+
+*"and one more thing - search. as you can imagine it is really important to be
+able to search logs."*
+
+Right, and it changes what "not resident" has to mean. A search cannot be over
+the rows you happen to hold: you open a 2 GiB log at its tail, and what you want
+is a line from four hours ago. So **search reads the file, not the buffer** — it
+is the one operation that must stream the whole file, and it must do so in blocks
+and without materialising rows, or the memory saved by §20.4 is spent by the
+first `^W`.
+
+The shape that follows from the design already here:
+
+- **It scans bytes.** The pattern is matched against the file's bytes (or against
+  a block decoded as it goes), never against a decoded document.
+- **It walks in blocks**, in either direction, so `^W` from the tail searches
+  backwards through history and `^W` from the top forwards — and both are
+  interruptible, because a 2 GiB scan is long enough that the user will want to
+  stop it.
+- **A hit is a byte offset plus a row number**, where the row number comes from
+  the sparse line index (§20.1). So a hit can be jumped to, and the jump decodes
+  only the screenful it lands on.
+- **It reads what it does not hold.** That is the requirement that makes it
+  different from today's search, which is over the rows in the buffer.
+
+Cost: one pass over the bytes at the measured 2.2 GB/s — ~1 s for 2 GiB, which is
+acceptable for a search and is the same order as the line-count scan §20.1
+already needs. And it is why search is the piece to get right before the SPLIT
+between "resident" and "not" is baked in: a search written against the buffer
+would have to be rewritten.

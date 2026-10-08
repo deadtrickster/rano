@@ -342,6 +342,14 @@ fn sgr_mouse(params: &[u8], release: bool) -> Option<Event> {
     let btn = fields.next()??;
     let x = fields.next().flatten().unwrap_or(1).saturating_sub(1);
     let y = fields.next().flatten().unwrap_or(1).saturating_sub(1);
+    // **Bit 7 is the extra buttons** (back, forward — buttons 8 to 11), and a wheel report
+    // with the motion bit set is no wheel step anyone made. rano has no kind for either, so
+    // neither is anything: read through `btn & 3` they came out as a left, middle or right
+    // press, and a back button over a picker selected the row under the pointer. letibot's
+    // decoder, which this one replaced, dropped them; so does this.
+    if btn & 128 != 0 || (btn & 64 != 0 && btn & 32 != 0) {
+        return None;
+    }
     // Bits 2–4 of the button are shift, meta, control; 5 is motion; 6 the wheel.
     let mut mods = Mods::NONE;
     if btn & 4 != 0 {
@@ -646,6 +654,24 @@ mod tests {
             assert_eq!(used, 0, "the partial report must be carried, not eaten");
         }
         assert_eq!(decode(whole).len(), 1);
+    }
+
+    /// The extra buttons (back/forward, bit 7) and a wheel code with the motion bit are not
+    /// a press or a scroll: they decode to nothing rather than to a left click.
+    #[test]
+    fn extra_buttons_and_moving_wheels_are_not_clicks() {
+        for wire in [
+            "\x1b[<128;5;5M",
+            "\x1b[<129;5;5M",
+            "\x1b[<128;5;5m",
+            "\x1b[<96;5;5M",
+            "\x1b[<97;5;5M",
+        ] {
+            assert_eq!(decode(wire.as_bytes()), Vec::<Event>::new(), "{wire:?}");
+        }
+        // The ordinary ones are untouched.
+        assert_eq!(decode(b"\x1b[<64;1;1M").len(), 1);
+        assert_eq!(decode(b"\x1b[<0;1;1M").len(), 1);
     }
 
     #[test]

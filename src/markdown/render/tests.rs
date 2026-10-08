@@ -519,6 +519,24 @@ mod inline_render {
         assert_eq!(span_of(&l, " thing")[0].style.top(), Role::Subheading);
     }
 
+    /// A code span in a quote stays faint under its colour, as letibot drew it: the
+    /// quote is set back, the code in it is set back with it.
+    #[test]
+    fn a_code_span_in_a_quote_keeps_the_quote_under_it() {
+        let l = render("> see `x` here\n", 40);
+        let x = span_of(&l, "x")[0];
+        assert_eq!(x.style.top(), Role::Code);
+        assert_eq!(
+            x.style.roles().collect::<Vec<_>>(),
+            vec![Role::Faint, Role::Code]
+        );
+        let l = render("see `x` here\n", 40);
+        assert_eq!(
+            span_of(&l, "x")[0].style.roles().collect::<Vec<_>>(),
+            vec![Role::Code]
+        );
+    }
+
     /// Two captures side by side are two spans even when they mean the same thing:
     /// `assert_eq` and `!` are separate runs on the row a string host prints.
     #[test]

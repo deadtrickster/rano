@@ -721,7 +721,10 @@ pub fn runs_spans(runs: &[Run], container: Role) -> Vec<Span> {
             InlineStyle::Bold => on(Style::of(container), true, false, false),
             InlineStyle::Italic => on(Style::of(container), false, true, false),
             InlineStyle::BoldItalic => on(Style::of(container), true, true, false),
-            InlineStyle::Code => on(Style::of(Role::Code), heavy, false, false),
+            // The container stays under the code role: in a quote the span is faint
+            // cyan, as letibot's rows drew it, and not a full-strength island in a
+            // set-back passage.
+            InlineStyle::Code => on(Style::of(container).role(Role::Code), heavy, false, false),
             InlineStyle::Strikethrough => on(Style::of(container), false, false, true),
         };
         push_span(&mut out, Span::styled(r.text.as_str(), style));

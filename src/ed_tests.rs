@@ -707,6 +707,202 @@ fn a_view_puts_its_own_keys_on_the_bar() {
     );
 }
 
+const SUN_PNG_W: u32 = 200;
+const SUN_PNG_H: u32 = 100;
+
+/// A PNG-shaped file: signature, then a real IHDR carrying `w` and `h`. The bytes
+/// need not decode — nothing in rano decodes a PNG, the terminal does.
+fn write_png(path: &std::path::Path, w: u32, h: u32) {
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.extend_from_slice(&13u32.to_be_bytes());
+    v.extend_from_slice(b"IHDR");
+    v.extend_from_slice(&w.to_be_bytes());
+    v.extend_from_slice(&h.to_be_bytes());
+    v.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+    fs::write(path, v).unwrap();
+}
+
+fn picture_rows(ed: &Editor) -> Vec<String> {
+    ed.diff_view
+        .as_ref()
+        .expect("a view")
+        .lines
+        .iter()
+        .map(|l| l.plain())
+        .collect()
+}
+
+fn graphics(ed: &mut Editor) -> Vec<String> {
+    ed.take_graphics()
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect()
+}
+
+/// **M-P on a PNG draws it**: the rows are placeholder cells the terminal fills, and the
+/// terminal is told the upload and the placement that go with them, in that order,
+/// before the frame that draws them.
+#[test]
+fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
+    let d = temp_dir("png");
+    let file = d.0.join("sun.png");
+    write_png(&file, SUN_PNG_W, SUN_PNG_H);
+    let mut ed = test_ed("the buffer is the file's bytes, and they are not the picture");
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.text_w = 120;
+    ed.text_h = 20;
+    ed.images = true;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rows = picture_rows(&ed);
+    let cells = crate::term::graphics::image_cells(
+        Some(SUN_PNG_W),
+        Some(SUN_PNG_H),
+        crate::term::graphics::image_box(120),
+    );
+    assert_eq!(rows.len(), cells.1 as usize, "one row per row of the box");
+    assert!(rows[0].starts_with('\u{10EEEE}'), "{:?}", rows[0]);
+    assert_eq!(crate::width::text::width(&rows[0]), cells.0 as usize);
+    let header = ed.diff_view.as_ref().unwrap().header();
+    assert!(header.contains("Picture"), "{header}");
+    assert!(header.contains("sun.png"), "{header}");
+    // Uploaded once, then placed where the rows draw it.
+    let out = graphics(&mut ed);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
+    assert!(out[1].contains("a=p,U=1"), "{:?}", out[1]);
+    assert!(out[1].contains(&format!("c={},", cells.0)), "{:?}", out[1]);
+    // Nothing changed since: nothing is sent again.
+    assert!(graphics(&mut ed).is_empty());
+    // A resize moves the box, and the terminal is given the picture again at it.
+    ed.text_w = 200;
+    assert!(ed.refresh_diff_view());
+    let out = graphics(&mut ed);
+    assert_eq!(out.len(), 2, "the picture again, at the new box: {out:?}");
+    assert!(graphics(&mut ed).is_empty(), "and then quiet again");
+    // **A narrow frame takes a narrow picture** — half a screen, a split pane, a phone.
+    // The rows drawn always fit the width they are drawn in, which is what `image_box`
+    // now guarantees even below its 20-column floor.
+    ed.text_w = 15;
+    assert!(ed.refresh_diff_view());
+    let rows = picture_rows(&ed);
+    assert_eq!(crate::width::text::width(&rows[0]), 15, "{:?}", rows[0]);
+    assert!(rows.len() <= crate::term::graphics::IMAGE_MAX_ROWS as usize);
+    let out = graphics(&mut ed);
+    assert!(out[1].contains("c=15,"), "placed 15 wide: {:?}", out[1]);
+    // Closing drops it, bytes and all.
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_none());
+    let out = graphics(&mut ed);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].contains("a=d,d=I"), "{:?}", out[0]);
+    // The text was never touched.
+    assert_eq!(
+        lines(&ed)[0],
+        "the buffer is the file's bytes, and they are not the picture"
+    );
+}
+
+/// **A markdown preview draws the pictures the document names**, under the row that
+/// names them — the alt text is all the renderer leaves of a reference.
+#[test]
+fn a_markdown_preview_draws_the_pictures_the_document_names() {
+    let d = temp_dir("md_img");
+    write_png(&d.0.join("sun.png"), SUN_PNG_W, SUN_PNG_H);
+    let text = "Intro, and sun.png named early.\n\n![the sun](sun.png)\n\nAfter.\n";
+    let mut ed = test_ed(text);
+    ed.bs_mut().buf.name = Some(d.0.join("notes.md"));
+    ed.text_w = 120;
+    ed.text_h = 24;
+    ed.images = true;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rows = picture_rows(&ed);
+    // The picture goes under the reference, not under the sentence that names the file.
+    let reference = rows
+        .iter()
+        .position(|r| r.contains("the sun"))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert!(rows[reference + 1].starts_with('\u{10EEEE}'), "{rows:?}");
+    assert!(rows[0].contains("Intro"), "{rows:?}");
+    // One picture: one upload, one placement.
+    let out = graphics(&mut ed);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
+    assert!(out[1].contains("a=p,U=1"), "{:?}", out[1]);
+    let wide = crate::width::text::width(&rows[reference + 1]);
+    // **A narrower frame re-splices the picture narrower**: the rows are the box, and the
+    // box follows the width, so the document adapts like everything else rano draws.
+    ed.text_w = 40;
+    assert!(ed.refresh_diff_view());
+    let rows = picture_rows(&ed);
+    let narrow = crate::width::text::width(&rows[reference + 1]);
+    assert!(
+        narrow < wide,
+        "{narrow} < {wide}: the box followed the frame"
+    );
+    assert!(rows.iter().any(|r| r.contains("After")), "{rows:?}");
+    let out = graphics(&mut ed);
+    assert_eq!(out[1].matches("a=p,U=1").count(), 1, "{:?}", out[1]);
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert_eq!(graphics(&mut ed).len(), 1, "and dropped with the view");
+}
+
+/// A reference that is not there is not an error: the alt text is what the renderer
+/// drew, and a document is still a document with a picture missing from it.
+#[test]
+fn a_reference_to_a_missing_file_draws_nothing() {
+    let d = temp_dir("md_missing");
+    let mut ed = test_ed("Before.\n\n![gone](nowhere.png)\n");
+    ed.bs_mut().buf.name = Some(d.0.join("notes.md"));
+    ed.text_w = 100;
+    ed.text_h = 20;
+    ed.images = true;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_some(), "the preview still opens");
+    let rows = picture_rows(&ed);
+    assert!(rows.iter().any(|r| r.contains("gone")), "{rows:?}");
+    assert!(!rows.iter().any(|r| r.starts_with('\u{10EEEE}')));
+    assert!(graphics(&mut ed).is_empty(), "and nothing is queued for it");
+    assert!(ed.status_text().is_none(), "and nothing is said about it");
+}
+
+#[test]
+fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture() {
+    let d = temp_dir("png_why");
+    let file = d.0.join("sun.png");
+    write_png(&file, 20, 10);
+    // No pictures on this terminal: the placeholder cells would be garbage.
+    let mut ed = test_ed("x");
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.images = false;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_none());
+    let msg = ed.status_text().unwrap();
+    assert!(msg.contains("does not take inline pictures"), "{msg}");
+    assert!(graphics(&mut ed).is_empty());
+    // **A file that is not a picture is refused by name**, and which refusal it is depends
+    // on the machine: the bytes are not a PNG, so a converter is asked — and there may be
+    // none (`no converter found`), or one that cannot read it (`could not read it`). What
+    // the reader is owed is the file and a reason, so that is what is pinned.
+    for nonsense in ["liar.png", "sun.jpg"] {
+        let path = d.0.join(nonsense);
+        fs::write(&path, b"not a picture at all, whatever the name says").unwrap();
+        let mut ed = test_ed("x");
+        ed.bs_mut().buf.name = Some(path);
+        ed.images = true;
+        press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+        assert!(ed.diff_view.is_none());
+        let msg = ed.status_text().unwrap();
+        assert!(msg.contains(nonsense), "{msg}");
+        assert!(
+            msg.contains("not a PNG")
+                || msg.contains("could not read it")
+                || msg.contains("no converter found"),
+            "{msg}"
+        );
+        assert!(graphics(&mut ed).is_empty());
+    }
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

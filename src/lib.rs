@@ -22,6 +22,10 @@
 //! - [`term`] — the terminal: raw mode, the row-diffing painter, input decoded
 //!   into rano's own events, kitty graphics and OSC 8 links.
 //! - [`editor`] / [`ui`] — the editor and its renderer, for a host to embed.
+//!   A picture preview ([`image`] read off the disk, drawn through
+//!   [`term::graphics`]) is the one thing the editor cannot finish alone: it
+//!   queues the bytes and the host writes them (`Editor::images`,
+//!   `Editor::take_graphics`).
 //!
 //! Embedding the editor as a pane, in outline:
 //!
@@ -44,6 +48,13 @@
 //! let mut frame = rano::render::Buffer::empty(rano::render::Rect::new(0, 0, 80, 31));
 //! // Each iteration of the host's loop:
 //! if ed.tick(Instant::now()) {
+//!     // **The bytes a picture needs go to the terminal itself**, around the
+//!     // frame whose placeholder rows name it — and only after
+//!     // `ed.images = terminal.features().images`, which is what lets M-P offer
+//!     // a picture at all. Both are no-ops on a terminal without pictures.
+//!     if ed.images {
+//!         for bytes in ed.take_graphics() { /* write them to the terminal */ }
+//!     }
 //!     // The editor paints its pane and says where the cursor goes
 //!     // (column, row); the host emits the frame, e.g. through
 //!     // `rano::term::Terminal::draw_buffer`.
@@ -75,6 +86,9 @@ pub mod conflict;
 pub mod diff;
 pub mod encoding;
 pub mod highlight;
+// A picture read off the disk (`image::read`): the PNG bytes the kitty graphics
+// protocol carries, and the size M-P's picture view cuts its cells from.
+pub mod image;
 // Keys and keymaps, emacs-shaped: chords, prefix maps, a stack of active maps
 // (mode over global), where-is. Pure data — command names, not functions — so
 // a host can stack its own map over the editor's.

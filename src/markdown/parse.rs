@@ -443,6 +443,41 @@ pub fn lex(s: &str) -> Vec<Block> {
     parse_standalone(s, &mut bytes, &mut calls)
 }
 
+/// **The pictures a document names** — `![alt](target)` — as `(alt, target)`, in the
+/// order they appear.
+///
+/// Ported from letibot's `ui::render::markdown_images`, where it exists for the same
+/// reason: an image is the one construct whose *target* the rendered rows do not
+/// carry. What the painter leaves of `![sun](/w/sun.png)` is the alt text — `sun` — so
+/// a renderer that wants to draw the picture has to read the reference out of the
+/// source, and what it needs is the path.
+///
+/// Local targets only: a `http://` reference is a picture somebody would have to
+/// fetch, and neither renderer reaches the network.
+pub fn images(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("![") {
+        rest = &rest[at + 2..];
+        let Some(close) = rest.find("](") else { break };
+        // The alt text is one line; a `![` whose `](` is paragraphs away is not an image.
+        if rest[..close].contains('\n') {
+            continue;
+        }
+        let alt = rest[..close].trim().to_string();
+        rest = &rest[close + 2..];
+        let Some(end) = rest.find(')') else { break };
+        // `(path "title")`: the title is not part of the path.
+        let target = rest[..end].split(" \"").next().unwrap_or("").trim();
+        let target = target.trim_start_matches('<').trim_end_matches('>');
+        if !target.is_empty() && !target.contains("://") && !target.contains('\n') {
+            out.push((alt, target.to_string()));
+        }
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // The inline pass
 // ---------------------------------------------------------------------------
@@ -1828,6 +1863,27 @@ mod tests {
 
     pub(super) fn blocks(md: &IncrementalMarkdown) -> Vec<Block> {
         md.blocks().cloned().collect()
+    }
+
+    /// **The references a document names**, which is the one thing the rendered rows do
+    /// not carry: the painter leaves an image's alt text and drops its destination.
+    #[test]
+    fn a_documents_pictures_are_read_out_of_its_source() {
+        let doc = "Intro.\n\n![the sun](sun.png)\n\n![a note](<a b.png> \"the title\")\n\n![](no-alt.png)\n";
+        assert_eq!(
+            images(doc),
+            vec![
+                ("the sun".to_string(), "sun.png".to_string()),
+                ("a note".to_string(), "a b.png".to_string()),
+                (String::new(), "no-alt.png".to_string()),
+            ]
+        );
+        // A URL is a picture somebody would have to fetch, and a `![` whose `](` is
+        // paragraphs away is not an image at all — both are what letibot's scanner does.
+        assert_eq!(images("![x](https://example.com/s.png)"), Vec::new());
+        assert_eq!(images("![one\n\ntwo](s.png)"), Vec::new());
+        assert_eq!(images("no pictures here"), Vec::new());
+        assert_eq!(images("![unclosed](s.png"), Vec::new());
     }
 
     /// The licence for the whole mechanism, as an assertion.

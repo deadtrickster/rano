@@ -2355,11 +2355,12 @@ highlight landed, including the published v0.2.0. It is invisible on a file
 smaller than the margin, which is most files, and only shows on a long one you
 scroll.
 
-## 19. M-P grew one more preview: markdown
+## 19. M-P grew two more previews: markdown and pictures
 
 Added 2026-10-08, from the operator: *"for diffs we have Alt-P for 'preview'. I
 want this extended to say markdowns, svg (we are targeting ghosty) and so on. Do
-markdown and svg first."*
+markdown and svg first."* — and then *"lets render images too, both inline in
+markdown preview mode and when i open files. letibot already does that"*.
 
 - [x] **Markdown** (`.md`, `.markdown`): M-P renders the buffer with
   `markdown::render_blocks` — the renderer a model's reply is already drawn with
@@ -2367,24 +2368,63 @@ markdown and svg first."*
   fence's syntax highlight arrive as they do in the agent pane. **No new
   dependency**: the module was there, and the view is `Source::Markdown` in
   `diffview.rs` with a `DiffKind` and a keymap of its own.
-- [x] **The split key says why not** on it. `s` is the shared diff map's, and a
-  one-column view has nothing to toggle: it flashes rather than re-rendering the
-  same rows (`Source::has_a_split`, `DiffAct::ToggleSplit`).
+- [x] **Pictures in a markdown preview**: the document's `![alt](path)`
+  references are read beside it (`image::read`, PNG), uploaded to the terminal
+  and drawn as rows of placeholder cells under the row that names them
+  (`splice_pictures` + `picture_anchor`, ported from letibot's
+  `transcript::assistant`). A reference that cannot be read draws nothing.
+- [x] **M-P on a PNG** draws the file as the picture it is — the buffer's own
+  text is a lossy decode of those bytes, so the file is read from disk, by name
+  (`.png` first, then the bytes' signature), and a `.png` that is not one is
+  refused by name.
+- [x] **The plumbing** (`Editor::images`, `images_held`, `take_graphics`,
+  `sync_image`, `term::graphics::image_delete`): the editor queues the kitty
+  upload/placement/delete commands and the host writes them before the frame that
+  draws the placeholders; what the terminal holds is tracked by id, so a frame
+  that changed nothing sends nothing and a picture that closed takes its bytes
+  with it. Gated on `Features::images` (Ghostty), with
+  `RANO_TERM_FEATURES=images` as the override.
+- [x] **The split key says why not** on all three one-column views. `s` is the
+  shared diff map's, and `Source::has_a_split` is asked first: it flashes the
+  reason rather than re-rendering the same rows.
 - [x] The command's label is "Preview" rather than "Diff Preview" (the name
   `diff-preview` stays, so a host rebinding it survives).
 
-### 19.1 SVG: built, measured, and taken back out
+### 19.1 How a picture is drawn, and what a width does to it
 
-An SVG was implemented the same way — rasterized (`src/svg.rs`, `resvg` +
-`usvg` + `tiny-skia`) and drawn inline through the kitty graphics protocol's
-Unicode placeholders, the mechanism letibot already draws a tool's PNG with,
-gated on `Features::images`, with the editor queueing the upload/placement/delete
-bytes for its host. It worked and its tests passed. The operator's ruling on the
-price: *"yea let them be text for now"*, so it is out of the tree and the numbers
-are kept here rather than paid again.
+**PNG only, and that is the protocol's limit rather than a choice.** The kitty
+protocol's compressed format is PNG (`f=100`); Ghostty's loader
+(`terminal/kitty/graphics_image.zig`) decodes PNG and raw pixels and has no JPEG,
+GIF or WebP path at all — checked in its source, not assumed. So a JPEG would
+have to be decoded *here* first, which rano does not do: `image::kind` names the
+formats it knows and M-P says which way one is out.
+
+**Widths are the whole of the geometry**, and every piece of it is derived rather
+than fixed:
+
+- `image_box(width)` is half the frame, 20..80 — **and never wider than the frame
+  itself**, which the 20-column floor could be: a 16-column pane (a split, a
+  phone) would otherwise place a 20-column picture in a 15-column view and the
+  terminal would fill the cells it was told to and draw over the edge. Fixed here
+  and pinned by a test.
+- `image_cells(intrinsic, box)` then cuts the box to the picture's shape (a cell
+  is about twice as tall as it is wide), so a 200×100 PNG is 2:1 in cells too.
+- A resize re-renders the view, which re-derives the cells and — for a document —
+  re-splices its pictures at the new box, and `sync_image` re-uploads and
+  re-places what the terminal holds. Nothing in the path is cached per width.
+- 30 rows is the hard cap: the Unicode-placeholder protocol's diacritic table has
+  30 entries, so a taller picture is narrowed to keep its shape rather than
+  drawn wrong.
+
+### 19.2 SVG: built, measured, and taken back out
+
+An SVG was implemented the same way — rasterized (`resvg` + `usvg` +
+`tiny-skia`) and drawn through the same placeholders. It worked and its tests
+passed. The operator's ruling on the price: *"yea let them be text for now"*, so
+it is out of the tree and the numbers are kept here rather than paid again.
 
 Measured 2026-10-08 on this machine, `resvg` trimmed to `text`, `system-fonts`,
-`raster-images` (off: `svgz`, `gif`, `image-webp`, `memmap-fonts`):
+`raster-images`:
 
 ```
 Cargo.lock          57 packages -> 111           (+54)
@@ -2396,26 +2436,63 @@ a 1200x800 document into a 60x20 box (960x640 px)   7.5-9.5 ms, PNG encode 6-10 
 Two things `usvg` does not do by itself, both found by a test rather than by
 reading the docs, and both silent when wrong — worth knowing before anyone tries
 again: `Options::default()` carries an **empty font database** (`<text>` is
-dropped without a word, so a labelled diagram loses its labels), and a raster a
-document embeds or links needs the `raster-images` feature or half the picture is
-missing. The other two findings: the cell box has to come first (`image_cells`)
-and the raster is cut at its pixel size; and on this machine there is no
-converter to shell out to instead — no `rsvg-convert`, no `inkscape`, no
+dropped without a word), and a raster a document embeds or links needs the
+`raster-images` feature or half the picture is missing. There is also no
+converter to shell out to on this machine — no `rsvg-convert`, no `inkscape`, no
 `magick` — and `qlmanage` is macOS-only and wants a GUI session.
 
-- [ ] **What "text for now" means**: M-P on an `.svg` says the generic "nothing
-  to render" and the file is read as text like any other. Two ways back in, if it
-  ever matters: name SVG in that message, or make the rasterizer a build that
-  asks for it (`--features svg`, or a converter found on `PATH`) so the default
-  binary stays as lean as the ruling wants it.
+- [ ] **Ways back in**, if it matters later: a build that asks for the
+  rasterizer (`--features svg`), a converter found on `PATH`, or naming SVG in
+  M-P's message so the reader knows why nothing happened.
 
-### 19.2 Open: "and so on"
+### 19.3 Conversion: delegated, bounded, and watched
 
-- [ ] **PNG/JPEG** would be a *decoder*, not a rasterizer: the pixels are already
-  a picture. This is the cheapest picture preview left, and the shape §19.1
-  describes — a `Source` variant whose rows are placeholders, plus a queue of
-  bytes the host writes to the terminal — is what it would slot back into.
-- [ ] **A CSV/JSON table** is a renderer like markdown's (rows to `Line`s), not a
-  picture: one more `Source` variant and no new dependency.
-- [ ] **PDF** would want a rasterizer rano does not have, and the one that was
-  here was SVG's.
+**PNG is what the protocol carries**, so a picture in any other format has to be turned
+into one. The operator's own ruling on how: *"it can be as simple as a standard python
+script or imagemagic command"* — and then *"with a timer so we dont hang. kinda
+heuristic on image size so conversion won't put us down. it is a convenience thingy
+after all"*, and *"not only macOS - linux too"*.
+
+- [x] **A converter on the machine, not a decoder in the binary**
+  (`image::CONVERTERS`): `magick`, `convert`, `sips`, `ffmpeg`, `python3` with Pillow, in
+  that order, whichever is on PATH. This is the argument §19.2 was decided on, kept: a
+  bundled decoder is MiB and a lockfile; a machine that has any of these five gets JPEG,
+  GIF, WebP, TIFF, BMP **and SVG** for nothing. On this machine `sips` answers — measured,
+  a 900×525 JPEG converts in ~60 ms — and an SVG rasterizes (120×60 → a 320×160 PNG),
+  which is the SVG preview that was withdrawn in §19.2, for free where it is free.
+- [x] **Present is not working**: the candidates are *tried*, and the first that reads the
+  picture wins and is remembered (a hint for next time, not a cache of the answer — a tool
+  that cannot read one format is not asked to read it again, but a different format still
+  gets its chance). `python3` without Pillow is on every machine and must not stand in
+  front of an ImageMagick that works.
+- [x] **Table arguments are kept whole.** A `-c` Python program has spaces in it, so a tool
+  from the table is an argv and only a command line from the environment is split on
+  whitespace. (The first version split the table too, silently; a test pins it now.)
+- [x] **No shell**: argv to the program, never a string to a shell, so a picture whose name
+  has a space, a quote or a `;` in it is a name.
+- [x] **Bounded and watched** (`image::Limits`): 2 s wall clock, 256 MiB of RSS — *sampled*
+  from the process while it runs (`/proc/<pid>/statm` on Linux, `proc_pidinfo` on macOS)
+  and *also* imposed by the kernel where the kernel keeps one (`setrlimit(RLIMIT_AS)`,
+  `RLIMIT_FSIZE` 32 MiB, `RLIMIT_CPU`) — and the file it writes is read only if it exited
+  zero. A decompression bomb is 400 MiB of RGBA for a 16 MiB file, which is exactly the
+  shape of "a conversion that puts us down".
+- [x] **What it costs us**: no new dependency at all — `libc` was already there for the
+  terminal layer, and `flate2` was there for the updater. The price is a subprocess on the
+  frame's thread (bounded by the 2 s deadline) and the converter's own quality.
+- [x] The temp file lives in the temp directory under `rano-picture-<pid>-<n>.png` and is
+  removed on every path out, including the failures.
+
+### 19.4 Open: "and so on"
+
+- [ ] **A decoder in the binary**, for the machines with no converter on them: a JPEG
+  decoder is a fraction of §19.2's rasterizer, and the plumbing (`Source::Picture`,
+  `sync_image`) takes it as it is. Not done because the delegation above is enough here.
+- [ ] **A CSV/JSON table** is a renderer like markdown's (rows to `Line`s), not a picture:
+  one more `Source` variant and no new dependency.
+- [ ] **PDF** needs a rasterizer pypdfium/`pdftoppm`/ImageMagick — all of which a converter
+  on PATH might be, and none of which rano carries.
+- [ ] **The box is capped** at `image_box`'s half-a-frame (20..80, and never wider than the
+  frame) and `image_cells`' 30 rows, and there is no key to ask for a bigger picture or a
+  full-width one. Whether M-P should offer one is not decided.
+- [ ] **Animated pictures** are first frames: the converters are asked for one, and a GIF
+  that moves previews as a still.

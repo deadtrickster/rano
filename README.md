@@ -137,7 +137,7 @@ the config writes them nano's way (`^X`, `M-P`).
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current — unless it has unsaved edits, which keeps it); `name:line[:col]` jumps there |
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
-| `M-P` | Preview a diff/patch buffer, a markdown file as prose, or a file's merge conflicts side by side |
+| `M-P` | Preview a diff/patch buffer, a markdown file as prose with its pictures, a PNG as a picture, or a file's merge conflicts side by side |
 | `M-S` | Send the file, cursor and selection to `send_command` (see [Talking to a host](#talking-to-a-host)) |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
@@ -182,7 +182,7 @@ is called off by `n`.
 The diff renderers are part of rano's library (`rano::diff`, `rano::sidediff`),
 drawing ratatui lines, for other programs that show text the same way.
 
-### Preview: diffs, markdown, merge conflicts
+### Preview: diffs, markdown, pictures, merge conflicts
 
 `M-P` draws the current buffer over the text, using the same renderers as the
 save diff above, and `M-P` or Esc goes back to the text. Only resolving a
@@ -196,8 +196,18 @@ the buffer holds, not an edit of it.
 - **A markdown file** (`.md`, `.markdown`) is drawn as the prose it documents:
   headings, lists, quotes and tables laid out at the width, emphasis and code
   spans in their own colour, and a fence syntax-highlighted in the language it
-  names. This view is one column, so `s` says there is nothing to split rather
-  than doing nothing.
+  names. **The pictures it names are drawn too** — `![alt](sun.png)` renders as
+  the image, under the line the reference is on, resolved relative to the file
+  (a `~/` path or an absolute one as written). A reference that cannot be read
+  draws nothing and says nothing: the alt text is what is left of it. This view
+  is one column, so `s` says there is nothing to split rather than doing nothing.
+- **A picture file** (`.png`, or anything a converter on the machine can turn
+  into one — a JPEG, a GIF, an SVG) is drawn as the picture it is, in the
+  terminal, at a box that follows the window: half its width, and narrower in a
+  narrow pane; a resize redraws it at the new box. Pictures need a terminal that
+  takes inline images (the kitty graphics protocol): Ghostty does, and
+  `RANO_TERM_FEATURES=images` turns them on anywhere else. Without one M-P says
+  so instead of drawing placeholder cells.
 - **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
   without diff3's `|||||||` base) is shown one conflict per section, with ours
   and theirs lined up and the surrounding lines of the file for context. Each
@@ -212,6 +222,24 @@ the buffer holds, not an edit of it.
 
 `s` switches between unified and two panels, and the choice sticks for the
 session. Both are syntax-coloured in the file's language.
+
+#### Pictures in other formats
+
+The terminal's protocol carries PNG, so anything else is converted first by a
+converter on your machine — ImageMagick (`magick` or `convert`), macOS's `sips`,
+`ffmpeg`, or Python with Pillow, in that order, whichever is installed. rano
+carries no decoder and no rasterizer of its own: that is a decision with its
+numbers in `TODO.md` (§19.2 — a bundled SVG rasterizer was +2.4 MiB), and a
+machine with a converter gets JPEG, GIF, WebP, TIFF, SVG and the rest for free,
+including SVG, which draws wherever the converter can rasterize it.
+
+A conversion is asked to fit the box the picture will be drawn in, and it is
+watched while it runs: two seconds, 256 MiB of memory (sampled as it goes, and
+capped by the kernel as well where the kernel keeps one), and 32 MiB written. A
+converter that passes any of those is killed and said to have been — this is a
+convenience, and one that hangs the editor is worth less than the picture.
+`RANO_IMAGE_CONVERT` names a converter yourself (a command line with `{in}`,
+`{out}`, `{w}`, `{h}`, `{max}`); an empty one turns conversion off.
 
 ## Buffers
 

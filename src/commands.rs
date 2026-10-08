@@ -381,7 +381,7 @@ pub fn commands() -> &'static [Command] {
                 // Not "Diff Preview": it previews a markdown file as prose too.
                 "Preview",
                 Code,
-                "Show a diff/patch buffer rendered, a markdown file as prose, or a file's merge conflicts side by side.",
+                "Show a diff/patch buffer rendered, a markdown file as prose with its pictures, a PNG as a picture, or a file's merge conflicts side by side.",
                 |e| e.toggle_rendered_view(),
             ),
             // ---- buffers ----
@@ -728,10 +728,13 @@ pub struct Keymaps {
     pub diff: Keymap,
     pub save: Keymap,
     pub patch: Keymap,
-    /// A markdown buffer rendered as prose. There is no second panel here, so
-    /// the shared `diff` map's `s` answers with the reason rather than with a
+    /// A markdown buffer rendered as prose, pictures and all. There is no second panel
+    /// here, so the shared `diff` map's `s` answers with the reason rather than with a
     /// re-render (see `DiffAct::ToggleSplit`).
     pub markdown: Keymap,
+    /// A picture: one column, and no keys but its own scrolling — the same `s` rule as
+    /// `markdown`.
+    pub picture: Keymap,
     pub conflict: Keymap,
     /// A host's review ([`Editor::open_review`]): send from the view, and M-P
     /// closes it as it opened it.
@@ -866,6 +869,8 @@ impl Keymaps {
         patch.bind("M-p", "diff-close");
         let mut markdown = Keymap::new("markdown");
         markdown.bind("M-p", "diff-close");
+        let mut picture = Keymap::new("picture");
+        picture.bind("M-p", "diff-close");
         let mut conflict = Keymap::new("conflicts");
         conflict
             .bind("n", "conflict-next")
@@ -937,6 +942,7 @@ impl Keymaps {
             save,
             patch,
             markdown,
+            picture,
             conflict,
             review,
             list,
@@ -1038,6 +1044,7 @@ impl Editor {
                 DiffKind::Save => &k.save,
                 DiffKind::Patch => &k.patch,
                 DiffKind::Markdown => &k.markdown,
+                DiffKind::Picture => &k.picture,
                 DiffKind::Conflict => &k.conflict,
                 DiffKind::Review => &k.review,
             };

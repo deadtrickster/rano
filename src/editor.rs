@@ -150,6 +150,20 @@ pub struct Editor {
     /// Split (two panels) rather than unified, for the next diff view: the last
     /// choice made with `s` in this session.
     pub diff_split: bool,
+    /// **Whether the terminal on the other end takes inline pictures**
+    /// ([`crate::term::Features::images`]). Off until a host says otherwise: a
+    /// placeholder cell is `U+10EEEE` with combining marks, which a terminal that
+    /// cannot fill it draws as garbage — so M-P on a PNG says why instead of drawing one.
+    pub images: bool,
+    /// **Bytes the host must write to the terminal outside the frame**: the kitty
+    /// graphics commands for the pictures a view is drawing. The editor cannot write
+    /// them itself — it is a library, and the terminal is the host's — so they wait here
+    /// ([`Self::take_graphics`]).
+    pub(crate) graphics_out: Vec<Vec<u8>>,
+    /// **The pictures the terminal is holding**, as `id → the cell box it is placed in`.
+    /// Kept so a frame that changed nothing sends nothing, and so a picture that is gone
+    /// — or whose box moved — is dropped rather than left in the terminal's memory.
+    pub(crate) images_held: std::collections::HashMap<u32, (u32, u32)>,
     /// **Whether a left press armed a selection that has not dragged yet.** A
     /// click places the cursor, and the anchor armed for the drag that may
     /// follow is dropped when the button comes up without one — an anchor left
@@ -319,6 +333,9 @@ impl Editor {
             picker: None,
             diff_view: None,
             diff_split: false,
+            images: false,
+            graphics_out: Vec::new(),
+            images_held: std::collections::HashMap::new(),
             mouse_arm: false,
             on_send: None,
             replace: None,

@@ -303,6 +303,11 @@ fn run(
     // palette; the two differ only in the diff tints.
     let mut palette = Palette::Colour;
     let mut ed = Editor::new(buf, cfg);
+    // **What the terminal can be asked for, told to the editor once.** A picture is drawn
+    // as placeholder cells, which a terminal that cannot fill them shows as garbage, so
+    // M-P on a PNG is refused — by name — where `Features::images` is off (see
+    // `term::features`).
+    ed.images = terminal.features().images;
     // One request at startup, off the main thread. `run` rather than
     // `Editor::new` because it is a property of RUNNING, not of being — no test
     // makes a network call by constructing an editor.
@@ -347,6 +352,13 @@ fn run(
         // embedding the editor makes.
         dirty |= ed.tick(Instant::now());
         if dirty {
+            // **The pictures' own bytes first**, before the frame that draws the
+            // placeholder rows naming them: the uploads, the placements and the delete of
+            // a picture the previous frame was drawing. They are not part of the frame —
+            // the encoder diffs rows of text — so they go out around it.
+            for bytes in ed.take_graphics() {
+                terminal.write_raw(&bytes);
+            }
             // Only the rows that changed reach the glass; the cursor is
             // hidden while they are written and shown where the editor says,
             // or left hidden (the edit point is outside the view).

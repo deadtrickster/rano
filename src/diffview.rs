@@ -1,6 +1,6 @@
 //! A view drawn over the text by the library's renderers — a diff, split or
 //! unified (`s` toggles, remembered for the session), or a file rendered as
-//! something other than its own text. Five things open it:
+//! something other than its own text. Six things open it:
 //!
 //! - **the "File changed on disk" question** (`d`): what saving would do to
 //!   the file. It answers to the question — `y` and `n` answer from here, and
@@ -10,14 +10,23 @@
 //! - **M-P on a buffer with merge conflicts**: ours against theirs, side by
 //!   side ([`crate::conflict`]);
 //! - **M-P on a markdown buffer**: the file as prose ([`crate::markdown`]), the
-//!   text untouched underneath it;
+//!   text untouched underneath it — and the pictures it names (`![alt](path)`)
+//!   drawn in it, as the terminal's own rows ([`crate::term::graphics`]);
+//! - **M-P on a PNG**: the file as the picture it is, in the terminal, at a box
+//!   that follows the window;
 //! - **a host's review** ([`Editor::open_review`]): one change to the file,
 //!   as the host saw it made, at the file's own line numbers — and M-P on that
 //!   buffer shows it again ([`crate::review`]).
 //!
 //! The sources are kept and the lines re-rendered only when the width or the
 //! view changes — a diff and a highlight of two whole files is not per-frame
-//! work. The M-P views are snapshots of the buffer when they opened.
+//! work. The M-P views are snapshots of the buffer when they opened, and a picture
+//! is the exception that is cut again at the box a new width gives it.
+//!
+//! **A picture is the one view whose rows are not the whole of it**: the rows are
+//! placeholder cells the terminal fills from its own copy of the bytes, so the
+//! editor queues those bytes for the host ([`Editor::take_graphics`]) and keeps the
+//! set the terminal is holding up to date ([`Editor::sync_image`]).
 
 use std::path::PathBuf;
 
@@ -42,7 +51,31 @@ pub enum Source {
     /// A diff or patch buffer's text.
     Patch { name: String, text: String },
     /// A markdown buffer's text, drawn as the prose it documents.
-    Markdown { name: String, text: String },
+    Markdown {
+        name: String,
+        text: String,
+        /// **The pictures the document names**, read when the view opened: an image
+        /// reference's target is not in the rendered rows, so it is taken from the
+        /// source and the file is read here rather than while a frame is drawn.
+        /// Empty for a document that names none, or a terminal that takes no
+        /// pictures.
+        images: Vec<Img>,
+    },
+    /// **A picture**: a PNG ([`crate::image`]) drawn as the placeholder cells the
+    /// terminal fills from its own copy of it ([`crate::term::graphics`]).
+    Picture {
+        name: String,
+        /// The image id, hashed from the file's name: the placeholders and the
+        /// upload have to name the same image, and one file is one picture.
+        id: u32,
+        /// The PNG's bytes, base64 — what the upload sends — and the picture's own
+        /// pixel size, which decides the cell box at any width (the bytes are never
+        /// re-read: they are the same picture whatever box it is drawn in).
+        png: String,
+        intrinsic: (u32, u32),
+        /// The cell box the placeholders draw, re-cut when the width moves.
+        cells: (u32, u32),
+    },
     /// A buffer with conflict markers, and where the reader is in it.
     Conflict {
         name: String,
@@ -58,6 +91,26 @@ pub enum Source {
         name: String,
         change: crate::review::Change,
     },
+}
+
+/// **A picture inside a rendered document**: the reference it was named by and the
+/// bytes it is, with the cell box it fills.
+///
+/// The box is the renderer's to set (it depends on the width the view draws at) and
+/// the rest is read once, when the view opens: `alt` and `target` are kept because
+/// the row the picture goes under is found by the reference it shows, and a document
+/// can name the same file twice.
+#[derive(Debug, Clone)]
+pub struct Img {
+    /// The image id, hashed from the resolved path: two references to one file are
+    /// one picture in the terminal, drawn in two places.
+    pub id: u32,
+    pub alt: String,
+    pub target: String,
+    /// The PNG's bytes, base64.
+    pub png: String,
+    pub intrinsic: (u32, u32),
+    pub cells: (u32, u32),
 }
 
 impl Source {
@@ -120,12 +173,30 @@ impl DiffView {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             // The document's own renderer, the one a model's reply is drawn
-            // with: blocks to rows, at the width the view draws them.
-            Source::Markdown { text, .. } => crate::markdown::render_blocks(
-                &crate::markdown::lex(text),
-                width,
-                &crate::markdown::RenderOptions::default(),
-            ),
+            // with: blocks to rows, at the width the view draws them, with the
+            // pictures it names spliced in under the lines that name them.
+            Source::Markdown { text, images, .. } => {
+                let mut rows = crate::markdown::render_blocks(
+                    &crate::markdown::lex(text),
+                    width,
+                    &crate::markdown::RenderOptions::default(),
+                );
+                splice_pictures(&mut rows, images, width);
+                rows
+            }
+            // Rows of placeholder cells: the terminal fills them from its own
+            // copy of the picture. Nothing is read here — the bytes came off the
+            // disk when the view opened — but a resize moves the box, and the
+            // cells are what the placeholders and the placement agree on.
+            Source::Picture {
+                id,
+                intrinsic,
+                cells,
+                ..
+            } => {
+                *cells = cells_for(*intrinsic, width);
+                crate::term::graphics::image_lines(*id, cells.0, cells.1)
+            }
             Source::Conflict {
                 name,
                 text,
@@ -177,6 +248,10 @@ impl DiffView {
             Source::Markdown { name, .. } => {
                 format!(" Markdown {name}   Esc: back to the text")
             }
+            Source::Picture { name, cells, .. } => format!(
+                " Picture {name} ({}×{} cells)   Esc: back to the text",
+                cells.0, cells.1
+            ),
             Source::Review { name, .. } => format!(
                 " Review {name} ({view})   s: split/unified  M-s: send your place  Esc: to the change in the text"
             ),
@@ -210,6 +285,72 @@ pub(crate) fn body_rows(text_h: usize) -> usize {
     text_h.saturating_sub(1).max(1)
 }
 
+/// The cells a picture of `intrinsic` pixels fills at the width a view draws at:
+/// the one call the placeholders and the placement both go through.
+fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
+    crate::term::graphics::image_cells(
+        Some(intrinsic.0),
+        Some(intrinsic.1),
+        crate::term::graphics::image_box(width),
+    )
+}
+
+/// **The pictures of a rendered document, spliced in as rows**: each goes under the
+/// first row that shows its reference ([`picture_anchor`]), and each picture's box is
+/// re-cut for this width. Ported from letibot's `transcript::assistant`, which draws a
+/// reply's pictures the same way — an inserted row of placeholder cells, because to
+/// the row-diffing painter they are text.
+fn splice_pictures(rows: &mut Vec<Line>, images: &mut [Img], width: usize) {
+    let mut from = 0;
+    for img in images.iter_mut() {
+        img.cells = cells_for(img.intrinsic, width);
+        let at = {
+            let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+            picture_anchor(&plain, from, &img.alt, &img.target).unwrap_or(rows.len())
+        };
+        let picture = crate::term::graphics::image_lines(img.id, img.cells.0, img.cells.1);
+        from = at + picture.len();
+        rows.splice(at..at, picture);
+    }
+}
+
+/// **Where a document's picture goes**: after the first rendered row, at or past
+/// `from`, that shows its reference — the markdown itself when it is drawn literally
+/// (a fence), else the alt text, which is what the renderer leaves of an image, else
+/// the bare target.
+///
+/// Ported from letibot's `ui::render::picture_anchor`, with one order changed and for
+/// the reason that function's own comment gives: the operator's reply named the path in
+/// a sentence before the `![…]` line, and the picture hung under the sentence. Searching
+/// the Target first does not fix that — the rendered row shows the *alt text*, never the
+/// path — so the alt text is looked for before it, and the path is the last resort (it
+/// is what an image with no alt text has left to be found by, and it is right in a fence
+/// that draws the reference literally). The frame rule is letibot's: a reference drawn
+/// inside a code fence (`│` rows, closed by `└`) puts the picture under the frame, not
+/// inside it.
+fn picture_anchor(rows: &[String], from: usize, alt: &str, target: &str) -> Option<usize> {
+    let reference = format!("]({target}");
+    let on = |needle: &str| {
+        rows.iter()
+            .enumerate()
+            .skip(from)
+            .find(|(_, l)| l.contains(needle))
+    };
+    on(&reference)
+        .or_else(|| (!alt.is_empty()).then(|| on(alt)).flatten())
+        .or_else(|| on(target))
+        .map(|(i, _)| {
+            let mut at = i + 1;
+            while at < rows.len() && rows[at].trim_start().starts_with('│') {
+                at += 1;
+            }
+            if at < rows.len() && rows[at].trim_start().starts_with('└') {
+                at += 1;
+            }
+            at
+        })
+}
+
 impl Editor {
     /// Open the diff of `disk` (the file now) against `mine` (the buffer as a
     /// save would write it), from the save question.
@@ -224,11 +365,133 @@ impl Editor {
     pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
         self.diff_view = Some(DiffView::new(source, self.diff_split, self.text_w));
+        // A picture's upload and placement follow from what is now open, and a
+        // picture that was open before it is dropped here.
+        self.sync_image();
     }
 
-    /// M-P: the current buffer rendered — a patch file hunk by hunk, a markdown
-    /// file as prose, a file with merge conflicts ours against theirs. Anything
-    /// else says why not.
+    /// **M-P on a picture file**: read it and open the view that draws it, or say why
+    /// not. What stops it is said rather than drawn — a picture is the one view whose
+    /// failure the reader cannot see for themselves.
+    fn open_picture(&mut self, name: String) {
+        if !self.images {
+            self.flash(
+                "This terminal does not take inline pictures: RANO_TERM_FEATURES=images forces them",
+            );
+            return;
+        }
+        let Some(path) = self.bs().buf.name.clone() else {
+            self.flash("This buffer has no file to read a picture from");
+            return;
+        };
+        let id = crate::term::graphics::image_id(&name);
+        // The box a conversion may fill, before anything about the picture is known.
+        let max_px = crate::image::box_px(self.text_w);
+        match crate::image::read(&path.to_string_lossy(), None, max_px) {
+            Ok(pic) => self.open_view(Source::Picture {
+                cells: cells_for((pic.width, pic.height), self.text_w),
+                intrinsic: (pic.width, pic.height),
+                png: crate::term::terminal::base64(&pic.png),
+                id,
+                name,
+            }),
+            Err(e) => self.flash(&e),
+        }
+    }
+
+    /// **The pictures a markdown document names**, read beside it: `![alt](path)`,
+    /// resolved against the directory the file is in. A reference that cannot be read
+    /// is skipped rather than flashed — the document is still the document, and the
+    /// alt text is what the renderer already drew in its place.
+    fn document_images(&self, text: &str) -> Vec<Img> {
+        if !self.images {
+            return Vec::new();
+        }
+        let dir = self
+            .bs()
+            .buf
+            .name
+            .as_deref()
+            .and_then(std::path::Path::parent);
+        let max_px = crate::image::box_px(self.text_w);
+        // **One budget for the document**, not one per picture: a page naming twenty
+        // photographs is not twenty waits. The spend is on conversions only — a PNG is read
+        // as it is and never counts against it — and a reference left unread draws nothing,
+        // which is what a reference that cannot be read does anyway.
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        for (alt, target) in crate::markdown::images(text) {
+            let converts = !crate::image::is_png(Some(std::path::Path::new(&target)));
+            if converts && started.elapsed() > crate::image::CONVERT_TIMEOUT {
+                continue;
+            }
+            let Ok(pic) = crate::image::read(&target, dir, max_px) else {
+                continue;
+            };
+            let path = crate::image::resolve(&target, dir);
+            out.push(Img {
+                id: crate::term::graphics::image_id(&path.to_string_lossy()),
+                cells: (0, 0),
+                alt,
+                target,
+                png: crate::term::terminal::base64(&pic.png),
+                intrinsic: (pic.width, pic.height),
+            });
+        }
+        out
+    }
+
+    /// **What the terminal must be told about the open view's pictures**: the upload
+    /// of one it has not been sent, the placement of one whose box moved, and the drop
+    /// of one no longer drawn. Nothing when nothing changed, so it is cheap enough to
+    /// ask after every render.
+    ///
+    /// The bytes are queued rather than written — this is a library, and the terminal
+    /// belongs to the host ([`Self::take_graphics`]).
+    fn sync_image(&mut self) {
+        let want = match &self.diff_view {
+            Some(v) => v.images(),
+            None => Vec::new(),
+        };
+        // A picture the view no longer draws at all goes first — with its bytes, which
+        // nothing else can free once the rows that named it are gone. A picture whose
+        // *box* moved is kept: the upload under the same id replaces the data, and the
+        // placement drops the placements that came before it.
+        let mut stale: Vec<u32> = self
+            .images_held
+            .keys()
+            .copied()
+            .filter(|id| !want.iter().any(|(w, _, _)| w == id))
+            .collect();
+        stale.sort_unstable();
+        for id in stale {
+            self.images_held.remove(&id);
+            self.graphics_out
+                .push(crate::term::graphics::image_delete(id));
+        }
+        for (id, cells, png) in want {
+            if self.images_held.get(&id) == Some(&cells) {
+                continue;
+            }
+            self.images_held.insert(id, cells);
+            self.graphics_out
+                .push(crate::term::graphics::image_upload(id, png));
+            self.graphics_out
+                .push(crate::term::graphics::image_place(id, cells.0, cells.1));
+        }
+    }
+
+    /// **Drain the bytes queued for the terminal**: the kitty graphics commands a
+    /// picture needs (see [`Self::images`]), as many as there are, in the order they
+    /// must be written. A host whose terminal takes pictures writes them out before the
+    /// frame that draws the placeholder rows.
+    pub fn take_graphics(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.graphics_out)
+    }
+
+    /// M-P: the current buffer rendered — a patch file hunk by hunk, a markdown file
+    /// as prose with the pictures it names, a picture file as itself, a file with merge
+    /// conflicts ours against theirs. Anything else says why not.
     pub(crate) fn toggle_rendered_view(&mut self) {
         let name = self.buffer_name(self.cur);
         let text = self.bs().buf.text();
@@ -238,6 +501,14 @@ impl Editor {
             .buf
             .row_opt(0)
             .map(|l| l.iter().collect::<String>());
+        // **A picture file is asked about first**, by its name and not its bytes: what is
+        // in the buffer is a lossy decode of those bytes — text that is not the file — so
+        // neither the conflict nor the patch question can be asked of it sensibly. A PNG
+        // is drawn as it is; anything else a converter turns into one (§19.3), and a
+        // format with no converter for it says so by name.
+        if crate::image::kind(named).is_some() {
+            return self.open_picture(name);
+        }
         // Conflicts first: a patch file with markers in it is mid-merge too,
         // and the merge is what needs reading.
         if crate::conflict::has_conflicts(&text) {
@@ -253,10 +524,11 @@ impl Editor {
         {
             self.open_view(Source::Patch { name, text });
         } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown) {
-            self.open_view(Source::Markdown { name, text });
+            let images = self.document_images(&text);
+            self.open_view(Source::Markdown { name, text, images });
         } else if !self.show_review() {
             self.flash(
-                "Nothing to render: not a diff or patch, not markdown, and no merge conflicts",
+                "Nothing to render: not a diff or patch, not markdown or a picture, and no merge conflicts",
             );
         }
     }
@@ -267,6 +539,9 @@ impl Editor {
         match self.diff_view.as_mut() {
             Some(v) if v.width != w => {
                 v.render(w);
+                // The placeholders moved with the box, and the terminal has to be told
+                // where they are now (and given the picture again, cut for the new box).
+                self.sync_image();
                 true
             }
             _ => false,
@@ -293,6 +568,9 @@ impl Editor {
             }
             // Leaving: back to the save question, or back to the text.
             DiffAct::Close => {
+                // Nothing is open now, so a picture the terminal holds is one nobody
+                // draws: it goes, with its bytes.
+                self.sync_image();
                 if v.answers_save() {
                     self.reask_external();
                 }
@@ -328,6 +606,7 @@ impl Editor {
             Source::Save { .. } => DiffKind::Save,
             Source::Patch { .. } => DiffKind::Patch,
             Source::Markdown { .. } => DiffKind::Markdown,
+            Source::Picture { .. } => DiffKind::Picture,
             Source::Conflict { .. } => DiffKind::Conflict,
             Source::Review { .. } => DiffKind::Review,
         })
@@ -353,6 +632,7 @@ pub(crate) enum DiffKind {
     Save,
     Patch,
     Markdown,
+    Picture,
     Conflict,
     Review,
 }
@@ -472,6 +752,20 @@ impl Editor {
 }
 
 impl DiffView {
+    /// **The pictures this view's rows are placeholders for**, as `(id, cells, png)`:
+    /// what the terminal has to hold before the frame that draws them. Empty for every
+    /// view whose rows are their own text.
+    fn images(&self) -> Vec<(u32, (u32, u32), &str)> {
+        match &self.source {
+            Source::Picture { id, cells, png, .. } => vec![(*id, *cells, png.as_str())],
+            Source::Markdown { images, .. } => images
+                .iter()
+                .map(|i| (i.id, i.cells, i.png.as_str()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Scroll so the current conflict's header is the first row shown.
     fn jump_to_current(&mut self) {
         if let Source::Conflict {

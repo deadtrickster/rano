@@ -28,11 +28,15 @@ const PLACEHOLDER: char = '\u{10EEEE}';
 pub const IMAGE_MAX_ROWS: u32 = ROW_DIACRITICS.len() as u32;
 
 /// **How wide an image may be on a frame `width` columns wide**: half of it, never under 20
-/// and never over 80. The operator, on the first picture drawn: it was 40 columns on a window
-/// five times that. The uploader and every renderer ask this one function with the same width,
-/// so the rows a renderer draws always match the placement the terminal holds.
+/// and never over 80 — **and never wider than the frame itself**, which the floor of 20 can
+/// be: a 16-column pane (a split, a phone) would otherwise place a 20-column picture in a
+/// 15-column view, and the terminal fills the cells it was told to and draws over the edge.
+/// The operator, on the first picture drawn: it was 40 columns on a window five times that.
+/// The uploader and every renderer ask this one function with the same width, so the rows a
+/// renderer draws always match the placement the terminal holds.
 pub fn image_box(width: usize) -> u32 {
-    ((width / 2) as u32).clamp(20, 80)
+    let frame = (width as u32).max(1);
+    ((width / 2) as u32).clamp(20, 80).min(frame)
 }
 
 /// **An image's id, from the row it belongs to** — so any renderer can draw a row's
@@ -140,6 +144,14 @@ pub fn image_upload(id: u32, png_base64: &str) -> Vec<u8> {
 /// The one placement id this head uses for every image, which its placeholders name.
 const PLACEMENT: u32 = 1;
 
+/// **The bytes that drop an image and every placement of it** — what a picture view sends
+/// on its way out, and when the box it is placed in moves. The uppercase `d=I` is the
+/// protocol's "the data too": a picture nobody draws is memory in the terminal that nothing
+/// else can free, and the rows that named it are gone from the screen already.
+pub fn image_delete(id: u32) -> Vec<u8> {
+    format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").into_bytes()
+}
+
 /// **The virtual placement the placeholders draw**: `cols`×`rows` cells of image `id`, under
 /// placement [`PLACEMENT`]. Every placement the image already has is deleted first (`d=i`,
 /// which keeps the image's data) — one left by an earlier head, or by this one at another size,
@@ -160,6 +172,15 @@ mod tests {
         assert_eq!(image_box(30), 20, "never under 20");
         assert_eq!(image_box(120), 60, "half the frame");
         assert_eq!(image_box(400), 80, "never over 80");
+        // **But never wider than the frame**, which the 20-column floor is on a narrow view:
+        // a split pane or a phone. What is drawn has to fit where it is drawn.
+        assert_eq!(image_box(15), 15, "a 15-column frame takes 15");
+        assert_eq!(image_box(1), 1);
+        assert_eq!(
+            image_box(0),
+            1,
+            "a frame nobody has set is not zero cells wide"
+        );
         assert_eq!(image_cells(None, Some(10), 40), (40, 12));
         assert_eq!(image_cells(Some(400), Some(100), 40), (40, 5));
         assert_eq!(image_cells(Some(720), Some(420), 80), (80, 24));
@@ -185,6 +206,11 @@ mod tests {
         assert!(image_rows(9, 4, 1)[0].contains("\x1b[58;5;1m"));
         assert_ne!(image_id("a"), image_id("b"));
         assert!(image_id("") > 0 && image_id("x") <= 0xff_ffff);
+        // Dropping one drops the data, not only where it was drawn.
+        assert_eq!(
+            String::from_utf8(image_delete(9)).unwrap(),
+            "\x1b_Ga=d,d=I,i=9,q=2\x1b\\"
+        );
     }
 
     /// **The placeholders pass through a cell buffer intact**: the same clusters as the

@@ -55,6 +55,10 @@
 //! if ed.wants_quit() { /* ^X: close the pane */ }
 //! ```
 
+// The agent UI's widgets — tool calls, the permission card, panes, the header and
+// hint bar — as rano-owned view models drawn on `render`. A host (letibot) maps its
+// own state onto them; nothing here depends on a host's crates.
+pub mod agent;
 pub mod buffer;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,
 // diffed side by side with the renderers below (the editor's M-P).

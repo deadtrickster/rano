@@ -17,10 +17,6 @@
 //! They agree on every cluster of escape-free, tab-free, control-free text; the
 //! test `the_two_walks_agree_on_plain_text` holds them to it.
 //!
-//! The binary compiles [`super`] through its own `mod width;`, which does not reach
-//! this module's callers (they are all lib-side: `render` and `term`). Hence the
-//! `allow(dead_code)` on the declaration rather than anything here.
-//!
 //! The rest of this header is letibot's, kept because each point is a defect it
 //! paid for.
 //!

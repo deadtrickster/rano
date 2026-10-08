@@ -267,7 +267,7 @@ impl std::ops::BitOr for Attrs {
 }
 
 /// What a role looks like under a palette: medium-neutral, so a string painter, a
-/// cell emitter and the ratatui adapter all read the same table.
+/// cell emitter and an export all read the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Look {
     pub fg: Option<Hue>,
@@ -517,67 +517,6 @@ impl Palette {
             return s.to_string();
         }
         format!("{o}{s}{}", crate::width::text::RESET)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The ratatui adapter. Transitional: the editor still draws with ratatui, and
-// these are the functions its bridge calls. It reads the same table as
-// everything above, so it cannot drift from it; it goes when the last ratatui
-// caller does.
-// ---------------------------------------------------------------------------
-
-use ratatui::style::{Color, Modifier, Style};
-
-impl Hue {
-    fn ratatui(self) -> Color {
-        match self {
-            Hue::Slot(n) => match n {
-                0 => Color::Black,
-                1 => Color::Red,
-                2 => Color::Green,
-                3 => Color::Yellow,
-                4 => Color::Blue,
-                5 => Color::Magenta,
-                6 => Color::Cyan,
-                7 => Color::Gray,
-                8 => Color::DarkGray,
-                9 => Color::LightRed,
-                10 => Color::LightGreen,
-                11 => Color::LightYellow,
-                12 => Color::LightBlue,
-                13 => Color::LightMagenta,
-                14 => Color::LightCyan,
-                15 => Color::White,
-                n => Color::Indexed(n),
-            },
-            Hue::Cube(n) => Color::Indexed(n),
-        }
-    }
-}
-
-impl Look {
-    /// This look as a ratatui [`Style`].
-    pub fn ratatui(&self) -> Style {
-        let mut s = Style::new();
-        if let Some(f) = self.fg {
-            s = s.fg(f.ratatui());
-        }
-        if let Some(b) = self.bg {
-            s = s.bg(b.ratatui());
-        }
-        for (a, m) in [
-            (Attrs::BOLD, Modifier::BOLD),
-            (Attrs::DIM, Modifier::DIM),
-            (Attrs::ITALIC, Modifier::ITALIC),
-            (Attrs::UNDERLINE, Modifier::UNDERLINED),
-            (Attrs::REVERSE, Modifier::REVERSED),
-        ] {
-            if self.attrs.contains(a) {
-                s = s.add_modifier(m);
-            }
-        }
-        s
     }
 }
 

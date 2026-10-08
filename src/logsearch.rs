@@ -1086,4 +1086,122 @@ mod tests {
             mb / elapsed.as_secs_f64()
         );
     }
+
+    /// **Against the implementation that cannot be wrong.** Every test above
+    /// states a case someone thought of; this one compares the module to a
+    /// whole-file in-memory scan — no windows, no carry, no direction — over a
+    /// corpus built from the shapes a real log has, at block sizes from 1 byte
+    /// to longer than the file, in both directions, from eight offsets.
+    ///
+    /// A boundary bug that no hand-picked case sits on still has to agree with
+    /// the scan that never crosses a block. Literals only, deliberately: the
+    /// regex caveats in the module header (a match longer than a window) are
+    /// real, documented limits, and a reference that shares them would be
+    /// testing nothing.
+    #[test]
+    fn agrees_with_a_whole_file_scan_over_a_corpus() {
+        let mut corpus: Vec<u8> = Vec::new();
+        for i in 0..300 {
+            match i % 7 {
+                0 => corpus
+                    .extend_from_slice(format!("2026-10-09T12:00:0{i} INFO row {i}\n").as_bytes()),
+                1 => corpus.extend_from_slice(b"ERROR something went wrong\n"),
+                2 => corpus.extend_from_slice(b"  at frame::of::a::stack::trace (file.rs:12)\n"),
+                3 => corpus.extend_from_slice(b"\n"),
+                4 => corpus.extend_from_slice(format!("weird \u{e9} multibyte {i}\n").as_bytes()),
+                5 => corpus.extend_from_slice(b"no newline in the middle of this one"),
+                _ => corpus.extend_from_slice(format!("ERROR {i} error ERROR\n").as_bytes()),
+            }
+        }
+        let p = tmp("corpus", &corpus);
+        let size = corpus.len() as u64;
+
+        // `before[i]` is the number of newlines in `[0, i)` — the row of a
+        // match starting at `i`, computed the slow honest way.
+        let before: Vec<u64> = {
+            let mut v = Vec::with_capacity(corpus.len() + 1);
+            let mut nl = 0u64;
+            for b in &corpus {
+                v.push(nl);
+                if *b == b'\n' {
+                    nl += 1;
+                }
+            }
+            v.push(nl);
+            v
+        };
+        let reference = |needle: &[u8], cs: bool, from: u64, dir: Dir| -> Vec<(u64, u64, usize)> {
+            let n = needle.len();
+            let mut out = Vec::new();
+            let mut i = 0usize;
+            while i + n <= corpus.len() {
+                let cand = &corpus[i..i + n];
+                let hit = if cs {
+                    cand == needle
+                } else {
+                    cand.eq_ignore_ascii_case(needle)
+                };
+                let start = i as u64;
+                let in_range = match dir {
+                    Dir::Forward => start >= from,
+                    Dir::Backward => start < from,
+                };
+                if hit && in_range {
+                    out.push((start, before[i], n));
+                }
+                i += 1;
+            }
+            if dir == Dir::Backward {
+                out.reverse();
+            }
+            out
+        };
+
+        let needles: [(&[u8], bool); 5] = [
+            (b"ERROR", true),
+            (b"error", false),
+            (b"\n", true),
+            ("\u{e9}".as_bytes(), true),
+            (b"  at ", true),
+        ];
+        let froms = [0u64, 1, 5, 40, 1000, size - 1, size, size + 10];
+        let blocks = [
+            1usize,
+            2,
+            3,
+            8,
+            64,
+            1000,
+            corpus.len() - 1,
+            corpus.len(),
+            corpus.len() + 7,
+        ];
+        let mut checked = 0usize;
+        for block in blocks {
+            for (needle, cs) in needles {
+                for from in froms {
+                    for dir in [Dir::Forward, Dir::Backward] {
+                        let want = reference(needle, cs, from, dir);
+                        let pattern = Pattern::Literal {
+                            needle,
+                            case_sensitive: cs,
+                        };
+                        let out =
+                            scan(&p, &pattern, dir, from, block, usize::MAX, &go()).expect("scan");
+                        let got: Vec<(u64, u64, usize)> = out
+                            .hits
+                            .into_iter()
+                            .map(|h| (h.offset, h.row, h.len))
+                            .collect();
+                        assert_eq!(
+                            got, want,
+                            "needle {needle:?} case_sensitive={cs} from={from} dir={dir:?} block={block}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, blocks.len() * needles.len() * froms.len() * 2);
+    }
 }

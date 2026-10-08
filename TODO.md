@@ -2868,8 +2868,48 @@ The shape that follows from the design already here:
 - **It reads what it does not hold.** That is the requirement that makes it
   different from today's search, which is over the rows in the buffer.
 
-Cost: one pass over the bytes at the measured 2.2 GB/s — ~1 s for 2 GiB, which is
-acceptable for a search and is the same order as the line-count scan §20.1
-already needs. And it is why search is the piece to get right before the SPLIT
-between "resident" and "not" is baked in: a search written against the buffer
-would have to be rewritten.
+Cost: **measured, release, on a ~4 MB log-shaped file at block 64 KiB: 678 MB/s
+forward and 573 MB/s backward** (the backward number pays the newline pre-pass
+over `[0, from)` as well as the matching pass). That is **~3 s for a 2 GiB log**,
+against the 2.2 GB/s and ~1 s this section first assumed — so the estimate was
+optimistic by about 3x, and the reason is the matcher rather than the shape: a
+literal is compared slice-per-byte-position, where skipping to the needle's
+first byte with `memchr` would pass over most positions without looking at them.
+The order is still right — one pass, seconds and not minutes — and the number is
+now the measured one instead of the assumed one. Backward will stay the slower
+direction until the sparse index (§20.1) removes its pre-pass.
+
+And it is why search is the piece to get right before the SPLIT between
+"resident" and "not" is baked in: a search written against the buffer would have
+to be rewritten.
+
+**Landed** as `src/logsearch.rs`, with no caller yet (the keys are a later
+increment): `scan(path, pattern, dir, from, block, max_hits, cancel)` streams
+the file's bytes in `block`-sized windows, forward or backward from `from`, with
+a **carry** of the previous window re-read so a match that straddles a block
+boundary is still found, and a hit deduplicated by offset so it is reported
+once. Memory is O(block) — one reusable `Vec<u8>` of `block + carry` and the
+bounded hit list — which is the §20.4 budget applied to the one operation that
+has to read the whole file.
+
+Three limits are stated in the header rather than hidden, because each is real:
+a regex match longer than one window is reported once but at the offset where it
+enters the LAST window rather than its true start (bounded patterns — which is
+every other regex test — are exact); `^`/`$` anchor at window edges, not file
+edges; and case folding is ASCII-only while matching is over bytes, so a needle
+that is half of a multibyte character matches those bytes.
+
+The row number is the count of `\n` before the offset. Forward from 0 the
+matching pass counts as it goes; anything else pays one counting pass over
+`[0, from)` first. **When §20.1's sparse index exists that pre-pass becomes a
+lookup and every scan is one pass** — nothing else in the module changes, which
+is what "the piece to get right before the split" meant.
+
+Tested against a **whole-file in-memory scan** over a 300-record corpus of the
+shapes a real log has — 9 block sizes from 1 byte to longer than the file, 8
+offsets, both directions, 5 needles, 720 comparisons — plus hand-computed cases
+for the block-boundary straddle at 6/7/8/9 in both directions, a multibyte
+needle split by a boundary, a regex spanning one, interrupt before and mid scan,
+CRLF rows, byte offsets and rows after multibyte content, and a ~4 MB scan that
+MEASURES its throughput and prints it without asserting on it (timing assertions
+flake).

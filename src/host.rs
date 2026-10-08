@@ -282,6 +282,39 @@ mod tests {
         );
     }
 
+    /// **Over an open prompt too.** A prompt takes every key for its line, and it took the
+    /// host's chord with them — an embedded pane could not be closed mid-search. The host's
+    /// chord comes back by name, the prompt stays open, and typing still goes into it.
+    #[test]
+    fn a_host_chord_comes_back_over_an_open_prompt() {
+        let mut ed = ed("abc");
+        let mut map = Keymap::new("host");
+        map.bind("C-q", "host-close-pane");
+        ed.push_keymap(map);
+        ed.prompt = Some(crate::prompt::Prompt {
+            kind: crate::prompt::PromptKind::Search,
+            text: String::new(),
+            cursor: 0,
+        });
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('q'), Mods::CTRL)),
+            KeyOutcome::Host("host-close-pane".into())
+        );
+        assert!(
+            ed.prompt.is_some(),
+            "the prompt stays open for the host to come back to"
+        );
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('b'), Mods::NONE)),
+            KeyOutcome::Handled
+        );
+        assert_eq!(
+            text(&ed),
+            vec!["abc"],
+            "typing went into the prompt, not the text"
+        );
+    }
+
     #[test]
     fn a_host_map_does_not_stop_typing_and_can_rebind() {
         let mut ed = ed("");

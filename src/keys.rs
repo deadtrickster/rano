@@ -80,6 +80,22 @@ impl Editor {
                 _ => self.completion_close(),
             }
         }
+        // **A host's own chord reaches the host even over a prompt.** A prompt takes
+        // every key for its line of text, and it used to take the host's keys too: a
+        // pane embedded in letibot could not be closed while a search was being typed.
+        // So a single key a host map binds to a *host* command (not an editor one,
+        // the same test dispatch makes) goes back to the host, and the prompt stays
+        // open for when the host hands the keyboard back. Everything else — typing,
+        // the prompt's own keys, an editor command a host rebound — is the prompt's.
+        if self.prompt.is_some() && !self.host_keymaps.is_empty() {
+            let host: Vec<&crate::keymap::Keymap> = self.host_keymaps.iter().rev().collect();
+            if let crate::keymap::Lookup::Command(name) =
+                crate::keymap::lookup(&host, &[Key::from_event(&key)])
+                && crate::commands::command(name).is_none()
+            {
+                return KeyOutcome::Host(name.to_string());
+            }
+        }
         // A prompt edits its own line of text; everything else — the text, a
         // list, a diff, a help page, M-x — goes through the keymaps.
         if let Some(p) = self.prompt.take() {

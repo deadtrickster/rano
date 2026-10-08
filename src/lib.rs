@@ -156,6 +156,11 @@ mod linecount;
 mod load_ctrl;
 mod loader;
 pub mod logblocks;
+// Log search (TODO.md §20.9): pattern-matching a file's BYTES in blocks,
+// forward or backward from an offset, interruptible — search over what the
+// FILE holds, not what the buffer does. `pub` because it has no caller in
+// the editor yet (like `todo.rs`), so it needs no `#[allow(dead_code)]`.
+pub mod logsearch;
 mod lsp;
 mod lsp_ctrl;
 mod picker;

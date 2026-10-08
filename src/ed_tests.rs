@@ -313,12 +313,9 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     assert!(ed.refresh_diff_view());
     assert!(!ed.refresh_diff_view());
     // Drawn over the text, with the header naming the view.
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
     ed.text_h = 8;
-    term.draw(|fr| ui::draw(fr, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     assert!(row(1).contains("Saving would change"), "{}", row(1));
     assert!((2..9).any(|y| row(y).contains("Xone")));
     press(&mut ed, KeyCode::Esc, KeyModifiers::NONE);
@@ -502,12 +499,8 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
 // ---- keymaps, M-x, help pages, which-key ----
 
 fn screen(ed: &Editor, w: u16, h: u16) -> Vec<String> {
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-    term.draw(|f| ui::draw(f, ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    (0..h)
-        .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
-        .collect()
+    let s = ui::Screen::of(ed, w, h);
+    (0..h).map(|y| s.row(y)).collect()
 }
 
 #[test]
@@ -3278,11 +3271,8 @@ fn open_prompt_shows_live_path_hints() {
     });
     assert!(ed.refresh_prompt_hints());
     assert!(!ed.refresh_prompt_hints());
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|f| ui::draw(f, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     // status row is 12 - 3 = 9; the hints sit on the row above it.
     assert!(row(8).contains("alpha.rs  beta.rs  sub/"), "{}", row(8));
     // Typing narrows them.
@@ -3315,11 +3305,8 @@ fn picker_draws_over_the_text() {
     b.name = Some(PathBuf::from("/tmp/rano_draw_b"));
     ed.buffers.push(BufferState::new(b));
     ed.open_buffer_list();
-    let backend = ratatui::backend::TestBackend::new(60, 12);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|f| ui::draw(f, &ed)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+    let buf = ui::Screen::of(&ed, 60, 12);
+    let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
     assert!(row(1).contains("Buffers (2)"), "{}", row(1));
     assert!(row(2).contains("rano_draw_a"), "{}", row(2));
     assert!(row(3).contains("rano_draw_b"), "{}", row(3));

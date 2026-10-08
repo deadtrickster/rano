@@ -38,12 +38,16 @@
 //! host.bind("C-q", "close-pane"); // not an editor command: handed back
 //! ed.push_keymap(host);
 //! ed.open_at(Path::new("src/main.rs"), 120, Some(5)).ok();
-//! let pane = ratatui::layout::Rect::new(0, 1, 80, 30);
-//! ed.set_area(Area::new(pane.x, pane.y, pane.width, pane.height));
-//! # let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 31)).unwrap();
+//! let pane = rano::render::Rect::new(0, 1, 80, 30);
+//! ed.set_area(pane.into());
+//! // The host's frame: one cell buffer for the whole screen, reused.
+//! let mut frame = rano::render::Buffer::empty(rano::render::Rect::new(0, 0, 80, 31));
 //! // Each iteration of the host's loop:
 //! if ed.tick(Instant::now()) {
-//!     terminal.draw(|f| ui::draw_in(f, pane, &ed)).unwrap();
+//!     // The editor paints its pane and says where the cursor goes
+//!     // (column, row); the host emits the frame, e.g. through
+//!     // `rano::term::Terminal::draw_buffer`.
+//!     let _cursor = ui::draw_in(&mut frame, pane, &ed);
 //! }
 //! let wait = ed.next_wakeup(); // poll input for at most this long
 //! # let _ = wait;

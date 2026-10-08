@@ -2,19 +2,33 @@ use crate::buffer::Pos;
 use crate::editor::Editor;
 use crate::lsp;
 use crate::prompt::{Prompt, prompt_label};
+use crate::render::{Buffer, Line, Paragraph, Rect, Span, Style, Widget};
+use crate::style::Role;
 use crate::width;
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
 
 /// Nano decorates the title bar, prompt bar and the key combos of the
 /// function bar with plain reverse video (ncurses A_REVERSE, SGR 7). That is
 /// what nano itself emits and it renders fine in tmux; the gray-on-gray bug
 /// came from an explicit white-on-darkgray pair, not from reverse video.
-const fn rev() -> Style {
-    Style::new().add_modifier(Modifier::REVERSED)
+/// [`Role::Bar`] is that reverse, named.
+fn rev() -> Style {
+    Style::of(Role::Bar)
+}
+
+/// The current row of a list or a popup: reverse too, but its own role.
+fn sel() -> Style {
+    Style::of(Role::Selected)
+}
+
+/// `line` in the one-row rectangle `r`, clipped to it.
+fn put(buf: &mut Buffer, r: Rect, line: &Line) {
+    line.render(r, buf);
+}
+
+/// `line` in `r` with `style` filling the whole of `r` under it — a bar that is
+/// reversed to the edge of the pane, not only as far as its text reaches.
+fn band(buf: &mut Buffer, r: Rect, line: Line, style: Style) {
+    Paragraph::new(line).style(style).render(r, buf);
 }
 
 /// The prompt row, nano-style (winio.c): the label sits fixed at column 0
@@ -216,11 +230,18 @@ fn line_to_spans(
     window: impl Iterator<Item = (usize, char)>,
     ed: &Editor,
     diags: &[lsp::Diagnostic],
-) -> Line<'static> {
-    let mut spans: Vec<crate::render::Span> = Vec::new();
+) -> Line {
+    let mut spans: Vec<Span> = Vec::new();
     let mut run = String::new();
-    let mut run_style: Option<crate::render::Style> = None;
+    let mut run_style: Option<Style> = None;
     for (col, ch) in window {
+        // A control character in the file is not drawn (the width layer counts
+        // it as no column), and it must not reach a span as text: an ESC there
+        // would start what the render core reads as an escape sequence and
+        // drops whole, taking the visible characters after it with it.
+        if ch.is_control() {
+            continue;
+        }
         let style = ed.char_style_with(Pos { row: abs_row, col }, diags);
         match run_style.take() {
             Some(s) if s == style => {
@@ -228,7 +249,7 @@ fn line_to_spans(
                 run_style = Some(s);
             }
             Some(s) => {
-                spans.push(crate::render::Span::styled(std::mem::take(&mut run), s));
+                spans.push(Span::styled(std::mem::take(&mut run), s));
                 run_style = Some(style);
                 run.push(ch);
             }
@@ -239,9 +260,9 @@ fn line_to_spans(
         }
     }
     if let Some(s) = run_style {
-        spans.push(crate::render::Span::styled(run, s));
+        spans.push(Span::styled(run, s));
     }
-    bridge(&crate::render::Line::new(spans))
+    Line::new(spans)
 }
 
 /// Most rows the live path suggestions take above a file-name prompt.
@@ -299,9 +320,11 @@ impl From<Rect> for crate::editor::Area {
     }
 }
 
-/// Draw the editor over the whole frame: the standalone binary's case.
-pub fn draw(f: &mut Frame, ed: &Editor) {
-    draw_in(f, f.area(), ed);
+/// Draw the editor over the whole buffer: the standalone binary's case.
+/// Returns where the terminal cursor goes, as for [`draw_in`].
+pub fn draw(buf: &mut Buffer, ed: &Editor) -> Option<(u16, u16)> {
+    let area = buf.area();
+    draw_in(buf, area, ed)
 }
 
 /// Draw the editor inside `area` only, for a host that gives it a pane.
@@ -312,10 +335,19 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
 /// are left as the host drew them. The terminal cursor is placed inside
 /// `area` too, or not at all.
 ///
+/// Every cell of `area` is painted — what the editor does not draw is blanked
+/// first — so a host can reuse one buffer across frames.
+///
+/// Returns the terminal cursor's cell as **`(column, row)`**, absolute (in the
+/// buffer's coordinates, like `area`), or `None` when the cursor should be
+/// hidden: over a list, a diff or a help page, or when the edit point is
+/// scrolled out of view. Note the order: `term::Terminal::draw_buffer` takes
+/// `(row, column)`.
+///
 /// Mouse events are mapped through the area last given to
 /// [`Editor::set_area`], not this one: drawing takes `&Editor` and cannot
 /// record it. A host passes the same rectangle to both.
-pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
+pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
     // Pane-relative rectangles: the layout below was written for a frame at
     // (0, 0), and this keeps it that way rather than threading `area.x` and
     // `area.y` through every row. The intersection is what makes "outside
@@ -324,13 +356,18 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     let at = |x: u16, y: u16, w: u16, h: u16| {
         Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
     };
-    let cursor_at = |f: &mut Frame, x: u16, y: u16| {
-        f.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
+    let mut cursor: Option<(u16, u16)> = None;
+    let mut cursor_at = |x: u16, y: u16| {
+        cursor = Some((area.x.saturating_add(x), area.y.saturating_add(y)));
     };
     let width = area.width;
+    // ratatui started every frame from a blank buffer; a reused one has the
+    // last frame in it, and the rows below only paint where they have text.
+    let whole = area.intersection(buf.area());
+    buf.fill(whole, &Style::new());
     if area.height < 5 {
-        f.render_widget(Paragraph::new("Terminal too small"), area);
-        return;
+        Paragraph::new("Terminal too small").render(whole, buf);
+        return None;
     }
     // title (1) + text + status (1) + bar (2)
     let text_h = (area.height - 4) as usize;
@@ -421,12 +458,10 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
     let flags = if bs.mark.is_some() { "M" } else { "" };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            title_line(width, &name, bs.buf.modified, flags),
-            rev(),
-        ))),
+    put(
+        buf,
         at(0, 0, width, 1),
+        &Line::styled(title_line(width, &name, bs.buf.modified, flags), rev()),
     );
 
     // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
@@ -445,11 +480,13 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
             // Every wrap segment of such a row is colored.
             let role = match diag_sev[i] {
                 Some(sev) => crate::editor::diag_role(sev),
-                None => crate::style::Role::Faint,
+                None => Role::Faint,
             };
-            nums.push(bridge(&crate::render::Line::styled(s, role)));
+            nums.push(Line::styled(s, role));
         }
-        f.render_widget(Paragraph::new(nums), at(0, 1, g as u16, text_h as u16));
+        for (i, l) in nums.iter().enumerate() {
+            put(buf, at(0, 1 + i as u16, g as u16, 1), l);
+        }
     }
 
     // ---- text area (rows 1..text_h) ----
@@ -499,10 +536,9 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
             None => lines.push(Line::default()),
         }
     }
-    f.render_widget(
-        Paragraph::new(lines),
-        at(g as u16, 1, view_w as u16, text_h as u16),
-    );
+    for (i, l) in lines.iter().enumerate() {
+        put(buf, at(g as u16, 1 + i as u16, view_w as u16, 1), l);
+    }
 
     // ---- completion popup (LSP) ----
     // A small unadorned block below the word being completed (above it when
@@ -561,14 +597,15 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
                 let label: String = it.label.chars().take(label_w).collect();
                 let pad = w - 2 - label.chars().count() - kind_tag(it.kind).len();
                 let style = if i + start == p.sel {
-                    rev()
+                    sel()
                 } else {
-                    Style::default()
+                    Style::new()
                 };
                 let text = format!(" {label}{}{}", " ".repeat(pad), kind_tag(it.kind));
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(text, style))),
+                put(
+                    buf,
                     at(x, y0 as u16 + i as u16, w as u16, 1),
+                    &Line::styled(text, style),
                 );
             }
         }
@@ -580,23 +617,22 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     // selection stays in view.
     if let Some(p) = &ed.picker {
         let area_text = at(0, 1, width, text_h as u16);
-        f.render_widget(Clear, area_text);
+        buf.fill(area_text, &Style::new());
         let header = format!(" {}   Enter: go  Esc: close", p.title);
-        f.render_widget(
-            Paragraph::new(Line::from(header)).style(rev()),
-            at(0, 1, width, 1),
-        );
+        band(buf, at(0, 1, width, 1), Line::from(header), rev());
         let rows = crate::picker::list_rows(text_h);
         let start = (p.sel + 1).saturating_sub(rows);
         for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
             let style = if start + k == p.sel {
-                rev()
+                sel()
             } else {
-                Style::default()
+                Style::new()
             };
-            f.render_widget(
-                Paragraph::new(Line::from(format!(" {}", it.label))).style(style),
+            band(
+                buf,
                 at(0, 2 + k as u16, width, 1),
+                Line::from(format!(" {}", it.label)),
+                style,
             );
         }
     }
@@ -607,14 +643,11 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     // library's renderers; they are drawn as they are.
     if let Some(v) = &ed.diff_view {
         let area_text = at(0, 1, width, text_h as u16);
-        f.render_widget(Clear, area_text);
-        f.render_widget(
-            Paragraph::new(Line::from(v.header())).style(rev()),
-            at(0, 1, width, 1),
-        );
+        buf.fill(area_text, &Style::new());
+        band(buf, at(0, 1, width, 1), Line::from(v.header()), rev());
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(Paragraph::new(bridge(l)), at(0, 2 + k as u16, width, 1));
+            put(buf, at(0, 2 + k as u16, width, 1), l);
         }
     }
 
@@ -640,21 +673,21 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
         if let Some(rows) = flash.or(hints) {
             let top = status_row - rows.len() as u16;
             for (k, r) in rows.iter().enumerate() {
-                f.render_widget(
-                    Paragraph::new(Line::from(r.as_str())).style(rev()),
+                band(
+                    buf,
                     at(0, top + k as u16, width, 1),
+                    Line::from(r.as_str()),
+                    rev(),
                 );
             }
         }
         let (text, _) = prompt_text(p, width as usize);
         let mut s: Vec<char> = text.chars().collect();
         s.resize(width as usize, ' ');
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                s.into_iter().collect::<String>(),
-                rev(),
-            ))),
+        put(
+            buf,
             at(0, status_row, width, 1),
+            &Line::styled(s.into_iter().collect::<String>(), rev()),
         );
     } else {
         // Outside prompts the cursor position sits at the right edge of the
@@ -674,18 +707,17 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
             } else {
                 (msg.clone(), start)
             };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw(" ".repeat(pos)),
-                    Span::styled(text, rev()),
-                ])),
+            put(
+                buf,
                 at(0, status_row, (avail as u16).max(1), 1),
+                &Line::new(vec![Span::raw(" ".repeat(pos)), Span::styled(text, rev())]),
             );
         }
         let x = (width as usize).saturating_sub(pos_w);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::raw(pos_txt))),
+        put(
+            buf,
             at(x as u16, status_row, pos_w as u16, 1),
+            &Line::raw(pos_txt),
         );
     }
 
@@ -733,10 +765,7 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
                         spans.push(Span::raw(" ".repeat(w)));
                     }
                 }
-                f.render_widget(
-                    Paragraph::new(Line::from(spans)),
-                    at(0, area.height - 2 + r, width, 1),
-                );
+                put(buf, at(0, area.height - 2 + r, width, 1), &Line::new(spans));
             }
         }
     }
@@ -746,12 +775,12 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     // the diff, which has nothing to point at.
     if let Some(p) = &ed.palette {
         let col = 4 + p.query.chars().count();
-        cursor_at(f, (col as u16).min(width.saturating_sub(1)), status_row);
+        cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
     } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
         if let Some(p) = &ed.prompt {
             // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);
-            cursor_at(f, (col as u16).min(width.saturating_sub(1)), status_row);
+            cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
         } else {
             // M-\: the cursor's pane row is its VISUAL row.
             let cy = if ed.wrap {
@@ -776,7 +805,7 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
                 } else {
                     (g + disp.saturating_sub(bs.scroll_x)) as u16
                 };
-                cursor_at(f, cx.min(width.saturating_sub(1)), cy as u16 + 1);
+                cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + 1);
             }
         }
     }
@@ -784,44 +813,40 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     // ---- help pages (over the text, like the list) ----
     if let Some(v) = &ed.info {
         let area_text = at(0, 1, width, text_h as u16);
-        f.render_widget(Clear, area_text);
+        buf.fill(area_text, &Style::new());
         let header = format!(
             " {}   q: close  \u{2191}\u{2193} PgUp PgDn: scroll",
             v.title
         );
-        f.render_widget(
-            Paragraph::new(Line::from(header)).style(rev()),
-            at(0, 1, width, 1),
-        );
+        band(buf, at(0, 1, width, 1), Line::from(header), rev());
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(Paragraph::new(bridge(l)), at(0, 2 + k as u16, width, 1));
+            put(buf, at(0, 2 + k as u16, width, 1), l);
         }
     }
 
     // ---- M-x: the query on the status row, candidates above it ----
     if let Some(p) = &ed.palette {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+        put(
+            buf,
+            at(0, status_row, width, 1),
+            &Line::styled(
                 format!(
                     "M-x {:<w$}",
                     p.query,
                     w = (width as usize).saturating_sub(4)
                 ),
                 rev(),
-            ))),
-            at(0, status_row, width, 1),
+            ),
         );
         let rows = text_h.min(14).min(p.items.len().max(1));
         let top = status_row.saturating_sub(rows as u16);
-        f.render_widget(Clear, at(0, top, width, rows as u16));
+        buf.fill(at(0, top, width, rows as u16), &Style::new());
         if p.items.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "  no command matches",
-                    Style::new().add_modifier(Modifier::DIM),
-                )),
+            put(
+                buf,
                 at(0, top, width, 1),
+                &Line::styled("  no command matches", Role::Faint),
             );
         }
         let start = (p.sel + 1).saturating_sub(rows);
@@ -837,21 +862,19 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
                 continue;
             };
             let keys = ed.keys_for(name);
-            let mut spans = vec![
+            let line = Line::new(vec![
                 Span::raw(format!(" {:<tw$}  ", c.title)),
-                Span::styled(format!("{keys:<14} "), Style::new().fg(Color::Cyan)),
-                Span::styled(c.doc.to_string(), Style::new().add_modifier(Modifier::DIM)),
-            ];
-            if start + k == p.sel {
-                for s in &mut spans {
-                    s.style = s.style.patch(rev());
-                }
-            }
-            let mut line = Line::from(spans);
-            if start + k == p.sel {
-                line = line.style(rev());
-            }
-            f.render_widget(Paragraph::new(line), at(0, top + k as u16, width, 1));
+                Span::role(format!("{keys:<14} "), Role::Key),
+                Span::role(c.doc.to_string(), Role::Faint),
+            ]);
+            // The selected row is reversed to the pane's edge, under the key
+            // colour and the faint doc, which keep theirs.
+            let style = if start + k == p.sel {
+                sel()
+            } else {
+                Style::new()
+            };
+            band(buf, at(0, top + k as u16, width, 1), line, style);
         }
     }
 
@@ -859,45 +882,21 @@ pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
     if let Some((m, keys)) = ed.pending_card() {
         let nano = ed.config.nano_keys;
         let entries = crate::commands::entries_of(m, nano);
-        let rows = crate::help::card_rows(
-            &entries,
-            width as usize,
-            &crate::render::Style::of(crate::style::Role::Key),
-        );
+        let rows = crate::help::card_rows(&entries, width as usize, &Style::of(Role::Key));
         let n = rows.len().min(text_h.saturating_sub(1));
         let top = status_row.saturating_sub(n as u16 + 1);
-        f.render_widget(Clear, at(0, top, width, n as u16 + 1));
+        buf.fill(at(0, top, width, n as u16 + 1), &Style::new());
         let title = format!(
             " {} {}-   ESC: cancel",
             m.name,
             crate::help::notation(nano, &keys)
         );
-        f.render_widget(
-            Paragraph::new(Line::from(title)).style(rev()),
-            at(0, top, width, 1),
-        );
+        band(buf, at(0, top, width, 1), Line::from(title), rev());
         for (k, l) in rows.into_iter().take(n).enumerate() {
-            f.render_widget(
-                Paragraph::new(bridge(&l)),
-                at(0, top + 1 + k as u16, width, 1),
-            );
+            put(buf, at(0, top + 1 + k as u16, width, 1), &l);
         }
     }
-}
-
-/// A render-core line as a ratatui one, under the colour palette. Transitional:
-/// the renderers paint `crate::render` lines and this frame is still ratatui's;
-/// it goes when the editor draws into a `render::Buffer`.
-fn bridge(l: &crate::render::Line) -> Line<'static> {
-    Line::from(
-        l.spans
-            .iter()
-            .map(|s| {
-                let look = l.style.patch(&s.style).look(crate::style::Palette::Colour);
-                Span::styled(s.content.clone(), look.ratatui())
-            })
-            .collect::<Vec<_>>(),
-    )
+    cursor
 }
 
 /// Build the title bar string: program name left, file name centered in the
@@ -940,16 +939,51 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
     s.into_iter().collect()
 }
 
+/// A frame drawn for a test: the cells and where the cursor went, read the way
+/// the tests read ratatui's `TestBackend` (`screen[(x, y)].symbol`).
+#[cfg(test)]
+pub(crate) struct Screen {
+    pub buf: Buffer,
+    pub cursor: Option<(u16, u16)>,
+}
+
+#[cfg(test)]
+impl Screen {
+    /// `ed` drawn over a fresh `w` × `h` buffer.
+    pub(crate) fn of(ed: &Editor, w: u16, h: u16) -> Screen {
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        let cursor = draw(&mut buf, ed);
+        Screen { buf, cursor }
+    }
+
+    pub(crate) fn cell(&self, (x, y): (u16, u16)) -> Option<&crate::render::Cell> {
+        self.buf.cell(x, y)
+    }
+
+    /// Row `y`'s text, full width.
+    pub(crate) fn row(&self, y: u16) -> String {
+        self.buf
+            .to_plain_lines()
+            .get((y - self.buf.area().y) as usize)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<(u16, u16)> for Screen {
+    type Output = crate::render::Cell;
+    fn index(&self, at: (u16, u16)) -> &crate::render::Cell {
+        self.cell(at).expect("a cell inside the screen")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buffer;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::layout::Position;
 
     fn ed(text: &str) -> Editor {
-        let mut buf = Buffer::new();
+        let mut buf = crate::buffer::Buffer::new();
         if !text.is_empty() {
             buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         }
@@ -967,7 +1001,7 @@ mod tests {
     /// An editor over a NAMED buffer, so `detect` finds a language and the
     /// highlighter runs — the draw tests need coloured cells.
     fn ed_named(name: &str, text: &str) -> Editor {
-        let mut buf = Buffer::new();
+        let mut buf = crate::buffer::Buffer::new();
         buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from(name));
         let mut ed = Editor::new(buf, crate::config::Config::default());
@@ -1037,10 +1071,7 @@ mod tests {
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "b");
-        assert_eq!(
-            line.spans[1].style,
-            Style::default().fg(Color::White).bg(Color::DarkGray)
-        );
+        assert_eq!(line.spans[1].style, Style::of(Role::Selection));
         assert_eq!(line.spans[2].content, "c");
     }
 
@@ -1088,12 +1119,7 @@ mod tests {
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[0].style, Style::default());
         assert_eq!(line.spans[1].content, "bc");
-        assert_eq!(
-            line.spans[1].style,
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::UNDERLINED)
-        );
+        assert_eq!(line.spans[1].style, Style::of(Role::DiagError).underline());
     }
 
     // ---------- text_window ----------
@@ -1148,10 +1174,7 @@ mod tests {
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "f");
         assert_eq!(line.spans[1].content, "g");
-        assert_eq!(
-            line.spans[1].style,
-            Style::default().fg(Color::White).bg(Color::DarkGray)
-        );
+        assert_eq!(line.spans[1].style, Style::of(Role::Selection));
         assert_eq!(line.spans[2].content, "h");
     }
 
@@ -1207,12 +1230,11 @@ mod tests {
             row: 0,
             col: 0,
         });
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
         let row = |y: u16| -> String {
             (0..40)
-                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
         // The popup sits below the word's row (text starts at pane row 1):
@@ -1221,11 +1243,7 @@ mod tests {
         assert!(row(3).contains("println!"));
         // The selected row carries reverse video (popup starts at x = gutter).
         let cell = buf.cell((3, 3)).unwrap();
-        assert!(
-            cell.style()
-                .add_modifier
-                .contains(ratatui::style::Modifier::REVERSED)
-        );
+        assert_eq!(cell.style.top(), Role::Selected);
         // The fn kind tag renders at the row's right edge.
         assert!(row(2).contains("fn"));
     }
@@ -1234,23 +1252,22 @@ mod tests {
     fn idle_status_row_shows_cursor_position() {
         let mut e = ed("hello\nworld\n");
         e.bs_mut().cursor = Pos { row: 1, col: 3 };
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
         let row = |y: u16| -> String {
             (0..40)
-                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
         // Status row = height-3 = 21: "Ln 2, Col 4" right-aligned.
         assert!(row(21).ends_with("Ln 2, Col 4"), "row21={:?}", row(21));
         // A transient message centers left of it; both are visible.
         e.flash("saved");
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, terminal.buf.area().width, terminal.buf.area().height);
+        let buf = &terminal;
         let row = |y: u16| -> String {
             (0..40)
-                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
         assert!(row(21).contains("saved"));
@@ -1262,12 +1279,11 @@ mod tests {
         // nano's algorithm: total = min(29, ((80+40)/20)*2) = 12 items,
         // per_row 6, itemw 13, column-major (item 1 lands bottom-left).
         let e = ed("x");
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 80, 24);
+        let buf = &terminal;
         let row = |y: u16| -> String {
             (0..80)
-                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
         let top = row(22);
@@ -1280,11 +1296,11 @@ mod tests {
         // key_notation = nano: nano's own bar.
         let mut e = ed("x");
         e.config.nano_keys = true;
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, terminal.buf.area().width, terminal.buf.area().height);
+        let buf = &terminal;
         let row = |y: u16| -> String {
             (0..80)
-                .map(|x| buf.cell((x, y)).unwrap().symbol())
+                .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
         assert!(row(22).starts_with("^G Help…"), "{}", row(22));
@@ -1311,13 +1327,13 @@ mod tests {
                 severity: 2,
             },
         ];
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf.cell((1, 1)).unwrap().fg, Color::Red);
-        assert_eq!(buf.cell((1, 2)).unwrap().fg, Color::Yellow);
-        // A row with no diagnostic is faint: dim, in the text's own colour.
-        assert!(buf.cell((1, 3)).unwrap().modifier.contains(Modifier::DIM));
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
+        let role = |y| buf.cell((1, y)).unwrap().style.top();
+        assert_eq!(role(1), Role::DiagError);
+        assert_eq!(role(2), Role::DiagWarning);
+        // A row with no diagnostic is faint.
+        assert_eq!(role(3), Role::Faint);
     }
 
     #[test]
@@ -1335,31 +1351,25 @@ mod tests {
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "a");
         assert_eq!(line.spans[1].content, "       ");
-        assert_eq!(
-            line.spans[1].style,
-            Style::default().fg(Color::White).bg(Color::DarkGray)
-        );
+        assert_eq!(line.spans[1].style, Style::of(Role::Selection));
         assert_eq!(line.spans[2].content, "b");
     }
 
-    // ---------- draw (TestBackend) ----------
+    // ---------- draw (into a render::Buffer) ----------
 
     #[test]
     fn draw_gutter_layout_and_cursor() {
         let mut e = ed("aa\nbb\ncc\ndd\nee\nff\ngg\nhh\nii\njj\nkk\nll");
         e.show_line_numbers = true;
         e.bs_mut().cursor = Pos { row: 2, col: 1 };
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
+        let terminal = Screen::of(&e, 40, 24);
         let g = gutter_width(12); // 3
         assert_eq!(g, 3);
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1"); // " 1 "
-        assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "a"); // text at x = g
-        terminal
-            .backend_mut()
-            .assert_cursor_position(Position::new(4, 3)); // g + disp(1) - 0
+        let buf = &terminal;
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol.as_str(), "1"); // " 1 "
+        assert_eq!(buf.cell((2, 1)).unwrap().symbol.as_str(), " ");
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol.as_str(), "a"); // text at x = g
+        assert_eq!(terminal.cursor, Some((4, 3))); // g + disp(1) - 0
     }
 
     #[test]
@@ -1369,27 +1379,24 @@ mod tests {
         e.text_w = 40; // match the backend; the run loop keeps these in sync
         e.ensure_wrap_prefix();
         e.bs_mut().cursor = Pos { row: 0, col: 40 };
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
         // view_w = 40 - 3 = 37: pane row 1 renders 37 a's, pane row 2 the
         // remaining 13.
-        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((39, 1)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((3, 2)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((15, 2)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((16, 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((39, 1)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((3, 2)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((15, 2)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((16, 2)).unwrap().symbol.as_str(), " ");
         // Gutter: the number sits on the first wrap segment only.
-        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1");
-        assert_eq!(buf.cell((1, 2)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((1, 3)).unwrap().symbol(), "2");
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol.as_str(), "1");
+        assert_eq!(buf.cell((1, 2)).unwrap().symbol.as_str(), " ");
+        assert_eq!(buf.cell((1, 3)).unwrap().symbol.as_str(), "2");
         // Rows past the end of the buffer stay blank (no stale cells).
-        assert_eq!(buf.cell((3, 5)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((1, 5)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((3, 5)).unwrap().symbol.as_str(), " ");
+        assert_eq!(buf.cell((1, 5)).unwrap().symbol.as_str(), " ");
         // Cursor at (0, 40): visual row 1, display col 40 → x = 3 + 40 % 37.
-        terminal
-            .backend_mut()
-            .assert_cursor_position(Position::new(6, 2));
+        assert_eq!(terminal.cursor, Some((6, 2)));
     }
 
     #[test]
@@ -1404,23 +1411,22 @@ mod tests {
         e.text_w = 80;
         e.ensure_wrap_prefix();
         e.bs_mut().scroll = 3;
-        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 80, 40);
+        let buf = &terminal;
         // view_w = 80 - 3 = 77. At scroll 3 the viewport shows segments
         // 3..10 (8 rows, y=1..8), then "short" at y=9 — no blank gap.
-        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol.as_str(), "a");
         assert_eq!(
-            buf.cell((79, 8)).unwrap().symbol(),
+            buf.cell((79, 8)).unwrap().symbol.as_str(),
             "a",
             "last segment row full"
         );
         assert_eq!(
-            buf.cell((3, 9)).unwrap().symbol(),
+            buf.cell((3, 9)).unwrap().symbol.as_str(),
             "s",
             "next line directly below"
         );
-        assert_eq!(buf.cell((4, 9)).unwrap().symbol(), "h");
+        assert_eq!(buf.cell((4, 9)).unwrap().symbol.as_str(), "h");
     }
 
     #[test]
@@ -1432,21 +1438,20 @@ mod tests {
         e.show_line_numbers = true;
         e.text_w = 40;
         e.ensure_wrap_prefix();
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
         // view_w = 40 - 3 = 37. Row 0: tab = display cols 0..8, then 40 a's
         // at 8..48 → segment 0 = 8 spaces + 29 a's, segment 1 = 11 a's.
-        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((10, 1)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((11, 1)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((39, 1)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((3, 2)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((13, 2)).unwrap().symbol(), "a");
-        assert_eq!(buf.cell((14, 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((3, 1)).unwrap().symbol.as_str(), " ");
+        assert_eq!(buf.cell((10, 1)).unwrap().symbol.as_str(), " ");
+        assert_eq!(buf.cell((11, 1)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((39, 1)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((3, 2)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((13, 2)).unwrap().symbol.as_str(), "a");
+        assert_eq!(buf.cell((14, 2)).unwrap().symbol.as_str(), " ");
         // Gutter number on the first segment only.
-        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "1");
-        assert_eq!(buf.cell((1, 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol.as_str(), "1");
+        assert_eq!(buf.cell((1, 2)).unwrap().symbol.as_str(), " ");
     }
 
     // ---------- width: what a character occupies ----------
@@ -1454,23 +1459,15 @@ mod tests {
     #[test]
     fn draw_colours_markdown_constructs_on_screen() {
         // Not just `style_at`: the palette has to reach the cells. A markdown
-        // buffer with one of each construct, drawn to a TestBackend.
+        // buffer with one of each construct, drawn to a buffer.
         let src = "# H\n\n**bold** `code` *it*\n\n```rust\nlet x = 1;\n```\n";
         let mut e = ed_named("x.md", src);
         e.show_line_numbers = false;
-        let mut terminal = Terminal::new(TestBackend::new(30, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
-        let cell = |x: u16, y: u16| {
-            let c = buf.cell((x, y)).unwrap();
-            (c.fg, c.modifier)
-        };
-        let want = |s: crate::render::Style| {
-            let r = s.look(crate::style::Palette::Colour).ratatui();
-            (r.fg.unwrap_or(Color::Reset), r.add_modifier)
-        };
-        use crate::render::Style as S;
-        use crate::style::Role;
+        let terminal = Screen::of(&e, 30, 24);
+        let buf = &terminal;
+        let cell = |x: u16, y: u16| buf.cell((x, y)).unwrap().style.clone();
+        let want = |s: Style| s;
+        use Style as S;
         // Row 3 (pane row 3): "**bold** `code` *it*" — the inner text of each
         // construct, and the delimiters, all distinct.
         assert_eq!(cell(2, 3), want(S::of(Role::Strong)), "strong text");
@@ -1540,10 +1537,9 @@ mod tests {
         e.show_line_numbers = false;
         e.text_w = 4;
         e.ensure_wrap_prefix();
-        let mut terminal = Terminal::new(TestBackend::new(4, 12)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
-        let sym = |x: u16, y: u16| buf.cell((x, y)).unwrap().symbol().to_string();
+        let terminal = Screen::of(&e, 4, 12);
+        let buf = &terminal;
+        let sym = |x: u16, y: u16| buf.cell((x, y)).unwrap().symbol.as_str().to_string();
         assert_eq!(sym(0, 1), "中");
         assert_eq!(sym(2, 1), "文");
         assert_eq!(sym(0, 2), "字");
@@ -1563,31 +1559,27 @@ mod tests {
         e.show_line_numbers = false;
         e.text_w = 1;
         e.ensure_wrap_prefix();
-        let mut terminal = Terminal::new(TestBackend::new(1, 12)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
+        let terminal = Screen::of(&e, 1, 12);
+        let buf = &terminal;
         // One cell per row, each holding a whole base+accent grapheme.
         for y in 1..=3 {
             assert_eq!(
-                buf.cell((0, y)).unwrap().symbol(),
+                buf.cell((0, y)).unwrap().symbol.as_str(),
                 "e\u{301}",
                 "row {y} split the cluster"
             );
         }
-        assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "x");
+        assert_eq!(buf.cell((0, 4)).unwrap().symbol.as_str(), "x");
     }
 
     #[test]
     fn draw_no_gutter_text_at_x0() {
         let mut e = ed("aa\nbb");
         e.show_line_numbers = false;
-        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
-        terminal.draw(|f| draw(f, &e)).unwrap();
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "a");
-        terminal
-            .backend_mut()
-            .assert_cursor_position(Position::new(0, 1));
+        let terminal = Screen::of(&e, 40, 24);
+        let buf = &terminal;
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol.as_str(), "a");
+        assert_eq!(terminal.cursor, Some((0, 1)));
     }
 
     // ---- drawing into a host's pane (draw_in) ----
@@ -1603,28 +1595,22 @@ mod tests {
 
     /// Paint the whole frame with `#`, then the editor into `PANE`, as a host
     /// with its own content around the pane would.
-    fn draw_pane(e: &Editor) -> Terminal<TestBackend> {
-        let mut t = Terminal::new(TestBackend::new(60, 30)).unwrap();
-        t.draw(|f| {
-            let all = f.area();
-            for y in all.top()..all.bottom() {
-                for x in all.left()..all.right() {
-                    f.buffer_mut()[(x, y)].set_symbol("#");
-                }
-            }
-            draw_in(f, PANE, e);
-        })
-        .unwrap();
-        t
+    fn draw_pane(e: &Editor) -> Screen {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 30));
+        for y in 0..30 {
+            buf.set_str(0, y, &"#".repeat(60), &Style::new(), 60);
+        }
+        let cursor = draw_in(&mut buf, PANE, e);
+        Screen { buf, cursor }
     }
 
-    fn outside_is_untouched(t: &Terminal<TestBackend>) {
-        let buf = t.backend().buffer();
+    fn outside_is_untouched(t: &Screen) {
+        let buf = t;
         for y in 0..30u16 {
             for x in 0..60u16 {
-                if !PANE.contains(Position::new(x, y)) {
+                if !PANE.contains(x, y) {
                     assert_eq!(
-                        buf[(x, y)].symbol(),
+                        buf[(x, y)].symbol.as_str(),
                         "#",
                         "cell ({x}, {y}) outside the pane"
                     );
@@ -1639,20 +1625,24 @@ mod tests {
         e.show_line_numbers = true;
         e.set_area(PANE.into());
         e.bs_mut().cursor = Pos { row: 2, col: 1 };
-        let mut t = draw_pane(&e);
+        let t = draw_pane(&e);
         outside_is_untouched(&t);
         let g = gutter_width(4) as u16;
-        let buf = t.backend().buffer();
+        let buf = &t;
         // Text starts on the pane's second row, after its gutter.
-        assert_eq!(buf[(PANE.x + g, PANE.y + 1)].symbol(), "a");
-        assert_eq!(buf[(PANE.x + g, PANE.y + 3)].symbol(), "c");
+        assert_eq!(buf[(PANE.x + g, PANE.y + 1)].symbol.as_str(), "a");
+        assert_eq!(buf[(PANE.x + g, PANE.y + 3)].symbol.as_str(), "c");
         // The status row's position readout sits at the pane's right edge.
         let status: String = (PANE.x..PANE.right())
-            .map(|x| buf[(x, PANE.y + PANE.height - 3)].symbol().to_string())
+            .map(|x| {
+                buf[(x, PANE.y + PANE.height - 3)]
+                    .symbol
+                    .as_str()
+                    .to_string()
+            })
             .collect();
         assert!(status.trim_end().ends_with("Ln 3, Col 2"), "{status:?}");
-        t.backend_mut()
-            .assert_cursor_position(Position::new(PANE.x + g + 1, PANE.y + 1 + 2));
+        assert_eq!(t.cursor, Some((PANE.x + g + 1, PANE.y + 1 + 2)));
     }
 
     #[test]
@@ -1664,16 +1654,15 @@ mod tests {
             text: "ab".into(),
             cursor: 2,
         });
-        let mut t = draw_pane(&e);
+        let t = draw_pane(&e);
         outside_is_untouched(&t);
         let row = PANE.y + PANE.height - 3;
-        let buf = t.backend().buffer();
+        let buf = &t;
         let line: String = (PANE.x..PANE.right())
-            .map(|x| buf[(x, row)].symbol().to_string())
+            .map(|x| buf[(x, row)].symbol.as_str().to_string())
             .collect();
         assert!(line.starts_with("Search: ab"), "{line:?}");
-        t.backend_mut()
-            .assert_cursor_position(Position::new(PANE.x + 10, row));
+        assert_eq!(t.cursor, Some((PANE.x + 10, row)));
     }
 
     #[test]

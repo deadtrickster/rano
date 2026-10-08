@@ -225,8 +225,6 @@ mod tests {
     use crate::buffer::Pos;
     use crate::config;
     use crate::editor::Editor;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -296,12 +294,7 @@ mod tests {
         ed.start_load(&t.0).expect("start");
         // Draw WITHOUT polling: this is the very first frame, before any row
         // has been adopted.
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
-        terminal.draw(|f| crate::ui::draw(f, &ed)).expect("draw");
-        let buf = terminal.backend().buffer();
-        let status: String = (0..80)
-            .map(|x| buf.cell((x, 21)).unwrap().symbol())
-            .collect();
+        let status = crate::ui::Screen::of(&ed, 80, 24).row(21);
         assert!(
             status.contains("Reading"),
             "the status line should say so, got {status:?}"

@@ -67,10 +67,9 @@ pub(crate) struct UndoStep {
 
 /// A rectangle of terminal cells: where the editor sits on the screen.
 ///
-/// rano's own type rather than ratatui's `Rect` on purpose: ratatui is only
-/// how rano draws today, and the editor's logic (sizing, mouse mapping) and
-/// a host's calls into it should not have to change when that does. The
-/// drawing side converts (`From<ratatui::layout::Rect>`, in `ui`).
+/// The editor's own type rather than the drawing side's rectangle on purpose:
+/// the editor's logic (sizing, mouse mapping) and a host's calls into it should
+/// not change with how it draws. `ui` converts (`From<render::Rect>`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Area {
     pub x: u16,

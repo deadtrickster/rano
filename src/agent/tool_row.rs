@@ -246,9 +246,9 @@ impl ToolRow {
         head.spans.push(Span::styled(subject, subject_style));
         head.spans
             .push(Span::role(format!(" · {word}"), outcome_role));
-        if !took.is_empty() {
-            head.spans.push(Span::role(took.clone(), Role::Faint));
-        }
+        // Pushed even when empty: a host printing strings writes the faint run's open and
+        // close around nothing, the bytes letibot's header always carried there.
+        head.spans.push(Span::role(took.clone(), Role::Faint));
 
         // A result of one line goes ON the header. `▸ Read .gitignore · ok · 1.1s · /target`
         // is one row where `▸ Read .gitignore · ok · 1 line` over `  /target` was two, and the
@@ -492,6 +492,18 @@ mod tests {
     }
 
     /// `an_operators_tool_row_is_the_models_row_with_the_persons_own_mark_on_it`.
+    /// letibot `app/tests/tools.rs::a_models_tool_row_is_unmarked_and_its_paint_has_not_moved`,
+    /// byte for byte: a row with no duration still writes the faint run where the duration
+    /// would be.
+    #[test]
+    fn a_models_tool_row_header_is_the_bytes_it_has_always_been() {
+        assert_eq!(
+            bang(false).lines(120)[0].to_ansi(Palette::Colour),
+            "  \u{1b}[2m▾\u{1b}[0m\u{1b}[2m Ran \u{1b}[0m(bang-1)\u{1b}[2m · ok\u{1b}[0m\
+             \u{1b}[2m\u{1b}[0m\u{1b}[1m · 60 lines\u{1b}[0m"
+        );
+    }
+
     #[test]
     fn an_operators_tool_row_is_the_models_row_with_the_persons_own_mark_on_it() {
         let mine = bang(true).lines(120);

@@ -694,7 +694,7 @@ fn code_span_inner(node: &Node) -> Option<(usize, usize)> {
         .iter()
         .filter(|c| c.kind == "code_span_delimiter");
     let first = delims.next()?;
-    let last = delims.last().unwrap_or(first);
+    let last = delims.next_back().unwrap_or(first);
     Some((first.end, last.start.max(first.end)))
 }
 
@@ -964,13 +964,13 @@ fn collect_blocks(
         if fences.iter().any(|f| c.start >= f.open && c.start < f.end) {
             continue;
         }
-        if let Some(block) = block_of(c, src, spans, fences) {
+        if let Some(block) = block_of(c, src, spans) {
             blocks.push((c.start, block));
         }
     }
 }
 
-fn block_of(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Option<Block> {
+fn block_of(node: &Node, src: &str, spans: &[Span]) -> Option<Block> {
     match node.kind.as_str() {
         "atx_heading" | "setext_heading" => {
             let level = heading_level(node);
@@ -985,7 +985,7 @@ fn block_of(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Option<
         }),
         "block_quote" => {
             let mut lines = Vec::new();
-            subtree_lines(node, src, spans, fences, &mut lines);
+            subtree_lines(node, src, spans, &mut lines);
             if lines.is_empty() {
                 lines.push(Vec::new());
             }
@@ -994,7 +994,7 @@ fn block_of(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Option<
         // Only an indented block can reach here: a *fenced* one was masked away before the
         // parse, and `collect_blocks` emits it from the scan.
         "indented_code_block" => Some(code_block(node, src)),
-        "list" => Some(list_block(node, src, spans, fences)),
+        "list" => Some(list_block(node, src, spans)),
         "pipe_table" => Some(table_block(node, src, spans)),
         "thematic_break" => Some(Block::Rule),
         // Raw HTML and anything the grammar grew that this projection does not know:
@@ -1070,13 +1070,7 @@ fn lines_of_node(node: &Node, src: &str, spans: &[Span]) -> Vec<Vec<Run>> {
 /// everything a reader would see. The cost is that a quoted fence is quote prose rather
 /// than a coloured code box: the model cannot say "this line is code" inside a quote,
 /// and showing the ``` markers instead would be worse.
-fn subtree_lines(
-    node: &Node,
-    src: &str,
-    spans: &[Span],
-    fences: &[Fence],
-    out: &mut Vec<Vec<Run>>,
-) {
+fn subtree_lines(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<Run>>) {
     for c in &node.children {
         match c.kind.as_str() {
             // Structure and link targets: not text.
@@ -1122,7 +1116,7 @@ fn subtree_lines(
                     }
                 }
             }
-            _ => subtree_lines(c, src, spans, fences, out),
+            _ => subtree_lines(c, src, spans, out),
         }
     }
 }
@@ -1152,10 +1146,10 @@ fn lines_of_ranges(src: &str, spans: &[Span], ranges: &[(usize, usize)], out: &m
 /// have already been filtered, so a nested list is not in here, but the fallback that
 /// catches a leaf without children has to apply to each node rather than to the item as
 /// a whole.
-fn item_runs(body: &[Node], src: &str, spans: &[Span], fences: &[Fence]) -> Vec<Run> {
+fn item_runs(body: &[Node], src: &str, spans: &[Span]) -> Vec<Run> {
     let mut lines = Vec::new();
     for n in body {
-        subtree_lines_one(n, src, spans, fences, &mut lines);
+        subtree_lines_one(n, src, spans, &mut lines);
     }
     let mut out: Vec<Run> = Vec::new();
     for (i, line) in lines.into_iter().enumerate() {
@@ -1171,15 +1165,9 @@ fn item_runs(body: &[Node], src: &str, spans: &[Span], fences: &[Fence]) -> Vec<
 
 /// [`subtree_lines`] for a single detached node: the node's own contribution, then
 /// each of its children's.
-fn subtree_lines_one(
-    node: &Node,
-    src: &str,
-    spans: &[Span],
-    fences: &[Fence],
-    out: &mut Vec<Vec<Run>>,
-) {
+fn subtree_lines_one(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<Run>>) {
     let before = out.len();
-    subtree_lines(node, src, spans, fences, out);
+    subtree_lines(node, src, spans, out);
     // A node with no children of its own contributes its whole text — the case a
     // detached leaf (a `paragraph` stripped of its `inline`) falls into.
     if out.len() == before {
@@ -1239,7 +1227,7 @@ fn text_without_continuations(node: &Node, src: &str) -> String {
     out
 }
 
-fn list_block(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Block {
+fn list_block(node: &Node, src: &str, spans: &[Span]) -> Block {
     let mut items = Vec::new();
     let mut indents = Vec::new();
     let mut ordered = false;
@@ -1249,7 +1237,6 @@ fn list_block(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Block
         node,
         src,
         spans,
-        fences,
         &mut items,
         &mut indents,
         &mut ordered,
@@ -1281,11 +1268,14 @@ fn list_block(node: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Block
 /// number and capped at 8 columns, so `1. ` sub-items (written at three or four
 /// spaces) and `- ` sub-items (written at two) land on the same step rather than one
 /// column apart.
+// A recursive walk that fills five accumulators at once (the items, their indents and
+// the list's ordered/start/first facts); bundling them into a struct would be a
+// rewrite of the walk rather than a fix, so the argument count is allowed here.
+#[allow(clippy::too_many_arguments)]
 fn collect_items(
     node: &Node,
     src: &str,
     spans: &[Span],
-    fences: &[Fence],
     items: &mut Vec<Vec<Run>>,
     indents: &mut Vec<usize>,
     ordered: &mut bool,
@@ -1333,18 +1323,18 @@ fn collect_items(
                         }
                     }
                 }
-                let item = item_runs(&rest, src, spans, fences);
+                let item = item_runs(&rest, src, spans);
                 if !item.is_empty() {
                     items.push(item);
                     indents.push(marker_indent(src, marker));
                 }
                 for g in &c.children {
                     if g.kind == "list" {
-                        collect_items(g, src, spans, fences, items, indents, ordered, start, first);
+                        collect_items(g, src, spans, items, indents, ordered, start, first);
                     }
                 }
             }
-            "list" => collect_items(c, src, spans, fences, items, indents, ordered, start, first),
+            "list" => collect_items(c, src, spans, items, indents, ordered, start, first),
             _ => {}
         }
     }

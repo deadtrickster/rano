@@ -518,7 +518,7 @@ mod tests {
     }
 
     /// The right panel's spans of a row: everything after the separator.
-    fn right_of<'a>(row: &'a Line) -> &'a [Span] {
+    fn right_of(row: &Line) -> &[Span] {
         let i = row
             .spans
             .iter()

@@ -120,6 +120,13 @@ impl Line {
         self.spans.iter().all(|s| s.content.is_empty())
     }
 
+    /// Room for a row's ANSI form in one allocation: its text and a sequence and a reset
+    /// per span. A string grown push by push reallocates three or four times a row, and a
+    /// host that converts its live rows every frame pays that per row per frame.
+    fn ansi_capacity(&self) -> usize {
+        self.spans.iter().map(|s| s.content.len() + 16).sum()
+    }
+
     /// **The line as one ANSI string**, for a host that prints strings rather than
     /// drawing a [`super::Buffer`]: each span opens its own look (the line's style
     /// patched under it) and closes with a reset.
@@ -130,7 +137,7 @@ impl Line {
     /// its attributes open in the next. Content escapes are dropped, as everywhere
     /// in `render`; [`Palette::None`] writes the plain text and nothing else.
     pub fn to_ansi(&self, palette: Palette) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.ansi_capacity());
         for sp in &self.spans {
             let seq = self.style.patch(&sp.style).look(palette).sgr();
             out.push_str(&seq);
@@ -158,7 +165,8 @@ impl Line {
     /// plain text and nothing else.
     pub fn to_ansi_inside(&self, palette: Palette) -> String {
         let restore = self.style.look(palette).sgr();
-        let mut out = String::new();
+        let mut out =
+            String::with_capacity(self.ansi_capacity() + restore.len() * self.spans.len());
         for sp in &self.spans {
             let seq = sp.style.look(palette).sgr();
             out.push_str(&seq);

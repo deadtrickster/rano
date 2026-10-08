@@ -39,6 +39,7 @@ use crate::render::{Buffer, Line, Rect, Widget};
 use crate::style::Role;
 
 pub mod card;
+pub mod composer;
 pub mod decision;
 pub mod fit;
 pub mod header;

@@ -141,6 +141,35 @@ impl Line {
         }
         out
     }
+
+    /// **The line as ANSI for a host that keeps the row's own style open around it** — a
+    /// register drawn under a whole block, like letibot's reasoning, which its host opens
+    /// once at the start of the row (and resets at the end) rather than on every span.
+    ///
+    /// So a span with no style of its own is its text and nothing else: the register is
+    /// already on. A styled span opens its *own* look — not the row's patched under it, the
+    /// terminal still has the row's attributes from the host's open — and closes with a
+    /// reset **and the row's style again**, so the text after it is back in the register.
+    /// A reset alone restores the terminal default, and a heading inside dim reasoning that
+    /// closed to the default turned the rest of the row white: the defect letibot's
+    /// `Painter::inside` existed for, and the convention its rows (and its tests) still keep.
+    ///
+    /// With no row style this is [`Line::to_ansi`] exactly. [`Palette::None`] writes the
+    /// plain text and nothing else.
+    pub fn to_ansi_inside(&self, palette: Palette) -> String {
+        let restore = self.style.look(palette).sgr();
+        let mut out = String::new();
+        for sp in &self.spans {
+            let seq = sp.style.look(palette).sgr();
+            out.push_str(&seq);
+            for_each_cell(&sp.content, |c| out.push_str(c.text));
+            if !seq.is_empty() {
+                out.push_str(crate::width::text::RESET);
+                out.push_str(&restore);
+            }
+        }
+        out
+    }
 }
 
 impl From<&str> for Line {
@@ -370,6 +399,27 @@ mod tests {
             Span::role(a, Role::Keyword),
             Span::role(b, Role::Code),
         ])
+    }
+
+    /// Inside a register, a plain span is bare text and a styled one closes back to the
+    /// register; with no register it is `to_ansi`, byte for byte.
+    #[test]
+    fn to_ansi_inside_restores_the_rows_style_after_every_span() {
+        let p = Palette::Colour;
+        let mut l = Line::new(vec![
+            Span::raw("a "),
+            Span::role("kw", Role::Keyword),
+            Span::raw(" b"),
+        ]);
+        assert_eq!(l.to_ansi_inside(p), l.to_ansi(p));
+        l.style = Style::of(Role::Reasoning);
+        let kw = p.open(Role::Keyword);
+        let back = p.open(Role::Reasoning);
+        assert_eq!(
+            l.to_ansi_inside(p),
+            format!("a {kw}kw{}{back} b", wt::RESET)
+        );
+        assert_eq!(l.to_ansi_inside(Palette::None), "a kw b");
     }
 
     /// The styled wrap and letibot's string wrap break in the same places, because they

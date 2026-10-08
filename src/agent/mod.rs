@@ -56,6 +56,7 @@ pub mod queue;
 pub mod quit;
 pub mod subagents;
 pub mod text;
+pub mod todos;
 pub mod tool_row;
 pub mod turn_status;
 

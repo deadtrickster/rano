@@ -42,6 +42,7 @@ pub mod card;
 pub mod decision;
 pub mod outcome;
 pub mod text;
+pub mod tool_row;
 
 /// Whether a block shows its body. Letibot's `Fold`: the conversation-wide tool fold
 /// (`/t`) and the reasoning fold are each one of these.

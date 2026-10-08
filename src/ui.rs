@@ -290,8 +290,40 @@ pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<Strin
     rows
 }
 
+impl From<Rect> for crate::editor::Area {
+    fn from(r: Rect) -> Self {
+        Self::new(r.x, r.y, r.width, r.height)
+    }
+}
+
+/// Draw the editor over the whole frame: the standalone binary's case.
 pub fn draw(f: &mut Frame, ed: &Editor) {
-    let area = f.area();
+    draw_in(f, f.area(), ed);
+}
+
+/// Draw the editor inside `area` only, for a host that gives it a pane.
+///
+/// Every row the editor paints — title, text, status, function bar, and the
+/// overlays drawn over them (completion, lists, diffs, help, M-x, which-key) —
+/// is laid out from `area`'s own origin and clipped to it, so cells outside
+/// are left as the host drew them. The terminal cursor is placed inside
+/// `area` too, or not at all.
+///
+/// Mouse events are mapped through the area last given to
+/// [`Editor::set_area`], not this one: drawing takes `&Editor` and cannot
+/// record it. A host passes the same rectangle to both.
+pub fn draw_in(f: &mut Frame, area: Rect, ed: &Editor) {
+    // Pane-relative rectangles: the layout below was written for a frame at
+    // (0, 0), and this keeps it that way rather than threading `area.x` and
+    // `area.y` through every row. The intersection is what makes "outside
+    // the area is untouched" true even where a computed width runs over
+    // (a popup clamped to `width`, a status message wider than the pane).
+    let at = |x: u16, y: u16, w: u16, h: u16| {
+        Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
+    };
+    let cursor_at = |f: &mut Frame, x: u16, y: u16| {
+        f.set_cursor_position((area.x.saturating_add(x), area.y.saturating_add(y)));
+    };
     let width = area.width;
     if area.height < 5 {
         f.render_widget(Paragraph::new("Terminal too small"), area);
@@ -391,7 +423,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             title_line(width, &name, bs.buf.modified, flags),
             rev(),
         ))),
-        Rect::new(0, 0, width, 1),
+        at(0, 0, width, 1),
     );
 
     // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
@@ -416,10 +448,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             };
             nums.push(Line::from(Span::styled(s, Style::default().fg(fg))));
         }
-        f.render_widget(
-            Paragraph::new(nums),
-            Rect::new(0, 1, g as u16, text_h as u16),
-        );
+        f.render_widget(Paragraph::new(nums), at(0, 1, g as u16, text_h as u16));
     }
 
     // ---- text area (rows 1..text_h) ----
@@ -471,7 +500,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     }
     f.render_widget(
         Paragraph::new(lines),
-        Rect::new(g as u16, 1, view_w as u16, text_h as u16),
+        at(g as u16, 1, view_w as u16, text_h as u16),
     );
 
     // ---- completion popup (LSP) ----
@@ -538,7 +567,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 let text = format!(" {label}{}{}", " ".repeat(pad), kind_tag(it.kind));
                 f.render_widget(
                     Paragraph::new(Line::from(Span::styled(text, style))),
-                    Rect::new(x, y0 as u16 + i as u16, w as u16, 1),
+                    at(x, y0 as u16 + i as u16, w as u16, 1),
                 );
             }
         }
@@ -549,12 +578,12 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // then one row per item with the selection reversed, scrolled so the
     // selection stays in view.
     if let Some(p) = &ed.picker {
-        let area_text = Rect::new(0, 1, width, text_h as u16);
+        let area_text = at(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
         let header = format!(" {}   Enter: go  Esc: close", p.title);
         f.render_widget(
             Paragraph::new(Line::from(header)).style(rev()),
-            Rect::new(0, 1, width, 1),
+            at(0, 1, width, 1),
         );
         let rows = crate::picker::list_rows(text_h);
         let start = (p.sel + 1).saturating_sub(rows);
@@ -566,7 +595,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             };
             f.render_widget(
                 Paragraph::new(Line::from(format!(" {}", it.label))).style(style),
-                Rect::new(0, 2 + k as u16, width, 1),
+                at(0, 2 + k as u16, width, 1),
             );
         }
     }
@@ -576,18 +605,15 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // rendered diff lines from `top`. The lines are already styled by the
     // library's renderers; they are drawn as they are.
     if let Some(v) = &ed.diff_view {
-        let area_text = Rect::new(0, 1, width, text_h as u16);
+        let area_text = at(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
         f.render_widget(
             Paragraph::new(Line::from(v.header())).style(rev()),
-            Rect::new(0, 1, width, 1),
+            at(0, 1, width, 1),
         );
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(
-                Paragraph::new(l.clone()),
-                Rect::new(0, 2 + k as u16, width, 1),
-            );
+            f.render_widget(Paragraph::new(l.clone()), at(0, 2 + k as u16, width, 1));
         }
     }
 
@@ -615,7 +641,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             for (k, r) in rows.iter().enumerate() {
                 f.render_widget(
                     Paragraph::new(Line::from(r.as_str())).style(rev()),
-                    Rect::new(0, top + k as u16, width, 1),
+                    at(0, top + k as u16, width, 1),
                 );
             }
         }
@@ -627,7 +653,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 s.into_iter().collect::<String>(),
                 rev(),
             ))),
-            Rect::new(0, status_row, width, 1),
+            at(0, status_row, width, 1),
         );
     } else {
         // Outside prompts the cursor position sits at the right edge of the
@@ -652,13 +678,13 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                     Span::raw(" ".repeat(pos)),
                     Span::styled(text, rev()),
                 ])),
-                Rect::new(0, status_row, (avail as u16).max(1), 1),
+                at(0, status_row, (avail as u16).max(1), 1),
             );
         }
         let x = (width as usize).saturating_sub(pos_w);
         f.render_widget(
             Paragraph::new(Line::from(Span::raw(pos_txt))),
-            Rect::new(x as u16, status_row, pos_w as u16, 1),
+            at(x as u16, status_row, pos_w as u16, 1),
         );
     }
 
@@ -708,7 +734,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 }
                 f.render_widget(
                     Paragraph::new(Line::from(spans)),
-                    Rect::new(0, area.height - 2 + r, width, 1),
+                    at(0, area.height - 2 + r, width, 1),
                 );
             }
         }
@@ -719,12 +745,12 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
     // the diff, which has nothing to point at.
     if let Some(p) = &ed.palette {
         let col = 4 + p.query.chars().count();
-        f.set_cursor_position(((col as u16).min(width.saturating_sub(1)), status_row));
+        cursor_at(f, (col as u16).min(width.saturating_sub(1)), status_row);
     } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
         if let Some(p) = &ed.prompt {
             // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);
-            f.set_cursor_position(((col as u16).min(width.saturating_sub(1)), status_row));
+            cursor_at(f, (col as u16).min(width.saturating_sub(1)), status_row);
         } else {
             // M-\: the cursor's pane row is its VISUAL row.
             let cy = if ed.wrap {
@@ -749,14 +775,14 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 } else {
                     (g + disp.saturating_sub(bs.scroll_x)) as u16
                 };
-                f.set_cursor_position((cx.min(width.saturating_sub(1)), cy as u16 + 1));
+                cursor_at(f, cx.min(width.saturating_sub(1)), cy as u16 + 1);
             }
         }
     }
 
     // ---- help pages (over the text, like the list) ----
     if let Some(v) = &ed.info {
-        let area_text = Rect::new(0, 1, width, text_h as u16);
+        let area_text = at(0, 1, width, text_h as u16);
         f.render_widget(Clear, area_text);
         let header = format!(
             " {}   q: close  \u{2191}\u{2193} PgUp PgDn: scroll",
@@ -764,14 +790,11 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         );
         f.render_widget(
             Paragraph::new(Line::from(header)).style(rev()),
-            Rect::new(0, 1, width, 1),
+            at(0, 1, width, 1),
         );
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            f.render_widget(
-                Paragraph::new(l.clone()),
-                Rect::new(0, 2 + k as u16, width, 1),
-            );
+            f.render_widget(Paragraph::new(l.clone()), at(0, 2 + k as u16, width, 1));
         }
     }
 
@@ -786,18 +809,18 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
                 ),
                 rev(),
             ))),
-            Rect::new(0, status_row, width, 1),
+            at(0, status_row, width, 1),
         );
         let rows = text_h.min(14).min(p.items.len().max(1));
         let top = status_row.saturating_sub(rows as u16);
-        f.render_widget(Clear, Rect::new(0, top, width, rows as u16));
+        f.render_widget(Clear, at(0, top, width, rows as u16));
         if p.items.is_empty() {
             f.render_widget(
                 Paragraph::new(Span::styled(
                     "  no command matches",
                     Style::new().add_modifier(Modifier::DIM),
                 )),
-                Rect::new(0, top, width, 1),
+                at(0, top, width, 1),
             );
         }
         let start = (p.sel + 1).saturating_sub(rows);
@@ -827,7 +850,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
             if start + k == p.sel {
                 line = line.style(rev());
             }
-            f.render_widget(Paragraph::new(line), Rect::new(0, top + k as u16, width, 1));
+            f.render_widget(Paragraph::new(line), at(0, top + k as u16, width, 1));
         }
     }
 
@@ -838,7 +861,7 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         let rows = crate::help::card_rows(&entries, width as usize, Style::new().fg(Color::Cyan));
         let n = rows.len().min(text_h.saturating_sub(1));
         let top = status_row.saturating_sub(n as u16 + 1);
-        f.render_widget(Clear, Rect::new(0, top, width, n as u16 + 1));
+        f.render_widget(Clear, at(0, top, width, n as u16 + 1));
         let title = format!(
             " {} {}-   ESC: cancel",
             m.name,
@@ -846,13 +869,10 @@ pub fn draw(f: &mut Frame, ed: &Editor) {
         );
         f.render_widget(
             Paragraph::new(Line::from(title)).style(rev()),
-            Rect::new(0, top, width, 1),
+            at(0, top, width, 1),
         );
         for (k, l) in rows.into_iter().take(n).enumerate() {
-            f.render_widget(
-                Paragraph::new(l),
-                Rect::new(0, top + 1 + k as u16, width, 1),
-            );
+            f.render_widget(Paragraph::new(l), at(0, top + 1 + k as u16, width, 1));
         }
     }
 }
@@ -1535,5 +1555,136 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(Position::new(0, 1));
+    }
+
+    // ---- drawing into a host's pane (draw_in) ----
+
+    /// The pane the tests below draw into: away from every edge, so a row or
+    /// column that ignored the origin would land visibly outside it.
+    const PANE: Rect = Rect {
+        x: 10,
+        y: 5,
+        width: 40,
+        height: 20,
+    };
+
+    /// Paint the whole frame with `#`, then the editor into `PANE`, as a host
+    /// with its own content around the pane would.
+    fn draw_pane(e: &Editor) -> Terminal<TestBackend> {
+        let mut t = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        t.draw(|f| {
+            let all = f.area();
+            for y in all.top()..all.bottom() {
+                for x in all.left()..all.right() {
+                    f.buffer_mut()[(x, y)].set_symbol("#");
+                }
+            }
+            draw_in(f, PANE, e);
+        })
+        .unwrap();
+        t
+    }
+
+    fn outside_is_untouched(t: &Terminal<TestBackend>) {
+        let buf = t.backend().buffer();
+        for y in 0..30u16 {
+            for x in 0..60u16 {
+                if !PANE.contains(Position::new(x, y)) {
+                    assert_eq!(
+                        buf[(x, y)].symbol(),
+                        "#",
+                        "cell ({x}, {y}) outside the pane"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draw_in_keeps_to_its_area_and_puts_the_cursor_inside() {
+        let mut e = ed("aa\nbb\ncc\ndd");
+        e.show_line_numbers = true;
+        e.set_area(PANE.into());
+        e.bs_mut().cursor = Pos { row: 2, col: 1 };
+        let mut t = draw_pane(&e);
+        outside_is_untouched(&t);
+        let g = gutter_width(4) as u16;
+        let buf = t.backend().buffer();
+        // Text starts on the pane's second row, after its gutter.
+        assert_eq!(buf[(PANE.x + g, PANE.y + 1)].symbol(), "a");
+        assert_eq!(buf[(PANE.x + g, PANE.y + 3)].symbol(), "c");
+        // The status row's position readout sits at the pane's right edge.
+        let status: String = (PANE.x..PANE.right())
+            .map(|x| buf[(x, PANE.y + PANE.height - 3)].symbol().to_string())
+            .collect();
+        assert!(status.trim_end().ends_with("Ln 3, Col 2"), "{status:?}");
+        t.backend_mut()
+            .assert_cursor_position(Position::new(PANE.x + g + 1, PANE.y + 1 + 2));
+    }
+
+    #[test]
+    fn draw_in_puts_a_prompt_and_its_cursor_on_the_panes_status_row() {
+        let mut e = ed("text");
+        e.set_area(PANE.into());
+        e.prompt = Some(Prompt {
+            kind: crate::prompt::PromptKind::Search,
+            text: "ab".into(),
+            cursor: 2,
+        });
+        let mut t = draw_pane(&e);
+        outside_is_untouched(&t);
+        let row = PANE.y + PANE.height - 3;
+        let buf = t.backend().buffer();
+        let line: String = (PANE.x..PANE.right())
+            .map(|x| buf[(x, row)].symbol().to_string())
+            .collect();
+        assert!(line.starts_with("Search: ab"), "{line:?}");
+        t.backend_mut()
+            .assert_cursor_position(Position::new(PANE.x + 10, row));
+    }
+
+    #[test]
+    fn draw_in_keeps_overlays_inside_too() {
+        // The which-key card and the M-x list are drawn over the text from
+        // the status row upwards; both are rows a full-frame layout put at
+        // x = 0.
+        let mut e = ed("text");
+        e.set_area(PANE.into());
+        e.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::ALT,
+        ));
+        assert!(e.palette.is_some(), "M-x opens the palette");
+        let t = draw_pane(&e);
+        outside_is_untouched(&t);
+    }
+
+    #[test]
+    fn a_click_is_mapped_through_the_panes_origin() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut e = ed("aa\nbb\ncc\ndd");
+        e.show_line_numbers = false;
+        e.set_area(PANE.into());
+        let click = |x: u16, y: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Pane row 3 is buffer row 2 (the title takes pane row 0).
+        assert!(e.handle_mouse(click(PANE.x + 1, PANE.y + 3)));
+        assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });
+        // Outside the pane: not the editor's click, whatever lies under it.
+        assert!(!e.handle_mouse(click(PANE.x - 1, PANE.y + 1)));
+        assert!(!e.handle_mouse(click(PANE.x + 1, PANE.bottom())));
+        assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });
+    }
+
+    #[test]
+    fn set_area_sizes_the_text_viewport() {
+        let mut e = ed("x");
+        assert!(e.set_area(PANE.into()));
+        assert_eq!((e.text_w, e.text_h), (40, 16));
+        assert!(!e.set_area(PANE.into()), "the same area is not a change");
     }
 }

@@ -63,6 +63,38 @@ pub(crate) struct UndoStep {
     len_at_begin: usize, // buf.row_count() when the step began
 }
 
+/// A rectangle of terminal cells: where the editor sits on the screen.
+///
+/// rano's own type rather than ratatui's `Rect` on purpose: ratatui is only
+/// how rano draws today, and the editor's logic (sizing, mouse mapping) and
+/// a host's calls into it should not have to change when that does. The
+/// drawing side converts (`From<ratatui::layout::Rect>`, in `ui`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Area {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl Area {
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// Whether the cell at column `x`, row `y` is inside.
+    pub const fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x
+            && y >= self.y
+            && (x as u32) < self.x as u32 + self.w as u32
+            && (y as u32) < self.y as u32 + self.h as u32
+    }
+}
+
 pub struct Editor {
     /// Open buffers (F8 groundwork); exactly one until multi-buffer lands.
     pub buffers: Vec<BufferState>,
@@ -115,6 +147,13 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
+    /// The screen rectangle the editor occupies, as last given to
+    /// [`Self::set_area`]. Mouse events arrive in terminal coordinates and are
+    /// mapped through its origin; `text_w`/`text_h` are derived from its size.
+    /// Empty until a host sets it, which means "at (0, 0), unbounded" — what
+    /// the editor assumed before it could be a pane, and what tests that set
+    /// `text_w`/`text_h` by hand still rely on.
+    pub(crate) area: Area,
     /// Rendered width of a tab (seeded from config, F1).
     pub tab_width: usize,
     /// Line-number gutter toggle (M-N; seeded from config, F1).
@@ -268,6 +307,7 @@ impl Editor {
             replace_count: 0,
             text_w: 80,
             text_h: 24,
+            area: Area::default(),
             tab_width,
             show_line_numbers,
             wrap,
@@ -1618,6 +1658,24 @@ impl Editor {
 
     // ---------- mouse ----------
 
+    /// Give the editor its place on the screen: the whole terminal for the
+    /// binary, a pane for a host. Sets the text viewport from the size (the
+    /// title, status and two function-bar rows take four) and the origin
+    /// mouse events are mapped through. Returns whether anything changed,
+    /// i.e. whether the next frame must be drawn.
+    ///
+    /// Draw with the same rectangle ([`crate::ui::draw_in`]); the two are
+    /// separate only because drawing borrows the editor immutably.
+    pub fn set_area(&mut self, area: Area) -> bool {
+        if area == self.area {
+            return false;
+        }
+        self.area = area;
+        self.text_w = area.w as usize;
+        self.text_h = (area.h as usize).saturating_sub(4);
+        true
+    }
+
     /// Map a pane cell to a buffer position: only clicks inside the text
     /// area land; the title, status and function bars are ignored, and a
     /// click on the gutter or past EOL goes to the line start / line end.
@@ -1665,7 +1723,19 @@ impl Editor {
 
     /// Left click: cursor + fresh selection anchor. Left drag: extend.
     /// Wheel: scroll the viewport a few lines. Everything else is ignored.
+    ///
+    /// `m` is in terminal coordinates; an event outside the editor's area
+    /// (see [`Self::set_area`]) is not the editor's and is ignored, so a host
+    /// may forward every mouse event without hit-testing first.
     pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+        let mut m = m;
+        if !self.area.is_empty() {
+            if !self.area.contains(m.column, m.row) {
+                return false;
+            }
+            m.column -= self.area.x;
+            m.row -= self.area.y;
+        }
         // The list overlay is keyboard-only; the text under it is not there
         // to click.
         if self.picker.is_some() {

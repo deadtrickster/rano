@@ -14,7 +14,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use rano::buffer::{Buffer, Pos};
-use rano::editor::Editor;
+use rano::editor::{Area, Editor};
 use rano::send_ctrl::split_position;
 use rano::{config, export, send_ctrl, syntax, ui};
 use ratatui::Terminal;
@@ -325,15 +325,9 @@ fn run(
     // state changes. text_w is the FULL viewport width now (draw renders
     // full-width lines); justify keeps its old wrap width via a -2 there.
     let mut dirty = true;
-    let mut last_size = (0u16, 0u16);
     let result = loop {
         let size = terminal.size()?;
-        if (size.width, size.height) != last_size {
-            last_size = (size.width, size.height);
-            ed.text_w = size.width as usize;
-            ed.text_h = (size.height as usize).saturating_sub(4);
-            dirty = true;
-        }
+        dirty |= ed.set_area(Area::new(0, 0, size.width, size.height));
         // Before the scroll: `--line` CENTRES the target, and centring sets
         // the scroll. Running `adjust_scroll` first would then pull the view
         // back to the nearest edge, which is the opposite of centring. It is
@@ -366,7 +360,7 @@ fn run(
             // positioned spot, or leaves it hidden when ui::draw skips
             // positioning (edit point outside the viewport).
             terminal.hide_cursor()?;
-            terminal.draw(|f| ui::draw(f, &ed))?;
+            terminal.draw(|f| ui::draw_in(f, f.area(), &ed))?;
             dirty = false;
         }
         if ed.quit {

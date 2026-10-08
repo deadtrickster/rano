@@ -15,7 +15,12 @@
 //! - [`diff`] / [`sidediff`] — line diffs drawn as ratatui lines, unified or
 //!   in two panels, with [`style`]'s roles and [`highlight`]'s syntax mapping.
 //! - [`width`] — display width: how many columns a character takes, where a
-//!   line's wrap segments begin, and which clusters may never be split.
+//!   line's wrap segments begin, and which clusters may never be split;
+//!   [`width::text`] is the same over strings that carry escapes.
+//! - [`render`] — rano's own render core: role-styled spans and lines, a
+//!   width-correct cell buffer, widgets, and rows emitted per palette.
+//! - [`term`] — the terminal: raw mode, the row-diffing painter, input decoded
+//!   into rano's own events, kitty graphics and OSC 8 links.
 //! - [`editor`] / [`ui`] — the editor and its renderer, for a host to embed.
 //!
 //! Embedding the editor as a pane, in outline:
@@ -72,6 +77,11 @@ pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;
+// The render core: roles-styled spans and lines, a width-correct cell buffer,
+// widgets, and the emitter that turns a buffer into terminal rows per palette.
+// What rano draws with once the editor is off ratatui, and what letibot draws
+// through. No ratatui and no crossterm in it.
+pub mod render;
 pub mod sidediff;
 pub mod style;
 // The row store (§15, §16.3): the editor's `Buffer` is built on `Rows`, which
@@ -81,6 +91,10 @@ pub mod rows;
 // `Editor::on_send` and the binary's `send_command`.
 pub mod send;
 pub mod syntax;
+// The terminal: raw mode and restore, the row-diffing painter, input decoding
+// into rano's own events, feature detection, kitty graphics and OSC 8 links.
+// Ported from letibot's `crates/tui/src/backend/`; draws `render`'s rows.
+pub mod term;
 // The version check and self-update. lib-only: the binary reads it, but so
 // could an embedder that wants to offer the same thing.
 pub mod update;

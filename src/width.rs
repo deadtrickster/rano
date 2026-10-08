@@ -36,6 +36,13 @@
 //! line is the sum of its segments' widths exactly, which is what lets the
 //! wrap table count segments and the renderer agree about where they begin.
 
+// The same tables, walked over a `&str` that may carry escapes: the renderer's
+// side (letibot's `width.rs`, ported). A child module so the tables below stay
+// private and stay one copy. `dead_code` because the binary compiles this file
+// through its own `mod width;` and none of its callers are in the binary.
+#[allow(dead_code)]
+pub mod text;
+
 /// Columns one character claims on a terminal: 0, 1 or 2.
 pub fn char_width(c: char) -> usize {
     let u = c as u32;
@@ -261,7 +268,14 @@ impl Iterator for Clusters<'_> {
             let joins = n != '\t'
                 && (nw == 0
                     || chars[end - 1] == '\u{200d}'
-                    || (is_regional_indicator(chars[start]) && is_regional_indicator(n)));
+                    // A flag is exactly TWO regional indicators. Checking only
+                    // that the cluster *started* with one joined every indicator
+                    // after it, so two flags side by side were one two-column
+                    // cluster where the terminal draws four columns — found by
+                    // holding this walk to letibot's (`text`), which pairs them.
+                    || (end == start + 1
+                        && is_regional_indicator(chars[start])
+                        && is_regional_indicator(n)));
             if !joins {
                 break;
             }
@@ -432,6 +446,11 @@ mod tests {
         // A flag: two regional indicators, two columns together.
         let flag = cs("\u{1f1eb}\u{1f1f7}");
         assert_eq!(width(&flag, 8), 2);
+        // Two flags are two clusters, four columns: indicators pair, they do
+        // not chain.
+        let flags = cs("\u{1f1eb}\u{1f1f7}\u{1f1ee}\u{1f1f3}");
+        assert_eq!(width(&flags, 8), 4);
+        assert_eq!(clusters(&flags, 8).len(), 2);
     }
 
     #[test]

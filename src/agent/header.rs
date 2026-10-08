@@ -275,7 +275,7 @@ impl Header {
         line.push(Span::raw(" ".repeat(pad)));
         line.push(Span::role(tail, Role::Faint));
         if line.width() > w {
-            return crate::render::text::truncate(&line, w);
+            return crate::render::text::truncate_owned(line, w);
         }
         line
     }

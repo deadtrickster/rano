@@ -5,7 +5,7 @@
 //! (`tool_result_row_lines`). The view model is [`ToolRow`]; what letibot read out of its
 //! `ItemCtx` and `TranscriptItem::ToolResult` is a field each.
 
-use crate::render::text::truncate;
+use crate::render::text::truncate_owned;
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
 use crate::term::links::file_url;
@@ -267,7 +267,7 @@ impl ToolRow {
         if let Some(l) = inline {
             head.spans.push(Span::role(" · ", Role::Faint));
             head.spans.push(Span::raw(l));
-            let mut out = vec![truncate(&head, w)];
+            let mut out = vec![truncate_owned(head, w)];
             // The approval rides the one-line form too: a gated call whose result fit on the
             // header is no less gated for it.
             if let Some(d) = &self.decision {
@@ -291,7 +291,7 @@ impl ToolRow {
         // No chord on the header. It belongs on the elision row below, which exists exactly
         // when something is hidden — an affordance on a card with nothing folded is columns
         // of every row spent advertising a key that would do nothing.
-        let mut out = vec![truncate(&head, w)];
+        let mut out = vec![truncate_owned(head, w)];
         // The reason, on its own wrapping line rather than in the header's tail. Never
         // truncated, and in the outcome's own role: a call that abstained or was refused
         // said *why*, and that sentence is the whole content of the row.
@@ -448,7 +448,7 @@ impl ToolRow {
         }
         out.extend(picture());
         RowLayout {
-            lines: step_in(out.into_iter().map(|l| truncate(&l, w)).collect(), ind),
+            lines: step_in(out.into_iter().map(|l| truncate_owned(l, w)).collect(), ind),
             max_page: window.then_some(max_page),
         }
     }

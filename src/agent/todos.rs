@@ -289,7 +289,7 @@ impl TodoCard {
             Role::Faint,
         ));
         out.into_iter()
-            .map(|l| crate::render::text::truncate(&l, w))
+            .map(|l| crate::render::text::truncate_owned(l, w))
             .collect()
     }
 }

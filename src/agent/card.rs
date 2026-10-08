@@ -38,7 +38,7 @@
 //! no mouse selection here, so there is nothing to port — but the hazard is real the
 //! moment one is added, and it is recorded here rather than rediscovered.
 
-use crate::render::text::truncate;
+use crate::render::text::{truncate, truncate_owned};
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
 use crate::width::text as wt;
@@ -376,7 +376,7 @@ impl Card {
             tail.push(format!("spill {h}"));
         }
         if tail.is_empty() {
-            return truncate(&s, cfg.width);
+            return truncate_owned(s, cfg.width);
         }
         let role = match &self.phase {
             Phase::Finished { outcome, .. } | Phase::Replayed { outcome }
@@ -429,7 +429,7 @@ impl Card {
         push(&mut s, joined, role);
         // One last guard for the case the floor above creates — a tail longer than any subject
         // could leave room for — and it takes the END, so the clock survives it.
-        truncate(&s, cfg.width)
+        truncate_owned(s, cfg.width)
     }
 
     /// The whole card.
@@ -446,7 +446,7 @@ impl Card {
             _ => head_tail(&self.body, cfg.budget.first_lines, cfg.budget.last_lines),
         };
         for l in body {
-            out.push(truncate(&indent(l, 2), cfg.width));
+            out.push(truncate_owned(indent(l, 2), cfg.width));
         }
         out
     }
@@ -511,7 +511,7 @@ pub fn reasoning(
             None => one("Thought", Role::Strong),
         }
     };
-    let mut out = vec![truncate(&head, cfg.width)];
+    let mut out = vec![truncate_owned(head, cfg.width)];
     if cfg.mode == DisplayMode::Collapsed {
         if !body.is_empty() {
             out.push(one(format!("  … {} lines", body.len()), Role::Faint));
@@ -533,7 +533,7 @@ pub fn reasoning(
             content: sp.content,
             style: inner.patch(&sp.style),
         }));
-        out.push(truncate(&row, cfg.width));
+        out.push(truncate_owned(row, cfg.width));
     }
     out
 }

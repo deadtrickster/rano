@@ -123,7 +123,7 @@ impl HintBar {
         if pad > 0 {
             line.spans.insert(0, Span::raw(" ".repeat(pad)));
         }
-        crate::render::text::truncate(&line, w)
+        crate::render::text::truncate_owned(line, w)
     }
 }
 

@@ -198,7 +198,7 @@ impl TurnStatus {
             Some(pp) if pp.total > 0 && pp.processed < pp.total => {
                 let mut l = Line::new(vec![spin, Span::raw(" ")]);
                 l.spans.extend(prefill_line(&pp, w.saturating_sub(6)).spans);
-                crate::render::text::truncate(&l, w)
+                crate::render::text::truncate_owned(l, w)
             }
             _ => {
                 // `started_ms == 0` means the turn came out of a snapshot, which has no
@@ -219,7 +219,7 @@ impl TurnStatus {
                     ),
                     Span::role(format!(" Responding{since}"), Role::Pending),
                 ]);
-                crate::render::text::truncate(&l, w)
+                crate::render::text::truncate_owned(l, w)
             }
         }
     }

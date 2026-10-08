@@ -13,7 +13,7 @@
 //! [`truncate`] is closed by the emitter where the linked cells end.
 
 use super::style::Style;
-use crate::style::{Palette, Role};
+use crate::style::{Look, Palette, Role};
 use crate::width::text::{Cell, break_cells, for_each_cell};
 
 /// A run of text in one style.
@@ -146,13 +146,8 @@ impl Line {
     pub fn to_ansi(&self, palette: Palette) -> String {
         let mut out = String::with_capacity(self.ansi_capacity());
         for sp in &self.spans {
-            let seq = self.style.patch(&sp.style).look(palette).sgr();
-            let close = if seq.is_empty() {
-                ""
-            } else {
-                crate::width::text::RESET
-            };
-            push_span_ansi(&mut out, sp, &seq, close, "");
+            let look = self.style.patch(&sp.style).look(palette);
+            push_span_ansi(&mut out, sp, look, None);
         }
         out
     }
@@ -172,32 +167,21 @@ impl Line {
     /// With no row style this is [`Line::to_ansi`] exactly. [`Palette::None`] writes the
     /// plain text and nothing else.
     pub fn to_ansi_inside(&self, palette: Palette) -> String {
-        let restore = self.style.look(palette).sgr();
-        let mut out =
-            String::with_capacity(self.ansi_capacity() + restore.len() * self.spans.len());
+        let restore = self.style.look(palette);
+        let mut out = String::with_capacity(self.ansi_capacity() + 8 * self.spans.len());
         for sp in &self.spans {
-            let seq = sp.style.look(palette).sgr();
-            let close = if seq.is_empty() {
-                ""
-            } else {
-                crate::width::text::RESET
-            };
-            push_span_ansi(
-                &mut out,
-                sp,
-                &seq,
-                close,
-                if seq.is_empty() { "" } else { &restore },
-            );
+            push_span_ansi(&mut out, sp, sp.style.look(palette), Some(restore));
         }
         out
     }
 }
 
-/// One span of a row as ANSI: its link opened, its raw placeholder colours set, its own
-/// sequence, the text (escapes in the content dropped), then `close` and `restore` when a
-/// sequence was opened, the raw colours unset and the link closed.
-fn push_span_ansi(out: &mut String, sp: &Span, seq: &str, close: &str, restore: &str) {
+/// One span of a row as ANSI: its link opened, its raw placeholder colours set, its look's
+/// sequence, the text (escapes in the content dropped), then — when a sequence was opened —
+/// a reset and the `restore` look, the raw colours unset and the link closed. Writes onto
+/// `out` and allocates nothing of its own: this runs per span per row per frame.
+fn push_span_ansi(out: &mut String, sp: &Span, look: Look, restore: Option<Look>) {
+    use std::fmt::Write;
     if let Some(url) = &sp.style.link {
         out.push_str("\x1b]8;;");
         out.push_str(url);
@@ -205,15 +189,19 @@ fn push_span_ansi(out: &mut String, sp: &Span, seq: &str, close: &str, restore: 
     }
     let raw = sp.style.raw;
     if let Some([r, g, b]) = raw.fg_rgb {
-        out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+        let _ = write!(out, "\x1b[38;2;{r};{g};{b}m");
     }
     if let Some(u) = raw.underline {
-        out.push_str(&format!("\x1b[58;5;{u}m"));
+        let _ = write!(out, "\x1b[58;5;{u}m");
     }
-    out.push_str(seq);
+    look.write_sgr(out);
     for_each_cell(&sp.content, |c| out.push_str(c.text));
-    out.push_str(close);
-    out.push_str(restore);
+    if !look.is_plain() {
+        out.push_str(crate::width::text::RESET);
+        if let Some(r) = restore {
+            r.write_sgr(out);
+        }
+    }
     if raw.fg_rgb.is_some() {
         out.push_str("\x1b[39m");
     }
@@ -385,6 +373,17 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
         _ => out.spans.push(Span::styled("…", style.clone())),
     }
     out
+}
+
+/// [`truncate`] for a line the caller is done with: handed back as it is when it fits,
+/// which is almost every line of a frame, so a widget's last step costs no copy of its
+/// spans.
+pub fn truncate_owned(line: Line, cols: usize) -> Line {
+    if line.width() <= cols {
+        line
+    } else {
+        truncate(&line, cols)
+    }
 }
 
 /// **Shorten to `cols` columns by eating the LEFT, keeping the end** — the pair to

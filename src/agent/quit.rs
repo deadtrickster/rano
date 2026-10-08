@@ -108,7 +108,7 @@ impl QuitCard {
                 Span::raw(format!("{} {:>2}  ", if picked { "▸" } else { " " }, i + 1)),
                 Span::role(*name, if picked { Role::Strong } else { Role::Plain }),
             ]);
-            out.push(crate::render::text::truncate(&l, w));
+            out.push(crate::render::text::truncate_owned(l, w));
             for l in wrap(why, w.saturating_sub(8)) {
                 out.push(one(format!("       {l}"), Role::Faint));
             }

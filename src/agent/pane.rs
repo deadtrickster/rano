@@ -82,7 +82,9 @@ impl PaneLines {
     /// Every row cut to `w` columns.
     pub fn trimmed(mut self, w: usize) -> PaneLines {
         for l in &mut self.lines {
-            *l = crate::render::text::truncate(l, w);
+            if l.width() > w {
+                *l = crate::render::text::truncate(l, w);
+            }
         }
         self
     }
@@ -209,7 +211,7 @@ pub fn split_row(left: Line, right: Line, w: usize) -> Line {
         );
         out
     } else {
-        crate::render::text::truncate(&left, w)
+        crate::render::text::truncate_owned(left, w)
     }
 }
 

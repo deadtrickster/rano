@@ -229,7 +229,7 @@ impl ComposerField {
                 l.push(wall.clone());
                 l
             } else {
-                crate::render::text::truncate(&body, w)
+                crate::render::text::truncate_owned(body, w)
             });
         }
         let col = if boxed { ccol + 2 } else { ccol };

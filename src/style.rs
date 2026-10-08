@@ -345,11 +345,52 @@ impl Look {
 
     /// The whole opening sequence, or `""` for a plain look.
     pub fn sgr(&self) -> String {
-        if self.is_plain() {
-            return String::new();
-        }
-        format!("\x1b[{}m", self.sgr_params())
+        let mut s = String::new();
+        self.write_sgr(&mut s);
+        s
     }
+
+    /// [`Look::sgr`] written onto the end of `out`, allocating nothing of its own — the
+    /// form a string emitter uses per span. A frame converts every row it shows, and a
+    /// `String` per styled span per row per frame is what letibot's `frame_allocations`
+    /// test exists to catch (its painter cached these sequences for the same reason).
+    pub fn write_sgr(&self, out: &mut String) {
+        if self.is_plain() {
+            return;
+        }
+        out.push_str("\x1b[");
+        let mut first = true;
+        for (a, on, _) in Attrs::TABLE {
+            if self.attrs.contains(a) {
+                if !first {
+                    out.push(';');
+                }
+                first = false;
+                push_u8(out, on);
+            }
+        }
+        for (h, bg) in [(self.fg, false), (self.bg, true)] {
+            if let Some(h) = h {
+                if !first {
+                    out.push(';');
+                }
+                first = false;
+                h.sgr(bg, out);
+            }
+        }
+        out.push('m');
+    }
+}
+
+/// A small number in decimal, onto `out`, with no allocation.
+fn push_u8(out: &mut String, n: u8) {
+    if n >= 100 {
+        out.push((b'0' + n / 100) as char);
+    }
+    if n >= 10 {
+        out.push((b'0' + (n / 10) % 10) as char);
+    }
+    out.push((b'0' + n % 10) as char);
 }
 
 /// A mapping from roles to looks.

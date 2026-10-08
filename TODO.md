@@ -1699,6 +1699,58 @@ avoids it, by not holding the rows at all and decoding the window. That is why
 this is a store change and not a tweak, and why the 4× is not a defect: `Vec<char>`
 is what makes character indexing O(1), which the cursor and column model need.
 
+#### The question that follows: "I want to pay for what I see only"
+
+Asked 2026-10-09, and it is a stricter target than this section's — *"pay for
+what I see only, plus some offscreen margin if needed for nested renderers or
+blocks"*. Strict, because **every O(rows) term has to go, not just the decoded
+text**, and the numbers say so. Sized exactly (`size_of`), for a 2 GiB file:
+
+    RowStore's per-row entry   40 B      RowWrap per-row geometry  32 B
+    wrap_prefix per row         8 B      Vec<char> header per row  24 B
+
+    log line  rows/2GiB  index40  wrap40  hdr24  chars4x     total
+       22 B     97.6M     3723    3723    2234    8192    17872 MiB
+       48 B     44.7M     1706    1706    1023    8192    12627 MiB
+       80 B     26.8M     1023    1023     614    8192    10852 MiB
+      200 B     10.7M      409     409     245    8192     9255 MiB
+     4 KiB      524k       20      20      12    8192     8244 MiB
+
+**`chars 4×` is flat at 8192 MiB whatever the line length.** Everything that makes
+log-shaped files worse is per ROW, and at 22-byte lines those columns are 12.6 GB
+of the 17 — more than the text. Measured, it is 4.05× for 4 KiB lines and 8.04×
+for 22-byte lines, so *"more so for shit like logs"* is exactly right and it is
+structural rather than incidental: logs maximise rows per byte.
+
+**And the store this section planned does NOT meet that target.** Its per-row
+entry is `Row { chars, start, end }` at **40 bytes** — *more* than the 24-byte
+`Vec<char>` header it would replace. It windows the text and leaves ~3.7 GB of
+index for the same file. The plan's own deliverable (19.8 MB) held because it was
+measured on a 193 MB file, where 2.6M rows × 40 B is only 100 MB; it does not hold
+where the operator is pointing.
+
+**What paying for what you see requires:**
+
+| term | now | to pay for what you see |
+|---|---|---|
+| `chars` | 4× the file | decoded for the viewport + margin, evicted |
+| `Vec<char>` header | 24 B/row | gone — rows are not materialised |
+| `Row` index | **40 B/row** | **sparse: one entry per 256 KiB of file = 131 KiB total** |
+| `RowWrap` + prefix | **40 B/row** | **geometry for visible rows only** |
+
+That is a **different design from the one below**: a sparse index —
+`(byte_start, row_start)` per block, with a row found by scanning at most 256 KiB
+(~120 µs at the measured 2.2 GB/s) rather than a per-row table — plus a windowed
+wrap geometry and a windowed decode. Memory then tracks the viewport, not the
+file: a few MiB for a 2 GiB log instead of 17 GB.
+
+**The hard part is edits, and it is where the per-row index was earning its
+keep.** Inserting a row shifts the number of every row after it, so a sparse
+index cannot be indexed into; it needs a sparse overlay (edited rows, plus a log
+of insertions and deletions) and a row-to-source mapping that accounts for them.
+That is the real design work here, and it is bigger than the swap this section
+was staging towards.
+
 **The store, and why each piece is there** — both parts measured:
 
 - **Chunked**: rows in chunks of 1,024, so a structural edit shifts one chunk

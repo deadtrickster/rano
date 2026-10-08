@@ -2354,3 +2354,68 @@ horizontal scrolling moves through, and the same staleness applied.
 highlight landed, including the published v0.2.0. It is invisible on a file
 smaller than the margin, which is most files, and only shows on a long one you
 scroll.
+
+## 19. M-P grew one more preview: markdown
+
+Added 2026-10-08, from the operator: *"for diffs we have Alt-P for 'preview'. I
+want this extended to say markdowns, svg (we are targeting ghosty) and so on. Do
+markdown and svg first."*
+
+- [x] **Markdown** (`.md`, `.markdown`): M-P renders the buffer with
+  `markdown::render_blocks` — the renderer a model's reply is already drawn with
+  — at the view's width, so headings, lists, tables, inline emphasis and a
+  fence's syntax highlight arrive as they do in the agent pane. **No new
+  dependency**: the module was there, and the view is `Source::Markdown` in
+  `diffview.rs` with a `DiffKind` and a keymap of its own.
+- [x] **The split key says why not** on it. `s` is the shared diff map's, and a
+  one-column view has nothing to toggle: it flashes rather than re-rendering the
+  same rows (`Source::has_a_split`, `DiffAct::ToggleSplit`).
+- [x] The command's label is "Preview" rather than "Diff Preview" (the name
+  `diff-preview` stays, so a host rebinding it survives).
+
+### 19.1 SVG: built, measured, and taken back out
+
+An SVG was implemented the same way — rasterized (`src/svg.rs`, `resvg` +
+`usvg` + `tiny-skia`) and drawn inline through the kitty graphics protocol's
+Unicode placeholders, the mechanism letibot already draws a tool's PNG with,
+gated on `Features::images`, with the editor queueing the upload/placement/delete
+bytes for its host. It worked and its tests passed. The operator's ruling on the
+price: *"yea let them be text for now"*, so it is out of the tree and the numbers
+are kept here rather than paid again.
+
+Measured 2026-10-08 on this machine, `resvg` trimmed to `text`, `system-fonts`,
+`raster-images` (off: `svgz`, `gif`, `image-webp`, `memmap-fonts`):
+
+```
+Cargo.lock          57 packages -> 111           (+54)
+release binary      17.4 MiB -> 19.9 MiB         (+2.4 MiB, +14%)
+load_system_fonts   22.5 ms release, 74 ms debug (791 fonts), once per process
+a 1200x800 document into a 60x20 box (960x640 px)   7.5-9.5 ms, PNG encode 6-10 ms of it
+```
+
+Two things `usvg` does not do by itself, both found by a test rather than by
+reading the docs, and both silent when wrong — worth knowing before anyone tries
+again: `Options::default()` carries an **empty font database** (`<text>` is
+dropped without a word, so a labelled diagram loses its labels), and a raster a
+document embeds or links needs the `raster-images` feature or half the picture is
+missing. The other two findings: the cell box has to come first (`image_cells`)
+and the raster is cut at its pixel size; and on this machine there is no
+converter to shell out to instead — no `rsvg-convert`, no `inkscape`, no
+`magick` — and `qlmanage` is macOS-only and wants a GUI session.
+
+- [ ] **What "text for now" means**: M-P on an `.svg` says the generic "nothing
+  to render" and the file is read as text like any other. Two ways back in, if it
+  ever matters: name SVG in that message, or make the rasterizer a build that
+  asks for it (`--features svg`, or a converter found on `PATH`) so the default
+  binary stays as lean as the ruling wants it.
+
+### 19.2 Open: "and so on"
+
+- [ ] **PNG/JPEG** would be a *decoder*, not a rasterizer: the pixels are already
+  a picture. This is the cheapest picture preview left, and the shape §19.1
+  describes — a `Source` variant whose rows are placeholders, plus a queue of
+  bytes the host writes to the terminal — is what it would slot back into.
+- [ ] **A CSV/JSON table** is a renderer like markdown's (rows to `Line`s), not a
+  picture: one more `Source` variant and no new dependency.
+- [ ] **PDF** would want a rasterizer rano does not have, and the one that was
+  here was SVG's.

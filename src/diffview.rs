@@ -1,5 +1,6 @@
-//! A diff drawn over the text by the library's renderers, split or unified
-//! (`s` toggles, remembered for the session). Three things open it:
+//! A view drawn over the text by the library's renderers — a diff, split or
+//! unified (`s` toggles, remembered for the session), or a file rendered as
+//! something other than its own text. Five things open it:
 //!
 //! - **the "File changed on disk" question** (`d`): what saving would do to
 //!   the file. It answers to the question — `y` and `n` answer from here, and
@@ -8,13 +9,15 @@
 //!   hunk, at each file's own line numbers ([`crate::patch`]);
 //! - **M-P on a buffer with merge conflicts**: ours against theirs, side by
 //!   side ([`crate::conflict`]);
+//! - **M-P on a markdown buffer**: the file as prose ([`crate::markdown`]), the
+//!   text untouched underneath it;
 //! - **a host's review** ([`Editor::open_review`]): one change to the file,
 //!   as the host saw it made, at the file's own line numbers — and M-P on that
 //!   buffer shows it again ([`crate::review`]).
 //!
 //! The sources are kept and the lines re-rendered only when the width or the
 //! view changes — a diff and a highlight of two whole files is not per-frame
-//! work. The two M-P views are snapshots of the buffer when they opened.
+//! work. The M-P views are snapshots of the buffer when they opened.
 
 use std::path::PathBuf;
 
@@ -38,6 +41,8 @@ pub enum Source {
     },
     /// A diff or patch buffer's text.
     Patch { name: String, text: String },
+    /// A markdown buffer's text, drawn as the prose it documents.
+    Markdown { name: String, text: String },
     /// A buffer with conflict markers, and where the reader is in it.
     Conflict {
         name: String,
@@ -53,6 +58,23 @@ pub enum Source {
         name: String,
         change: crate::review::Change,
     },
+}
+
+impl Source {
+    /// **Whether `s` has two panels to toggle here.** The four diffs do; a
+    /// rendered document is one column, and says so rather than re-rendering
+    /// itself under a key that promised a change (see `DiffAct::ToggleSplit`).
+    /// Positive rather than "not a document", so a source added later has to
+    /// ask for the split deliberately.
+    fn has_a_split(&self) -> bool {
+        matches!(
+            self,
+            Source::Save { .. }
+                | Source::Patch { .. }
+                | Source::Conflict { .. }
+                | Source::Review { .. }
+        )
+    }
 }
 
 pub struct DiffView {
@@ -97,6 +119,13 @@ impl DiffView {
             Source::Patch { text, .. } => {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
+            // The document's own renderer, the one a model's reply is drawn
+            // with: blocks to rows, at the width the view draws them.
+            Source::Markdown { text, .. } => crate::markdown::render_blocks(
+                &crate::markdown::lex(text),
+                width,
+                &crate::markdown::RenderOptions::default(),
+            ),
             Source::Conflict {
                 name,
                 text,
@@ -144,6 +173,9 @@ impl DiffView {
             ),
             Source::Patch { name, .. } => {
                 format!(" Patch {name} ({view})   s: split/unified  Esc: back to the text")
+            }
+            Source::Markdown { name, .. } => {
+                format!(" Markdown {name}   Esc: back to the text")
             }
             Source::Review { name, .. } => format!(
                 " Review {name} ({view})   s: split/unified  M-s: send your place  Esc: to the change in the text"
@@ -194,8 +226,9 @@ impl Editor {
         self.diff_view = Some(DiffView::new(source, self.diff_split, self.text_w));
     }
 
-    /// M-P: the current buffer rendered — a patch file hunk by hunk, a file
-    /// with merge conflicts ours against theirs. Anything else says why not.
+    /// M-P: the current buffer rendered — a patch file hunk by hunk, a markdown
+    /// file as prose, a file with merge conflicts ours against theirs. Anything
+    /// else says why not.
     pub(crate) fn toggle_rendered_view(&mut self) {
         let name = self.buffer_name(self.cur);
         let text = self.bs().buf.text();
@@ -219,8 +252,12 @@ impl Editor {
             || looks_like_a_patch(&text)
         {
             self.open_view(Source::Patch { name, text });
+        } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown) {
+            self.open_view(Source::Markdown { name, text });
         } else if !self.show_review() {
-            self.flash("Nothing to render: not a diff or patch, and no merge conflicts");
+            self.flash(
+                "Nothing to render: not a diff or patch, not markdown, and no merge conflicts",
+            );
         }
     }
 
@@ -261,8 +298,15 @@ impl Editor {
                 }
                 return;
             }
-            // Split ↔ unified, remembered for the next diff.
+            // Split ↔ unified, remembered for the next diff. A view with one
+            // column has none to toggle, and says so rather than re-rendering
+            // the same rows.
             DiffAct::ToggleSplit => {
+                if !v.source.has_a_split() {
+                    self.flash("This view is one column: there is no split");
+                    self.diff_view = Some(v);
+                    return;
+                }
                 v.split = !v.split;
                 self.diff_split = v.split;
                 v.top = 0;
@@ -283,6 +327,7 @@ impl Editor {
         self.diff_view.as_ref().map(|v| match v.source {
             Source::Save { .. } => DiffKind::Save,
             Source::Patch { .. } => DiffKind::Patch,
+            Source::Markdown { .. } => DiffKind::Markdown,
             Source::Conflict { .. } => DiffKind::Conflict,
             Source::Review { .. } => DiffKind::Review,
         })
@@ -307,6 +352,7 @@ pub(crate) enum DiffAct {
 pub(crate) enum DiffKind {
     Save,
     Patch,
+    Markdown,
     Conflict,
     Review,
 }

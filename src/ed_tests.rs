@@ -364,6 +364,40 @@ fn m_p_previews_a_patch_buffer_and_closes_again() {
 }
 
 #[test]
+fn m_p_previews_a_markdown_buffer_as_prose() {
+    let mut ed = test_ed("# Title\n\nsome **bold** text and `code`\n\n- one\n- two");
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_preview.md"));
+    ed.text_w = 100;
+    ed.text_h = 20;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    // The markup is gone, not coloured: a heading, emphasis and a code span
+    // arrive as the words they wrap.
+    let rows = diff_view_text(&ed);
+    assert_eq!(rows[0], "# Title", "{rows:?}");
+    assert!(
+        rows.contains(&"some bold text and code".to_string()),
+        "{rows:?}"
+    );
+    assert!(rows.contains(&"· one".to_string()), "{rows:?}");
+    let header = ed.diff_view.as_ref().unwrap().header();
+    assert!(header.contains("Markdown /tmp/rano_preview.md"), "{header}");
+    // `s` is the shared diff map's split, and this view is one column: it says
+    // so rather than re-rendering the same rows, and the view stays open.
+    press(&mut ed, KeyCode::Char('s'), Mods::NONE);
+    assert!(ed.diff_view.is_some());
+    assert!(
+        ed.status.as_ref().unwrap().text.contains("one column"),
+        "{:?}",
+        ed.status.as_ref().map(|f| f.text.clone())
+    );
+    // M-P closes back to the text, which is untouched.
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_none());
+    assert!(ed.prompt.is_none());
+    assert_eq!(lines(&ed)[0], "# Title");
+}
+
+#[test]
 fn m_p_shows_merge_conflicts_ours_against_theirs() {
     let mut ed = test_ed(
         "fn main() {\n<<<<<<< HEAD\n    let total = 1;\n=======\n    let sum = 1;\n>>>>>>> feature\n}",

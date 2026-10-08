@@ -137,7 +137,7 @@ the config writes them nano's way (`^X`, `M-P`).
 | `F8` | Open file (new buffer when `multibuffer`, else replaces current — unless it has unsaved edits, which keeps it); `name:line[:col]` jumps there |
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
-| `M-P` | Preview a diff/patch buffer, or a file's merge conflicts side by side |
+| `M-P` | Preview a diff/patch buffer, a markdown file as prose, or a file's merge conflicts side by side |
 | `M-S` | Send the file, cursor and selection to `send_command` (see [Talking to a host](#talking-to-a-host)) |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
@@ -180,16 +180,22 @@ is called off by `n`.
 The diff renderers are part of rano's library (`rano::diff`, `rano::sidediff`),
 drawing ratatui lines, for other programs that show text the same way.
 
-### Diff preview and merge conflicts
+### Preview: diffs, markdown, merge conflicts
 
 `M-P` draws the current buffer over the text, using the same renderers as the
 save diff above, and `M-P` or Esc goes back to the text. Only resolving a
-conflict from the view (below) changes the text.
+conflict from the view (below) changes the text — a preview is a view of what
+the buffer holds, not an edit of it.
 
 - **A diff or patch** (`.diff`, `.patch`, or any buffer holding `git diff` /
   `diff -u` output) is shown file by file and hunk by hunk, numbered by each
   file's own lines, with changed words emphasised. The commit message and
   `format-patch` signature are shown dimmed.
+- **A markdown file** (`.md`, `.markdown`) is drawn as the prose it documents:
+  headings, lists, quotes and tables laid out at the width, emphasis and code
+  spans in their own colour, and a fence syntax-highlighted in the language it
+  names. This view is one column, so `s` says there is nothing to split rather
+  than doing nothing.
 - **A file with merge conflicts** (`<<<<<<<` / `=======` / `>>>>>>>`, with or
   without diff3's `|||||||` base) is shown one conflict per section, with ours
   and theirs lined up and the surrounding lines of the file for context. Each

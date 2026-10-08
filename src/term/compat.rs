@@ -2,7 +2,7 @@
 //!
 //! rano's editor still takes `crossterm::event::KeyEvent`s (its keymap's `Key::from_event`).
 //! Until it takes [`super::event`] directly, a host that reads input through
-//! [`super::decode`] can feed it through these. This is the only place in `term` that names
+//! [`mod@super::decode`] can feed it through these. This is the only place in `term` that names
 //! crossterm, and it is deleted with the editor's last crossterm call.
 //!
 //! The conversions spell keys the way crossterm itself reports them where the editor's keymap

@@ -11,7 +11,12 @@
 //! - [`diff`] / [`sidediff`] — line diffs drawn as ratatui lines, unified or
 //!   in two panels, with [`style`]'s roles and [`highlight`]'s syntax mapping.
 //! - [`width`] — display width: how many columns a character takes, where a
-//!   line's wrap segments begin, and which clusters may never be split.
+//!   line's wrap segments begin, and which clusters may never be split;
+//!   [`width::text`] is the same over strings that carry escapes.
+//! - [`render`] — rano's own render core: role-styled spans and lines, a
+//!   width-correct cell buffer, widgets, and rows emitted per palette.
+//! - [`term`] — the terminal: raw mode, the row-diffing painter, input decoded
+//!   into rano's own events, kitty graphics and OSC 8 links.
 
 pub mod buffer;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,

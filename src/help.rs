@@ -12,7 +12,7 @@
 //!   by what they do.
 //! - **`describe-key`** (`C-g k`): press a key, read what it runs.
 
-use rano::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
+use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 

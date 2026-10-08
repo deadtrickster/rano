@@ -14,6 +14,7 @@ use crate::BufferState;
 use crate::RowWrap;
 use crate::buffer::{Buffer, DiskStamp, Pos};
 use crate::config;
+pub use crate::keys::KeyOutcome;
 use crate::lsp;
 use crate::prompt::{Prompt, PromptKind, expand_tilde};
 use crate::search_ctrl::ReplaceState;
@@ -63,6 +64,38 @@ pub(crate) struct UndoStep {
     len_at_begin: usize, // buf.row_count() when the step began
 }
 
+/// A rectangle of terminal cells: where the editor sits on the screen.
+///
+/// rano's own type rather than ratatui's `Rect` on purpose: ratatui is only
+/// how rano draws today, and the editor's logic (sizing, mouse mapping) and
+/// a host's calls into it should not have to change when that does. The
+/// drawing side converts (`From<ratatui::layout::Rect>`, in `ui`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Area {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl Area {
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// Whether the cell at column `x`, row `y` is inside.
+    pub const fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x
+            && y >= self.y
+            && (x as u32) < self.x as u32 + self.w as u32
+            && (y as u32) < self.y as u32 + self.h as u32
+    }
+}
+
 pub struct Editor {
     /// Open buffers (F8 groundwork); exactly one until multi-buffer lands.
     pub buffers: Vec<BufferState>,
@@ -83,6 +116,10 @@ pub struct Editor {
     /// The keymaps in effect: the global layer and each mode's (see
     /// `commands.rs`). A host can rebind by editing them.
     pub keymaps: crate::commands::Keymaps,
+    /// A host's own maps, stacked over `keymaps` (see `Editor::push_keymap`).
+    /// Kept apart from the editor's so a host never has to know which of
+    /// the editor's maps is in effect to put a chord above all of them.
+    pub(crate) host_keymaps: Vec<crate::keymap::Keymap>,
     /// A key sequence under way: a prefix pressed, or `describe-key` waiting.
     pub pending: crate::commands::Pending,
     /// `M-x`, while it is open.
@@ -115,6 +152,13 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
+    /// The screen rectangle the editor occupies, as last given to
+    /// [`Self::set_area`]. Mouse events arrive in terminal coordinates and are
+    /// mapped through its origin; `text_w`/`text_h` are derived from its size.
+    /// Empty until a host sets it, which means "at (0, 0), unbounded" — what
+    /// the editor assumed before it could be a pane, and what tests that set
+    /// `text_w`/`text_h` by hand still rely on.
+    pub(crate) area: Area,
     /// Rendered width of a tab (seeded from config, F1).
     pub tab_width: usize,
     /// Line-number gutter toggle (M-N; seeded from config, F1).
@@ -163,7 +207,7 @@ pub struct Editor {
     /// produce. Off unless enabled — see `crate::update::enabled`, which reads
     /// the config and `RANO_AUTOUPDATE`. Nothing here runs in tests, because
     /// `Editor::new` does not start the check; `run()` does.
-    pub(crate) update: crate::update_ctrl::UpdateCheck,
+    pub update: crate::update_ctrl::UpdateCheck,
     pub(crate) load_saturated: bool,
     /// The style grid is behind the buffer; the next frame re-highlights. See
     /// [`Self::ensure_highlight`].
@@ -235,7 +279,7 @@ pub(crate) fn completion_prefix(
 }
 
 impl Editor {
-    pub(crate) fn new(buf: Buffer, config: config::Config) -> Self {
+    pub fn new(buf: Buffer, config: config::Config) -> Self {
         let tab_width = config.tab_width;
         let show_line_numbers = config.line_numbers;
         let wrap = config.wrap;
@@ -249,6 +293,7 @@ impl Editor {
             prompt: None,
             prompt_hints: None,
             keymaps: crate::commands::Keymaps::standard(),
+            host_keymaps: Vec::new(),
             pending: Default::default(),
             palette: None,
             info: None,
@@ -268,6 +313,7 @@ impl Editor {
             replace_count: 0,
             text_w: 80,
             text_h: 24,
+            area: Area::default(),
             tab_width,
             show_line_numbers,
             wrap,
@@ -297,7 +343,7 @@ impl Editor {
         &self.buffers[self.cur]
     }
 
-    pub(crate) fn bs_mut(&mut self) -> &mut BufferState {
+    pub fn bs_mut(&mut self) -> &mut BufferState {
         &mut self.buffers[self.cur]
     }
 
@@ -1618,6 +1664,24 @@ impl Editor {
 
     // ---------- mouse ----------
 
+    /// Give the editor its place on the screen: the whole terminal for the
+    /// binary, a pane for a host. Sets the text viewport from the size (the
+    /// title, status and two function-bar rows take four) and the origin
+    /// mouse events are mapped through. Returns whether anything changed,
+    /// i.e. whether the next frame must be drawn.
+    ///
+    /// Draw with the same rectangle ([`crate::ui::draw_in`]); the two are
+    /// separate only because drawing borrows the editor immutably.
+    pub fn set_area(&mut self, area: Area) -> bool {
+        if area == self.area {
+            return false;
+        }
+        self.area = area;
+        self.text_w = area.w as usize;
+        self.text_h = (area.h as usize).saturating_sub(4);
+        true
+    }
+
     /// Map a pane cell to a buffer position: only clicks inside the text
     /// area land; the title, status and function bars are ignored, and a
     /// click on the gutter or past EOL goes to the line start / line end.
@@ -1665,7 +1729,19 @@ impl Editor {
 
     /// Left click: cursor + fresh selection anchor. Left drag: extend.
     /// Wheel: scroll the viewport a few lines. Everything else is ignored.
-    pub(crate) fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+    ///
+    /// `m` is in terminal coordinates; an event outside the editor's area
+    /// (see [`Self::set_area`]) is not the editor's and is ignored, so a host
+    /// may forward every mouse event without hit-testing first.
+    pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
+        let mut m = m;
+        if !self.area.is_empty() {
+            if !self.area.contains(m.column, m.row) {
+                return false;
+            }
+            m.column -= self.area.x;
+            m.row -= self.area.y;
+        }
         // The list overlay is keyboard-only; the text under it is not there
         // to click.
         if self.picker.is_some() {
@@ -2017,7 +2093,7 @@ impl Editor {
 
     /// E1: bracketed paste. \r is stripped, newlines split into rows; the
     /// whole paste (including selection replacement) is ONE undo step.
-    pub(crate) fn paste_text(&mut self, s: &str) {
+    pub fn paste_text(&mut self, s: &str) {
         let frags: Vec<Vec<char>> = s
             .replace('\r', "")
             .split('\n')
@@ -3063,4 +3139,100 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
         (a, b) = (b, a % b);
     }
     a
+}
+
+impl Editor {
+    pub fn status_text(&self) -> Option<String> {
+        // A load in flight is the most important thing to say: without it the
+        // screen is a frame with nothing in it, which reads as frozen.
+        if let Some(s) = self.loading_text() {
+            return Some(s);
+        }
+        if let Some(f) = &self.status
+            && f.until > Instant::now()
+        {
+            return Some(f.text.clone());
+        }
+        if let Some(job) = &self.bs().exec_job {
+            return Some(format!("Running: {}", job.cmd));
+        }
+        if let Some(s) = self.lsp_status() {
+            return Some(s);
+        }
+        if let Some(t) = self.loc_until
+            && t > Instant::now()
+        {
+            return Some(format!(
+                "Line {}, Col {}",
+                self.bs().cursor.row + 1,
+                self.bs().cursor.col + 1
+            ));
+        }
+        None
+    }
+
+    /// Expire an overdue status flash / cursor-position display. Returns
+    /// whether anything visible was cleared (dirty-draw, D6).
+    pub(crate) fn tick_status(&mut self) -> bool {
+        let mut dirty = false;
+        if let Some(f) = &self.status
+            && f.until <= Instant::now()
+        {
+            self.status = None;
+            dirty = true;
+        }
+        if self.loc_until.is_some_and(|t| t <= Instant::now()) {
+            self.loc_until = None;
+            dirty = true;
+        }
+        dirty
+    }
+
+    /// One buffer per extra command-line file, after the first. Each is
+    /// named at once (title, buffer list, language) but read only when it
+    /// first becomes current — see `start_pending_load`. A file named twice
+    /// gets one buffer; a file that does not exist yet is a new buffer that
+    /// will be saved under that name, as for the first file.
+    #[cfg(test)]
+    pub(crate) fn add_deferred_buffers(&mut self, paths: &[PathBuf]) {
+        let at: Vec<(PathBuf, Option<Pos>)> = paths.iter().map(|p| (p.clone(), None)).collect();
+        self.add_deferred_buffers_at(&at);
+    }
+
+    /// [`Self::add_deferred_buffers`], each with the position (`file:line:col`,
+    /// `+line`) its cursor goes to once it is read.
+    pub fn add_deferred_buffers_at(&mut self, files: &[(PathBuf, Option<Pos>)]) {
+        for (p, at) in files {
+            if self.find_buffer(p).is_some() {
+                continue;
+            }
+            let mut buf = Buffer::new();
+            buf.name = Some(p.clone());
+            let mut bs = BufferState::new(buf);
+            if p.exists() {
+                bs.pending_load = Some(p.clone());
+            }
+            bs.goto = *at;
+            self.buffers.push(bs);
+        }
+    }
+
+    // ---------- styling ----------
+
+    /// The file name for the title bar, prefixed "[i/n] " when several
+    /// buffers are open. Scratch buffers show an empty name.
+    pub(crate) fn title_text(&self) -> String {
+        let name = self
+            .bs()
+            .buf
+            .name
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if self.buffers.len() > 1 {
+            format!("[{}/{}] {}", self.cur + 1, self.buffers.len(), name)
+        } else {
+            name
+        }
+    }
 }

@@ -188,12 +188,13 @@ impl Editor {
                     PromptKind::OpenName => {
                         // `name:line[:col]` jumps there, as on the command
                         // line. Read failed: keep the prompt open for editing.
-                        let opened = match crate::split_position(&expand_tilde(p.text.trim())) {
-                            Some((name, line, col)) => {
-                                self.open_at(std::path::Path::new(&name), line, col).is_ok()
-                            }
-                            None => self.open_file(&p.text),
-                        };
+                        let opened =
+                            match crate::send_ctrl::split_position(&expand_tilde(p.text.trim())) {
+                                Some((name, line, col)) => {
+                                    self.open_at(std::path::Path::new(&name), line, col).is_ok()
+                                }
+                                None => self.open_file(&p.text),
+                            };
                         if !opened {
                             self.prompt = Some(p);
                         }

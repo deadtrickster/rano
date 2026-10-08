@@ -297,6 +297,19 @@ environment:
 rano doesn't wait for the command, and its output is discarded (the terminal
 belongs to the editor), so the status line only says the event was sent.
 
+## Embedding
+
+The editor is a library too (`rano::editor`), so another program can show it
+as a pane rather than run it as a second process. A host builds an `Editor`,
+gives it its place with `set_area`, opens files with `open_at(path, line,
+column)`, feeds it keys, mouse events and pastes, calls `tick` between events
+and draws it with `rano::ui::draw_in` into its pane's rectangle.
+`next_wakeup` says how long the host may wait for input before ticking again.
+`handle_key` says whether the editor used a key; a host stacks its own chords
+over the editor's with `push_keymap`, and a chord bound to a name the editor
+does not know comes back to the host by that name. `wants_quit` turns true
+when the editor exits. The `rano` binary is one such host.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/rano/config.toml` (falling back to `~/.config/rano/config.toml`):

@@ -16,8 +16,9 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use rano::conflict::Take;
-use rano::keymap::{Entry, Key, Keymap, Lookup, lookup, seq_emacs, where_is};
+use crate::conflict::Take;
+use crate::keymap::{Entry, Key, Keymap, Lookup, lookup, seq_emacs, where_is};
+use crate::keys::KeyOutcome;
 
 use crate::diffview::{ConflictAct, DiffAct, DiffKind};
 use crate::editor::Editor;
@@ -995,7 +996,20 @@ enum Decision {
 
 impl Editor {
     /// The keymaps in effect, most specific first.
+    ///
+    /// A host's maps ([`Self::push_keymap`]) come first, last pushed first,
+    /// over whatever the editor's own stack is at the moment — so a host's
+    /// chord works in a list or a diff as well as in the text.
     pub(crate) fn active_keymaps(&self) -> Vec<&Keymap> {
+        let mut stack: Vec<&Keymap> = self.host_keymaps.iter().rev().collect();
+        stack.extend(self.editor_keymaps());
+        stack
+    }
+
+    /// The editor's own maps in effect, without a host's: the global layer or
+    /// the open mode's. What decides whether an unbound character is typed,
+    /// which a host map stacked on top must not change.
+    pub(crate) fn editor_keymaps(&self) -> Vec<&Keymap> {
         let k = &self.keymaps;
         if self.palette.is_some() {
             return vec![&k.palette];
@@ -1024,7 +1038,11 @@ impl Editor {
     /// One key through the keymaps: a command runs, a prefix waits for the next
     /// key (its card shows after [`CARD_DELAY`]), and an unbound printable
     /// character is typed — into the text, or into the `M-x` query.
-    pub(crate) fn dispatch_key(&mut self, key: Key) {
+    ///
+    /// A command name no editor command has can only have come from a host's
+    /// map; it is returned for the host to run rather than reported as
+    /// missing.
+    pub(crate) fn dispatch_key(&mut self, key: Key) -> KeyOutcome {
         let mut seq = std::mem::take(&mut self.pending.keys);
         let describing = std::mem::take(&mut self.pending.describe);
         self.pending.since = None;
@@ -1041,6 +1059,7 @@ impl Editor {
                 self.pending.describe = describing;
             }
             Decision::Run(name) if describing => self.show_description(&seq, Some(&name)),
+            Decision::Run(name) if command(&name).is_none() => return KeyOutcome::Host(name),
             Decision::Run(name) => self.run_command(&name),
             Decision::Unbound if describing => self.show_description(&seq, None),
             Decision::Unbound => {
@@ -1050,11 +1069,14 @@ impl Editor {
                     if self.palette.is_some() {
                         self.palette_type(c);
                     } else if self
-                        .active_keymaps()
+                        .editor_keymaps()
                         .first()
                         .is_some_and(|m| m.name == "global")
                     {
                         self.insert_char(c);
+                    } else {
+                        // A mode (a list, a diff, help) types nothing.
+                        return KeyOutcome::Unhandled;
                     }
                 } else if seq.len() > 1 {
                     // C-g and ESC are how a prefix is abandoned, as in emacs.
@@ -1063,9 +1085,12 @@ impl Editor {
                     } else {
                         self.flash(&format!("{} is undefined", seq_emacs(&seq)));
                     }
+                } else {
+                    return KeyOutcome::Unhandled;
                 }
             }
         }
+        KeyOutcome::Handled
     }
 
     /// Run a command by name, and remember it for `M-x`'s ordering.
@@ -1116,12 +1141,16 @@ impl Editor {
         {
             return entries_of(m, nano);
         }
-        if stack.first().is_some_and(|m| m.name == "global") {
+        if self
+            .editor_keymaps()
+            .first()
+            .is_some_and(|m| m.name == "global")
+        {
             return BAR
                 .iter()
                 .filter_map(|name| {
                     if let Some(prefix) = name.strip_prefix('@') {
-                        let seq = rano::keymap::parse_seq(prefix)?;
+                        let seq = crate::keymap::parse_seq(prefix)?;
                         let Lookup::Prefix(m) = lookup(&stack, &seq) else {
                             return None;
                         };
@@ -1228,7 +1257,7 @@ mod tests {
         let k = Keymaps::standard();
         for name in BAR {
             if let Some(p) = name.strip_prefix('@') {
-                let seq = rano::keymap::parse_seq(p).unwrap();
+                let seq = crate::keymap::parse_seq(p).unwrap();
                 assert!(
                     matches!(lookup(&[&k.global], &seq), Lookup::Prefix(_)),
                     "{p}"

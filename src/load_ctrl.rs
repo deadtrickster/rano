@@ -19,7 +19,7 @@ impl Editor {
     /// Returns whether a job started; a file that cannot be opened is reported
     /// by the caller (it is the one failure that should not become a status
     /// line, because there is nothing on screen to attach it to).
-    pub(crate) fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
+    pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
         let job = LoadJob::spawn(path.to_path_buf())?;
         {
             let bs = self.bs_mut();

@@ -217,6 +217,11 @@ pub struct Editor {
     /// them itself — it is a library, and the terminal is the host's — so they wait here
     /// ([`Self::take_graphics`]).
     pub(crate) graphics_out: Vec<Vec<u8>>,
+    /// **Text the host must put on the terminal's clipboard** (OSC 52): what `M-6`, `^K` and
+    /// the end of a mouse drag queued ([`Self::take_clipboard`]). The editor does not know
+    /// whether the terminal speaks OSC 52 — that is [`crate::term::Features::clipboard`], and
+    /// the terminal's own answer — so it queues the text and the host hands it over.
+    pub(crate) clipboard_out: Option<String>,
     /// **The pictures the terminal is holding**, as `id → the cell box it is placed in`.
     /// Kept so a frame that changed nothing sends nothing, and so a picture that is gone
     /// — or whose box moved — is dropped rather than left in the terminal's memory.
@@ -397,6 +402,7 @@ impl Editor {
             images: false,
             edit_override: false,
             graphics_out: Vec::new(),
+            clipboard_out: None,
             images_held: std::collections::HashMap::new(),
             mouse_arm: false,
             on_send: None,
@@ -1998,6 +2004,13 @@ impl Editor {
                 if dropped {
                     bs.mark = None;
                 }
+                // **A selection made with the mouse goes to the system clipboard**, the way
+                // it does in every program with a mouse: the drag selected in *rano*, so the
+                // terminal's own copy has nothing to work from, and without this a reader
+                // selects text and then finds that nothing can pick it up.
+                if !dropped {
+                    self.copy_to_clipboard();
+                }
                 dropped
             }
             MouseKind::Drag(MouseButton::Left) => match self.mouse_pos(m.y, m.x) {
@@ -2243,6 +2256,17 @@ impl Editor {
         if self.refuse_read_only("cut") {
             return;
         }
+        // **What was cut goes to the system clipboard too**, computed first: after the cut
+        // there is no selection left to read, and a cut that nothing outside rano can see is
+        // the same complaint the copy had (*"nothing copies"*). "Cut" to the rest of the
+        // machine means "put it on the clipboard and remove it here".
+        let clip = self.selection_text().or_else(|| {
+            // A whole line, which is `^K`'s own unit, with its newline.
+            let c = self.bs().cursor;
+            let line: String = self.bs().buf.row(c.row).iter().collect();
+            Some(format!("{line}\n"))
+        });
+        self.clipboard_out = clip;
         let (first, last) = match self.bs().mark {
             Some(mark) => {
                 let (a, b) = normalize(mark, self.bs().cursor);
@@ -2390,8 +2414,62 @@ impl Editor {
         self.edit_invalidate();
     }
 
+    /// **The marked region, as text**: the rows joined, with a newline after each — the
+    /// form a reader pastes into another program. `None` when nothing is marked (or the
+    /// mark is empty), and a *whole-line* selection ends with a newline, the way `^K` and
+    /// every editor's line-wise copy do, so pasting it back is a line rather than a run-on.
+    pub fn selection_text(&self) -> Option<String> {
+        let mark = self.bs().mark?;
+        let (a, b) = normalize(mark, self.bs().cursor);
+        if a == b {
+            return None;
+        }
+        let mut out = self
+            .bs()
+            .buf
+            .copy_range(a, b)
+            .iter()
+            .map(|row| row.iter().collect::<String>())
+            .collect::<Vec<String>>()
+            .join("\n");
+        // **The newline the selection took with it.** `copy_range` is the cutbuffer's view —
+        // whole rows, trimmed at both ends — so a selection that starts at a row's first
+        // column (line-wise, the way `^K` takes one) or ends at one (it swallowed the
+        // newline before it) is missing the newline it covered, and pasting it would join it
+        // to whatever comes next.
+        if a.row < b.row && (a.col == 0 || b.col == 0) {
+            out.push('\n');
+        }
+        Some(out)
+    }
+
+    /// **Put the marked region on the terminal's clipboard** (OSC 52, where the terminal
+    /// speaks it), for everything that copies: `M-6`, `^K`, and the end of a mouse drag.
+    ///
+    /// Queued rather than written — the editor is a library and the terminal is the
+    /// host's — so a host drains it with [`Self::take_clipboard`] and hands it to
+    /// `term::Terminal::copy`, which is the one place that knows the terminal's answer.
+    ///
+    /// The reader, on not being able to copy a selection they had just made with the
+    /// mouse: *"when i just select text without shift and try to copy it - nothing
+    /// copies"*. rano's selection is rano's, so the terminal's own copy has nothing to
+    /// work from — the text has to go out from here.
+    pub(crate) fn copy_to_clipboard(&mut self) {
+        if let Some(text) = self.selection_text() {
+            self.clipboard_out = Some(text);
+        }
+    }
+
+    /// **Take the text queued for the terminal's clipboard**, if any. A host that wants
+    /// copy to reach the system clipboard writes it with `term::Terminal::copy` (OSC 52);
+    /// the standalone binary does it every frame, as it does with pictures.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard_out.take()
+    }
+
     /// M-6: copy the current line (or marked region) to the cutbuffer
-    /// without deleting it. The mark stays active.
+    /// without deleting it. The mark stays active, and the region goes to the system
+    /// clipboard as well — a copy that nothing outside rano can see is not a copy.
     pub(crate) fn copy(&mut self) {
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
@@ -2399,6 +2477,7 @@ impl Editor {
                 let rows = self.bs_mut().buf.copy_range(a, b);
                 self.cut = rows;
                 self.cut_line = a.col == 0 && b.row > a.row;
+                self.copy_to_clipboard();
                 return;
             }
         }
@@ -2406,6 +2485,8 @@ impl Editor {
         let line = self.bs().buf.row(c.row).clone();
         self.cut = vec![line];
         self.cut_line = true;
+        // A whole line, with its newline: what `^K` would have taken.
+        self.clipboard_out = Some(format!("{}\n", self.cut[0].iter().collect::<String>()));
     }
 
     pub(crate) fn delete_char_cut(&mut self) {

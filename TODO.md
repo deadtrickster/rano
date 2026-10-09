@@ -2971,3 +2971,41 @@ needle split by a boundary, a regex spanning one, interrupt before and mid scan,
 CRLF rows, byte offsets and rows after multibyte content, and a ~4 MB scan that
 MEASURES its throughput and prints it without asserting on it (timing assertions
 flake).
+
+## 21. The clipboard: a selection nothing could pick up
+
+Added 2026-10-09, from the operator: *"ok we have a huge problem with clipboard and
+selection - when i just select text without shift and try to copy it - nothing copies
+lol"*.
+
+Both halves of that were true, and neither was about `OSC 52` being unsupported:
+
+- [x] **`M-6` and `^K` never reached the system clipboard.** They filled rano's own
+  cutbuffer (nano's semantics) and stopped there; `Terminal::copy`, the OSC 52 writer, had
+  no caller at all — it was written for letibot's head. A copy nothing outside rano can
+  see is not a copy, so `copy`, `cut` and the end of a mouse drag now queue the text
+  (`Editor::clipboard_out` → `Editor::take_clipboard`) and the binary hands it to
+  `Terminal::copy`, which is still the only place that knows whether the terminal speaks
+  OSC 52. The editor is a library: it queues, the host writes — the same shape as a
+  picture's bytes.
+- [x] **A mouse drag selects in *rano*, so the terminal's own copy had nothing to work
+  from.** With `?1002` on, the drag is rano's; the terminal's own selection is Shift+drag.
+  So the app has to do the copying, and it now does: **letting go of a drag puts the
+  selection on the system clipboard**, the way a selection works everywhere else, and
+  `M-6` / `^K` do the same for the mark and the line. The terminal's `Cmd+C` still needs a
+  terminal selection (Shift+drag) — a limit of the protocol, not of rano. The clipboard is
+  drained every pass of the loop, not only when a frame is due: it is not the screen, and
+  a copy that waited for the next keystroke to be written would look like the same nothing
+  the report was about.
+- [x] **What the clipboard text is**: the marked rows joined with newlines, plus the
+  newline a line-wise selection took with it — one that starts or ends at a row's first
+  column is line-wise, the way `^K` takes a line, so pasting it back is a line rather than
+  a run-on. `M-6` with no mark copies the whole line, newline and all.
+- [x] **And writing the test found a crash.** `a_copy_reaches_the_terminal_clipboard`
+  panicked inside `Buffer::cut_range`: the arithmetic for the rows *between* the two ends
+  (`b.row - 1 - first_removed`) **underflowed** on the ordinary case it was written for —
+  a selection from a row's first column into the *next* row, which is one mouse drag — and
+  `remove_empty_line` returning 1 for the drained first row is what put it under zero. A
+  two-row selection that starts at a line's first column, then `^K`: that is all it took.
+  The end is now exclusive and in post-removal coordinates, and the case is pinned by the
+  test. It had been there since the cutbuffer was written.

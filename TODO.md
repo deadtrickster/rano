@@ -2743,8 +2743,30 @@ case — `one_nl: rows=1 window=16 — got 2, reference 0`.
       may colour have not changed — so a log being written no longer re-parses
       per append, which is the per-keystroke cost §16 exists to avoid arriving
       in a new shape. `landed`
-- [ ] **F** — the tail pane, on the existing `agent::pane` framework, with the
-      not-rendered budget below.
+- [x] **F** — the tail pane, on `agent::pane`, and the not-rendered budget.
+      **Two halves, and they are two files because the framework's own rule puts
+      them there** — nothing in `agent/` touches the filesystem, so the reader is
+      not in it and the widget has no path.
+      `src/logtail.rs` is §20.4's budget as a TYPE: `LogTail` holds the row
+      count, a sparse row → byte index (one `u64` per 4096 rows) and the block
+      boundaries, and **no rows at all** — `state_bytes()` counts exactly those
+      two vectors by capacity, so the promise is a number a test reads rather
+      than a claim in a comment. The pass never decodes a row: `Blocks` gained
+      `push_first` (one rule, two doors — `push` is now one line of it), a `\r`
+      is a line ending rather than content, and a leading U+00A0 is decoded
+      rather than looked at as 0xC2. Rows come from the file per window and are
+      dropped with it.
+      `src/agent/logpane.rs` is the widget: a view model, rows numbered **by the
+      file**, every row drawn hanging off its block with a dim `│` where
+      `logblocks` says it continues. Folding is deliberately NOT done — a block a
+      growing log has not finished writing is not a block to hide rows in (§20.5).
+      **Measured: 200 000 rows of 8.9 MB indexed in 25.9 ms, state 2048 KiB —
+      10.5 bytes per row.** So a 4 000 000-row log's bookkeeping is ~42 MB,
+      against the 1.6 GB the same file costs open in a buffer (C's measurement).
+      The pass was 208 MB/s with a branch per byte and is 344 MB/s with the
+      row's four-byte head split from the newline search; `memchr` is the
+      remaining step, and the same one `logsearch` names.
+      `landed`
 
 ### 20.4 The not-rendered budget, which is the point
 

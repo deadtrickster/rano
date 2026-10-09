@@ -155,6 +155,14 @@ pub struct Editor {
     /// placeholder cell is `U+10EEEE` with combining marks, which a terminal that
     /// cannot fill it draws as garbage — so M-P on a PNG says why instead of drawing one.
     pub images: bool,
+    /// **`--edit`: open a `.log` as an ordinary file** rather than as a tail
+    /// (TODO.md §20.7's escape hatch from the mode).
+    ///
+    /// A property of RUNNING rather than of being, like [`Self::images`]: no test
+    /// needs it set, and only a command line sets it. `-f` is the other escape —
+    /// it opens ANY file as a tail — and it wins where both are given, because it
+    /// says what to do rather than what not to.
+    pub edit_override: bool,
     /// **Bytes the host must write to the terminal outside the frame**: the kitty
     /// graphics commands for the pictures a view is drawing. The editor cannot write
     /// them itself — it is a library, and the terminal is the host's — so they wait here
@@ -334,6 +342,7 @@ impl Editor {
             diff_view: None,
             diff_split: false,
             images: false,
+            edit_override: false,
             graphics_out: Vec::new(),
             images_held: std::collections::HashMap::new(),
             mouse_arm: false,
@@ -2895,14 +2904,30 @@ impl Editor {
             self.set_current(i);
             return true;
         }
-        let buf = match Buffer::from_file(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.flash(&format!("Error: {}", e));
-                return false;
+        // **A `.log` is never read here.** It opens in log mode, which is a LOAD,
+        // so the file is named now and read on the next tick — the same decision
+        // `start_pending_load` makes for a command-line file, at the same one
+        // place. Without this, `M->` on a 2 GiB log would read it whole into a
+        // buffer before the next frame, which is the freeze TODO.md §14 exists to
+        // avoid.
+        let log = self.log_mode_for(&path);
+        let (buf, count) = if log {
+            let mut b = Buffer::new();
+            b.name = Some(path.clone());
+            b.disk = crate::buffer::DiskStamp::of(&path);
+            (b, 0)
+        } else {
+            match Buffer::from_file(&path) {
+                Ok(b) => {
+                    let n = b.row_count();
+                    (b, n)
+                }
+                Err(e) => {
+                    self.flash(&format!("Error: {e}"));
+                    return false;
+                }
             }
         };
-        let count = buf.row_count();
         // Without multibuffer the new file replaces the current buffer — but
         // never one with unsaved edits: that one stays, and the file gets a
         // buffer of its own, so opening a file cannot throw work away.
@@ -2915,11 +2940,15 @@ impl Editor {
             let b = &self.bs().buf;
             b.name.is_none() && !b.modified && b.row_count() <= 1 && b.text().is_empty()
         };
+        let mut state = BufferState::new(buf);
+        if log {
+            state.pending_load = Some(path.clone());
+        }
         if (self.config.multibuffer && !scratch) || kept {
-            self.buffers.push(BufferState::new(buf));
+            self.buffers.push(state);
             self.cur = self.buffers.len() - 1;
         } else {
-            self.buffers[self.cur] = BufferState::new(buf);
+            self.buffers[self.cur] = state;
         }
         // A fresh highlighter has no window, which `highlight_covers_viewport`
         // reads as "covers everything"; only the flag gets it a first pass.
@@ -2927,12 +2956,17 @@ impl Editor {
         self.lsp_sync();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        if kept {
-            self.flash(&format!(
-                "Read {count} lines into a new buffer: the other has unsaved edits (M-< goes back)"
-            ));
-        } else {
-            self.flash(&format!("Read {} lines", count));
+        // A log says nothing here: its rows have not been read, and the line
+        // count is the background scan's to say (`start_tail`'s `CaughtUp` flash
+        // says "Tailing — showing the last N lines" in a moment).
+        if !log {
+            if kept {
+                self.flash(&format!(
+                    "Read {count} lines into a new buffer: the other has unsaved edits (M-< goes back)"
+                ));
+            } else {
+                self.flash(&format!("Read {} lines", count));
+            }
         }
         // **A picture is its own reading**: the text just loaded is a lossy decode of bytes
         // that are not text, so the picture opens over it. The flash above still says what

@@ -50,7 +50,8 @@ rano [options] [file...]
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
   -f, --follow      open at the tail, and keep reading the file as it grows
-                    (all three apply to the first file)
+  --edit            open a .log as an ordinary file (a .log IS one by default)
+                    (all of these apply to the first file)
   file:LINE[:COL]   open that file at that position (any file, not just the first)
   +LINE[,COL] file  the same, nano/vi style, for the file after it
   -h, --help        usage
@@ -78,21 +79,32 @@ rows stream in, so `--line 1000000 huge.log` waits for line 1000000 rather than
 opening at whatever had been read. A bad flag or an unreadable file prints a
 message and exits non-zero, so a caller can tell what happened.
 
-### `-f`, which is how you read a log
+### `-f`, and what a `.log` does by default
 
-`rano -f huge.log` opens at the **tail**: the last screenful, found by scanning
-backwards from the end, so a 2 GiB log opens for a read of a few hundred KiB
-rather than the whole file. It then **follows** — new lines appear as whatever
-is writing the file writes them — and it opens **read-only**, because a tailed
-file is one another process owns: an edit that could not be saved is work lost
-silently, so typing is refused at the keystroke and says why.
+**A file whose name ends in `.log` opens in log mode by itself** — the name is
+the whole rule, with no `/var/log/` case and no content sniffing. `rano -f
+whatever` forces the same thing for a file that is not named that way, and
+`rano --edit server.log` opens a log as an ordinary file when you mean to edit
+it. That one rule is applied at **every door a file comes in by** — the command
+line, a second file on it, `M->`, F8 — because a rule honoured at four doors out
+of five is one nobody can predict, and the fifth is the one that reads a 2 GiB
+log into a buffer and freezes the frame.
+
+It opens at the **tail**: the last screenful, found by scanning backwards from
+the end, so a 2 GiB log opens for a read of a few hundred KiB rather than the
+whole file. It then **follows** — new lines appear as whatever is writing the
+file writes them — and it opens **read-only**, because a tailed file is one
+another process owns: an edit that could not be saved is work lost silently, so
+typing is refused at the keystroke and says why.
 
 A row appears only once the file has finished writing it: a trailing partial
 line is held back until its newline arrives, so half a stack trace is never
-shown as if it were whole. The line numbers are the FILE's, counted in the
-background while you look at the buffer — until that count answers, the gutter is
-blank and the status line says `Ln ?`, because a tail's row 1 is not the file's
-line 1 and guessing it would be a lie.
+shown as if it were whole. Nothing past where the file had reached when you
+opened it is coloured, because a row the file is still writing is not finished
+text. The line numbers are the FILE's, counted in the background while you look
+at the buffer — until that count answers, the gutter is blank and the status line
+says `Ln ?`, because a tail's row 1 is not the file's line 1 and guessing it
+would be a lie.
 
 Measured on one 344 MB log of 4 000 000 rows: **5 MB of memory**, against 1.6 GB
 for the same file opened normally. A follower with nothing new to read costs

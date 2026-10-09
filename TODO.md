@@ -2862,6 +2862,25 @@ rule; `--edit` the escape hatch from the mode.
 This is the increment I would do LAST, because it is the one that changes
 behaviour for files nobody asked about.
 
+**Landed.** The rule is `Editor::log_mode_for`: **the name ends in `.log`, and
+that is all of it** — no `/var/log/`, no content sniff, no format list. `.log` on
+its own is a dotfile rather than a log, and case does not matter (`.LOG` is the
+same file on every filesystem a log gets written to). The one decision is
+`Editor::start_named`, called from **every door** — the command line, a second
+file on it, and F8/`M->` — because a rule honoured at four doors out of five is
+one nobody can predict. `-f` forces the mode for any file and wins over
+`--edit`, which says to treat a log as a file.
+
+**It also fixed a freeze that was already there.** `open_file` (`M->`, F8) reads a
+file whole, so `M-> huge.log` used to read 2 GiB into a buffer before the next
+frame — the very thing §14 removed from the command line. A `.log` is now named
+and deferred instead, which is the same rule arriving at the last door, and the
+reason that path needs no special case beyond it.
+
+Verified in a terminal: `rano server.log` opens as `VIEW`, at the tail, scrolled
+to the bottom, saying `Tailing — showing the last 200 lines`; `rano --edit
+server.log` opens at row 1 and says `Read 500 lines`.
+
 ### 20.8 Docker output, and why it is a different problem
 
 Two shapes, and only one of them is a file:

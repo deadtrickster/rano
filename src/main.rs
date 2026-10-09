@@ -33,6 +33,9 @@ struct Args {
     export: Option<export::Format>,
     /// `-f`/`--follow`: open the first file at its tail, read-only (TODO.md §20).
     follow: bool,
+    /// `--edit`: open a `.log` as an ordinary file rather than as a tail — the
+    /// escape hatch from the default §20.7 decides by name.
+    edit: bool,
     help: bool,
     version: bool,
 }
@@ -84,6 +87,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 out.col = Some(parse_num("--column", &value("--column")?)?)
             }
             "-f" | "--follow" => out.follow = true,
+            "--edit" => out.edit = true,
             "--export" => {
                 let v = value("--export")?;
                 out.export = Some(export::Format::parse(&v).ok_or_else(|| {
@@ -135,7 +139,8 @@ usage: rano [options] [file...]
   -l, --line N      put the cursor on line N (1-based) and centre it
   -c, --column N    put the cursor on column N (1-based)
   -f, --follow      open at the tail: the last few screens, read-only
-                    (all three apply to the first file)
+  --edit            open a .log as an ordinary file (a .log IS one by default)
+                    (all of these apply to the first file)
   file:LINE[:COL]   open that file at that position
   +LINE[,COL] file  the same, for the file after it
   -h, --help        this
@@ -229,7 +234,7 @@ fn main() {
     if !rest.is_empty() {
         cfg.multibuffer = true;
     }
-    if let Err(e) = run(buf, load, rest, pos, args.follow, cfg) {
+    if let Err(e) = run(buf, load, rest, pos, args.follow, args.edit, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -293,6 +298,7 @@ fn run(
     rest: Vec<(PathBuf, Option<Pos>)>,
     pos: Option<Pos>,
     follow: bool,
+    edit: bool,
     cfg: config::Config,
 ) -> io::Result<()> {
     // Raw mode, the alternate screen, bracketed paste and mouse buttons (the
@@ -313,6 +319,9 @@ fn run(
     // M-P on a PNG is refused — by name — where `Features::images` is off (see
     // `term::features`).
     ed.images = terminal.features().images;
+    // `--edit`: the escape from the mode a `.log` NAME puts it in. Set before any
+    // load, because every load asks (`Editor::log_mode_for`).
+    ed.edit_override = edit;
     // One request at startup, off the main thread. `run` rather than
     // `Editor::new` because it is a property of RUNNING, not of being — no test
     // makes a network call by constructing an editor.
@@ -324,14 +333,14 @@ fn run(
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.bs_mut().goto = pos;
     if let Some(path) = load {
-        // `-f`/`--follow` opens at the TAIL: the last few screens read from the
-        // end of the file, read-only, landing at the bottom (TODO.md §20).
-        // Everything else about the open — the name, the language, the deferred
-        // buffers behind it, the frame — is the same call.
+        // `-f`/`--follow` FORCES the tail: it says what to do. Without it, the
+        // name decides — `start_named` is the one decision every door uses, so a
+        // `.log` opens in log mode from here, from a deferred buffer and from F8
+        // (§20.7).
         let started = if follow {
             ed.start_tail(&path)
         } else {
-            ed.start_load(&path)
+            ed.start_named(&path)
         };
         if let Err(e) = started {
             // The one load failure reported before a frame is drawn: there is
@@ -485,6 +494,18 @@ mod args_tests {
         // And in any order, like every other flag.
         let a = parse_args(&argv(&["huge.log", "-f"])).expect("parse");
         assert!(a.follow && a.file() == Some("huge.log"));
+    }
+
+    #[test]
+    fn edit_is_the_escape_from_a_log_default() {
+        // `--edit` takes no value either, and off is the default — the RULE is
+        // `Editor::log_mode_for`'s, and the flag only overrides it.
+        let a = parse_args(&argv(&["--edit", "server.log"])).expect("parse");
+        assert!(a.edit);
+        assert_eq!(a.file(), Some("server.log"));
+        assert!(!parse_args(&argv(&["server.log"])).expect("parse").edit);
+        let a = parse_args(&argv(&["server.log", "--edit"])).expect("parse");
+        assert!(a.edit && a.file() == Some("server.log"));
     }
 
     #[test]

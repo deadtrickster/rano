@@ -4375,3 +4375,114 @@ fn a_plain_open_clears_the_tail_flag() {
         "read-only is per open, and this open did not ask for it"
     );
 }
+
+// ---------- §20.7: a `.log` opens in log mode ----------
+
+/// **The rule is the name, and nothing else.** Not `/var/log/`, not a content
+/// sniff, not a list of formats — §20.7's first draft had the directory rule too
+/// and it was written from one `ls` of one directory, which is how a predicate
+/// acquires a case per file its author happened to see.
+#[test]
+fn the_log_rule_is_the_name_and_nothing_else() {
+    let ed = test_ed("");
+    for (path, want) in [
+        ("server.log", true),
+        ("/var/log/syslog.log", true),
+        ("/home/x/Projects/thing/out/serve.LOG", true),
+        ("a.b.log", true),
+        ("x.LoG", true),
+        // Rotated logs are NOT `.log`: the extension is the whole rule, and
+        // `server.log.1` does not end in it.
+        ("server.log.1", false),
+        ("server.log.gz", false),
+        ("log", false),
+        ("logs", false),
+        ("log.txt", false),
+        ("src/log.rs", false),
+        // A dotfile called `.log` is a dotfile, not a log.
+        (".log", false),
+        ("/", false),
+    ] {
+        assert_eq!(
+            ed.log_mode_for(std::path::Path::new(path)),
+            want,
+            "{path:?} should {} be log mode",
+            if want { "" } else { "not" }
+        );
+    }
+    // And `--edit` turns every one of them off, which is the escape hatch §20.7
+    // names.
+    let mut ed = test_ed("");
+    ed.edit_override = true;
+    assert!(!ed.log_mode_for(std::path::Path::new("server.log")));
+}
+
+/// One decision for every door: a `.log` tails, a `.rs` does not, and `--edit`
+/// says to treat the log as a file.
+#[test]
+fn the_name_decides_as_a_log_or_as_a_file() {
+    let d = temp_dir("log_named");
+    let log = d.0.join("app.log");
+    let rs = d.0.join("app.rs");
+    let text: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+    fs::write(&log, &text).unwrap();
+    fs::write(&rs, &text).unwrap();
+
+    let mut ed = test_ed("");
+    ed.start_named(&log).expect("open the log");
+    settle(&mut ed);
+    assert!(ed.bs().tail.is_some(), "a .log did not open as a tail");
+    assert!(ed.bs().read_only, "a tail is a view (§20.6)");
+    assert_eq!(lines(&ed).len(), crate::loader::TAIL_ROWS);
+    assert_eq!(lines(&ed)[0], "line 301", "not the end of the file");
+
+    let mut ed = test_ed("");
+    ed.start_named(&rs).expect("open the source");
+    settle(&mut ed);
+    assert!(ed.bs().tail.is_none(), "a .rs opened as a tail");
+    assert!(!ed.bs().read_only);
+    assert_eq!(lines(&ed).len(), 500, "a plain open reads the whole file");
+
+    // `--edit`: the same file, as a file.
+    let mut ed = test_ed("");
+    ed.edit_override = true;
+    ed.start_named(&log).expect("open the log as a file");
+    settle(&mut ed);
+    assert!(ed.bs().tail.is_none());
+    assert!(!ed.bs().read_only);
+    assert_eq!(lines(&ed).len(), 500);
+}
+
+/// **A `.log` opened later is not read eagerly either.** `M->`/F8 go through
+/// `open_file`, which reads a file whole — so a log is named and deferred
+/// instead, which is both the same rule and the fix for opening a huge log that
+/// way at all.
+#[test]
+fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
+    let d = temp_dir("log_open_file");
+    let log = d.0.join("server.log");
+    let rs = d.0.join("server.rs");
+    let text: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+    fs::write(&log, &text).unwrap();
+    fs::write(&rs, &text).unwrap();
+
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    assert!(ed.open_file(log.to_str().unwrap()));
+    assert!(
+        ed.bs().pending_load.is_some(),
+        "a .log was read eagerly by open_file"
+    );
+    assert_eq!(lines(&ed), vec![""], "nothing was read yet");
+    ed.start_pending_load();
+    settle(&mut ed);
+    assert!(ed.bs().tail.is_some(), "it did not open as a tail");
+    assert!(ed.bs().read_only);
+    assert_eq!(lines(&ed)[0], "line 301");
+
+    // The control: an ordinary file is still read here, as it always was.
+    let mut ed = test_ed("");
+    assert!(ed.open_file(rs.to_str().unwrap()));
+    assert!(ed.bs().pending_load.is_none());
+    assert_eq!(lines(&ed).len(), 500, "a .rs is read on the spot");
+}

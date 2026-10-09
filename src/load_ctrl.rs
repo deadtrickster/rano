@@ -97,9 +97,46 @@ impl Editor {
         self.preview_if_picture();
     }
 
+    /// Whether `path` opens in LOG MODE: **its name ends in `.log`, and that is
+    /// the whole rule** (TODO.md §20.7).
+    ///
+    /// Deliberately not a path rule (`/var/log/`) and not a content sniff. A
+    /// first draft of §20.7 had `/var/log/` as a second case, written from one
+    /// `ls` of one directory — which is how a predicate acquires a rule per file
+    /// its author happened to see, and then a bug per file they did not. The name
+    /// is all of it: `--edit` is the escape from the mode, and `-f` is the escape
+    /// from the rule (it opens ANY file this way).
+    ///
+    /// `.log` on its own does not count — that is a dotfile, not a log, and the
+    /// rule is an extension. Case does not matter: `.LOG` is the same file on
+    /// every filesystem a log gets written to.
+    pub fn log_mode_for(&self, path: &Path) -> bool {
+        if self.edit_override {
+            return false;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        name.len() > 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".log")
+    }
+
+    /// Open `path` the way its NAME says it should be opened: as a log if it is
+    /// one, as a file otherwise.
+    ///
+    /// **One decision, called from every door** — the command line, a deferred
+    /// buffer, a file opened later with F8 — because a rule applied at four doors
+    /// out of five is a rule nobody can predict, and the fifth door is the one
+    /// that reads a 2 GiB log into a buffer and freezes the frame.
+    pub fn start_named(&mut self, path: &Path) -> std::io::Result<()> {
+        if self.log_mode_for(path) {
+            self.start_tail(path)
+        } else {
+            self.start_load(path)
+        }
+    }
+
     /// Open `path` as a tail: the last few screens, read from the end, read-only,
-    /// and followed as it grows — `-f`/`--follow`, and one day a `.log` name
-    /// (TODO.md §20).
+    /// and followed as it grows — `-f`/`--follow`, or a `.log` name (§20.7).
     ///
     /// Three things are decided here and nowhere else:
     ///
@@ -450,7 +487,7 @@ impl Editor {
         let Some(path) = self.bs_mut().pending_load.take() else {
             return false;
         };
-        if let Err(e) = self.start_load(&path) {
+        if let Err(e) = self.start_named(&path) {
             self.flash(&format!("Cannot read {}: {e}", path.display()));
         }
         true

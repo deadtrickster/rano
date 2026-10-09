@@ -50,6 +50,7 @@ pub mod help;
 pub mod hint_bar;
 pub mod jobs;
 pub mod loading;
+pub mod logpane;
 pub mod notes;
 pub mod outcome;
 pub mod pane;

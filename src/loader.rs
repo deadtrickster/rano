@@ -414,12 +414,10 @@ pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::
 
 /// The rows of `[from, size)` — the tail a caller reads after [`tail_offset`].
 ///
-/// Not yet called: [`LoadJob::spawn_from`] does the seek and the read together
-/// (one open, one position), so a caller wanting both halves as separate steps
-/// has not appeared. Kept and tested because it is the forward-reading half of
-/// `tail_offset`'s contract — the offset `tail_offset` returns is only correct
-/// if reading from it yields the last `rows` rows.
-#[allow(dead_code)]
+/// Split from the offset so the two can be tested apart: this is the read, and it
+/// is deliberately a plain forward read from a byte the caller already has.
+/// [`crate::logtail::LogTail::last_rows`] is its caller — the pane that draws the
+/// end of a file it never holds.
 pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(from))?;
     let mut out = Vec::new();

@@ -62,11 +62,30 @@ impl Blocks {
     /// that *does* start with whitespace continues the block above it. An
     /// empty row starts a block — it does not start with whitespace.
     pub fn push(&mut self, row: &[char]) {
-        let continues = self.len > 0 && row.first().is_some_and(|c| c.is_whitespace());
+        self.push_first(row.first().copied());
+    }
+
+    /// See one more row **given only its first character** (`None` for an empty
+    /// row) — the second door onto the one rule.
+    ///
+    /// `push` is the whole-row version, for a caller that holds rows. This is
+    /// for a pass that has a row's leading bytes and nothing else, which is what
+    /// a not-rendered log has: [`crate::logtail`] counts a file's rows and works
+    /// out its blocks without ever decoding a row into text, and all the rule
+    /// needs is the first character. One rule, two doors, so the two cannot
+    /// drift apart.
+    pub fn push_first(&mut self, first: Option<char>) {
+        let continues = self.len > 0 && first.is_some_and(char::is_whitespace);
         if !continues {
             self.starts.push(self.len);
         }
         self.len += 1;
+    }
+
+    /// The bytes `starts` occupies — the whole of what this retains per row, and
+    /// so the whole of the block half of §20.4's budget.
+    pub fn state_bytes(&self) -> usize {
+        self.starts.capacity() * std::mem::size_of::<usize>()
     }
 
     /// Rows seen so far.

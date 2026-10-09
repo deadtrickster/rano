@@ -161,6 +161,11 @@ pub mod logblocks;
 // FILE holds, not what the buffer does. `pub` because it has no caller in
 // the editor yet (like `todo.rs`), so it needs no `#[allow(dead_code)]`.
 pub mod logsearch;
+// The not-rendered half of log mode (TODO.md §20.4): a file's line count, a
+// sparse row → byte index and block boundaries, with NO rows kept. `pub` for
+// the same reason as `logsearch` — its caller is a host's log pane, which
+// rano does not have, so it needs no `#[allow(dead_code)]`.
+pub mod logtail;
 mod lsp;
 mod lsp_ctrl;
 mod picker;

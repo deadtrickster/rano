@@ -225,6 +225,14 @@ fn escape(b: &[u8], force: bool) -> Step {
                 b'Q' => Some(KeyCode::F(2)),
                 b'R' => Some(KeyCode::F(3)),
                 b'S' => Some(KeyCode::F(4)),
+                // **The application-keypad Enter.** `ESC O M` is what a keypad's Enter
+                // sends once the terminal is in keypad-transmit mode — `smkx`, which a
+                // full-screen program turns on together with the cursor keys — and it
+                // was the one SS3 sequence with no arm here. So the right-hand Enter
+                // decoded to NOTHING: not a wrong key, no key, and a person pressing it
+                // sees the head ignore them. It is the same byte a `+`-keypad's Enter
+                // sends on a full keyboard, which is where it was noticed.
+                b'M' => Some(KeyCode::Enter),
                 _ => None,
             };
             Step::Emit(k.map(|k| key(k, Mods::NONE)), 3)
@@ -696,6 +704,9 @@ mod tests {
             (&b"\x1b[C"[..], k(KeyCode::Right)),
             (b"\x1b[D", k(KeyCode::Left)),
             (b"\x1bOC", k(KeyCode::Right)),
+            // The application-keypad Enter — the right-hand Enter on a full keyboard,
+            // which sent `ESC O M` and decoded to nothing at all until this arm existed.
+            (b"\x1bOM", k(KeyCode::Enter)),
             (b"\x1b[H", k(KeyCode::Home)),
             (b"\x1b[3~", k(KeyCode::Delete)),
             (b"\x1b[2~", k(KeyCode::Insert)),

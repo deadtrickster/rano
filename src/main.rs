@@ -374,6 +374,14 @@ fn run(
         // highlight: everything between two events, the same call a host
         // embedding the editor makes.
         dirty |= ed.tick(Instant::now());
+        // **The clipboard is not the screen**, so it is drained on every pass rather than
+        // when a frame is due: a copy is a side effect the reader asked for, and one that
+        // waited for the next keystroke to be written would look like the same nothing that
+        // started this. `Terminal::copy` is where the terminal's own answer lives — nothing
+        // is written on a terminal that does not speak OSC 52.
+        if let Some(text) = ed.take_clipboard() {
+            terminal.copy(&text);
+        }
         if dirty {
             // **The pictures' own bytes first**, before the frame that draws the
             // placeholder rows naming them: the uploads, the placements and the delete of

@@ -412,12 +412,17 @@ impl Buffer {
             out.push(first);
         }
         let first_removed = self.remove_empty_line(a.row) as usize;
-        // Whole rows strictly between a's and b's rows. Their indices are
-        // shifted down by first_removed if a's row disappeared.
+        // Whole rows strictly between a's and b's rows. **`end` is exclusive and in
+        // POST-removal coordinates**: `b.row` is a pre-removal index, so it shifts down with
+        // the rest (`b.row - first_removed`), and the rows to take are those before it. The
+        // `- 1` this used to carry, paired with `end + 1` below, underflowed on the ordinary
+        // case it was written for — a selection from a row's first column to somewhere in the
+        // NEXT row (`b.row - 1 - first_removed` with both 1) — which is a mouse drag, and
+        // then ^K. Found by `a_copy_reaches_the_terminal_clipboard`.
         let r = a.row + 1 - first_removed;
-        let end = b.row - 1 - first_removed; // inclusive
-        if r <= end {
-            out.extend(self.lines.drain(r, end + 1));
+        let end = b.row - first_removed;
+        if r < end {
+            out.extend(self.lines.drain(r, end));
         }
         // b's row now sits right after everything that remains above it.
         let b_row = a.row + 1 - first_removed;

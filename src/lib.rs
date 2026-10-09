@@ -25,7 +25,8 @@
 //!   A picture preview ([`image`] read off the disk, drawn through
 //!   [`term::graphics`]) is the one thing the editor cannot finish alone: it
 //!   queues the bytes and the host writes them (`Editor::images`,
-//!   `Editor::take_graphics`).
+//!   `Editor::take_graphics`) — and a copy is the same shape, queued for the host
+//!   (`Editor::take_clipboard`) because the clipboard is the terminal's.
 //!
 //! Embedding the editor as a pane, in outline:
 //!
@@ -54,6 +55,12 @@
 //!     // a picture at all. Both are no-ops on a terminal without pictures.
 //!     if ed.images {
 //!         for bytes in ed.take_graphics() { /* write them to the terminal */ }
+//!     }
+//!     // **A copy reaches the system clipboard the same way**: the editor queues the text
+//!     // (M-6, ^K, the end of a mouse drag) and the host writes it — OSC 52, where the
+//!     // terminal speaks it (`Terminal::copy` answers that itself).
+//!     if let Some(text) = ed.take_clipboard() {
+//!         /* terminal.copy(&text) */
 //!     }
 //!     // The editor paints its pane and says where the cursor goes
 //!     // (column, row); the host emits the frame, e.g. through

@@ -989,6 +989,59 @@ fn opening_a_picture_shows_the_picture() {
     assert!(msg.starts_with("Read"), "the ordinary reading: {msg}");
 }
 
+/// **A copy must reach the system clipboard**, not only rano's own cutbuffer. The reader:
+/// *"when i just select text without shift and try to copy it - nothing copies"* — a mouse
+/// drag selects in rano, so the terminal's own copy has nothing to work from, and rano's
+/// `M-6`/`^K` used to stop at the cutbuffer.
+#[test]
+fn a_copy_reaches_the_terminal_clipboard() {
+    let mut ed = test_ed("one\ntwo\nthree\n");
+    // M-6 over a marked region: exactly the characters, no newline added for a partial
+    // first line.
+    ed.bs_mut().mark = Some(Pos { row: 0, col: 1 });
+    ed.bs_mut().cursor = Pos { row: 1, col: 1 };
+    press(&mut ed, KeyCode::Char('6'), Mods::ALT);
+    assert_eq!(ed.take_clipboard().as_deref(), Some("ne\nt"));
+    assert!(ed.take_clipboard().is_none(), "and it is taken once");
+    // The cutbuffer got it too: rano's own paste still works.
+    assert_eq!(ed.cut.len(), 2);
+    // A selection that starts at a row's first column is line-wise: the newline it took
+    // with it comes back, or pasting it into something else joins it to the next line.
+    ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
+    ed.bs_mut().cursor = Pos { row: 1, col: 2 };
+    press(&mut ed, KeyCode::Char('6'), Mods::ALT);
+    assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
+    // ^K cuts what is selected, and the clipboard takes it too — **the case that used to
+    // panic**: a selection from a row's first column into the next row underflowed
+    // `cut_range`'s arithmetic (`b.row - 1 - first_removed` with both 1). A mouse drag
+    // reaches it in one gesture.
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
+    assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
+    assert_eq!(lines(&ed), vec!["o", "three"]);
+    // ^K with no mark takes the line, newline and all.
+    let mut ed = test_ed("first\nsecond\n");
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
+    assert_eq!(ed.take_clipboard().as_deref(), Some("first\n"));
+    assert_eq!(lines(&ed)[0], "second");
+    // A mouse selection is a selection: dragging and letting go puts it on the clipboard,
+    // which is the gesture the complaint was about.
+    let mut ed = test_ed("alpha beta\nsecond line\n");
+    ed.text_w = 40;
+    ed.text_h = 10;
+    // No gutter, so a pane column is a character column and the arithmetic below is
+    // readable: 0 to 5 is `alpha`.
+    ed.show_line_numbers = false;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 1, 5)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 5));
+    assert_eq!(ed.take_clipboard().as_deref(), Some("alpha"));
+    // A plain click is not a selection, and queues nothing.
+    ed.bs_mut().mark = None;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 2)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 2));
+    assert!(ed.take_clipboard().is_none(), "a click is not a copy");
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

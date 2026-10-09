@@ -185,10 +185,14 @@ Movement: arrows, `Home`, `End`, `PgUp`, `PgDn`, `^P`/`^N` (line), `^E` (end
 of line), `Alt+Left`/`Alt+Right` or `Ctrl+Left`/`Ctrl+Right` (word), `◂`/`▸`
 for back/forward in prompts. Mouse: left click moves the cursor, and a click
 *on* the cursor toggles the mark (nano's gesture — then a drag or the arrows
-extend the selection); left drag selects from where it was pressed. The wheel
-scrolls the view — the preview of a file, or the text (where the cursor stays
-put unless the scroll would push it out of sight). Editing: `Enter`,
-`Backspace`, `Delete`, `Tab`.
+extend the selection); left drag selects from where it was pressed, and
+**letting go puts the selection on the system clipboard** (OSC 52, where the
+terminal speaks it), so selecting and then pasting into another program works.
+The wheel scrolls the view — the preview of a file, or the text (where the
+cursor stays put unless the scroll would push it out of sight). `M-6` copies
+the marked region or the current line, `^K` cuts it, and both reach the system
+clipboard as well as rano's own cutbuffer. Editing: `Enter`, `Backspace`,
+`Delete`, `Tab`.
 `Tab` follows the buffer's own indent style: space-indented files get spaces
 up to the next unit boundary (the unit is detected from the file — e.g.
 rano's own 4-space source), tab-indented files get a tab char; `Backspace`

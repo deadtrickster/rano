@@ -71,6 +71,55 @@ pub(crate) struct UndoStep {
 /// (nano puts two `Alt+Up`/`Alt+Down` in for one, and those move a line each).
 const WHEEL_LINES: isize = 3;
 
+/// **Which of nano's bars an editor draws** — the title row on top and the two-row function
+/// bar at the bottom. Both by default, which is the binary; a host framing the pane in its own
+/// chrome turns them off ([`Editor::set_chrome`]). The status row is not optional: prompts,
+/// messages and the cursor's place are drawn there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chrome {
+    pub title: bool,
+    pub keys: bool,
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Chrome {
+            title: true,
+            keys: true,
+        }
+    }
+}
+
+impl Chrome {
+    /// Neither bar: the text, and the status row under it.
+    pub const BARE: Chrome = Chrome {
+        title: false,
+        keys: false,
+    };
+
+    /// The pane row the text starts on.
+    pub fn top(&self) -> u16 {
+        u16::from(self.title)
+    }
+
+    /// Rows that are not text: the bars that are on, and the status row.
+    pub fn rows(&self) -> usize {
+        usize::from(self.title) + 1 + if self.keys { 2 } else { 0 }
+    }
+}
+
+/// What the title bar says, for a host that draws its own ([`Editor::frame_title`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameTitle {
+    /// The file's name as the bar shows it — `[i/n] ` first with several buffers open, empty
+    /// for a scratch buffer.
+    pub name: String,
+    /// Unsaved edits.
+    pub modified: bool,
+    /// The buffer cannot be written (a tailed log, a view).
+    pub read_only: bool,
+}
+
 /// A rectangle of terminal cells: where the editor sits on the screen.
 ///
 /// The editor's own type rather than the drawing side's rectangle on purpose:
@@ -168,6 +217,11 @@ pub struct Editor {
     /// them itself — it is a library, and the terminal is the host's — so they wait here
     /// ([`Self::take_graphics`]).
     pub(crate) graphics_out: Vec<Vec<u8>>,
+    /// **Text the host must put on the terminal's clipboard** (OSC 52): what `M-6`, `^K` and
+    /// the end of a mouse drag queued ([`Self::take_clipboard`]). The editor does not know
+    /// whether the terminal speaks OSC 52 — that is [`crate::term::Features::clipboard`], and
+    /// the terminal's own answer — so it queues the text and the host hands it over.
+    pub(crate) clipboard_out: Option<String>,
     /// **The pictures the terminal is holding**, as `id → the cell box it is placed in`.
     /// Kept so a frame that changed nothing sends nothing, and so a picture that is gone
     /// — or whose box moved — is dropped rather than left in the terminal's memory.
@@ -186,6 +240,10 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
+    /// **Which of nano's bars this editor draws itself** — see [`Chrome`]. A host that frames
+    /// the pane in its own look turns them off and draws [`Editor::frame_title`] and
+    /// [`Editor::key_hints`] where its own chrome goes.
+    pub chrome: Chrome,
     /// The screen rectangle the editor occupies, as last given to
     /// [`Self::set_area`]. Mouse events arrive in terminal coordinates and are
     /// mapped through its origin; `text_w`/`text_h` are derived from its size.
@@ -344,6 +402,7 @@ impl Editor {
             images: false,
             edit_override: false,
             graphics_out: Vec::new(),
+            clipboard_out: None,
             images_held: std::collections::HashMap::new(),
             mouse_arm: false,
             on_send: None,
@@ -352,6 +411,7 @@ impl Editor {
             replace_count: 0,
             text_w: 80,
             text_h: 24,
+            chrome: Chrome::default(),
             area: Area::default(),
             tab_width,
             show_line_numbers,
@@ -1782,17 +1842,53 @@ impl Editor {
         }
         self.area = area;
         self.text_w = area.w as usize;
-        self.text_h = (area.h as usize).saturating_sub(4);
+        self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
         true
+    }
+
+    /// **Draw with or without nano's own bars** — the title row and the two-row function bar.
+    ///
+    /// The binary keeps both. A host whose pane sits inside its own chrome turns them off: the
+    /// text gets those rows, and the host draws the file's name ([`Editor::frame_title`]) and the
+    /// keys ([`Editor::key_hints`]) in its own look. The status row stays either way — prompts,
+    /// messages and the cursor position live there.
+    pub fn set_chrome(&mut self, chrome: Chrome) {
+        self.chrome = chrome;
+        if !self.area.is_empty() {
+            self.text_h = (self.area.h as usize).saturating_sub(chrome.rows());
+        }
+    }
+
+    /// **What the title bar would say, for a host drawing its own**: the name (`[i/n] ` first
+    /// when several buffers are open; empty for a scratch buffer), whether it has unsaved
+    /// edits, and whether it can be written at all.
+    pub fn frame_title(&self) -> FrameTitle {
+        let bs = self.bs();
+        FrameTitle {
+            name: self.title_text(),
+            modified: bs.buf.modified,
+            read_only: bs.read_only,
+        }
+    }
+
+    /// **The function bar's entries, for a host drawing its own**: `(key, label)` in the bar's
+    /// order — what is in effect right now (a pending prefix's continuations, a mode's keys, or
+    /// the global ones), in the notation the person's keymap uses.
+    pub fn key_hints(&self) -> Vec<(String, String)> {
+        self.bar_items()
     }
 
     /// Map a pane cell to a buffer position: only clicks inside the text
     /// area land; the title, status and function bars are ignored, and a
     /// click on the gutter or past EOL goes to the line start / line end.
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
-        if self.prompt.is_some() || pane_row == 0 || pane_row as usize > self.text_h {
+        let top = self.chrome.top();
+        if self.prompt.is_some() || pane_row < top || (pane_row - top) as usize >= self.text_h {
             return None;
         }
+        // From here `pane_row` counts as though the title row were there, which is what the
+        // arithmetic below was written for.
+        let pane_row = pane_row + 1 - top;
         let bs = self.bs();
         // M-\: the pane row is a VISUAL row; map it to (buffer row, wrap
         // segment). With wrap off, seg is 0 and this is the old arithmetic.
@@ -1907,6 +2003,13 @@ impl Editor {
                 let dropped = armed && bs.mark == Some(bs.cursor);
                 if dropped {
                     bs.mark = None;
+                }
+                // **A selection made with the mouse goes to the system clipboard**, the way
+                // it does in every program with a mouse: the drag selected in *rano*, so the
+                // terminal's own copy has nothing to work from, and without this a reader
+                // selects text and then finds that nothing can pick it up.
+                if !dropped {
+                    self.copy_to_clipboard();
                 }
                 dropped
             }
@@ -2153,6 +2256,17 @@ impl Editor {
         if self.refuse_read_only("cut") {
             return;
         }
+        // **What was cut goes to the system clipboard too**, computed first: after the cut
+        // there is no selection left to read, and a cut that nothing outside rano can see is
+        // the same complaint the copy had (*"nothing copies"*). "Cut" to the rest of the
+        // machine means "put it on the clipboard and remove it here".
+        let clip = self.selection_text().or_else(|| {
+            // A whole line, which is `^K`'s own unit, with its newline.
+            let c = self.bs().cursor;
+            let line: String = self.bs().buf.row(c.row).iter().collect();
+            Some(format!("{line}\n"))
+        });
+        self.clipboard_out = clip;
         let (first, last) = match self.bs().mark {
             Some(mark) => {
                 let (a, b) = normalize(mark, self.bs().cursor);
@@ -2300,8 +2414,62 @@ impl Editor {
         self.edit_invalidate();
     }
 
+    /// **The marked region, as text**: the rows joined, with a newline after each — the
+    /// form a reader pastes into another program. `None` when nothing is marked (or the
+    /// mark is empty), and a *whole-line* selection ends with a newline, the way `^K` and
+    /// every editor's line-wise copy do, so pasting it back is a line rather than a run-on.
+    pub fn selection_text(&self) -> Option<String> {
+        let mark = self.bs().mark?;
+        let (a, b) = normalize(mark, self.bs().cursor);
+        if a == b {
+            return None;
+        }
+        let mut out = self
+            .bs()
+            .buf
+            .copy_range(a, b)
+            .iter()
+            .map(|row| row.iter().collect::<String>())
+            .collect::<Vec<String>>()
+            .join("\n");
+        // **The newline the selection took with it.** `copy_range` is the cutbuffer's view —
+        // whole rows, trimmed at both ends — so a selection that starts at a row's first
+        // column (line-wise, the way `^K` takes one) or ends at one (it swallowed the
+        // newline before it) is missing the newline it covered, and pasting it would join it
+        // to whatever comes next.
+        if a.row < b.row && (a.col == 0 || b.col == 0) {
+            out.push('\n');
+        }
+        Some(out)
+    }
+
+    /// **Put the marked region on the terminal's clipboard** (OSC 52, where the terminal
+    /// speaks it), for everything that copies: `M-6`, `^K`, and the end of a mouse drag.
+    ///
+    /// Queued rather than written — the editor is a library and the terminal is the
+    /// host's — so a host drains it with [`Self::take_clipboard`] and hands it to
+    /// `term::Terminal::copy`, which is the one place that knows the terminal's answer.
+    ///
+    /// The reader, on not being able to copy a selection they had just made with the
+    /// mouse: *"when i just select text without shift and try to copy it - nothing
+    /// copies"*. rano's selection is rano's, so the terminal's own copy has nothing to
+    /// work from — the text has to go out from here.
+    pub(crate) fn copy_to_clipboard(&mut self) {
+        if let Some(text) = self.selection_text() {
+            self.clipboard_out = Some(text);
+        }
+    }
+
+    /// **Take the text queued for the terminal's clipboard**, if any. A host that wants
+    /// copy to reach the system clipboard writes it with `term::Terminal::copy` (OSC 52);
+    /// the standalone binary does it every frame, as it does with pictures.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard_out.take()
+    }
+
     /// M-6: copy the current line (or marked region) to the cutbuffer
-    /// without deleting it. The mark stays active.
+    /// without deleting it. The mark stays active, and the region goes to the system
+    /// clipboard as well — a copy that nothing outside rano can see is not a copy.
     pub(crate) fn copy(&mut self) {
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
@@ -2309,6 +2477,7 @@ impl Editor {
                 let rows = self.bs_mut().buf.copy_range(a, b);
                 self.cut = rows;
                 self.cut_line = a.col == 0 && b.row > a.row;
+                self.copy_to_clipboard();
                 return;
             }
         }
@@ -2316,6 +2485,8 @@ impl Editor {
         let line = self.bs().buf.row(c.row).clone();
         self.cut = vec![line];
         self.cut_line = true;
+        // A whole line, with its newline: what `^K` would have taken.
+        self.clipboard_out = Some(format!("{}\n", self.cut[0].iter().collect::<String>()));
     }
 
     pub(crate) fn delete_char_cut(&mut self) {

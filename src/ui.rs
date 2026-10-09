@@ -365,12 +365,24 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // last frame in it, and the rows below only paint where they have text.
     let whole = area.intersection(buf.area());
     buf.fill(whole, &Style::new());
-    if area.height < 5 {
+    let chrome = ed.chrome;
+    if (area.height as usize) < chrome.rows() + 1 {
         Paragraph::new("Terminal too small").render(whole, buf);
         return None;
     }
-    // title (1) + text + status (1) + bar (2)
-    let text_h = (area.height - 4) as usize;
+    // title (1, if on) + text + status (1) + bar (2, if on)
+    let text_h = area.height as usize - chrome.rows();
+    // The pane row the text starts on: under the title, or at the top without one.
+    let t0 = chrome.top();
+    // **A view's header band**: reverse video like nano's bars — or, bare, the same words in
+    // bold, for the same reason the status row loses its strip (see `strip` below).
+    let head = || {
+        if chrome == crate::editor::Chrome::BARE {
+            Style::of(Role::Strong)
+        } else {
+            rev()
+        }
+    };
     let bs = ed.bs();
 
     // F4: line-number gutter shrinks the text viewport; E3: scroll_x is the
@@ -467,11 +479,13 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         (false, true) => "M",
         (false, false) => "",
     };
-    put(
-        buf,
-        at(0, 0, width, 1),
-        &Line::styled(title_line(width, &name, bs.buf.modified, flags), rev()),
-    );
+    if chrome.title {
+        put(
+            buf,
+            at(0, 0, width, 1),
+            &Line::styled(title_line(width, &name, bs.buf.modified, flags), rev()),
+        );
+    }
 
     // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
     if g > 0 {
@@ -503,7 +517,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             nums.push(Line::styled(s, role));
         }
         for (i, l) in nums.iter().enumerate() {
-            put(buf, at(0, 1 + i as u16, g as u16, 1), l);
+            put(buf, at(0, t0 + i as u16, g as u16, 1), l);
         }
     }
 
@@ -555,7 +569,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         }
     }
     for (i, l) in lines.iter().enumerate() {
-        put(buf, at(g as u16, 1 + i as u16, view_w as u16, 1), l);
+        put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
     }
 
     // ---- completion popup (LSP) ----
@@ -587,13 +601,13 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         // Text rows start at pane row 1 (title offset): the word sits on
         // pane row drow+1, the popup goes just below it (or above when the
         // bottom would clip).
-        let word_pane = drow + 1;
-        let y0 = if word_pane + vis_i <= text_h as i64 {
+        let word_pane = drow + i64::from(t0);
+        let y0 = if word_pane + vis_i < i64::from(t0) + text_h as i64 {
             word_pane + 1
         } else {
             word_pane - vis_i
         };
-        if y0 >= 1 && y0 + vis_i - 1 <= text_h as i64 {
+        if y0 >= i64::from(t0) && y0 + vis_i - 1 < i64::from(t0) + text_h as i64 {
             let line = bs.buf.row_opt(p.row).map(Vec::as_slice).unwrap_or(&[]);
             let disp = display_col(line, p.col, ed.tab_width);
             let x = if ed.wrap {
@@ -634,10 +648,10 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // then one row per item with the selection reversed, scrolled so the
     // selection stays in view.
     if let Some(p) = &ed.picker {
-        let area_text = at(0, 1, width, text_h as u16);
+        let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
         let header = format!(" {}   Enter: go  Esc: close", p.title);
-        band(buf, at(0, 1, width, 1), Line::from(header), rev());
+        band(buf, at(0, t0, width, 1), Line::from(header), head());
         let rows = crate::picker::list_rows(text_h);
         let start = (p.sel + 1).saturating_sub(rows);
         for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
@@ -648,7 +662,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             };
             band(
                 buf,
-                at(0, 2 + k as u16, width, 1),
+                at(0, t0 + 1 + k as u16, width, 1),
                 Line::from(format!(" {}", it.label)),
                 style,
             );
@@ -660,12 +674,12 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // rendered diff lines from `top`. The lines are already styled by the
     // library's renderers; they are drawn as they are.
     if let Some(v) = &ed.diff_view {
-        let area_text = at(0, 1, width, text_h as u16);
+        let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
-        band(buf, at(0, 1, width, 1), Line::from(v.header()), rev());
+        band(buf, at(0, t0, width, 1), Line::from(v.header()), head());
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            put(buf, at(0, 2 + k as u16, width, 1), l);
+            put(buf, at(0, t0 + 1 + k as u16, width, 1), l);
         }
     }
 
@@ -673,7 +687,16 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // nano (winio.c:statusline): the prompt bar is a full reverse strip with
     // the label and answer left-aligned at column 0; a plain message sits
     // centered with only the bracketed text reversed.
-    let status_row = area.height - 3;
+    let status_row = area.height - 1 - if chrome.keys { 2 } else { 0 };
+    // **Bare, the status row is not a reversed strip either.** nano's bars are reverse video
+    // and so are its prompt and its messages; a host that took the bars off is drawing the
+    // pane in its own look, and a lone white strip at the bottom of it is the one piece of
+    // nano left. So the prompt and the message are plain text there.
+    let strip = if chrome == crate::editor::Chrome::BARE {
+        Style::new()
+    } else {
+        rev()
+    };
     if let Some(p) = &ed.prompt {
         // The prompt owns the status row, so what goes with it is drawn
         // above it, over the bottom text rows: the live path suggestions,
@@ -695,7 +718,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                     buf,
                     at(0, top + k as u16, width, 1),
                     Line::from(r.as_str()),
-                    rev(),
+                    strip.clone(),
                 );
             }
         }
@@ -705,7 +728,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         put(
             buf,
             at(0, status_row, width, 1),
-            &Line::styled(s.into_iter().collect::<String>(), rev()),
+            &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
         );
     } else {
         // Outside prompts the cursor position sits at the right edge of the
@@ -734,7 +757,10 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             put(
                 buf,
                 at(0, status_row, (avail as u16).max(1), 1),
-                &Line::new(vec![Span::raw(" ".repeat(pos)), Span::styled(text, rev())]),
+                &Line::new(vec![
+                    Span::raw(" ".repeat(pos)),
+                    Span::styled(text, strip.clone()),
+                ]),
             );
         }
         let x = (width as usize).saturating_sub(pos_w);
@@ -754,7 +780,11 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // The last column absorbs the leftover (COLS % itemwidth) slack.
     // What is in effect decides the bar (`Editor::bar_items`): the global
     // keys, a mode's own, or what can follow a pending prefix.
-    let items = ed.bar_items();
+    let items = if chrome.keys {
+        ed.bar_items()
+    } else {
+        Vec::new()
+    };
     let total = items.len().min(((width as usize) + 40) / 20 * 2);
     if total > 0 {
         let per_row = total.div_ceil(2);
@@ -829,23 +859,23 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 } else {
                     (g + disp.saturating_sub(bs.scroll_x)) as u16
                 };
-                cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + 1);
+                cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + t0);
             }
         }
     }
 
     // ---- help pages (over the text, like the list) ----
     if let Some(v) = &ed.info {
-        let area_text = at(0, 1, width, text_h as u16);
+        let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
         let header = format!(
             " {}   q: close  \u{2191}\u{2193} PgUp PgDn: scroll",
             v.title
         );
-        band(buf, at(0, 1, width, 1), Line::from(header), rev());
+        band(buf, at(0, t0, width, 1), Line::from(header), head());
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            put(buf, at(0, 2 + k as u16, width, 1), l);
+            put(buf, at(0, t0 + 1 + k as u16, width, 1), l);
         }
     }
 
@@ -915,7 +945,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             m.name,
             crate::help::notation(nano, &keys)
         );
-        band(buf, at(0, top, width, 1), Line::from(title), rev());
+        band(buf, at(0, top, width, 1), Line::from(title), head());
         for (k, l) in rows.into_iter().take(n).enumerate() {
             put(buf, at(0, top + 1 + k as u16, width, 1), &l);
         }
@@ -1654,6 +1684,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **Bare chrome: no title row, no function bar, no reverse video** — the text from the
+    /// pane's first row, the status row its last, the cursor and a click on the same rows the
+    /// text is drawn on, and the bar's facts handed to the host instead.
+    #[test]
+    fn a_bare_pane_is_text_and_a_status_row_and_nothing_reversed() {
+        let mut e = ed("aa\nbb\ncc\ndd");
+        e.show_line_numbers = true;
+        e.set_chrome(crate::editor::Chrome::BARE);
+        e.set_area(PANE.into());
+        assert_eq!(
+            e.text_h,
+            PANE.height as usize - 1,
+            "every row but the status row"
+        );
+        e.bs_mut().cursor = Pos { row: 2, col: 1 };
+        let t = draw_pane(&e);
+        outside_is_untouched(&t);
+        let g = gutter_width(4) as u16;
+        let buf = &t;
+        assert_eq!(
+            buf[(PANE.x + g, PANE.y)].symbol.as_str(),
+            "a",
+            "text on the first row"
+        );
+        assert_eq!(buf[(PANE.x + g, PANE.y + 2)].symbol.as_str(), "c");
+        let status: String = (PANE.x..PANE.right())
+            .map(|x| {
+                buf[(x, PANE.y + PANE.height - 1)]
+                    .symbol
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+        assert!(status.trim_end().ends_with("Ln 3, Col 2"), "{status:?}");
+        assert_eq!(t.cursor, Some((PANE.x + g + 1, PANE.y + 2)));
+        for y in PANE.y..PANE.bottom() {
+            for x in PANE.x..PANE.right() {
+                let st = &buf[(x, y)].style;
+                assert!(
+                    !st.roles().any(|r| matches!(r, Role::Bar | Role::Selected))
+                        && !st.attrs.contains(crate::style::Attrs::REVERSE),
+                    "a reversed cell at ({x}, {y}) in a bare pane"
+                );
+            }
+        }
+        // A click on the first row lands on the first line.
+        e.handle_mouse(crate::term::MouseEvent {
+            kind: crate::term::MouseKind::Press(crate::term::MouseButton::Left),
+            x: PANE.x + g,
+            y: PANE.y,
+            mods: Default::default(),
+        });
+        assert_eq!(e.bs().cursor.row, 0, "a click on the first row");
+        // What the bars would have said, for the host's own frame.
+        let title = e.frame_title();
+        assert!(!title.modified && !title.read_only);
+        assert!(!e.key_hints().is_empty(), "the bar's keys");
     }
 
     #[test]

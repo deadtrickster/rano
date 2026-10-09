@@ -71,6 +71,55 @@ pub(crate) struct UndoStep {
 /// (nano puts two `Alt+Up`/`Alt+Down` in for one, and those move a line each).
 const WHEEL_LINES: isize = 3;
 
+/// **Which of nano's bars an editor draws** — the title row on top and the two-row function
+/// bar at the bottom. Both by default, which is the binary; a host framing the pane in its own
+/// chrome turns them off ([`Editor::set_chrome`]). The status row is not optional: prompts,
+/// messages and the cursor's place are drawn there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chrome {
+    pub title: bool,
+    pub keys: bool,
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Chrome {
+            title: true,
+            keys: true,
+        }
+    }
+}
+
+impl Chrome {
+    /// Neither bar: the text, and the status row under it.
+    pub const BARE: Chrome = Chrome {
+        title: false,
+        keys: false,
+    };
+
+    /// The pane row the text starts on.
+    pub fn top(&self) -> u16 {
+        u16::from(self.title)
+    }
+
+    /// Rows that are not text: the bars that are on, and the status row.
+    pub fn rows(&self) -> usize {
+        usize::from(self.title) + 1 + if self.keys { 2 } else { 0 }
+    }
+}
+
+/// What the title bar says, for a host that draws its own ([`Editor::frame_title`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameTitle {
+    /// The file's name as the bar shows it — `[i/n] ` first with several buffers open, empty
+    /// for a scratch buffer.
+    pub name: String,
+    /// Unsaved edits.
+    pub modified: bool,
+    /// The buffer cannot be written (a tailed log, a view).
+    pub read_only: bool,
+}
+
 /// A rectangle of terminal cells: where the editor sits on the screen.
 ///
 /// The editor's own type rather than the drawing side's rectangle on purpose:
@@ -186,6 +235,10 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
+    /// **Which of nano's bars this editor draws itself** — see [`Chrome`]. A host that frames
+    /// the pane in its own look turns them off and draws [`Editor::frame_title`] and
+    /// [`Editor::key_hints`] where its own chrome goes.
+    pub chrome: Chrome,
     /// The screen rectangle the editor occupies, as last given to
     /// [`Self::set_area`]. Mouse events arrive in terminal coordinates and are
     /// mapped through its origin; `text_w`/`text_h` are derived from its size.
@@ -352,6 +405,7 @@ impl Editor {
             replace_count: 0,
             text_w: 80,
             text_h: 24,
+            chrome: Chrome::default(),
             area: Area::default(),
             tab_width,
             show_line_numbers,
@@ -1782,17 +1836,53 @@ impl Editor {
         }
         self.area = area;
         self.text_w = area.w as usize;
-        self.text_h = (area.h as usize).saturating_sub(4);
+        self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
         true
+    }
+
+    /// **Draw with or without nano's own bars** — the title row and the two-row function bar.
+    ///
+    /// The binary keeps both. A host whose pane sits inside its own chrome turns them off: the
+    /// text gets those rows, and the host draws the file's name ([`Editor::frame_title`]) and the
+    /// keys ([`Editor::key_hints`]) in its own look. The status row stays either way — prompts,
+    /// messages and the cursor position live there.
+    pub fn set_chrome(&mut self, chrome: Chrome) {
+        self.chrome = chrome;
+        if !self.area.is_empty() {
+            self.text_h = (self.area.h as usize).saturating_sub(chrome.rows());
+        }
+    }
+
+    /// **What the title bar would say, for a host drawing its own**: the name (`[i/n] ` first
+    /// when several buffers are open; empty for a scratch buffer), whether it has unsaved
+    /// edits, and whether it can be written at all.
+    pub fn frame_title(&self) -> FrameTitle {
+        let bs = self.bs();
+        FrameTitle {
+            name: self.title_text(),
+            modified: bs.buf.modified,
+            read_only: bs.read_only,
+        }
+    }
+
+    /// **The function bar's entries, for a host drawing its own**: `(key, label)` in the bar's
+    /// order — what is in effect right now (a pending prefix's continuations, a mode's keys, or
+    /// the global ones), in the notation the person's keymap uses.
+    pub fn key_hints(&self) -> Vec<(String, String)> {
+        self.bar_items()
     }
 
     /// Map a pane cell to a buffer position: only clicks inside the text
     /// area land; the title, status and function bars are ignored, and a
     /// click on the gutter or past EOL goes to the line start / line end.
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
-        if self.prompt.is_some() || pane_row == 0 || pane_row as usize > self.text_h {
+        let top = self.chrome.top();
+        if self.prompt.is_some() || pane_row < top || (pane_row - top) as usize >= self.text_h {
             return None;
         }
+        // From here `pane_row` counts as though the title row were there, which is what the
+        // arithmetic below was written for.
+        let pane_row = pane_row + 1 - top;
         let bs = self.bs();
         // M-\: the pane row is a VISUAL row; map it to (buffer row, wrap
         // segment). With wrap off, seg is 0 and this is the old arithmetic.

@@ -877,7 +877,16 @@ impl Editor {
         let last_row = bs.buf.row_count().saturating_sub(1);
         let (first_vis, last_vis, first_seg, last_seg) = self.viewport_core(text_h);
         let first = first_vis.saturating_sub(Self::HIGHLIGHT_MARGIN);
-        let last = (last_vis + Self::HIGHLIGHT_MARGIN).min(last_row);
+        // **A tail clamps the window to what is settled** (TODO.md §20.3 E).
+        // Everything below the boundary is a row the file is still writing, and
+        // handing it to the parser is how a half-written stack trace gets
+        // coloured as if it were whole — and work thrown away when the row
+        // changes. Clamping it here, rather than filtering the styles
+        // afterwards, is also what makes `style_at` answer nothing for those
+        // rows, since the grid never covers them.
+        let last = (last_vis + Self::HIGHLIGHT_MARGIN)
+            .min(last_row)
+            .min(bs.settled_last_row());
         let (first, last) = (first.min(last), last);
         // Column bounds, for the long-row case. Only meaningful on the first
         // and last row of the window; every other row is taken whole.
@@ -925,7 +934,15 @@ impl Editor {
         };
         let (r0, r1, _, _) = self.viewport_core(self.text_h);
         let last_row = self.bs().buf.row_count().saturating_sub(1);
-        let (r0, r1) = (r0.min(last_row), r1.min(last_row));
+        // **Clamped to what is settled, exactly as `highlight_window` is.**
+        // This is the pairing the whole increment turns on: clamp only the
+        // parse range and this check keeps asking for rows the parser will
+        // never return, so it answers "not covered" on every frame and
+        // re-parses per frame — turning a saving into the exact regression
+        // (§16) the window exists to prevent. Clamped to the boundary, a
+        // viewport showing only arriving rows asks for nothing new.
+        let settled = self.bs().settled_last_row();
+        let (r0, r1) = (r0.min(last_row).min(settled), r1.min(last_row).min(settled));
         if r0 < have.rows.0 || r1 > have.rows.1 {
             return false;
         }

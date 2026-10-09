@@ -2723,9 +2723,26 @@ case — `one_nl: rows=1 window=16 — got 2, reference 0`.
       5.6 MB RSS. The first version of this showed NOTHING for any growth
       smaller than `BATCH`: the batch was flushed only when full or at the end of
       the file, and a follower has no end of file.
-- [ ] **E** — settle-before-styling: no highlight below `size_at_open`, none for
-      an unsettled row, and the first style pass for a settled block happens once
-      rather than per append.
+- [x] **E** — settle-before-styling, done. The boundary is a **row count** and
+      not a byte offset (`Tail::rows_at_open`): the buffer holds `Vec<char>` rows
+      and has no per-row byte index, so "rows at or after byte `size_at_open`" is
+      not a question it can answer — but "rows appended after the tail read" is
+      the same set, and `CaughtUp` is the moment it becomes known. `None` until
+      then, so the tail's own rows are styled as the file's rows they are.
+      Rows past it are **never handed to the parser**: `highlight_window` clamps
+      its `last` to the boundary, which is also what makes `style_at` answer
+      nothing for them (the grid never covers them). And **the clamp is applied
+      in `highlight_covers_viewport` too**, which is the half this increment
+      turns on: clamp only the parse range and the coverage check keeps asking
+      for rows the parser will never return, so it answers "not covered" every
+      frame and re-parses every frame. Measured by count rather than by clock,
+      because a clock would flake: with the coverage clamp removed, **30 idle
+      ticks cause 30 parses** instead of none. `Highlighter::parses` exists for
+      that assertion.
+      A settled tail also stops dirtying the highlight on append — the rows it
+      may colour have not changed — so a log being written no longer re-parses
+      per append, which is the per-keystroke cost §16 exists to avoid arriving
+      in a new shape. `landed`
 - [ ] **F** — the tail pane, on the existing `agent::pane` framework, with the
       not-rendered budget below.
 

@@ -4169,6 +4169,126 @@ fn the_gutter_and_the_status_line_wait_for_the_count() {
     );
 }
 
+/// **Rows past the settled boundary are never handed to the parser** (§20.3 E).
+///
+/// Asserted on the parse WINDOW rather than on colours, because the window is
+/// what the claim is about: `style_at` answers nothing outside it, and nothing
+/// is what the renderer draws. A `.rs` name, because `syntax::detect` has no
+/// language for `.log` and a colourless test would pass for the wrong reason.
+#[test]
+fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
+    use std::io::Write as _;
+    let d = temp_dir("tail_settled");
+    let path = d.0.join("settled.rs");
+    let text: String = (0..300).map(|i| format!("let x{i} = {i};\n")).collect();
+    fs::write(&path, &text).unwrap();
+
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    ed.show_line_numbers = true;
+    ed.start_tail(&path).expect("tail open");
+    settle(&mut ed);
+    ed.tick(Instant::now());
+
+    let settled = ed.bs().tail.expect("a tail").rows_at_open.expect("settled");
+    assert_eq!(
+        settled,
+        crate::loader::TAIL_ROWS,
+        "the tail read is the settled set"
+    );
+    let have = ed.bs().hl.styled_window().expect("a window");
+    assert_eq!(
+        have.rows.1,
+        settled - 1,
+        "the window reached past the boundary"
+    );
+
+    // Growth. The new row must not be parsed, and must not dirty the highlight:
+    // a log appends constantly, and a parse per append is the cost §16 exists to
+    // avoid arriving in a new shape.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
+    writeln!(f, "fn main() {{}}").expect("write");
+    f.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lines(&ed).len() < settled + 1 {
+        assert!(Instant::now() < deadline, "the growth never arrived");
+        ed.load_poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        !ed.highlight_dirty,
+        "an append to a settled tail asked for a re-highlight"
+    );
+    // **Forced, so the assertion below is about the WINDOW and not about the
+    // refresh not happening.** Without this, `styled_window` would still hold
+    // the pre-growth window and would pass whether the clamp existed or not.
+    ed.highlight_dirty = true;
+    ed.tick(Instant::now());
+    let have = ed.bs().hl.styled_window().expect("still a window");
+    assert!(
+        have.rows.1 < settled,
+        "the parser was handed a row the file is still writing: {:?}",
+        have.rows
+    );
+    assert!(
+        ed.bs()
+            .hl
+            .style_at(Pos {
+                row: settled,
+                col: 0
+            })
+            .is_none(),
+        "a row past the boundary came back styled"
+    );
+
+    // **And the coverage check agrees with the window** — the pairing this
+    // increment turns on. A frame's worth of ticks on a grown, settled tail must
+    // not re-parse: if only the parse range were clamped, `highlight_covers_
+    // viewport` would keep asking for rows the parser will never return, answer
+    // "not covered" every frame, and re-parse every frame — the §16 regression
+    // arriving dressed as a saving. Counted, not timed.
+    ed.highlight_dirty = true;
+    ed.tick(Instant::now());
+    let before = ed.bs().hl.parses;
+    for _ in 0..30 {
+        ed.tick(Instant::now());
+    }
+    assert_eq!(
+        ed.bs().hl.parses,
+        before,
+        "a settled tail re-parsed on idle frames"
+    );
+}
+
+/// **A plain open is not clamped at all**: every row may be styled, because
+/// there is no file still writing it. Without this the clamp of the test above
+/// could be a clamp for everyone.
+#[test]
+fn a_plain_open_styles_past_what_a_tail_would_settle() {
+    let d = temp_dir("tail_not_clamped");
+    let path = d.0.join("plain.rs");
+    let text: String = (0..300).map(|i| format!("let x{i} = {i};\n")).collect();
+    fs::write(&path, &text).unwrap();
+
+    let mut ed = test_ed("");
+    ed.text_h = 24;
+    ed.start_load(&path).expect("open");
+    settle(&mut ed);
+    ed.bs_mut().scroll = crate::loader::TAIL_ROWS;
+    ed.tick(Instant::now());
+
+    assert_eq!(ed.bs().settled_last_row(), usize::MAX);
+    let have = ed.bs().hl.styled_window().expect("a window");
+    assert!(
+        have.rows.1 > crate::loader::TAIL_ROWS,
+        "a plain buffer was clamped to a tail's boundary: {:?}",
+        have.rows
+    );
+}
+
 /// A plain open has nothing to wait for: its numbering is known from the first
 /// frame, because its row 1 IS the file's line 1.
 #[test]

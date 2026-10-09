@@ -185,6 +185,28 @@ impl BufferState {
         }
     }
 
+    /// The last buffer row that may be STYLED. Rows past it are ones the file
+    /// was still writing when the tail was read, and are left plain — half a
+    /// stack trace is not a stack trace yet, and colouring a row that is about
+    /// to change is work thrown away (TODO.md §20.1's idea 4, §20.3 E).
+    ///
+    /// `usize::MAX` for an ordinary buffer, and for a tail whose initial read
+    /// has not finished: until the boundary is known there is nothing to clamp
+    /// to, and the rows in hand are exactly the settled ones.
+    pub fn settled_last_row(&self) -> usize {
+        match self.tail.and_then(|t| t.rows_at_open) {
+            Some(rows) => rows.saturating_sub(1),
+            None => usize::MAX,
+        }
+    }
+
+    /// Whether the styling boundary is known — i.e. this is a tail and its
+    /// initial read has finished. A settled tail does not re-highlight when the
+    /// file grows: nothing it may colour has changed.
+    pub fn tail_settled(&self) -> bool {
+        self.tail.and_then(|t| t.rows_at_open).is_some()
+    }
+
     pub(crate) fn new(buf: Buffer) -> Self {
         let mut buf = buf;
         if buf.rows_is_empty() {

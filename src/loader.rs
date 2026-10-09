@@ -90,6 +90,20 @@ pub struct Tail {
     /// reader, and increment D (following the growth) is its second.
     #[allow(dead_code)]
     pub size_at_open: u64,
+    /// **The boundary styling stops at**, in buffer rows: everything below this
+    /// index arrived after the tail was read, so it is a row the file is still
+    /// writing and must not be coloured (TODO.md §20.1's idea 4, §20.3 E).
+    ///
+    /// A ROW COUNT rather than a byte offset, and that is not a shortcut: the
+    /// buffer holds `Vec<char>` rows and has no per-row byte index, so "rows at
+    /// or after byte `size_at_open`" is not a question it can answer — but
+    /// "rows appended after the tail read" is exactly the same set, and the
+    /// moment it becomes known is [`crate::loader::Adopted::CaughtUp`].
+    ///
+    /// `None` until that moment, which is honest rather than empty: while the
+    /// initial read is still arriving the boundary is unknown, and the rows in
+    /// hand are precisely the ones that were in the file before us.
+    pub rows_at_open: Option<usize>,
 }
 
 /// One message from the reader thread.

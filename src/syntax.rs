@@ -1121,6 +1121,12 @@ pub struct Highlighter {
     /// of reading the sides one after another, and the conflict itself is what
     /// is reported there.
     diag_conflicts: Vec<(usize, usize)>,
+    /// How many times the style grid has been parsed — see `refresh_rows`.
+    ///
+    /// Diagnostic, and read by the tests: "a settled tail does not re-parse on
+    /// idle frames" is a claim about a COUNT, and a clock cannot express it
+    /// without flaking.
+    pub parses: u64,
 }
 
 impl Highlighter {
@@ -1134,6 +1140,7 @@ impl Highlighter {
             tree: None,
             diag_tree: None,
             diag_conflicts: Vec::new(),
+            parses: 0,
         }
     }
 
@@ -1187,6 +1194,12 @@ impl Highlighter {
             self.clear();
             return;
         };
+        // **A parse happened, and this is how a test can say so.** A refresh
+        // count rather than a clock: "no parse on an idle frame" is a fact, and
+        // a timing assertion that says the same thing flakes. It is also the
+        // honest way to state the editor's own claim — one parse per frame at
+        // most, never one per keystroke or one per appended row.
+        self.parses += 1;
 
         // Only the window's characters are materialised. `buf.text()` copies
         // the whole document — 200 MB of memcpy per keystroke at 200 MB — so a

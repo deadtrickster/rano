@@ -124,7 +124,11 @@ impl Editor {
         self.start_follow_from(path, from)?;
         {
             let bs = self.bs_mut();
-            bs.tail = Some(Tail { size_at_open: size });
+            bs.tail = Some(Tail {
+                size_at_open: size,
+                // Unknown until the initial read finishes; see `Tail`.
+                rows_at_open: None,
+            });
             bs.read_only = true;
             // The tail's row 1 is the file's row `lines_before + 1`, and nothing
             // knows `lines_before` yet — so the numbering is honestly unknown
@@ -245,8 +249,17 @@ impl Editor {
                 // `--line` and a tail ask for opposite ends of the file.
                 bs.goto = None;
             }
+            // **A settled tail does not re-highlight when the file grows.** Rows
+            // past the boundary are never styled (§20.3 E) and the rows before
+            // it have not changed, so a refresh has nothing to do — and a log
+            // being written appends constantly, which is the per-keystroke cost
+            // §16 exists to avoid, arriving in a new shape. An ordinary buffer,
+            // and a tail whose boundary is not known yet, dirty as before.
+            let settled_tail = bs.tail_settled();
             bs.edit_gen = bs.edit_gen.wrapping_add(1);
-            self.highlight_dirty = true;
+            if !settled_tail {
+                self.highlight_dirty = true;
+            }
         }
         match outcome {
             Adopted::Nothing | Adopted::Rows(_) => {}
@@ -300,7 +313,13 @@ impl Editor {
                     if bs.buf.rows_is_empty() {
                         bs.buf.push_row(Vec::new());
                     }
-                    bs.buf.row_count()
+                    let rows = bs.buf.row_count();
+                    // A tail read without following (`start_load_from`) settles
+                    // here instead of at `CaughtUp`.
+                    if let Some(t) = bs.tail.as_mut() {
+                        t.rows_at_open = Some(rows);
+                    }
+                    rows
                 };
                 if self.bs().tail.is_some() {
                     // **Not "Read N lines".** `rows` here is the tail we asked
@@ -327,20 +346,30 @@ impl Editor {
                 self.diag_dirty = true;
                 let rows = {
                     let bs = self.bs_mut();
-                    // **`bs.load` stays.** Taking the job away is exactly what
-                    // would stop the following; what changes is that the job
-                    // reports `caught_up`, so nothing treats it as a read in
-                    // flight (`loading`, `loading_text`, `next_wakeup`).
                     bs.buf.crlf = crlf;
                     if bs.buf.rows_is_empty() {
                         bs.buf.push_row(Vec::new());
                     }
-                    bs.buf.row_count()
+                    let rows = bs.buf.row_count();
+                    // **The styling boundary** (§20.3 E): this is the moment it
+                    // becomes true that everything from here down arrived after
+                    // the tail was read, so it is a row the file is still
+                    // writing. Recorded on the way through rather than computed
+                    // later, because later is after more rows have arrived.
+                    if let Some(t) = bs.tail.as_mut() {
+                        t.rows_at_open = Some(rows);
+                    }
+                    rows
                 };
                 // **Not "Read N lines".** `rows` here is the tail we asked for,
                 // and the file's own line count is the background scan's
                 // (`BufferState::line_number`), not this. Saying 200 for a
                 // 400 000-line file is the lie §20.3 C exists to remove.
+                //
+                // It is also a statement about the MOMENT the file was read, so
+                // a row arriving afterwards makes it stale — bounded by the
+                // flash's own three seconds rather than tracked, and after that
+                // the gutter's numbers (which do keep up) are the answer.
                 self.flash(&format!(
                     "Tailing — showing the last {} line{}",
                     rows,

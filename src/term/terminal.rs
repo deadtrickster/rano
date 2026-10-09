@@ -840,8 +840,29 @@ pub fn paint_full(
     if s.is_empty() && cursor == prev_cursor {
         return String::new();
     }
+    // **The cursor is HIDDEN for the write and shown at the destination**, and the hide is
+    // the half that was missing.
+    //
+    // A frame ends by parking the cursor on the composer and showing it — and nothing hid
+    // it again before the NEXT frame wrote its rows. So the cursor was visible for the whole
+    // interval between one frame's park and the next frame's writes, and on any terminal
+    // that paints as bytes arrive it was therefore visible *wherever the last row-write left
+    // it*: the operator's *"green caret in random cells"*, 2026-10-09 — the cell changing
+    // each time because the last CHANGED row is a different row.
+    //
+    // MEASURED, not reasoned: a `pipe-pane` capture of one head's output over 1576 frames
+    // is 1,030,603 bytes in which `?2026h`/`?2026l` appear 1576 times each, `?25h` 1576
+    // times — and `?25l` **zero** times.
+    //
+    // `?25l` here rather than relying on `?2026h`'s compositing, which is the other half of
+    // the answer: DEC 2026 is what makes a frame atomic, and a terminal without it (or one
+    // that does not pass it through) paints the rows as they arrive. Hiding the cursor is
+    // the part that does not depend on the terminal cooperating.
     match cursor {
-        Some((r, c)) => s.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1)),
+        Some((r, c)) => {
+            s.insert_str(0, "\x1b[?25l");
+            s.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        }
         None => s.push_str("\x1b[?25l"),
     }
     s
@@ -1021,6 +1042,40 @@ mod tests {
             "only the rows that changed: {second:?}"
         );
         assert_eq!(second.matches("\x1b[2J").count(), 0, "and no erase");
+    }
+
+    /// **A frame that parks the cursor HIDES it before writing the rows.**
+    ///
+    /// MEASURED, 2026-10-09, and the measurement is why this test exists: a `pipe-pane`
+    /// capture of one head's own output over 1576 frames — 1,030,603 bytes — carried
+    /// `?25h` 1576 times and `?25l` **zero** times. So the cursor was live for the whole
+    /// interval between one frame's park and the next frame's writes, and on a terminal
+    /// that paints as bytes arrive it was visible wherever the last row-write left it:
+    /// the operator's *"green caret in random cells"*, a different cell each frame
+    /// because it is the last CHANGED row.
+    ///
+    /// **The order is the whole of the fix** — hide, then clear and write, then park and
+    /// show — and it is asserted as an order rather than as the presence of a sequence,
+    /// because a `?25l` in the wrong place is a cursor hidden after the flash.
+    #[test]
+    fn a_frame_that_parks_the_cursor_hides_it_first() {
+        let a: Vec<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
+        let mut shown = Vec::new();
+        let mut next = Vec::new();
+        let bytes = paint_full(&shown, &a, &mut next, Some((1, 3)), None, true);
+        assert!(
+            bytes.starts_with("\x1b[?25l"),
+            "the cursor is hidden before anything is written, or it is visible while the \
+             rows arrive: {bytes:?}"
+        );
+        let hide = bytes.find("\x1b[?25l").expect("hidden");
+        let row = bytes.find("two").expect("a row");
+        let park = bytes.find("\x1b[2;4H").expect("the destination");
+        let show = bytes.find("\x1b[?25h").expect("shown");
+        assert!(
+            hide < row && row < park && park < show,
+            "hide, then the rows, then park and show: {bytes:?}"
+        );
     }
 
     #[test]

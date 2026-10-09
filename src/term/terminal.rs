@@ -840,8 +840,29 @@ pub fn paint_full(
     if s.is_empty() && cursor == prev_cursor {
         return String::new();
     }
+    // **The cursor is HIDDEN for the write and shown at the destination**, and the hide is
+    // the half that was missing.
+    //
+    // A frame ends by parking the cursor on the composer and showing it — and nothing hid
+    // it again before the NEXT frame wrote its rows. So the cursor was visible for the whole
+    // interval between one frame's park and the next frame's writes, and on any terminal
+    // that paints as bytes arrive it was therefore visible *wherever the last row-write left
+    // it*: the operator's *"green caret in random cells"*, 2026-10-09 — the cell changing
+    // each time because the last CHANGED row is a different row.
+    //
+    // MEASURED, not reasoned: a `pipe-pane` capture of one head's output over 1576 frames
+    // is 1,030,603 bytes in which `?2026h`/`?2026l` appear 1576 times each, `?25h` 1576
+    // times — and `?25l` **zero** times.
+    //
+    // `?25l` here rather than relying on `?2026h`'s compositing, which is the other half of
+    // the answer: DEC 2026 is what makes a frame atomic, and a terminal without it (or one
+    // that does not pass it through) paints the rows as they arrive. Hiding the cursor is
+    // the part that does not depend on the terminal cooperating.
     match cursor {
-        Some((r, c)) => s.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1)),
+        Some((r, c)) => {
+            s.insert_str(0, "\x1b[?25l");
+            s.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        }
         None => s.push_str("\x1b[?25l"),
     }
     s

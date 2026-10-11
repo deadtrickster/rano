@@ -401,6 +401,12 @@ fn sgr_mouse(params: &[u8], release: bool) -> Option<Event> {
 /// `CSI code ; mods u` → the event it means. See the arm in [`csi`].
 fn kitty_key(params: &[u8]) -> Option<Event> {
     let (code, bits) = kitty_fields(params)?;
+    // The keypad's own codes mean the plain keys (see [`keypad`]), so the keypad's Enter keeps
+    // its shift exactly as the main Enter does.
+    let code = match keypad(code) {
+        Some(Keypad::Plain(c)) => c,
+        _ => code,
+    };
     let mods = Mods::from_bits(bits);
     // The one key the legacy spelling cannot carry: Enter keeps its shift.
     if code == 13 && mods.shift() {
@@ -428,10 +434,58 @@ fn kitty_fields(params: &[u8]) -> Option<(u32, u8)> {
     Some((code, mods))
 }
 
+/// **What one of the keypad's private-use codes means**, under the kitty keyboard.
+///
+/// The protocol's "disambiguate" flag — the one this terminal asks for — reports every keypad
+/// key by its own code (`57399` is `KP_0`, `57414` is `KP_ENTER`), and with no arm for them the
+/// keypad decoded to nothing at all: the right-hand Enter could not open a subagent or answer a
+/// card, and the keypad's digits typed nothing. The operator, 2026-10-11: *"the numpad enter
+/// can't enter subagent"*, *"access cards too"*. A keypad key means the key it is printed with:
+/// a digit, an operator, Enter, or — with NumLock off — an arrow, a page key, Home, End,
+/// Insert or Delete. `KP_BEGIN` (the centre key without NumLock) has no meaning and stays none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keypad {
+    /// The same as this plain code point (a character, or 13 for Enter).
+    Plain(u32),
+    /// The same as this legacy sequence.
+    Seq(&'static [u8]),
+}
+
+fn keypad(code: u32) -> Option<Keypad> {
+    use Keypad::{Plain, Seq};
+    Some(match code {
+        57399..=57408 => Plain('0' as u32 + (code - 57399)),
+        57409 => Plain('.' as u32),
+        57410 => Plain('/' as u32),
+        57411 => Plain('*' as u32),
+        57412 => Plain('-' as u32),
+        57413 => Plain('+' as u32),
+        57414 => Plain(13),
+        57415 => Plain('=' as u32),
+        57416 => Plain(',' as u32),
+        57417 => Seq(b"\x1b[D"),
+        57418 => Seq(b"\x1b[C"),
+        57419 => Seq(b"\x1b[A"),
+        57420 => Seq(b"\x1b[B"),
+        57421 => Seq(b"\x1b[5~"),
+        57422 => Seq(b"\x1b[6~"),
+        57423 => Seq(b"\x1b[H"),
+        57424 => Seq(b"\x1b[F"),
+        57425 => Seq(b"\x1b[2~"),
+        57426 => Seq(b"\x1b[3~"),
+        _ => return None,
+    })
+}
+
 /// What a terminal without the protocol sends for this key, or `None` for a key it has no
-/// spelling for (the keypad's private-use codes).
+/// spelling for (a private-use code that is not the keypad's, and the keypad's centre key).
 fn kitty_legacy(code: u32, mods: u8) -> Option<Vec<u8>> {
     let (alt, ctrl) = (mods & 2 != 0, mods & 4 != 0);
+    let code = match keypad(code) {
+        Some(Keypad::Plain(c)) => c,
+        Some(Keypad::Seq(seq)) => return Some(seq.to_vec()),
+        None => code,
+    };
     let mut out = Vec::new();
     if alt {
         out.push(0x1b);
@@ -759,8 +813,24 @@ mod tests {
         assert_eq!(one(b"\x1b[98;3u"), vec![alt(KeyCode::Char('b'))]);
         // A plain key the protocol chose to report anyway.
         assert_eq!(one(b"\x1b[97u"), vec![ch('a')]);
-        // The keypad's private-use codes have no legacy spelling, and are not typed.
-        assert_eq!(one(b"\x1b[57399u"), Vec::<Event>::new());
+        // **The keypad means what is printed on it** — the right-hand Enter is Enter (and keeps
+        // its shift), the digits and operators type, and with NumLock off it is the arrows and
+        // the page keys. Only the centre key (`KP_BEGIN`) means nothing.
+        assert_eq!(one(b"\x1b[57414u"), vec![k(KeyCode::Enter)]);
+        assert_eq!(
+            one(b"\x1b[57414;2u"),
+            vec![key(KeyCode::Enter, Mods::SHIFT)]
+        );
+        assert_eq!(one(b"\x1b[57399u"), vec![ch('0')]);
+        assert_eq!(one(b"\x1b[57408u"), vec![ch('9')]);
+        assert_eq!(one(b"\x1b[57413u"), vec![ch('+')]);
+        assert_eq!(one(b"\x1b[57409u"), vec![ch('.')]);
+        assert_eq!(one(b"\x1b[57419u"), vec![k(KeyCode::Up)]);
+        assert_eq!(one(b"\x1b[57422u"), vec![k(KeyCode::PageDown)]);
+        assert_eq!(one(b"\x1b[57426u"), vec![k(KeyCode::Delete)]);
+        assert_eq!(one(b"\x1b[57427u"), Vec::<Event>::new());
+        // Another private-use code is still nothing.
+        assert_eq!(one(b"\x1b[57441u"), Vec::<Event>::new());
         // An arrow is still the legacy CSI under flag 1.
         assert_eq!(one(b"\x1b[A"), vec![k(KeyCode::Up)]);
     }
@@ -791,6 +861,10 @@ mod tests {
         assert_eq!(legacy_bytes(b"\x1b[92;5u"), vec![0x1c]);
         assert_eq!(legacy_bytes(b"\x1b[27u"), vec![0x1b]);
         assert_eq!(legacy_bytes(b"\x1b[13;2u"), b"\r".to_vec());
+        // The keypad, in the bytes a terminal without the protocol sends for it.
+        assert_eq!(legacy_bytes(b"\x1b[57414u"), b"\r".to_vec());
+        assert_eq!(legacy_bytes(b"\x1b[57401u\x1b[57413u"), b"2+".to_vec());
+        assert_eq!(legacy_bytes(b"\x1b[57420u"), b"\x1b[B".to_vec());
         // Everything that is not a `CSI … u` passes untouched.
         assert_eq!(
             legacy_bytes(b"\x1b[A\x1b[1;5C"),

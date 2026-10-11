@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn a_frame_that_parks_the_cursor_hides_it_first() {
         let a: Vec<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
-        let mut shown = Vec::new();
+        let shown: Vec<String> = Vec::new();
         let mut next = Vec::new();
         let bytes = paint_full(&shown, &a, &mut next, Some((1, 3)), None, true);
         assert!(

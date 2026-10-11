@@ -306,6 +306,24 @@ impl DecisionCard {
     ///   `deny_and_tell` line. **Never trimmed and never scrolled**, because this half is
     ///   the answer.
     pub fn split(&self, w: usize) -> (Vec<Line>, Vec<Line>) {
+        let (content, choices, _) = self.layout(w);
+        (content, choices)
+    }
+
+    /// **Where each rung of the ladder was drawn**, for mouse hit-testing: rung `i` (an index
+    /// into `choices` for a question, `options` otherwise — the order Up/Down walks) occupies
+    /// the rows `choice_rows(w)[i]` of the **`choices` half** that [`DecisionCard::split`]
+    /// returns at the same `w`, wrapped lines included. Row 0 is the first row of that half
+    /// (the ladder opens it), so a host adds the row it drew the half at.
+    ///
+    /// The same shape of answer as [`super::quit::QuitCard::choice_rows`], as ranges because
+    /// a rung wraps: a host that re-wraps the ladder to find them repeats a layout it does not
+    /// own, and drifts the day the marker or the id's spelling changes.
+    pub fn choice_rows(&self, w: usize) -> Vec<std::ops::Range<usize>> {
+        self.layout(w).2
+    }
+
+    fn layout(&self, w: usize) -> (Vec<Line>, Vec<Line>, Vec<std::ops::Range<usize>>) {
         let dim = |s: &str| wrap(&clean(s), w).into_iter().map(|l| one(l, Role::Faint));
         // **The question, then the thing itself, then the evidence.**
         //
@@ -494,8 +512,10 @@ impl DecisionCard {
                 .collect()
         };
         let sel = self.selected.min(rows.len().saturating_sub(1));
+        let mut spans = Vec::with_capacity(rows.len());
         for (i, body) in rows.iter().enumerate() {
             let picked = i == sel;
+            let first = choices.len();
             // The id stays on the line. Typing it still works, a script still uses it, and
             // a reader learning the ladder sees both spellings of the same choice.
             for l in wrap(&format!("  {} {body}", if picked { "▸" } else { " " }), w) {
@@ -508,6 +528,7 @@ impl DecisionCard {
                     one(l, Role::Pending)
                 });
             }
+            spans.push(first..choices.len());
         }
         // **§1.6: how long there is, and what silence will do.** Both facts were on the
         // wire and neither was drawn; the operator was bitten by exactly that. Below the
@@ -569,7 +590,7 @@ impl DecisionCard {
                 Role::Pending,
             ));
         }
-        (out, choices)
+        (out, choices, spans)
     }
 
     /// The whole card as one list (the transcript's shape and the tests' entry point;
@@ -982,6 +1003,74 @@ mod tests {
         // Past the end clamps to the last rung rather than marking nothing.
         d.selected = 99;
         assert!(plain(&d.split(100).1)[2].starts_with("  ▸"));
+    }
+
+    /// **The ladder's row map is the rows the card drew** — letibot
+    /// `the_decision_ladder_rows_are_the_rows_the_card_drew`, at the card. Each rung's range
+    /// starts on the row carrying its marker column, the ranges tile the ladder from row 0
+    /// with no gap, and the rows of a range hold that rung's words and no other's — at widths
+    /// where the long rungs wrap onto two and three rows and where nothing wraps.
+    #[test]
+    fn the_ladder_rows_are_the_rows_the_card_drew() {
+        let mut perm = decision_with(&[
+            OptionKind::AllowOnce,
+            OptionKind::AllowAlways,
+            OptionKind::RejectAlways,
+        ]);
+        perm.options[1].label = "Always allow bash(cargo test --workspace --all-features *)".into();
+        perm.options[2].label = "Deny, and tell the model why it should not try this again".into();
+        perm.deadline_ms = Some(60_000);
+        let question = DecisionCard {
+            kind: "question".into(),
+            summary: "which one?".into(),
+            choices: vec![
+                "the short one".into(),
+                "a much longer choice that the model wrote out as a whole sentence of prose".into(),
+                "third".into(),
+            ],
+            ..DecisionCard::default()
+        };
+        for mut d in [perm, question] {
+            for sel in 0..3 {
+                d.selected = sel;
+                for w in [24usize, 30, 45, 60, 200] {
+                    let (_, choices) = d.split(w);
+                    let rows = d.choice_rows(w);
+                    let text = plain(&choices);
+                    assert_eq!(rows.len(), d.rows());
+                    assert_eq!(rows[0].start, 0, "w={w}");
+                    for (i, r) in rows.iter().enumerate() {
+                        assert!(!r.is_empty(), "w={w} rung {i}: {rows:?}");
+                        if i > 0 {
+                            assert_eq!(rows[i - 1].end, r.start, "w={w}: {rows:?}");
+                        }
+                        let mark = if i == sel { "  ▸ " } else { "    " };
+                        assert!(text[r.start].starts_with(mark), "w={w} {i}: {text:#?}");
+                        // Every row of the range belongs to rung i: the reverse run is on
+                        // exactly the picked rung's rows.
+                        for row in r.clone() {
+                            let reversed = choices[row]
+                                .spans
+                                .iter()
+                                .any(|s| s.style.attrs.contains(crate::style::Attrs::REVERSE));
+                            assert_eq!(reversed, i == sel, "w={w} row {row}: {text:#?}");
+                        }
+                    }
+                    // A wrap actually happened somewhere at the narrow widths.
+                    if w <= 30 {
+                        assert!(rows.iter().any(|r| r.len() > 1), "w={w}: {rows:?}");
+                    }
+                    // The row after the ladder is not a rung: the deadline or the hint.
+                    let end = rows.last().unwrap().end;
+                    assert!(!text[end].starts_with("  ▸"), "w={w}: {text:#?}");
+                    let words: String = text[..end].concat().split_whitespace().collect();
+                    assert!(
+                        words.contains("third") || words.contains("deny_always"),
+                        "{words}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

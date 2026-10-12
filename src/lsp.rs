@@ -87,28 +87,51 @@ pub struct LspClient {
     pub lang: Lang,
 }
 
-/// Resolve an LSP server binary: search `PATH`, then `~/.local/bin` and
-/// `~/.cargo/bin` (where rustup/gopls/bash-language-server typically live).
-/// Falls back to the bare name so a "not found" error is still meaningful.
-fn find_bin(name: &str) -> String {
-    use std::path::Path;
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let cand = dir.join(name);
-            if cand.is_file() {
-                return cand.to_string_lossy().into_owned();
-            }
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        for sub in ["local/bin", "cargo/bin"] {
-            let cand = Path::new(&home).join(sub).join(name);
-            if cand.is_file() {
-                return cand.to_string_lossy().into_owned();
-            }
+/// Resolve an LSP server binary: search `PATH`, then the directories a tool manager
+/// installs into but does not always put on a process's `PATH` — `~/.local/bin` and
+/// `~/.cargo/bin` (rustup's `rust-analyzer`, letibot's own installs), **mise's shims**
+/// (`~/.local/share/mise/shims`, which `mise activate` adds to a shell's `PATH` and
+/// nothing else's — a head launched from a GUI, or a host's pane, inherits no shell), and
+/// `~/go/bin` (`go install`'s default, which is on no `PATH` at all). Falls back to the
+/// bare name so a "not found" error is still meaningful — and that is how a caller tells
+/// "found" from "not found" without a second `Option` type.
+pub(crate) fn find_bin(name: &str) -> String {
+    for dir in search_dirs(std::env::var_os("PATH"), std::env::var_os("HOME")) {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return cand.to_string_lossy().into_owned();
         }
     }
     name.to_string()
+}
+
+/// **Where a server is looked for, in order**: `PATH` first, then the tool managers'
+/// directories. `HOME` is a parameter rather than read here so the list can be tested
+/// without touching the environment.
+fn search_dirs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        for sub in [
+            ".local/bin",
+            ".cargo/bin",
+            // mise (this host's tool manager): the shims are what `mise activate` puts on
+            // an interactive shell's PATH, and a process that does not inherit that shell
+            // sees none of the tools installed through it — `gopls`, `taplo`, `marksman`,
+            // `typescript-language-server` and the rest are all installed this way here.
+            ".local/share/mise/shims",
+            // `go install golang.org/x/tools/gopls@latest` and its kind.
+            "go/bin",
+        ] {
+            let cand = home.join(sub);
+            if cand.is_dir() && !dirs.contains(&cand) {
+                dirs.push(cand);
+            }
+        }
+    }
+    dirs
 }
 
 /// The server command for `lang`, or `None` when rano knows of no language
@@ -1065,6 +1088,104 @@ mod tests {
     #[test]
     fn path_uri() {
         assert_eq!(path_to_uri(Path::new("/tmp/x.rs")), "file:///tmp/x.rs");
+    }
+
+    /// **Where a server is looked for**: `PATH` first and in order, then the directories a
+    /// tool manager installs into — mise's shims among them, which is what makes `gopls`
+    /// reachable for a process that inherited no shell (see `search_dirs`).
+    #[test]
+    fn a_server_is_found_on_the_path_and_then_in_the_tool_managers_directories() {
+        // **The real HOME**, because what is asserted about the fallbacks is where *this*
+        // machine installs: a fabricated one has nothing under it to find, and the rule
+        // (only directories that exist are searched) would then be asserted vacuously.
+        let home = std::env::var_os("HOME");
+        let dirs = search_dirs(
+            Some(std::ffi::OsString::from("/first:/second")),
+            home.clone(),
+        );
+        // PATH in order, and first.
+        assert_eq!(dirs[0], Path::new("/first"));
+        assert_eq!(dirs[1], Path::new("/second"));
+        // Then the fallbacks, under HOME, exactly where they exist.
+        let home = PathBuf::from(home.expect("HOME"));
+        for sub in [
+            ".local/bin",
+            ".cargo/bin",
+            ".local/share/mise/shims",
+            "go/bin",
+        ] {
+            let want = home.join(sub);
+            assert_eq!(
+                dirs.contains(&want),
+                want.is_dir(),
+                "{sub} is searched exactly where it is installed: {dirs:?}"
+            );
+        }
+        // A `PATH` that already names one is not searched twice.
+        let local = home.join(".local/bin");
+        if local.is_dir() {
+            let again = search_dirs(
+                Some(std::ffi::OsString::from(
+                    local.to_string_lossy().into_owned(),
+                )),
+                Some(home.clone().into_os_string()),
+            );
+            assert_eq!(
+                again.iter().filter(|d| **d == local).count(),
+                1,
+                "{again:?}"
+            );
+        }
+        // No HOME at all: PATH and nothing else.
+        assert_eq!(
+            search_dirs(Some(std::ffi::OsString::from("/only")), None),
+            vec![Path::new("/only").to_path_buf()]
+        );
+        assert!(search_dirs(None, None).is_empty());
+    }
+
+    /// **A Go file gets diagnostics from gopls**, the same end-to-end shape as the
+    /// rust-analyzer test above: a module with a type error in it, the server spawned the
+    /// way an open buffer spawns it, and the error expected back. Ignored by default for
+    /// the same reason (slow, and it needs a server on PATH).
+    ///
+    /// Run it where a Go toolchain is: `cargo test -- --ignored go_diagnostics_flow`.
+    #[test]
+    #[ignore = "spawns gopls: slow + env-dependent (run with -- --ignored)"]
+    fn go_diagnostics_flow() {
+        let bin = find_bin("gopls");
+        if bin == "gopls" {
+            eprintln!("skip: gopls not found");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("rano_goplslflow_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("go.mod"), "module d\n\ngo 1.21\n").unwrap();
+        let doc = base.join("main.go");
+        let broken = "package main\n\nfunc main() {\n\tvar x string = 1\n\t_ = x\n}\n";
+        std::fs::write(&doc, broken).unwrap();
+
+        let mut client = LspClient::spawn(Lang::Go, &base, &doc, broken).expect("spawn gopls");
+
+        let mut saw_error = false;
+        for _ in 0..300 {
+            for e in client.poll() {
+                if let LspEvent::Diagnostics { diags, .. } = e
+                    && diags.iter().any(|d| d.severity == 1)
+                {
+                    saw_error = true;
+                }
+            }
+            if saw_error {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(saw_error, "expected a type-error diagnostic from gopls");
+
+        client.shutdown();
+        std::fs::remove_dir_all(&base).ok();
     }
 
     // End-to-end: spawn rust-analyzer and confirm the initial analysis yields

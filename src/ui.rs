@@ -1502,6 +1502,10 @@ mod tests {
         // "has tabs"); the tab must still expand to the next multiple of
         // tab_width and the row must wrap at the segment boundary.
         let mut e = ed(&format!("\t{}", "a".repeat(40)));
+        // Eight columns, named rather than inherited: the default is four now, and this
+        // test's arithmetic (and its comments) are about an eight-column tab. The default
+        // is pinned in `config`'s own tests.
+        e.tab_width = 8;
         e.show_line_numbers = true;
         e.text_w = 40;
         e.ensure_wrap_prefix();

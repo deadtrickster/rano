@@ -1,13 +1,12 @@
 //! Execute (^T, D7) and filter (M-|, F6): run external commands and splice
 //! their output back as undoable edits, on top of exec::ExecJob.
 
-use std::io::Write as _;
-use std::process::{Command, Stdio};
-
 use crate::buffer::Pos;
 use crate::editor::{ActionKind, Editor, normalize, plural};
 use crate::exec;
 use crate::prompt::{Prompt, PromptKind};
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 impl Editor {
     // ---------- exec ----------
@@ -166,4 +165,87 @@ impl Editor {
         self.edit_invalidate();
         self.flash(&format!("Filtered {} line{}", n, plural(n)));
     }
+}
+
+/// **Run a program over text, bounded.** `input` goes to its stdin, its stdout comes back,
+/// and a wall clock bounds the whole thing — this sits on the SAVE path (gofmt on a Go
+/// buffer), where a child that never answers would be an editor that never saves.
+///
+/// A different shape from [`Editor::do_filter`], which is the interactive `M-|`: that one
+/// goes through `sh -c` on its own thread and splices into a marked region of the buffer;
+/// this one runs a program directly with an argv and hands its output back to the caller.
+///
+/// Both pipes are drained by their own threads: writing first and reading afterwards
+/// deadlocks on a 64 KiB pipe, which is the same trap `do_filter` records one paragraph up.
+pub(crate) fn run_filter(
+    program: &str,
+    args: &[&str],
+    input: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read as _;
+    use std::sync::mpsc;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{program}: {e}"))?;
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
+    };
+    let out_rx = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let err_rx = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let text = input.to_string();
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(e) => break Err(format!("{program}: {e}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(format!("timed out after {timeout:?}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let out = String::from_utf8_lossy(&out_rx.recv().unwrap_or_default()).into_owned();
+    let err = String::from_utf8_lossy(&err_rx.recv().unwrap_or_default()).into_owned();
+    let status = status?;
+    if !status.success() {
+        let first = err.trim().lines().next().unwrap_or("").to_string();
+        return Err(if first.is_empty() {
+            format!("exit {}", status.code().unwrap_or(-1))
+        } else {
+            format!("exit {}: {first}", status.code().unwrap_or(-1))
+        });
+    }
+    Ok(out)
 }

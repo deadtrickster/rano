@@ -26,6 +26,9 @@ pub enum PromptKind {
     ConfirmOverwrite,
     /// The file changed on disk since it was read; `pending_write` holds it.
     ConfirmExternal,
+    /// The save's directory does not exist; `pending_write` and `pending_dir` hold the
+    /// write and the directory to make. See `Editor::answer_mkdir`.
+    ConfirmMkdir,
     ReplaceAsk,
 }
 
@@ -54,6 +57,7 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::ConfirmExternal => {
             "File changed on disk since it was read. Overwrite? (y, n, d for diff) "
         }
+        PromptKind::ConfirmMkdir => "Directory does not exist; create it? (y or n) ",
         PromptKind::ReplaceAsk => "Replace? (y, n, a, q) ",
     }
 }
@@ -157,6 +161,18 @@ impl Editor {
                 }
                 if let KeyCode::Char(c) = key.code {
                     self.answer_external(c);
+                    return;
+                }
+                self.prompt = Some(p);
+                return;
+            }
+            PromptKind::ConfirmMkdir => {
+                if cancel {
+                    self.answer_mkdir('n');
+                    return;
+                }
+                if let KeyCode::Char(c) = key.code {
+                    self.answer_mkdir(c);
                     return;
                 }
                 self.prompt = Some(p);

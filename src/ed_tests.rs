@@ -1042,6 +1042,119 @@ fn a_copy_reaches_the_terminal_clipboard() {
     assert!(ed.take_clipboard().is_none(), "a click is not a copy");
 }
 
+/// **A save into a directory that is not there is offered, not failed.** The operator:
+/// *"when I save file without parent dir- offer to create one instead of just failing"*.
+#[test]
+fn saving_into_a_missing_directory_offers_to_create_it() {
+    let d = temp_dir("mkdir");
+    let deep = d.0.join("one/two/three");
+    let file = deep.join("notes.txt");
+    let mut ed = test_ed("hello\n");
+    ed.bs_mut().buf.modified = true;
+    // ^O then the name: the save is offered the directory.
+    ed.do_write(file.display().to_string());
+    assert_eq!(
+        ed.prompt.as_ref().map(|p| p.kind),
+        Some(PromptKind::ConfirmMkdir),
+        "the question is asked"
+    );
+    assert!(!deep.exists(), "and nothing is created before the answer");
+    // **n** keeps everything as it was: no directory, no file, the buffer still modified.
+    press(&mut ed, KeyCode::Char('n'), Mods::NONE);
+    assert!(ed.prompt.is_none());
+    assert!(!deep.exists());
+    assert!(ed.bs().buf.modified, "the buffer is still unsaved");
+    assert!(
+        ed.status_text().unwrap().contains("Not saved"),
+        "and says so"
+    );
+    // **y** makes every directory on the way and retries the write.
+    let mut ed = test_ed("hello\n");
+    ed.bs_mut().buf.modified = true;
+    ed.do_write(file.display().to_string());
+    press(&mut ed, KeyCode::Char('y'), Mods::NONE);
+    assert!(ed.prompt.is_none());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
+    assert!(!ed.bs().buf.modified, "saved");
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(file.as_path()));
+    // Esc answers no like `n` does, and the quit a save was waiting for is dropped with
+    // it: a ^X that cannot write must not quit.
+    let mut ed = test_ed("x\n");
+    ed.bs_mut().buf.modified = true;
+    ed.quit_after_save = true;
+    // A directory that is still missing: the `y` above created the first one.
+    ed.do_write(d.0.join("four/five/other.txt").display().to_string());
+    assert_eq!(
+        ed.prompt.as_ref().map(|p| p.kind),
+        Some(PromptKind::ConfirmMkdir)
+    );
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(ed.prompt.is_none());
+    assert!(!ed.quit_after_save, "the quit is off");
+    assert!(
+        !ed.wants_quit(),
+        "and a save that could not write does not exit"
+    );
+}
+
+/// **gofmt on save, for a Go file**: the buffer is formatted before it is written, so the
+/// file and the buffer agree — and it is one undo step, because it is an edit.
+///
+/// Skips (loudly) where `gofmt` is not installed: this is a check of the machine's own
+/// formatter, not of rano's own code.
+#[test]
+fn saving_a_go_file_runs_gofmt_first() {
+    if crate::lsp::find_bin("gofmt") == "gofmt" {
+        eprintln!("skip: gofmt not found");
+        return;
+    }
+    let d = temp_dir("gofmt");
+    let file = d.0.join("main.go");
+    // Four-space indentation, which gofmt writes as tabs (measured: it is the one thing
+    // Go's rule is emphatic about, and the tool has no flag to say otherwise).
+    let spaces = "package main\n\nfunc main() {\n    println(1)\n}\n";
+    fs::write(&file, spaces).unwrap();
+    let mut ed = test_ed(spaces);
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.text_w = 60;
+    ed.text_h = 20;
+    // ^O then Enter: the prompt is pre-filled with the file's own name, so this is the
+    // ordinary "save this buffer" path.
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    let written = fs::read_to_string(&file).unwrap();
+    assert!(
+        written.contains("\tprintln(1)"),
+        "gofmt wrote tabs: {written:?}"
+    );
+    assert!(!written.contains("    println"), "{written:?}");
+    // The buffer is the formatted text, not the spaces that were typed.
+    assert_eq!(lines(&ed).join("\n") + "\n", written);
+    assert!(!ed.bs().buf.modified, "and the save landed");
+    // **One undo step takes the formatting back**, which is the whole reason the buffer
+    // is replaced as an edit rather than silently rewritten.
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
+    assert!(
+        lines(&ed).join("\n").contains("    println(1)"),
+        "M-U undoes it"
+    );
+    // A file that is already formatted is left alone: no edit, no undo step, no flash.
+    let mut ed = test_ed(&written);
+    ed.bs_mut().buf.name = Some(file.clone());
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(lines(&ed).join("\n") + "\n", written);
+    // And another language is never handed to gofmt.
+    let rs = d.0.join("main.rs");
+    let rust = "fn main() {\n    let x = 1;\n}\n";
+    fs::write(&rs, rust).unwrap();
+    let mut ed = test_ed(rust);
+    ed.bs_mut().buf.name = Some(rs.clone());
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(fs::read_to_string(&rs).unwrap(), rust);
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");
@@ -1712,10 +1825,31 @@ fn tab_aligns_to_next_unit_mid_line() {
 
 #[test]
 fn tab_uses_tab_char_when_file_does() {
+    // **This is `indent = auto`**, the mode that follows the file: a tab-indented buffer
+    // gets a tab. The default is `indent = spaces` (four of them), which the case below
+    // pins — the old default was a tab for every buffer that had no style to detect.
     let mut ed = test_ed("\ta\n\tb\n\n");
+    ed.config.indent = config::Indent::Auto;
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
     press(&mut ed, KeyCode::Tab, Mods::NONE);
     assert_eq!(lines(&ed), vec!["\ta", "\tb", "\t"]);
+}
+
+#[test]
+fn tab_inserts_the_configured_unit_by_default() {
+    // Four spaces, in a buffer whose file indents with tabs: the setting wins, which is
+    // what "make tabs configurable" asked for (and `indent = auto` is how to follow the
+    // file). Go's gofmt rewrites those spaces back to tabs on save, which is Go's rule.
+    let mut ed = test_ed("\ta\n\tb\n\n");
+    ed.bs_mut().cursor = Pos { row: 2, col: 0 };
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    assert_eq!(lines(&ed), vec!["\ta", "\tb", "    "]);
+    // `indent = tabs` is the other way to ask for one, and it is one character.
+    let mut ed = test_ed("");
+    ed.config.indent = config::Indent::Tabs;
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
+    assert_eq!(lines(&ed), vec!["\tx"]);
 }
 
 #[test]
@@ -1965,6 +2099,10 @@ fn scroll_x_follows_cursor() {
 fn scroll_x_with_tabs() {
     // cursor col 3 → display col 9; 9 >= 0 + 4 → scroll_x = 9 + 1 - 4
     let mut ed = test_ed("a\tb");
+    // The width is named rather than taken from the default (four columns now): this test
+    // is about the arithmetic *given* a tab width, and the default is pinned in
+    // `config::tests` and `config_line_numbers_seeded`.
+    ed.tab_width = 8;
     ed.wrap = false; // horizontal scrolling needs wrap off
     ed.show_line_numbers = false;
     ed.text_w = 4;
@@ -2787,7 +2925,9 @@ fn config_line_numbers_seeded() {
     };
     let ed = Editor::new(Buffer::new(), cfg);
     assert!(ed.show_line_numbers);
-    assert_eq!(ed.config.tab_width, 8);
+    assert_eq!(ed.config.tab_width, 4, "a tab is drawn four columns wide");
+    assert_eq!(ed.config.indent, config::Indent::Spaces);
+    assert_eq!(ed.config.indent_size, 4, "and a Tab inserts four spaces");
 }
 
 // F3 — auto-indent carries the current line's leading whitespace onto
@@ -2830,7 +2970,7 @@ fn indent_unit_matches_the_reference_scan() {
             })
             .collect();
         if counts.is_empty() {
-            return "\t".to_string();
+            return "    ".to_string();
         }
         counts.sort();
         let mut unit = counts[0];
@@ -2843,8 +2983,12 @@ fn indent_unit_matches_the_reference_scan() {
             }
             unit = a;
         }
-        if unit == 0 || unit > 8 {
-            return "\t".to_string();
+        // Nothing to detect — no indented row at all, a one-space run (which means "this
+        // row was indented by one", not "my style is one column"), or a unit past the
+        // 8-space bound — and the mode's fallback is the **configured size**, which is what
+        // `Indent::Auto` does (it used to be a tab).
+        if unit <= 1 || unit > 8 {
+            return "    ".to_string();
         }
         " ".repeat(unit)
     }
@@ -2863,7 +3007,12 @@ fn indent_unit_matches_the_reference_scan() {
         ("blank lines", "\n\n    a\n\n"),
         ("single", "    only"),
     ] {
-        let ed = test_ed(text);
+        // **The scan is what `indent = auto` asks for**: the *default* is four spaces,
+        // which is a setting rather than a detection (see `config::Indent`), so the mode
+        // is named here and the fallback is the configured size.
+        let mut ed = test_ed(text);
+        ed.config.indent = config::Indent::Auto;
+        ed.config.indent_size = 4;
         assert_eq!(
             ed.indent_unit(),
             reference(text),

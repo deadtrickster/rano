@@ -52,6 +52,9 @@ pub enum ActionKind {
     /// A merge conflict resolved from the conflict view: its marker block
     /// replaced by the side taken. One undo step each, coalescing with nothing.
     Resolve,
+    /// A formatter's whole-buffer rewrite on save (gofmt): one step, coalescing with
+    /// nothing, so `M-U` takes the formatting back in one press.
+    Format,
 }
 
 #[derive(Debug)]
@@ -187,6 +190,9 @@ pub struct Editor {
     pub loc_until: Option<Instant>,
     pub quit: bool,
     pub pending_write: Option<PathBuf>,
+    /// A save that was refused because its directory is missing: the directory the reader is
+    /// being asked to create, kept while the question is up. See [`Self::answer_mkdir`].
+    pub(crate) pending_dir: Option<PathBuf>,
     pub quit_after_save: bool,
     /// M-W on a modified buffer answered 'y': close it once the save lands
     /// (the save may first need a file name).
@@ -394,6 +400,7 @@ impl Editor {
             loc_until: None,
             quit: false,
             pending_write: None,
+            pending_dir: None,
             quit_after_save: false,
             close_after_save: false,
             picker: None,
@@ -1183,52 +1190,16 @@ impl Editor {
         out
     }
 
-    /// Indentation unit of the current buffer: a tab char if any line
-    /// indents with tabs, otherwise the common leading-space width (the GCD,
-    /// so mixed 4/8 comes out as 4). Falls back to a tab for flat buffers.
+    /// The whitespace a Tab inserts, and what an auto-indent puts on a new line: the
+    /// configured unit ([`crate::config::Indent`]) — `indent_size` spaces, a literal tab,
+    /// or the buffer's own style under `auto` (see `crate::config::detect_indent`).
     pub fn indent_unit(&self) -> String {
-        // **ONE pass, and no collected Vec.** The version this replaces built a
-        // `Vec<&Vec<char>>` of every row and then walked it twice, which on a
-        // 2.6M-row file is a 21 MB allocation and two traversals — measured at
-        // **36 ms per call**, against 13.2 ms for this. It is not a hot path for
-        // typing (`type a char` is 0.1 µs) but it runs on every **Enter** with
-        // auto-indent, every `Tab` and every `Backspace`, so 36 ms was the cost
-        // of pressing Enter in a large file.
-        //
-        // The GCD is tracked as the scan goes rather than sorted afterwards,
-        // because a GCD is all this needs and it is monotonically
-        // non-increasing — so reaching 1 ends the search, since no later row can
-        // raise it. That bound is exact, not a heuristic.
-        //
-        // It is still O(rows), which §16.0 says an edit must not be, and it is
-        // the blocker named in TODO.md §16.3 for the lazy store: under a
-        // file-backed row this walk would be disk reads. The exact fix is to
-        // maintain this incrementally (a row's leading whitespace is known when
-        // it is written), and it wants the swap to land first so it can be done
-        // once.
-        let mut unit = 0usize;
-        for l in self.bs().buf.rows() {
-            if l.first() == Some(&'\t') {
-                return "\t".to_string();
-            }
-            let n = l.iter().take_while(|c| **c == ' ').count();
-            if n > 0 {
-                unit = if unit == 0 { n } else { gcd(unit, n) };
-                if unit == 1 {
-                    // The floor: already 1, and it cannot fall further.
-                    break;
-                }
-            }
-        }
-        if unit == 0 || unit > 8 {
-            return "\t".to_string();
-        }
-        " ".repeat(unit)
+        self.config.indent_unit(&self.bs().buf)
     }
 
-    /// Tab: insert the buffer's indent unit — spaces up to the next unit
-    /// boundary for space-indented files (so rano matches its own 4-space
-    /// source), a literal tab for tab-indented ones.
+    /// Tab: insert the indent unit. Spaces are inserted up to the next unit boundary (so a
+    /// four-space buffer keeps its columns when Tab is pressed mid-indent), a literal tab is
+    /// inserted as one character.
     pub fn indent_line(&mut self) {
         let unit = self.indent_unit();
         if unit == "\t" {
@@ -2946,7 +2917,133 @@ impl Editor {
         self.open_diff_view(&path, disk, mine);
     }
 
+    /// **Answer to "the directory does not exist": create it and write.** `y` makes the
+    /// directories (all of them: `a/b/c.txt` is one `mkdir -p`) and retries the write that
+    /// asked; `n` drops the save and says so, keeping the buffer as it is — modified — so
+    /// nothing is lost by having asked.
+    pub(crate) fn answer_mkdir(&mut self, c: char) {
+        match c {
+            'y' | 'Y' => {
+                let Some(dir) = self.pending_dir.clone() else {
+                    return;
+                };
+                match fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        if let Some(path) = self.pending_write.take() {
+                            self.pending_dir = None;
+                            self.write_file(path);
+                        }
+                    }
+                    Err(e) => {
+                        // The quit or close this save was for is off, as it is for any
+                        // failed write: the buffer is unsaved and must not finish silently.
+                        self.pending_write = None;
+                        self.pending_dir = None;
+                        self.quit_after_save = false;
+                        self.close_after_save = false;
+                        self.flash(&format!("Cannot create {}: {e}", dir.display()));
+                    }
+                }
+            }
+            'n' | 'N' => {
+                let dir = self.pending_dir.take();
+                self.pending_write = None;
+                self.quit_after_save = false;
+                self.close_after_save = false;
+                match dir {
+                    Some(d) => self.flash(&format!("Not saved: {} does not exist", d.display())),
+                    None => self.flash("Not saved"),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// **gofmt on save, for a Go file.** The buffer is formatted *before* it is written, so
+    /// what lands on disk and what the reader is looking at are the same text — formatting
+    /// the file afterwards would leave the buffer stale and the next save would ask about a
+    /// file "changed on disk" by rano itself. The replacement is one undo step
+    /// ([`ActionKind::Format`]), so `M-U` takes it back.
+    ///
+    /// Go's own rule is tabs — measured, not assumed: `gofmt` turns a four-space indent into
+    /// one tab and has no `-tabs` flag any more, so it is not a choice the formatter offers —
+    /// which is `indent = auto`'s business, not this function's: what a *Tab key* inserts is
+    /// [`crate::config::Indent`], and what a *Go file* gets on save is gofmt's answer.
+    ///
+    /// Silent when this is not a Go file, when `gofmt` is not on the machine (the file is
+    /// simply saved unformatted — no worse than before) and when the formatting changed
+    /// nothing. A file gofmt cannot parse is saved as written, with one line saying why,
+    /// because a reader who expects formatting would otherwise not know nothing happened.
+    fn format_for_save(&mut self) {
+        let is_go = self
+            .bs()
+            .buf
+            .name
+            .as_deref()
+            .and_then(Path::extension)
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("go"));
+        if !is_go {
+            return;
+        }
+        let bin = crate::lsp::find_bin("gofmt");
+        if bin == "gofmt" {
+            return;
+        }
+        let before = self.bs().buf.text();
+        match crate::exec_ctrl::run_filter(&bin, &[], &before, FORMAT_TIMEOUT) {
+            Ok(formatted) if formatted != before => {
+                let mut rows: Vec<Vec<char>> =
+                    formatted.lines().map(|l| l.chars().collect()).collect();
+                if rows.is_empty() {
+                    rows.push(Vec::new());
+                }
+                let n = self.bs().buf.row_count();
+                self.begin_action(ActionKind::Format, 0, n);
+                self.bs_mut().buf.splice_rows(0, n, rows);
+                let last = self.bs().buf.row_count().saturating_sub(1);
+                let c = self.bs().cursor;
+                self.bs_mut().cursor = Pos {
+                    row: c.row.min(last),
+                    col: c.col,
+                };
+                self.finish_step();
+                self.edit_invalidate();
+                self.flash("gofmt: formatted on save (M-U undoes)");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let line = e.lines().next().unwrap_or("").to_string();
+                self.flash(&format!("Saved as written: gofmt {line}"));
+            }
+        }
+    }
+
     fn write_file(&mut self, path: PathBuf) {
+        // **A save into a directory that is not there**: `fs::write` can only say "No such
+        // file or directory", which does not say which of the two is missing, and the reader
+        // typed the path on purpose — so it is *offered* rather than failed (the operator:
+        // *"when I save file without parent dir- offer to create one instead of just
+        // failing"*). Nothing is created yet: a `n` leaves the file alone and the buffer
+        // untouched.
+        if let Some(dir) = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty() && !d.is_dir())
+            .map(Path::to_path_buf)
+        {
+            self.pending_write = Some(path);
+            self.pending_dir = Some(dir);
+            self.prompt = Some(Prompt {
+                kind: PromptKind::ConfirmMkdir,
+                text: String::new(),
+                cursor: 0,
+            });
+            return;
+        }
+        // **gofmt on save, for a Go file** (see `format_for_save`): the buffer is formatted
+        // *here*, after the questions above are answered, so a save the reader backed out of
+        // changes nothing.
+        self.format_for_save();
         // The buffer's OWN encoding, not always UTF-8: a file read as cp1252 or
         // UTF-16 is written back the way it was found, or opening and saving
         // would rewrite it as UTF-8 with the characters replaced.
@@ -3546,12 +3643,10 @@ pub(crate) fn widen_zero_width(diags: &mut [lsp::Diagnostic], lines: &[Vec<char>
     }
 }
 
-fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
+/// How long a formatter on the save path may take. `gofmt` is local and fast (a megabyte of
+/// Go is tens of milliseconds), so this is slack rather than a budget — but a save must never
+/// be something that can hang on a subprocess.
+const FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Editor {
     pub fn status_text(&self) -> Option<String> {

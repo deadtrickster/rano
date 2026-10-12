@@ -3009,3 +3009,66 @@ Both halves of that were true, and neither was about `OSC 52` being unsupported:
   two-row selection that starts at a line's first column, then `^K`: that is all it took.
   The end is now exclusive and in post-removal coordinates, and the case is pinned by the
   test. It had been there since the cutbuffer was written.
+
+## 22. Tabs, spaces, gofmt, gopls, and a save into a directory that is not there
+
+Added 2026-10-11, things the operator asked for in one sitting, in their words: *"make
+gopls work on this host - we have mise"*, *"when I save file without parent dir- offer to
+create one instead of just failing"*, *"run gofmt on save for go files"*, *"are we sure go
+uses tabs??"*, *"make tabs configurable - default to 4 spaces"* and *"so tab_width default
+- make it 4"*.
+
+### 22.1 Go uses tabs, and the measurement is the tool's own
+
+`gofmt` turns a four-space indent into one tab and **has no `-tabs` flag any more** — this
+release's `gofmt -h` lists none — so it is not a choice the formatter offers, and
+`go.dev/doc/effective_go` states the same rule. What was wrong here was not a colour: the
+old default was *unstated*. `Tab` in a buffer with no indentation to detect inserted a tab
+because the detection had nothing to go on, which is a guess rather than a setting.
+
+- [x] **`indent` is a setting with three values** (`config::Indent`): `spaces` (**the
+  default**, `indent_size` of them), `tabs` (one character), `auto` (the buffer's own
+  style — a tab-indented file gets a tab, a four-space file four). The scan is
+  `config::detect_indent`, moved out of the editor so the setting and the mode share one
+  implementation, and `auto`'s fallback when a file has nothing to detect is `indent_size`
+  spaces.
+- [x] **`indent_size = 4`**, and **`tab_width` now defaults to 4** as well (it was 8) —
+  the operator's two instructions. Different questions, and the two keys say so:
+  `tab_width` is how *wide* a tab is drawn, `indent_size` is how many spaces one *step* is.
+- [x] The tests that pinned the old defaults were updated rather than deleted: two that are
+  about arithmetic *given* a width now name the width explicitly (`scroll_x_with_tabs`,
+  `draw_wraps_tabbed_line`), and `tab_uses_tab_char_when_file_does` became `indent = auto`'s
+  case beside a new one for the default.
+
+### 22.2 gofmt on save
+
+- [x] A `.go` buffer is formatted **before it is written** (`Editor::format_for_save`), so
+  the file and the buffer are the same text; formatting the file afterwards would leave the
+  buffer stale, and the next save would ask about a file "changed on disk" by rano itself.
+  The replacement is **one undo step** (`ActionKind::Format`), so `M-U` takes it back.
+- [x] Bounded like every other subprocess here (`exec_ctrl::run_filter`: a 5 s wall clock,
+  with both pipes drained on their own threads), silent when `gofmt` is absent or the text
+  is already formatted, and one line when gofmt refuses a file it cannot parse.
+
+### 22.3 gopls, through mise
+
+- [x] **Installed with the tool manager this host uses**:
+  `mise use -g go:golang.org/x/tools/gopls@latest` → `gopls v0.23.0`.
+- [x] **`find_bin` now searches what a tool manager installs into** (`search_dirs`): `$PATH`
+  first, then `~/.local/bin`, `~/.cargo/bin`, **`~/.local/share/mise/shims`** and
+  `~/go/bin`. The shims are what `mise activate` puts on an interactive shell's `PATH` and
+  nothing else's — a head launched from a GUI, or a host's pane, inherits no shell and so
+  saw none of the tools installed through mise.
+- [x] **Proven end to end rather than assumed**: `lsp::tests::go_diagnostics_flow` (ignored,
+  like the rust-analyzer one) spawns gopls on a module with a type error and expects the
+  error back. Run here: **passes in 3.1 s**.
+
+### 22.4 A save into a directory that is not there
+
+- [x] `write_file` asks before failing: a missing parent directory raises
+  `PromptKind::ConfirmMkdir`, with the write held in `pending_write` and the directory in
+  `pending_dir`. `y` makes every directory on the way (`create_dir_all`) and retries the
+  write; `n` (or Esc) drops the save, keeps the buffer **modified**, and turns off the quit
+  or close the save was for — the rule a failed write already followed, so a `^X` that
+  cannot write does not exit.
+- [x] The question is asked *before* the formatter runs, so declining it changes nothing.

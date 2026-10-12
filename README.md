@@ -193,11 +193,13 @@ cursor stays put unless the scroll would push it out of sight). `M-6` copies
 the marked region or the current line, `^K` cuts it, and both reach the system
 clipboard as well as rano's own cutbuffer. Editing: `Enter`, `Backspace`,
 `Delete`, `Tab`.
-`Tab` follows the buffer's own indent style: space-indented files get spaces
-up to the next unit boundary (the unit is detected from the file — e.g.
-rano's own 4-space source), tab-indented files get a tab char; `Backspace`
-on leading whitespace eats a whole unit. `Esc` clears an active mark or
-cancels a prompt (`^G` also cancels prompts).
+`Tab` inserts the *configured* indent unit — **four spaces by default**, `indent_size`
+of them up to the next unit boundary (so pressing it mid-indent still lands on a
+boundary) — and `Backspace` on leading whitespace eats a whole unit. `indent =
+tabs` asks for a literal tab instead, and `indent = auto` follows the buffer's own
+style (a tab-indented file gets a tab, a four-space file four, detected from the
+file; a file with nothing to detect gets `indent_size` spaces). `Esc` clears an
+active mark or cancels a prompt (`^G` also cancels prompts).
 
 Prompts: `Up`/`Down` cycle history (search, exec, and filename prompts keep
 separate histories), `Tab` completes file names, `~` expands to `$HOME` in
@@ -398,7 +400,11 @@ when the editor exits. The `rano` binary is one such host.
 `$XDG_CONFIG_HOME/rano/config.toml` (falling back to `~/.config/rano/config.toml`):
 
 ```toml
-tab_width = 8      # 1..=16, tab rendering + horizontal scrolling
+tab_width = 4      # 1..=16, how WIDE a tab is drawn (+ horizontal scrolling)
+# What Tab inserts: `spaces` (indent_size of them — the default), `tabs` (one
+# tab character) or `auto` (the buffer's own style, detected).
+indent = spaces
+indent_size = 4    # 1..=16, columns per indent step when it is spaces
 auto_indent = true
 line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
@@ -477,7 +483,10 @@ same flags.
   is synced to the server before each request, each response is matched to
   the keystroke that asked for it (late answers for older typing are
   dropped), and snippet placeholders are flattened to plain text.
-- LSP: when a language server is on `$PATH` (rust-analyzer, gopls,
+- LSP: when a language server is installed — on `$PATH`, in `~/.local/bin`,
+  `~/.cargo/bin`, **mise's shims** (`~/.local/share/mise/shims`) or `~/go/bin`, so a
+  server a tool manager installed is found by a process that inherited no shell
+  (rust-analyzer, gopls,
   bash-language-server, pylsp, clangd, vscode-json-language-server, cl-lsp,
   typescript-language-server, marksman, taplo, yaml-language-server,
   vscode-html-language-server, vscode-css-language-server,

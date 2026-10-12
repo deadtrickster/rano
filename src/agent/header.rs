@@ -60,6 +60,16 @@ const GIT_WRAP: usize = 3;
 /// The columns between the left half and the tail: the one gap rule of this row.
 const GAP: usize = 2;
 
+/// The tail's facts, by the rank they are dropped in: lowest first.
+const DROP_OUT: u8 = 0;
+const DROP_POSITION: u8 = 1;
+const DROP_CACHED: u8 = 2;
+const DROP_MODEL: u8 = 3;
+const DROP_DURATION: u8 = 4;
+const DROP_RATE: u8 = 5;
+const DROP_SPEND: u8 = 6;
+const DROP_CTX: u8 = 7;
+
 /// **The longest PREFIX of the pieces that fits in ROOM columns** — leticl's `%git-fit`.
 ///
 /// ROOM is the whole field's budget, wrapping included: a field of pieces `p` is exactly
@@ -162,34 +172,41 @@ pub fn header_model(value: &str) -> String {
 }
 
 impl Header {
-    /// The right-hand facts, most valuable first.
-    fn facts(&self) -> Vec<String> {
+    /// The right-hand facts in DISPLAY order, each with the rank it is dropped in, lowest first.
+    ///
+    /// The operator's ruling: the out count goes first, *"hide session counter too"*, *"and %
+    /// cached"*, *"hide model too, the most important part is path and git"*. So the order is
+    /// `N out`, the position counter, `N% cached`, the model, the duration, `tok/s`, the spend,
+    /// and last `N ctx` — every one of them before the path or the git field gives a column.
+    fn facts(&self) -> Vec<(String, u8)> {
         let mut right = Vec::new();
         // Shown for one session too: "1/1" is a fact — this daemon holds one session and you
         // are in it — and the one untitled session is otherwise the case with no identity at all.
-        right.push(format!("{}/{}", self.position.0, self.position.1.max(1)));
+        right.push((
+            format!("{}/{}", self.position.0, self.position.1.max(1)),
+            DROP_POSITION,
+        ));
         if !self.model.is_empty() {
-            right.push(clean_line(&self.model));
+            right.push((clean_line(&self.model), DROP_MODEL));
         }
         // **The meter.** Beside the token count, because that is where the question "what is
         // this costing me" is already being asked.
         if let Some(m) = self.spent_micros {
-            right.push(format!("${:.4}", m as f64 / 1_000_000.0));
+            right.push((format!("${:.4}", m as f64 / 1_000_000.0), DROP_SPEND));
         }
         if let Some(c) = self.context.filter(|c| c.tokens > 0) {
-            right.push(format!("{} ctx", thousands(c.tokens)));
+            right.push((format!("{} ctx", thousands(c.tokens)), DROP_CTX));
             // A percentage nobody measured is refused.
             if c.cache_measured {
-                right.push(format!(
-                    "{:.0}% cached",
-                    c.cached as f64 * 100.0 / c.tokens as f64
+                right.push((
+                    format!("{:.0}% cached", c.cached as f64 * 100.0 / c.tokens as f64),
+                    DROP_CACHED,
                 ));
             }
         }
-        // A rate nobody measured is refused: `0 tok/s` would be a number nobody took. Dropped
-        // first on a narrow screen — the context numbers are the ones this header exists for.
+        // A rate nobody measured is refused: `0 tok/s` would be a number nobody took.
         if let Some(r) = self.tok_per_s {
-            right.push(format!("{r:.0} tok/s"));
+            right.push((format!("{r:.0} tok/s"), DROP_RATE));
         }
         // **While a turn runs the duration is the turn's, and only the duration** — the host
         // decides which (letibot: two clocks for one turn, `Responding · 151s` beside `4.5s`,
@@ -198,10 +215,10 @@ impl Header {
         // from its first millisecond (`0 ms`), and an idle head's last wall time only when
         // one was measured.
         if let Some(ms) = self.duration_ms {
-            right.push(dur_human(ms));
+            right.push((dur_human(ms), DROP_DURATION));
         }
         if let Some(n) = self.out_tokens.filter(|n| *n > 0) {
-            right.push(format!("{} out", thousands(n)));
+            right.push((format!("{} out", thousands(n)), DROP_OUT));
         }
         right
     }
@@ -211,48 +228,68 @@ impl Header {
     /// # It degrades by deletion, one field at a time
     ///
     /// The first version dropped the **whole** right half when the two halves did not both
-    /// fit — correct for the in-flight line, where the left half is what is happening, and
-    /// wrong here, where the right half is the part you cannot get any other way. Measured
-    /// under tmux at 110 columns: an 82-column path plus a 27-column tail is 111, and the
-    /// entire tail vanished with nothing to say it had. So the tail is built in priority order
-    /// and the path is shortened from its left before anything is dropped — a path is
-    /// recognisable from its end, and a token count is not recoverable from anywhere else.
+    /// fit, with nothing to say it had. Every field now goes on its own, in an order the
+    /// operator set: *"the most important part is path and git"*.
     ///
-    /// # The branch is the floor, and it outranks the tail's last facts
+    /// 1. The tail's facts go by rank, not by position: `N out`, the position counter
+    ///    (`1/130`), `N% cached`, the model, the duration, `tok/s`, the spend, and last
+    ///    `N ctx`. The survivors keep their display order.
+    /// 2. Only once the tail is empty does the path shorten, from its left (the end of a path
+    ///    is the part that identifies it), and below its floor of 8 columns it goes.
+    /// 3. Then the git marks fall off the right, then the branch.
+    /// 4. Past that the row is truncated. It is never wider than `w`; the name is never
+    ///    dropped by fitting.
     ///
     /// Measured at 156 columns: a 7-column name, a 25-column path and a 95-column tail left 27
     /// columns of padding, and the 23-column `(fix-main-pgx-timeout)` was not drawn — the room
-    /// sum counted the gap twice and the wrap's `)` twice. Every width below is now exactly what
-    /// is pushed into the line: the left half, one [`GAP`] of at least two columns, the tail.
-    /// And the branch is reserved before the tail is cut, so `83 tok/s`, `6.2s` and `514 out`
-    /// fall off before the branch does; the path takes what is left after both, and the marks
-    /// take what the path leaves. Only when the branch does not fit beside the tail's first fact
-    /// alone is it dropped.
+    /// sum counted the gap twice and the wrap's `)` twice. Every width below is exactly what is
+    /// pushed into the line: the left half, one [`GAP`] of two columns, the tail.
     pub fn line(&self, w: usize) -> Line {
         let name = clean_line(&self.name);
-        let name_cols = visible_width(&name);
-        let mut right = self.facts();
-        let tail_width = |right: &[String]| visible_width(&right.join(" · "));
-        // **The branch's reservation**: the field with its first piece only, when it will be
-        // drawn at all (it lives beside the workspace) and fits beside the tail's last fact.
-        let branch_cols = match self.git.first() {
-            Some((branch, _)) if !self.workspace.is_empty() => {
-                let cols = GIT_WRAP + visible_width(branch);
-                let floor = name_cols + cols + GAP + tail_width(&right[..right.len().min(1)]);
-                if floor <= w { cols } else { 0 }
+        // **One label, and only for a subagent: `subagent of <parent>`.** A screen showing
+        // somebody else's conversation looked like a screen showing one's own: *"when I
+        // \"Enter\" Subagent it is like completely switching session with just one piece of
+        // info - a Label that it is a subagent"*. Same faint register, same field.
+        let of = self
+            .subagent_of
+            .as_ref()
+            .map(|parent| format!("  subagent of {}", clean_line(parent)));
+        let path = (!self.workspace.is_empty()).then(|| clean_line(&self.workspace));
+        // The git field lives beside the workspace: no workspace, no field.
+        let git: &[(String, GitMark)] = if path.is_some() { &self.git } else { &[] };
+        let git_cols = |pieces: &[(String, GitMark)]| {
+            if pieces.is_empty() {
+                0
+            } else {
+                GIT_WRAP + pieces.iter().map(|p| visible_width(&p.0)).sum::<usize>()
             }
-            _ => 0,
         };
-        // Drop from the end until it leaves room for the name and the branch.
-        while right.len() > 1 && name_cols + branch_cols + GAP + tail_width(&right) > w {
-            right.pop();
+
+        let head_cols = visible_width(&name) + of.as_deref().map_or(0, visible_width);
+        let full_left =
+            head_cols + path.as_deref().map_or(0, |p| 2 + visible_width(p)) + git_cols(git);
+        let tail_cols = |right: &[(String, u8)]| {
+            if right.is_empty() {
+                0
+            } else {
+                GAP + right.iter().map(|f| visible_width(&f.0)).sum::<usize>()
+                    + 3 * (right.len() - 1)
+            }
+        };
+        // Drop the tail's facts by rank until the whole left half and the tail fit.
+        let mut right = self.facts();
+        while !right.is_empty() && full_left + tail_cols(&right) > w {
+            let lowest = (0..right.len())
+                .min_by_key(|&i| right[i].1)
+                .expect("non-empty");
+            right.remove(lowest);
         }
-        let tail = right.join(" · ");
-        let tail_cols = if tail.is_empty() {
-            0
-        } else {
-            visible_width(&tail) + GAP
-        };
+        let tail_cols = tail_cols(&right);
+        let tail = right
+            .into_iter()
+            .map(|f| f.0)
+            .collect::<Vec<_>>()
+            .join(" · ");
 
         // **The header is FACTS, and neither half of it is a sentence** (R51 item 10).
         //
@@ -264,46 +301,37 @@ impl Header {
         // **Deleted, not recoloured**: a grey bar is still a bar and still makes the claim. And
         // the name loses `Strong` as well — one quiet register for the header.
         let mut line = Line::default();
-        line.push(Span::role(name.clone(), Role::Faint));
-        let mut left_cols = name_cols;
-        // **One label, and only for a subagent: `subagent of <parent>`.** A screen showing
-        // somebody else's conversation looked like a screen showing one's own: *"when I
-        // \"Enter\" Subagent it is like completely switching session with just one piece of
-        // info - a Label that it is a subagent"*. Same faint register, same field.
-        if let Some(parent) = &self.subagent_of {
-            let of = format!("  subagent of {}", clean_line(parent));
-            left_cols += visible_width(&of);
+        line.push(Span::role(name, Role::Faint));
+        if let Some(of) = of {
             line.push(Span::role(of, Role::Faint));
         }
-        // The workspace fills whatever is left, shortened from its *left*: the end of a path
-        // is the part that identifies it.
-        if !self.workspace.is_empty() {
-            let path = clean_line(&self.workspace);
-            // The path's own two-column lead, and the branch's reservation, come off first.
-            let room = w.saturating_sub(left_cols + branch_cols + tail_cols + 2);
+        let mut left_cols = head_cols;
+        // **The workspace's repository, in gitstatus's own segments and colours**, beside the
+        // path it is a fact about. It keeps as much of itself as fits with no path at all, so
+        // the path gives way before any git piece does; the marks fall off the right before
+        // the branch. The parens are the row's own faint, so the field still reads as one thing.
+        let fit = git_fit(git, w.saturating_sub(head_cols + tail_cols));
+        if let Some(path) = path {
+            // The workspace fills whatever is left, shortened from its *left*.
+            let room = w.saturating_sub(head_cols + git_cols(fit) + tail_cols + 2);
             if room >= 8 {
                 let shown = ellipsise_left(&path, room);
                 left_cols += 2 + visible_width(&shown);
                 line.push(Span::role(format!("  {shown}"), Role::Faint));
             }
-            // **The workspace's repository, in gitstatus's own segments and colours**, beside
-            // the path it is a fact about. The branch is the floor and the marks fall off the
-            // right, so a narrow screen loses `?4` and not the branch; the parens are the row's
-            // own faint, so the field still reads as one thing.
-            let room = w.saturating_sub(left_cols + tail_cols);
-            let fit = git_fit(&self.git, room);
-            if !fit.is_empty() {
-                line.push(Span::role(" (", Role::Faint));
-                let mut cols = GIT_WRAP;
-                for (text, mark) in fit {
-                    cols += visible_width(text);
-                    line.push(Span::styled(clean_line(text), mark.style()));
-                }
-                line.push(Span::role(")", Role::Faint));
-                left_cols += cols;
-            }
         }
-        let pad = w.saturating_sub(left_cols + visible_width(&tail));
+        if !fit.is_empty() {
+            line.push(Span::role(" (", Role::Faint));
+            for (text, mark) in fit {
+                line.push(Span::styled(clean_line(text), mark.style()));
+            }
+            line.push(Span::role(")", Role::Faint));
+            left_cols += git_cols(fit);
+        }
+        // At least the one gap, even when the row is about to be truncated.
+        let pad = w
+            .saturating_sub(left_cols + visible_width(&tail))
+            .max(if tail.is_empty() { 0 } else { GAP });
         line.push(Span::raw(" ".repeat(pad)));
         line.push(Span::role(tail, Role::Faint));
         if line.width() > w {
@@ -406,10 +434,12 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/turn.rs` — the header degrades by deletion and keeps `1/2` longest,
-    /// with `41.2k ctx` from 80 columns up.
+    /// letibot `app/tests/turn.rs` — the header degrades by deletion. It used to keep `1/2`
+    /// longest and `41.2k ctx` from 80 columns up; by the operator's ruling the path and the
+    /// git field now outrank every tail fact, so the 80-column left half keeps its path whole
+    /// and the tail goes first, by rank.
     #[test]
-    fn a_narrow_header_drops_its_tail_from_the_end_and_keeps_the_position() {
+    fn a_narrow_header_drops_its_tail_before_its_path() {
         let mut h = base();
         h.workspace = "~/Projects/letibot/.claude/worktrees/agent-a19da2/crates/tui".into();
         h.model = "glm-5.3-flash".into();
@@ -421,12 +451,20 @@ mod tests {
         h.out_tokens = Some(200);
         for w in [40usize, 60, 80, 110, 200] {
             let l = h.line(w);
-            assert!(l.width() <= w, "w={w}: {}", l.plain());
-            assert!(l.plain().contains("1/2"), "w={w}: {}", l.plain());
+            let s = l.plain();
+            assert!(l.width() <= w, "w={w}: {s}");
+            assert!(s.contains("crates/tui"), "w={w}: {s}");
             if w >= 80 {
-                assert!(l.plain().contains("41.2k ctx"), "w={w}: {}", l.plain());
+                assert!(s.contains(&h.workspace), "w={w}: {s}");
             }
         }
+        // 18 + 62 + gap: 28 columns of tail, and `glm-5.3-flash · 41.2k ctx` is 25.
+        let s = h.line(110).plain();
+        assert!(s.ends_with("  glm-5.3-flash · 41.2k ctx"), "{s}");
+        assert_eq!(
+            h.line(80).plain().trim_end(),
+            format!("the cache question  {}", h.workspace)
+        );
     }
 
     /// letibot `app/tests/turn.rs::the_turns_numbers_live_in_the_header_and_an_ordinary_ending_has_no_footer`
@@ -526,26 +564,44 @@ mod tests {
         }
     }
 
+    fn tail_of(h: &Header) -> String {
+        h.facts()
+            .into_iter()
+            .map(|f| f.0)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
     #[test]
     fn the_measured_header_draws_its_branch_at_156_columns() {
-        let h = measured();
-        assert_eq!(
-            visible_width(&h.facts().join(" · ")),
-            95,
-            "the tail as measured"
-        );
+        let mut h = measured();
+        assert_eq!(visible_width(&tail_of(&h)), 95, "the tail as measured");
+        // As measured: the branch, 23 columns wrapped, beside the whole path and the whole tail
+        // (7 + 27 + 23 + 2 + 95 = 154).
+        h.git.truncate(1);
         let l = h.line(156);
         let s = l.plain();
         assert!(l.width() <= 156, "{s}");
-        assert!(s.contains("(fix-main-pgx-timeout"), "{s}");
-        assert!(s.contains("~/Projects/dbtest/pg-noop"), "{s}");
-        assert!(s.contains("514 out"), "nothing had to be dropped: {s}");
+        assert!(
+            s.contains("~/Projects/dbtest/pg-noop (fix-main-pgx-timeout)"),
+            "{s}"
+        );
+        assert!(s.ends_with("514 out"), "nothing had to be dropped: {s}");
+        // With marks the field is 27 columns and 158 do not fit: the out count goes, not git.
+        let l = measured().line(156);
+        let s = l.plain();
+        assert!(l.width() <= 156, "{s}");
+        assert!(
+            s.contains("~/Projects/dbtest/pg-noop (fix-main-pgx-timeout!3?2)"),
+            "{s}"
+        );
+        assert!(s.ends_with("6.2s"), "{s}");
     }
 
     #[test]
     fn the_git_field_fits_in_exactly_its_columns_and_not_one_fewer() {
-        // name 1 + "  ~/abcdef" 10 + " (main?4)" 9 + gap 2 + "1/2" 3 = 25.
-        let mut h = Header {
+        // name 1 + "  ~/abcdef" 10 + " (main?4)" 9 = 20; + gap 2 + "1/2" 3 = 25.
+        let h = Header {
             name: "n".into(),
             workspace: "~/abcdef".into(),
             git: vec![
@@ -555,35 +611,87 @@ mod tests {
             position: (1, 2),
             ..Header::default()
         };
-        let l = h.line(25);
-        assert_eq!(l.plain(), "n  ~/abcdef (main?4)  1/2");
-        // One fewer: the marks give way first, the path keeps its length.
-        let l = h.line(24);
-        assert_eq!(l.plain(), "n  ~/abcdef (main)   1/2");
-
-        // The branch alone: name 1 + " (main)" 7 + gap 2 + "1/2" 3 = 13; the path, below its
-        // floor of 8, has already gone.
-        h.git.truncate(1);
-        let l = h.line(13);
-        assert_eq!(l.plain(), "n (main)  1/2");
-        let l = h.line(12);
-        assert!(!l.plain().contains("main"), "{}", l.plain());
-        assert!(l.plain().contains("1/2"), "{}", l.plain());
-        assert!(l.width() <= 12, "{}", l.plain());
+        assert_eq!(h.line(25).plain(), "n  ~/abcdef (main?4)  1/2");
+        // One fewer: the tail goes, all of it, before the path or git give a column.
+        assert_eq!(h.line(24).plain(), "n  ~/abcdef (main?4)    ");
+        assert_eq!(h.line(20).plain(), "n  ~/abcdef (main?4)");
+        // Then the path, below its floor of 8.
+        assert_eq!(h.line(19).plain(), "n (main?4)         ");
+        // The whole field in exactly its 9 columns, and `?4` off the right at 8.
+        assert_eq!(h.line(10).plain(), "n (main?4)");
+        assert_eq!(h.line(9).plain(), "n (main) ");
+        assert_eq!(h.line(8).plain(), "n (main)");
+        assert_eq!(h.line(7).plain(), "n      ");
     }
 
+    /// The operator's order: out, position, cached, model, duration, tok/s, spend, ctx — and
+    /// only then the path, the marks, the branch. The left half, whole, is
+    /// 7 + 27 + 27 = 61 columns.
     #[test]
-    fn the_branch_outranks_the_tails_last_facts() {
-        // name 7 + branch 23 + gap 2 + "1/130 · … · 98% cached" 67 = 99; tok/s would need 110.
+    fn the_header_drops_its_facts_in_the_operators_order() {
         let h = measured();
-        let l = h.line(105);
-        let s = l.plain();
-        assert!(l.width() <= 105, "{s}");
-        assert!(s.contains("(fix-main-pgx-timeout"), "{s}");
-        assert!(s.contains("98% cached"), "{s}");
-        for gone in ["tok/s", "6.2s", "514 out"] {
-            assert!(!s.contains(gone), "{gone} should have given way: {s}");
+        let left = "pg-noop  ~/Projects/dbtest/pg-noop (fix-main-pgx-timeout!3?2)";
+        assert_eq!(visible_width(left), 61);
+        let steps = [
+            "1/130 · deepseek/deepseek-flash · $0.6051 · 719.3k ctx · 98% cached · 83 tok/s · 6.2s · 514 out",
+            "1/130 · deepseek/deepseek-flash · $0.6051 · 719.3k ctx · 98% cached · 83 tok/s · 6.2s",
+            "deepseek/deepseek-flash · $0.6051 · 719.3k ctx · 98% cached · 83 tok/s · 6.2s",
+            "deepseek/deepseek-flash · $0.6051 · 719.3k ctx · 83 tok/s · 6.2s",
+            "$0.6051 · 719.3k ctx · 83 tok/s · 6.2s",
+            "$0.6051 · 719.3k ctx · 83 tok/s",
+            "$0.6051 · 719.3k ctx",
+            "719.3k ctx",
+            "",
+        ];
+        let need = |tail: &str| {
+            61 + if tail.is_empty() {
+                0
+            } else {
+                GAP + visible_width(tail)
+            }
+        };
+        for (k, tail) in steps.iter().enumerate() {
+            let w = need(tail);
+            assert_eq!(
+                h.line(w).plain(),
+                format!("{left}  {tail}").trim_end(),
+                "w={w}"
+            );
+            if let Some(next) = steps.get(k + 1) {
+                let pad = w - 1 - 61 - visible_width(next);
+                assert_eq!(
+                    h.line(w - 1).plain(),
+                    format!("{left}{}{next}", " ".repeat(pad)),
+                    "w={}",
+                    w - 1
+                );
+            }
         }
+        // The tail is empty and the path and git are whole at 61; at 60 the path shortens.
+        let s = h.line(60).plain();
+        assert!(
+            s.starts_with("pg-noop  …/dbtest/pg-noop (fix-main-pgx-timeout!3?2)"),
+            "{s}"
+        );
+        // 7 + 2 + 8 + 27 = 44 is the path's floor; at 43 it is gone and git is whole.
+        assert!(
+            h.line(44).plain().starts_with("pg-noop  "),
+            "{}",
+            h.line(44).plain()
+        );
+        assert!(
+            h.line(43)
+                .plain()
+                .starts_with("pg-noop (fix-main-pgx-timeout!3?2)"),
+            "{}",
+            h.line(43).plain()
+        );
+        // Then the marks from the right, then the branch.
+        assert_eq!(h.line(34).plain(), "pg-noop (fix-main-pgx-timeout!3?2)");
+        assert_eq!(h.line(33).plain(), "pg-noop (fix-main-pgx-timeout!3) ");
+        assert_eq!(h.line(30).plain(), "pg-noop (fix-main-pgx-timeout)");
+        // With no git field left to keep, the path takes back the columns it can use.
+        assert_eq!(h.line(29).plain(), "pg-noop  …/dbtest/pg-noop    ");
     }
 
     #[test]

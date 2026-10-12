@@ -414,8 +414,11 @@ fn parse_standalone(src: &str, bytes_lexed: &mut u64, lex_calls: &mut u64) -> Ve
 /// unchanged and every newline is where it was. So a node the grammar reports at byte `n`
 /// corresponds to byte `n` of the real text.
 ///
-/// Replacing bytes of a multi-byte character with spaces is safe: the result is ASCII
-/// there, and no newline moved.
+/// Replacing a multi-byte character's bytes with spaces is safe **for the masked copy**:
+/// the result is ASCII there, and no newline moved. It is not safe for the OFFSETS. The
+/// length is preserved, so a node's range still points into `src` — but a node can begin on
+/// a byte that was the second of a three-byte character, and `src` is not ASCII there.
+/// Every slice of `src` by a node offset goes through [`slice`] for that reason.
 fn mask(src: &str, fences: &[Fence]) -> String {
     if fences.is_empty() {
         return src.to_string();
@@ -430,6 +433,32 @@ fn mask(src: &str, fences: &[Fence]) -> String {
         }
     }
     String::from_utf8(bytes).unwrap_or_else(|_| src.to_string())
+}
+
+/// The text at `a..b`, when that range is one this source can be cut at.
+///
+/// **A stale node range is not a crash.** Every caller here slices `src` with offsets from a
+/// tree built over [`mask`]'s copy, which is byte-for-byte the same LENGTH and not the same
+/// text: a fence's bytes become spaces, so `…` (three bytes) becomes three spaces and a node
+/// can begin on the second of them. Such an offset is a boundary in the masked text and the
+/// MIDDLE of a character in `src`.
+///
+/// Skipping the range costs one span its styling. Slicing it costs the person their editor.
+/// Measured 2026-10-10 in a streaming transcript, and reproducible in **19 bytes** — see
+/// `a_stale_range_is_not_a_crash`, whose repro panics at `start byte index 12 is not a char
+/// boundary; it is inside '…' (bytes 10..13)` **through both** a whole `lex` and a push in
+/// deltas, at three different sites (`inline_spans`, `text_without_continuations`, `runs_of`).
+///
+/// **One helper for every site, not a guard at one of them.** A guard at a single site does
+/// not fix the panic, it moves it: the three sites a 19-byte repro reaches are
+/// `inline_spans`, `text_without_continuations` and `runs_of`.
+///
+/// The mismatch itself is the real bug and lives upstream of here — the tree is a projection
+/// of the masked text, so its offsets are only meaningful against that text, and the fix for
+/// that is a design change rather than a guard. This is the guard that stops it being a
+/// crash in the meantime.
+fn slice(src: &str, a: usize, b: usize) -> Option<&str> {
+    src.get(a..b)
 }
 
 /// Lex a self-contained span of markdown into blocks.
@@ -515,7 +544,11 @@ struct Span {
 fn inline_spans(src: &str, root: &Node, bytes_lexed: &mut u64, lex_calls: &mut u64) -> Vec<Span> {
     let mut spans = Vec::new();
     for (a, b) in inline_ranges(root) {
-        let text = &src[a..b];
+        // A range can be stale — [`slice`] is where the whole story is, and every site that
+        // slices `src` by a tree offset now goes through it.
+        let Some(text) = slice(src, a, b) else {
+            continue;
+        };
         if !has_inline_syntax(text) {
             continue;
         }
@@ -1036,7 +1069,7 @@ fn block_of(node: &Node, src: &str, spans: &[Span]) -> Option<Block> {
         // shown as the text it is rather than dropped. A head that silently loses a
         // block is worse than one that shows it unstyled.
         _ => {
-            let text = &src[node.start..node.end];
+            let text = slice(src, node.start, node.end)?;
             if text.trim().is_empty() {
                 return None;
             }
@@ -1144,7 +1177,9 @@ fn subtree_lines(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<Run>>
                             push_text(&mut line, " ", InlineStyle::Plain);
                         }
                         let (a, b) = trim_range(src, cell.start, cell.end);
-                        push_text(&mut line, &src[a..b], InlineStyle::Plain);
+                        if let Some(t) = slice(src, a, b) {
+                            push_text(&mut line, t, InlineStyle::Plain);
+                        }
                     }
                     if !line.is_empty() {
                         out.push(line);
@@ -1251,13 +1286,17 @@ fn text_without_continuations(node: &Node, src: &str) -> String {
         if c.kind != "block_continuation" {
             continue;
         }
-        if cursor < c.start {
-            out.push_str(&src[cursor..c.start]);
+        if cursor < c.start
+            && let Some(t) = slice(src, cursor, c.start)
+        {
+            out.push_str(t);
         }
         cursor = cursor.max(c.end);
     }
-    if cursor < node.end {
-        out.push_str(&src[cursor..node.end]);
+    if cursor < node.end
+        && let Some(t) = slice(src, cursor, node.end)
+    {
+        out.push_str(t);
     }
     out
 }
@@ -1350,10 +1389,8 @@ fn collect_items(
                             // The marker node's text includes the delimiter and the
                             // space that follows it — `"7. "` — so the trailing
                             // punctuation comes off before the digits are read.
-                            *start = src[m.start..m.end]
-                                .trim()
-                                .trim_end_matches(['.', ')'])
-                                .parse()
+                            *start = slice(src, m.start, m.end)
+                                .and_then(|t| t.trim().trim_end_matches(['.', ')']).parse().ok())
                                 .unwrap_or(1);
                         }
                     }
@@ -1389,8 +1426,13 @@ fn collect_items(
 /// use, so the page keeps one idea of what one level of structure costs.
 fn marker_indent(src: &str, marker: Option<&Node>) -> usize {
     let Some(m) = marker else { return 0 };
-    let line_start = src[..m.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let col = src[line_start..m.start].chars().count();
+    let Some(head) = slice(src, 0, m.start) else {
+        return 0;
+    };
+    let line_start = head.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = slice(src, line_start, m.start)
+        .map(|t| t.chars().count())
+        .unwrap_or(0);
     (col / 2 * 2).min(8)
 }
 
@@ -1425,7 +1467,11 @@ fn align_of(row: &Node, src: &str) -> Vec<Align> {
         .iter()
         .filter(|c| c.kind == "pipe_table_delimiter_cell")
         .map(|c| {
-            let t = src[c.start..c.end].trim().trim_matches('|').trim();
+            let t = slice(src, c.start, c.end)
+                .unwrap_or("")
+                .trim()
+                .trim_matches('|')
+                .trim();
             match (t.starts_with(':'), t.ends_with(':')) {
                 (true, true) => Align::Center,
                 (false, true) => Align::Right,
@@ -1438,7 +1484,11 @@ fn align_of(row: &Node, src: &str) -> Vec<Align> {
 /// Tighten a range past whitespace and the pipes a cell is written between, so a
 /// cell does not carry its own `|` into the rendered table.
 fn trim_range(src: &str, a: usize, b: usize) -> (usize, usize) {
-    let text = &src[a..b];
+    // A range this source cannot be cut at is left as it is: every caller slices with the
+    // same guard, so nothing reads a byte it should not — the range simply yields no text.
+    let Some(text) = slice(src, a, b) else {
+        return (a, b.max(a));
+    };
     let start = a + (text.len() - text.trim_start_matches([' ', '|']).len());
     let end = b - (text.len() - text.trim_end_matches([' ', '|']).len());
     (start, end.max(start))
@@ -1461,18 +1511,23 @@ fn runs_of(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
     let mut pos = a;
     for s in spans.iter().filter(|s| s.end > a && s.start < b) {
         let (s0, s1) = (s.start.max(a), s.end.min(b));
-        if s0 > pos {
-            push_text(&mut out, &src[pos..s0], InlineStyle::Plain);
+        if s0 > pos
+            && let Some(t) = slice(src, pos, s0)
+        {
+            push_text(&mut out, t, InlineStyle::Plain);
         }
         if s1 > s0
             && let Some(style) = s.style
+            && let Some(t) = slice(src, s0, s1)
         {
-            push_text(&mut out, &src[s0..s1], style);
+            push_text(&mut out, t, style);
         }
         pos = pos.max(s1);
     }
-    if b > pos {
-        push_text(&mut out, &src[pos..b], InlineStyle::Plain);
+    if b > pos
+        && let Some(t) = slice(src, pos, b)
+    {
+        push_text(&mut out, t, InlineStyle::Plain);
     }
     out
 }
@@ -3391,5 +3446,180 @@ mod tail_cut_is_exact {
             );
             assert!(us < whole_us / 4.0, "the tail was not much cheaper");
         }
+    }
+}
+
+/// **What a big document costs, and what it hands a parser.** Ignored: it is a
+/// measurement, so it prints rather than passes.
+#[cfg(test)]
+mod markdown_cost {
+    use super::*;
+
+    /// The counters are the assertion, because they are deterministic and "how much text
+    /// we show a parser" is the quantity this file controls. The clock is PRINTED, not
+    /// asserted: a timing assertion flakes, and the number is still worth reading.
+    ///
+    /// Both paths, because they are different code: one whole `lex`, and the same text
+    /// arriving in 4 KiB deltas, which is what a streaming transcript does — and where
+    /// the tree and the source can disagree, since the mask is rebuilt per window.
+    ///
+    /// The bound catches a mistake in either direction: a range wrongly skipped would
+    /// show a parser LESS than the document (a span silently unstyled), and a document
+    /// re-parsed would show it much more (the quadratic shape §2 exists to prevent).
+    #[test]
+    #[ignore]
+    fn what_a_big_document_costs() {
+        let src = include_str!("../../tests/fixtures/markdown/streamed-message.md");
+        let big = src.repeat(500); // ~1.7 MB
+
+        let t = std::time::Instant::now();
+        let whole = lex(&big);
+        let whole_ms = t.elapsed().as_secs_f64() * 1e3;
+
+        let t = std::time::Instant::now();
+        let mut m = IncrementalMarkdown::new();
+        let mut start = 0usize;
+        for (i, c) in big.char_indices() {
+            if i - start >= 4096 && c.is_ascii() {
+                m.push(&big[start..i]);
+                start = i;
+            }
+        }
+        m.push(&big[start..]);
+        let inc_ms = t.elapsed().as_secs_f64() * 1e3;
+        let blocks = m.blocks().count();
+        let ratio = m.bytes_lexed() as f64 / big.len() as f64;
+        eprintln!(
+            "markdown cost: {} bytes | whole {whole_ms:.1} ms / {} blocks | incremental 4 KiB deltas {inc_ms:.1} ms / {blocks} blocks | bytes_lexed {} ({ratio:.3}x the doc) | lex_calls {} | window_len {} | stable {}",
+            big.len(),
+            whole.len(),
+            m.bytes_lexed(),
+            m.lex_calls(),
+            m.window_len(),
+            m.stable_count()
+        );
+        assert!(
+            (1.0..4.0).contains(&ratio),
+            "bytes_lexed is {ratio:.3}x the document"
+        );
+    }
+}
+
+/// **A stale node range is not a crash.**
+///
+/// Every slice of `src` by a tree offset goes through [`super::slice`], and this is the test
+/// that says so. The repro is 19 bytes, found by sweeping generated documents and then
+/// shrinking — and **it panics through both paths**: `lex` of the same text, and the same text
+/// pushed in pieces, which is why the third test here pins the one-parse path too. An earlier
+/// reading of this was wrong and worth keeping the correction of: a sweep of 279 841 generated
+/// static documents tripped nothing, and `lex` was called safe on that basis — but the
+/// shrinker's 19 bytes is a shape the generator never produced, so the negative result was a
+/// statement about the corpus and not about `lex`. The property is per-range, not per-path.
+///
+/// Before the guard the repro panicked at three different sites depending on how the bytes
+/// arrived — `inline_spans`, `text_without_continuations` and `runs_of` — so a guard at any
+/// one of them only moved the panic along.
+#[cfg(test)]
+mod a_stale_range_is_not_a_crash {
+    use super::*;
+
+    /// The smallest input found that panicked: a list item, a fence, and ellipses.
+    const REPRO: &str = "- \u{2026}\n```\n\u{2026}\u{2026}\u{2026}";
+
+    /// Push `doc` in deltas of `k` characters. `push` takes `&str`, so a delta never splits a
+    /// character — the disagreement is between the mask and the offsets, not a broken char.
+    fn in_deltas(doc: &str, k: usize) -> IncrementalMarkdown {
+        let mut m = IncrementalMarkdown::new();
+        let mut start = 0usize;
+        let mut n = 0usize;
+        for (i, _) in doc.char_indices() {
+            if n == k {
+                m.push(&doc[start..i]);
+                start = i;
+                n = 0;
+            }
+            n += 1;
+        }
+        m.push(&doc[start..]);
+        m
+    }
+
+    /// **Every string a reader would see in these blocks.** The text the model wrote, not
+    /// the rendered rows: what the assertion is about is whether the guard dropped content
+    /// on its way past.
+    fn text_of(blocks: &[Block]) -> String {
+        let mut out = String::new();
+        for b in blocks {
+            match b {
+                Block::Heading { runs, .. } => out.push_str(&runs_text(runs)),
+                Block::Paragraph { lines } | Block::Quote { lines } => {
+                    for l in lines {
+                        out.push_str(&runs_text(l));
+                        out.push('\n');
+                    }
+                }
+                Block::Code { lines, .. } => {
+                    for l in lines {
+                        out.push_str(l);
+                        out.push('\n');
+                    }
+                }
+                Block::List { items, .. } => {
+                    for i in items {
+                        out.push_str(&runs_text(i));
+                        out.push('\n');
+                    }
+                }
+                Block::Table { head, rows, .. } => {
+                    for l in head.iter().chain(rows.iter().flatten()) {
+                        out.push_str(&runs_text(l));
+                        out.push('\n');
+                    }
+                }
+                Block::Rule => out.push_str("---\n"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_repro_does_not_panic_at_any_delta_size() {
+        assert_eq!(REPRO.len(), 19);
+        for k in 1..=8usize {
+            let m = in_deltas(REPRO, k);
+            let blocks: Vec<Block> = m.blocks().cloned().collect();
+            // The text is shown rather than dropped: a guard that skipped everything would
+            // panic no more and render nothing, which is the other way to be wrong.
+            let text = text_of(&blocks);
+            assert!(
+                text.contains('\u{2026}'),
+                "delta {k} rendered nothing: {text:?} from {blocks:?}"
+            );
+        }
+    }
+
+    /// The same text, one whole parse. **This panicked too** — the repro is not an incremental
+    /// special case, which an earlier reading of it claimed and this test is the correction of.
+    #[test]
+    fn the_same_text_is_fine_in_one_parse() {
+        let blocks = lex(REPRO);
+        assert!(!blocks.is_empty());
+        assert!(text_of(&blocks).contains('\u{2026}'));
+    }
+
+    /// A stale range must stay a *stale range* and not become a dropped document: the blocks
+    /// either side of the fence are still there, and nothing panics with the ellipsis pushed
+    /// at every ratio.
+    #[test]
+    fn the_document_survives_being_cut_at_awkward_places() {
+        let doc = format!("{REPRO}\n\n- {}\n", "\u{2026}".repeat(40));
+        for k in [1usize, 2, 3, 5, 7, 13, 64] {
+            let m = in_deltas(&doc, k);
+            assert!(
+                m.blocks().count() > 0,
+                "delta {k} produced no blocks at all"
+            );
+        }
+        assert!(text_of(&lex(&doc)).contains('\u{2026}'));
     }
 }

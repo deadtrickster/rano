@@ -54,17 +54,26 @@ impl GitMark {
     }
 }
 
+/// The columns the row wraps a git field in: the `" ("` before it and the `")"` after it.
+const GIT_WRAP: usize = 3;
+
+/// The columns between the left half and the tail: the one gap rule of this row.
+const GAP: usize = 2;
+
 /// **The longest PREFIX of the pieces that fits in ROOM columns** — leticl's `%git-fit`.
+///
+/// ROOM is the whole field's budget, wrapping included: a field of pieces `p` is exactly
+/// `" (" + p + ")"`, so it is drawn when `3 + width(p) <= room` and not one column later.
 ///
 /// The field degrades by DELETION, like every other thing on this row: the branch is the floor
 /// and the marks fall off its right in gitstatus's own order, so a narrow screen loses `?4` and
 /// not the branch. A field dropped whole is the behaviour this replaces.
 pub fn git_fit(pieces: &[(String, GitMark)], room: usize) -> &[(String, GitMark)] {
-    let mut used = 3usize; // the " (" and ")" the row wraps the field in
+    let mut used = GIT_WRAP;
     let mut n = 0;
     for piece in pieces {
         let w = visible_width(&piece.0);
-        if used + w + 1 > room {
+        if used + w > room {
             break;
         }
         used += w;
@@ -208,19 +217,41 @@ impl Header {
     /// entire tail vanished with nothing to say it had. So the tail is built in priority order
     /// and the path is shortened from its left before anything is dropped — a path is
     /// recognisable from its end, and a token count is not recoverable from anywhere else.
+    ///
+    /// # The branch is the floor, and it outranks the tail's last facts
+    ///
+    /// Measured at 156 columns: a 7-column name, a 25-column path and a 95-column tail left 27
+    /// columns of padding, and the 23-column `(fix-main-pgx-timeout)` was not drawn — the room
+    /// sum counted the gap twice and the wrap's `)` twice. Every width below is now exactly what
+    /// is pushed into the line: the left half, one [`GAP`] of at least two columns, the tail.
+    /// And the branch is reserved before the tail is cut, so `83 tok/s`, `6.2s` and `514 out`
+    /// fall off before the branch does; the path takes what is left after both, and the marks
+    /// take what the path leaves. Only when the branch does not fit beside the tail's first fact
+    /// alone is it dropped.
     pub fn line(&self, w: usize) -> Line {
         let name = clean_line(&self.name);
+        let name_cols = visible_width(&name);
         let mut right = self.facts();
-        // Drop from the end until it leaves room for the name.
-        let name_cols = visible_width(&name) + 2;
-        while right.len() > 1 && name_cols + visible_width(&right.join(" · ")) + 2 > w {
+        let tail_width = |right: &[String]| visible_width(&right.join(" · "));
+        // **The branch's reservation**: the field with its first piece only, when it will be
+        // drawn at all (it lives beside the workspace) and fits beside the tail's last fact.
+        let branch_cols = match self.git.first() {
+            Some((branch, _)) if !self.workspace.is_empty() => {
+                let cols = GIT_WRAP + visible_width(branch);
+                let floor = name_cols + cols + GAP + tail_width(&right[..right.len().min(1)]);
+                if floor <= w { cols } else { 0 }
+            }
+            _ => 0,
+        };
+        // Drop from the end until it leaves room for the name and the branch.
+        while right.len() > 1 && name_cols + branch_cols + GAP + tail_width(&right) > w {
             right.pop();
         }
         let tail = right.join(" · ");
         let tail_cols = if tail.is_empty() {
             0
         } else {
-            visible_width(&tail) + 2
+            visible_width(&tail) + GAP
         };
 
         // **The header is FACTS, and neither half of it is a sentence** (R51 item 10).
@@ -234,7 +265,7 @@ impl Header {
         // the name loses `Strong` as well — one quiet register for the header.
         let mut line = Line::default();
         line.push(Span::role(name.clone(), Role::Faint));
-        let mut left_cols = visible_width(&name);
+        let mut left_cols = name_cols;
         // **One label, and only for a subagent: `subagent of <parent>`.** A screen showing
         // somebody else's conversation looked like a screen showing one's own: *"when I
         // \"Enter\" Subagent it is like completely switching session with just one piece of
@@ -248,7 +279,8 @@ impl Header {
         // is the part that identifies it.
         if !self.workspace.is_empty() {
             let path = clean_line(&self.workspace);
-            let room = w.saturating_sub(left_cols + tail_cols + 2);
+            // The path's own two-column lead, and the branch's reservation, come off first.
+            let room = w.saturating_sub(left_cols + branch_cols + tail_cols + 2);
             if room >= 8 {
                 let shown = ellipsise_left(&path, room);
                 left_cols += 2 + visible_width(&shown);
@@ -258,11 +290,11 @@ impl Header {
             // the path it is a fact about. The branch is the floor and the marks fall off the
             // right, so a narrow screen loses `?4` and not the branch; the parens are the row's
             // own faint, so the field still reads as one thing.
-            let room = w.saturating_sub(left_cols + tail_cols + 4);
+            let room = w.saturating_sub(left_cols + tail_cols);
             let fit = git_fit(&self.git, room);
             if !fit.is_empty() {
                 line.push(Span::role(" (", Role::Faint));
-                let mut cols = 3usize;
+                let mut cols = GIT_WRAP;
                 for (text, mark) in fit {
                     cols += visible_width(text);
                     line.push(Span::styled(clean_line(text), mark.style()));
@@ -459,7 +491,111 @@ mod tests {
             ("?4".to_string(), GitMark::Untracked),
         ];
         assert_eq!(git_fit(&p, 100).len(), 2);
-        assert_eq!(git_fit(&p, 9).len(), 1);
+        // " (main?4)" is exactly 9 columns: it fits in 9 and loses `?4` at 8.
+        assert_eq!(git_fit(&p, 9).len(), 2);
+        assert_eq!(git_fit(&p, 8).len(), 1);
+        // " (main)" is exactly 7.
+        assert_eq!(git_fit(&p, 7).len(), 1);
+        assert_eq!(git_fit(&p, 6).len(), 0);
         assert_eq!(git_fit(&p, 4).len(), 0);
+    }
+
+    /// The header measured live at 156 columns, where 27 columns of padding sat beside a
+    /// 23-column branch field that was not drawn.
+    fn measured() -> Header {
+        Header {
+            name: "pg-noop".into(),
+            workspace: "~/Projects/dbtest/pg-noop".into(),
+            git: vec![
+                ("fix-main-pgx-timeout".into(), GitMark::BranchDirty),
+                ("!3".into(), GitMark::Unstaged),
+                ("?2".into(), GitMark::Untracked),
+            ],
+            position: (1, 130),
+            model: "deepseek/deepseek-flash".into(),
+            spent_micros: Some(605_100),
+            context: Some(Context {
+                tokens: 719_300,
+                cached: 704_914,
+                cache_measured: true,
+            }),
+            tok_per_s: Some(83.0),
+            duration_ms: Some(6_200),
+            out_tokens: Some(514),
+            ..Header::default()
+        }
+    }
+
+    #[test]
+    fn the_measured_header_draws_its_branch_at_156_columns() {
+        let h = measured();
+        assert_eq!(
+            visible_width(&h.facts().join(" · ")),
+            95,
+            "the tail as measured"
+        );
+        let l = h.line(156);
+        let s = l.plain();
+        assert!(l.width() <= 156, "{s}");
+        assert!(s.contains("(fix-main-pgx-timeout"), "{s}");
+        assert!(s.contains("~/Projects/dbtest/pg-noop"), "{s}");
+        assert!(s.contains("514 out"), "nothing had to be dropped: {s}");
+    }
+
+    #[test]
+    fn the_git_field_fits_in_exactly_its_columns_and_not_one_fewer() {
+        // name 1 + "  ~/abcdef" 10 + " (main?4)" 9 + gap 2 + "1/2" 3 = 25.
+        let mut h = Header {
+            name: "n".into(),
+            workspace: "~/abcdef".into(),
+            git: vec![
+                ("main".into(), GitMark::BranchClean),
+                ("?4".into(), GitMark::Untracked),
+            ],
+            position: (1, 2),
+            ..Header::default()
+        };
+        let l = h.line(25);
+        assert_eq!(l.plain(), "n  ~/abcdef (main?4)  1/2");
+        // One fewer: the marks give way first, the path keeps its length.
+        let l = h.line(24);
+        assert_eq!(l.plain(), "n  ~/abcdef (main)   1/2");
+
+        // The branch alone: name 1 + " (main)" 7 + gap 2 + "1/2" 3 = 13; the path, below its
+        // floor of 8, has already gone.
+        h.git.truncate(1);
+        let l = h.line(13);
+        assert_eq!(l.plain(), "n (main)  1/2");
+        let l = h.line(12);
+        assert!(!l.plain().contains("main"), "{}", l.plain());
+        assert!(l.plain().contains("1/2"), "{}", l.plain());
+        assert!(l.width() <= 12, "{}", l.plain());
+    }
+
+    #[test]
+    fn the_branch_outranks_the_tails_last_facts() {
+        // name 7 + branch 23 + gap 2 + "1/130 · … · 98% cached" 67 = 99; tok/s would need 110.
+        let h = measured();
+        let l = h.line(105);
+        let s = l.plain();
+        assert!(l.width() <= 105, "{s}");
+        assert!(s.contains("(fix-main-pgx-timeout"), "{s}");
+        assert!(s.contains("98% cached"), "{s}");
+        for gone in ["tok/s", "6.2s", "514 out"] {
+            assert!(!s.contains(gone), "{gone} should have given way: {s}");
+        }
+    }
+
+    #[test]
+    fn the_header_never_exceeds_its_width() {
+        let h = measured();
+        let mut sub = h.clone();
+        sub.subagent_of = Some("the parent".into());
+        for h in [h, sub] {
+            for w in 0..=220 {
+                let l = h.line(w);
+                assert!(l.width() <= w, "w={w}: {}", l.plain());
+            }
+        }
     }
 }

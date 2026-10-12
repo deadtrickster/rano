@@ -236,7 +236,8 @@ impl Header {
     ///    `N ctx`. The survivors keep their display order.
     /// 2. Only once the tail is empty does the path shorten, from its left (the end of a path
     ///    is the part that identifies it), and below its floor of 8 columns it goes.
-    /// 3. Then the git marks fall off the right, then the branch.
+    /// 3. Only once the path is gone do the git marks fall off the right, then the branch. A
+    ///    git field with no path beside it opens with two spaces, not one.
     /// 4. Past that the row is truncated. It is never wider than `w`; the name is never
     ///    dropped by fitting.
     ///
@@ -307,26 +308,41 @@ impl Header {
         }
         let mut left_cols = head_cols;
         // **The workspace's repository, in gitstatus's own segments and colours**, beside the
-        // path it is a fact about. It keeps as much of itself as fits with no path at all, so
-        // the path gives way before any git piece does; the marks fall off the right before
-        // the branch. The parens are the row's own faint, so the field still reads as one thing.
-        let fit = git_fit(git, w.saturating_sub(head_cols + tail_cols));
-        if let Some(path) = path {
-            // The workspace fills whatever is left, shortened from its *left*.
-            let room = w.saturating_sub(head_cols + git_cols(fit) + tail_cols + 2);
+        // path it is a fact about. The parens are the row's own faint, so the field still reads
+        // as one thing. Beside the path it opens with one space (the path and its repository
+        // are one fact); with no path it opens with the left half's own two, as the operator
+        // approved at 34 columns: `pg-noop  (fix-main-pgx-timeout !2)`.
+        //
+        // The path shortens first, from its *left* (the end of a path is the part that
+        // identifies it), and goes below its floor of 8 while the whole git field is kept;
+        // only then do the marks fall off the right, then the branch.
+        let mut fit = git;
+        let mut shown = None;
+        if let Some(path) = &path {
+            let room = w.saturating_sub(head_cols + git_cols(git) + tail_cols + 2);
             if room >= 8 {
-                let shown = ellipsise_left(&path, room);
-                left_cols += 2 + visible_width(&shown);
-                line.push(Span::role(format!("  {shown}"), Role::Faint));
+                shown = Some(ellipsise_left(path, room));
+            } else {
+                fit = git_fit(git, w.saturating_sub(head_cols + tail_cols + 1));
+                // With no git field left to keep, the path takes back the columns it can use.
+                let room = w.saturating_sub(head_cols + tail_cols + 2);
+                if fit.is_empty() && room >= 8 {
+                    shown = Some(ellipsise_left(path, room));
+                }
             }
         }
+        if let Some(shown) = &shown {
+            left_cols += 2 + visible_width(shown);
+            line.push(Span::role(format!("  {shown}"), Role::Faint));
+        }
         if !fit.is_empty() {
-            line.push(Span::role(" (", Role::Faint));
+            let lead = if shown.is_some() { " (" } else { "  (" };
+            line.push(Span::role(lead, Role::Faint));
             for (text, mark) in fit {
                 line.push(Span::styled(clean_line(text), mark.style()));
             }
             line.push(Span::role(")", Role::Faint));
-            left_cols += git_cols(fit);
+            left_cols += git_cols(fit) + visible_width(lead) - 2;
         }
         // At least the one gap, even when the row is about to be truncated.
         let pad = w
@@ -616,12 +632,13 @@ mod tests {
         assert_eq!(h.line(24).plain(), "n  ~/abcdef (main?4)    ");
         assert_eq!(h.line(20).plain(), "n  ~/abcdef (main?4)");
         // Then the path, below its floor of 8.
-        assert_eq!(h.line(19).plain(), "n (main?4)         ");
-        // The whole field in exactly its 9 columns, and `?4` off the right at 8.
-        assert_eq!(h.line(10).plain(), "n (main?4)");
-        assert_eq!(h.line(9).plain(), "n (main) ");
-        assert_eq!(h.line(8).plain(), "n (main)");
-        assert_eq!(h.line(7).plain(), "n      ");
+        assert_eq!(h.line(19).plain(), "n  (main?4)        ");
+        // With no path the field opens with two spaces: the whole of it in exactly its 10
+        // columns, `?4` off the right at 9, the branch alone in exactly 8, nothing at 7.
+        assert_eq!(h.line(11).plain(), "n  (main?4)");
+        assert_eq!(h.line(10).plain(), "n  (main) ");
+        assert_eq!(h.line(9).plain(), "n  (main)");
+        assert_eq!(h.line(8).plain(), "n       ");
     }
 
     /// The operator's order: out, position, cached, model, duration, tok/s, spend, ctx — and
@@ -673,25 +690,51 @@ mod tests {
             s.starts_with("pg-noop  …/dbtest/pg-noop (fix-main-pgx-timeout!3?2)"),
             "{s}"
         );
-        // 7 + 2 + 8 + 27 = 44 is the path's floor; at 43 it is gone and git is whole.
+        // 7 + 2 + 8 + 27 = 44 is the path's floor; at 43 it is gone and git is whole, now
+        // opening with two spaces.
         assert!(
-            h.line(44).plain().starts_with("pg-noop  "),
+            h.line(44).plain().starts_with("pg-noop  …"),
             "{}",
             h.line(44).plain()
         );
         assert!(
             h.line(43)
                 .plain()
-                .starts_with("pg-noop (fix-main-pgx-timeout!3?2)"),
+                .starts_with("pg-noop  (fix-main-pgx-timeout!3?2)"),
             "{}",
             h.line(43).plain()
         );
-        // Then the marks from the right, then the branch.
-        assert_eq!(h.line(34).plain(), "pg-noop (fix-main-pgx-timeout!3?2)");
-        assert_eq!(h.line(33).plain(), "pg-noop (fix-main-pgx-timeout!3) ");
-        assert_eq!(h.line(30).plain(), "pg-noop (fix-main-pgx-timeout)");
+        // Only then the marks from the right, then the branch.
+        assert_eq!(h.line(35).plain(), "pg-noop  (fix-main-pgx-timeout!3?2)");
+        assert_eq!(h.line(34).plain(), "pg-noop  (fix-main-pgx-timeout!3) ");
+        assert_eq!(h.line(31).plain(), "pg-noop  (fix-main-pgx-timeout)");
         // With no git field left to keep, the path takes back the columns it can use.
-        assert_eq!(h.line(29).plain(), "pg-noop  …/dbtest/pg-noop    ");
+        assert_eq!(h.line(30).plain(), "pg-noop  …/dbtest/pg-noop     ");
+    }
+
+    /// The operator's approved example at 34 columns: the tail is gone, the path is gone, and
+    /// the git field, branch and mark both, is whole.
+    #[test]
+    fn git_marks_outlast_the_path() {
+        let mut h = measured();
+        h.git = vec![
+            ("fix-main-pgx-timeout".into(), GitMark::BranchDirty),
+            (" !2".into(), GitMark::Unstaged),
+        ];
+        assert_eq!(h.line(34).plain(), "pg-noop  (fix-main-pgx-timeout !2)");
+        // With the path: 7 + 2 + 8 (its floor) + " (fix-main-pgx-timeout !2)" 26 = 43.
+        let s = h.line(43).plain();
+        assert!(
+            s.starts_with("pg-noop  …pg-noop (fix-main-pgx-timeout !2)"),
+            "{s}"
+        );
+        // One fewer and the path goes, the marks stay.
+        assert_eq!(
+            h.line(42).plain(),
+            "pg-noop  (fix-main-pgx-timeout !2)        "
+        );
+        // The mark goes only once there is no path left to give way.
+        assert_eq!(h.line(33).plain(), "pg-noop  (fix-main-pgx-timeout)  ");
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //!
 //! `TERM=xterm-ghostty` (which survives `ssh` when the terminfo is installed on the far side —
 //! the Linux box case) or `TERM_PROGRAM=ghostty` (local only; ssh does not forward it) turns on
-//! all seven. Nothing else does by default: kitty, WezTerm and iTerm2 speak some of them, each
+//! six of the seven ([`Features::GHOSTTY`]) — all but the tab's progress bar, which the operator
+//! turned off by default (2026-10-14): Ghostty draws a busy one as a bar sweeping side to side
+//! for as long as a turn runs, and `+progress` brings it back. Nothing else does by default: kitty, WezTerm and iTerm2 speak some of them, each
 //! a different some, and a guess about which is a garbled screen for somebody.
 //!
 //! `RANO_TERM_FEATURES` overrides the guess either way (`LETIBOT_TERM_FEATURES`, the name this
@@ -65,6 +67,14 @@ impl Features {
         background: true,
     };
 
+    /// **What Ghostty gets with no override**: everything but `progress`. A busy tab's bar is
+    /// indeterminate, and Ghostty animates that for the whole of a turn — motion in the corner of
+    /// the eye that says nothing a glance at the tab would not.
+    pub const GHOSTTY: Features = Features {
+        progress: false,
+        ..Features::ALL
+    };
+
     /// From this process's environment.
     pub fn detect() -> Features {
         let var = |k: &str| std::env::var(k).unwrap_or_default();
@@ -84,7 +94,7 @@ impl Features {
     pub fn from_env(term: &str, term_program: &str, in_tmux: bool, wanted: &str) -> Features {
         let ghostty = term == "xterm-ghostty" || term_program.eq_ignore_ascii_case("ghostty");
         let mut f = if ghostty && !in_tmux {
-            Features::ALL
+            Features::GHOSTTY
         } else {
             Features::default()
         };
@@ -141,13 +151,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ghostty_gets_all_seven_and_nothing_else_gets_any_by_default() {
+    fn ghostty_gets_all_but_the_progress_bar_and_nothing_else_gets_any_by_default() {
+        let f = Features::from_env("xterm-ghostty", "", false, "");
+        assert_eq!(f, Features::GHOSTTY);
+        assert!(!f.progress, "the progress bar is off by default");
         assert_eq!(
-            Features::from_env("xterm-ghostty", "", false, ""),
-            Features::ALL
+            f.names(),
+            vec![
+                "notify",
+                "keys",
+                "links",
+                "clipboard",
+                "images",
+                "background"
+            ]
         );
         assert_eq!(
             Features::from_env("xterm-256color", "ghostty", false, ""),
+            Features::GHOSTTY
+        );
+        // And it is one word away, either way it is asked for.
+        assert_eq!(
+            Features::from_env("xterm-ghostty", "", false, "+progress"),
+            Features::ALL
+        );
+        assert_eq!(
+            Features::from_env("xterm-ghostty", "", false, "progress"),
+            Features::ALL
+        );
+        assert_eq!(
+            Features::from_env("xterm-ghostty", "", false, "all"),
             Features::ALL
         );
         for (term, prog) in [

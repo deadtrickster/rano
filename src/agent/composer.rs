@@ -104,12 +104,17 @@ pub fn jobs_fact(running: usize, to_a_file: usize) -> Option<String> {
 /// letibot fills it from: `subagents_running` ← subagents that are not `is_finished()` (the one
 /// lifecycle predicate the subagents pane's active group is built from, so the edge and the pane
 /// cannot disagree — *"an agent is alive from spawn until it has finished"*); `jobs_running` /
-/// `jobs_to_a_file` ← the job table's running rows and those with a `redirect`.
+/// `jobs_to_a_file` ← the job table's running rows and those with a `redirect`; `monitors_live`
+/// ← the monitors still watching (the same table's monitor rows that are `live`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BoxTop {
     pub subagents_running: usize,
     pub jobs_running: usize,
     pub jobs_to_a_file: usize,
+    /// **Monitors still watching** — a watch armed and not yet fired, expired or retired. Until
+    /// this a monitor was seen only when it fired: one that was waiting was on no screen at all,
+    /// and it keeps the session's daemon up.
+    pub monitors_live: usize,
 }
 
 impl BoxTop {
@@ -124,6 +129,13 @@ impl BoxTop {
         }
         if let Some(jobs) = jobs_fact(self.jobs_running, self.jobs_to_a_file) {
             facts.push(jobs);
+        }
+        let m = self.monitors_live;
+        if m > 0 {
+            facts.push(format!(
+                "{m} monitor{} watching",
+                if m == 1 { "" } else { "s" }
+            ));
         }
         let right = if facts.is_empty() {
             Line::default()
@@ -306,6 +318,7 @@ mod tests {
             subagents_running: 1,
             jobs_running: 2,
             jobs_to_a_file: 1,
+            monitors_live: 0,
         };
         let l = top.line(100);
         let s = l.plain();
@@ -314,6 +327,24 @@ mod tests {
             s.contains(" 1 subagent running · 2 jobs running · 1 to a file ─╮"),
             "{s}"
         );
+        // A watching monitor is counted too, last; a session with none says nothing of them.
+        let watching = BoxTop {
+            monitors_live: 2,
+            ..top
+        }
+        .line(120)
+        .plain();
+        assert!(
+            watching.contains(" · 1 to a file · 2 monitors watching ─╮"),
+            "{watching}"
+        );
+        let one = BoxTop {
+            monitors_live: 1,
+            ..BoxTop::default()
+        }
+        .line(80)
+        .plain();
+        assert!(one.contains(" 1 monitor watching ─╮"), "{one}");
         assert_eq!(l.width(), 100);
         assert_eq!(role_of(&l, "subagent"), Some(Role::Pending));
         assert_eq!(jobs_fact(1, 0).as_deref(), Some("1 job running"));

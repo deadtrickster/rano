@@ -123,9 +123,34 @@ impl std::fmt::Debug for CodePaint {
     }
 }
 
+/// **A fence labelled with a file and a line range** — `path:N` or `path:N-M` as the label's first
+/// word, the rest a note — answered as the path and the first line. Such a block is a CITATION:
+/// its lines are the file's own, so they are drawn with the file's line numbers and coloured by
+/// the file's extension rather than by a language name. The path must look like one (a `/` or a
+/// `.` in it), so `rust:2` stays a language.
+pub fn citation(info: &str) -> Option<(&str, u32)> {
+    let word = info.split_whitespace().next()?;
+    let (path, range) = word.rsplit_once(':')?;
+    if path.is_empty() || !(path.contains('/') || path.contains('.')) {
+        return None;
+    }
+    let first = range.split_once('-').map_or(range, |(a, _)| a);
+    let start: u32 = first.parse().ok()?;
+    if let Some((_, b)) = range.split_once('-') {
+        let end: u32 = b.parse().ok()?;
+        if end < start {
+            return None;
+        }
+    }
+    (start >= 1).then_some((path, start))
+}
+
 impl CodePaint {
     pub(crate) fn new(lang: &str) -> CodePaint {
-        let resolved = Lang::from_token(lang);
+        let resolved = match citation(lang) {
+            Some((path, _)) => crate::syntax::detect(Some(std::path::Path::new(path)), None),
+            None => Lang::from_token(lang),
+        };
         CodePaint {
             stream: resolved.map(Stream::new),
             lang: resolved,
@@ -412,14 +437,29 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
             // it is not colouring; none of them manufactures one. The frame is
             // still drawn, so a bare block is visibly a block: `┌─` and `└─` with
             // nothing between them but the code.
-            let head = match paint.lang {
-                Some(l) => format!("┌─ {}", l.name()),
-                None if !lang.is_empty() => format!("┌─ {lang}"),
-                None => "┌─".to_string(),
+            // **A citation names its file and range, and its lines carry their numbers** — the
+            // label is the header as written (a note after the range included), and each line
+            // the file's own number, so `pgdump_schema.go:242-248` reads as lines 242 to 248 of
+            // that file rather than as seven anonymous lines.
+            let cited = citation(lang);
+            let head = match (cited, paint.lang) {
+                (Some(_), _) => format!("┌─ {}", lang.trim()),
+                (None, Some(l)) => format!("┌─ {}", l.name()),
+                (None, None) if !lang.is_empty() => format!("┌─ {lang}"),
+                (None, None) => "┌─".to_string(),
             };
             out.push(faint(head));
-            for l in painted {
+            // A citation with nothing in it yet (its host has not filled it) numbers nothing.
+            let filled = lines.iter().any(|l| !l.trim().is_empty());
+            let numbers = cited.filter(|_| filled).map(|(_, start)| {
+                let last = start as usize + painted.len().saturating_sub(1);
+                (start as usize, last.to_string().len())
+            });
+            for (i, l) in painted.into_iter().enumerate() {
                 let mut spans = vec![span("│ ", Role::Faint)];
+                if let Some((start, w)) = numbers {
+                    spans.push(span(format!("{:>w$}  ", start + i), Role::Faint));
+                }
                 spans.extend(l);
                 out.push(Line::new(spans));
             }

@@ -899,3 +899,44 @@ mod code_fences_are_coloured_by_rano {
         assert!(out.contains("two"), "{out:?}");
     }
 }
+
+/// **A citation is drawn with its file's line numbers and coloured by the file** — the fence
+/// label `path:N-M` (a note after it kept in the header), each line numbered from `N`, the gutter
+/// as wide as the last number. An ordinary fence keeps its plain gutter.
+#[test]
+fn a_citation_numbers_its_lines_as_the_file_does() {
+    let md = "```flow/pgdump_schema.go:98-101 · changed since the reply\nfunc a() {\n\treturn\n}\n// end\n```\n";
+    let blocks = lex(md);
+    let rows = text(&render_blocks(&blocks, 80, &opts()));
+    assert_eq!(
+        rows,
+        vec![
+            "┌─ flow/pgdump_schema.go:98-101 · changed since the reply",
+            "│  98  func a() {",
+            "│  99      return",
+            "│ 100  }",
+            "│ 101  // end",
+            "└─",
+        ]
+    );
+    assert!(
+        has_role(&render_blocks(&blocks, 80, &opts()), Role::Keyword),
+        "coloured as Go, by the file's extension"
+    );
+    let empty = text(&render_blocks(&lex("```a/b.go:5-9\n```\n"), 80, &opts()));
+    assert!(
+        empty
+            .iter()
+            .all(|r| !r.contains('5') || r.starts_with("┌─")),
+        "an unfilled citation numbers nothing: {empty:?}"
+    );
+    assert_eq!(citation("src/main.rs:7"), Some(("src/main.rs", 7)));
+    assert_eq!(citation("rust:2"), None, "a language, not a file");
+    assert_eq!(citation("a.go:9-3"), None);
+    let plain = text(&render_blocks(
+        &lex("```rust\nfn x() {}\n```\n"),
+        80,
+        &opts(),
+    ));
+    assert_eq!(plain, vec!["┌─ rust", "│ fn x() {}", "└─"]);
+}

@@ -43,5 +43,5 @@ pub use parse::{
     Align, Block, DEFAULT_MAX_UNFROZEN, IncrementalMarkdown, InlineStyle, Run, images, lex,
     runs_text, stable_boundary, stable_boundary_with, tail_cut,
 };
-pub use render::{RenderOptions, render_block, render_blocks, render_bounded};
+pub use render::{RenderOptions, citation, render_block, render_blocks, render_bounded};
 pub use view::{Decor, MarkdownView};

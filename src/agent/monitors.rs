@@ -8,7 +8,7 @@
 //! layout and nothing else.
 
 use crate::agent::pane::{self, PaneLines};
-use crate::agent::text::{clean_line, duration};
+use crate::agent::text::{clean_line, duration, wrap};
 use crate::render::{Line, Span};
 use crate::style::Role;
 
@@ -86,13 +86,15 @@ impl MonitorsPane {
             let left = Line::new(vec![
                 Span::raw(format!("{} ", pane::mark(picked))),
                 Span::role("[~]", Role::Pending),
-                Span::raw(format!(
-                    " {} · watching {}",
-                    clean_line(&m.name),
-                    clean_line(&m.watching)
-                )),
+                Span::raw(format!(" {}", clean_line(&m.name))),
             ]);
             out.push_stop(pane::picked(left, picked));
+            // **What it watches, whole** — the operator: *"i want to see monitor command in the
+            // details"*. A command is the one thing a person reads a monitor for, and it used to
+            // ride the row's first line, cut at the pane's edge.
+            for l in watching_lines(&m.watching, "watching", w) {
+                out.push(Line::raw(l));
+            }
             let mut facts: Vec<String> = Vec::new();
             facts.push(if m.repeat { "repeats" } else { "once" }.into());
             if m.fired > 0 {
@@ -130,6 +132,11 @@ impl MonitorsPane {
                         Role::Faint,
                     ),
                 ]));
+                if !m.watching.is_empty() {
+                    for l in watching_lines(&m.watching, "was watching", w) {
+                        out.push(pane::faint(l));
+                    }
+                }
             }
         }
         out.blank();
@@ -140,6 +147,17 @@ impl MonitorsPane {
         }));
         out.trimmed(w)
     }
+}
+
+/// `{what} {watching}`, wrapped under a row at the detail column — never cut, so a long command
+/// reads whole.
+fn watching_lines(watching: &str, what: &str, w: usize) -> Vec<String> {
+    const INDENT: &str = "         ";
+    let room = w.saturating_sub(INDENT.len()).max(20);
+    wrap(&format!("{what} {}", clean_line(watching)), room)
+        .into_iter()
+        .map(|l| format!("{INDENT}{l}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -191,9 +209,10 @@ mod tests {
         assert_eq!(p.selected_monitor().map(|m| m.name.as_str()), Some("tick"));
         let rows = plain(&p.content(120).lines);
         assert_eq!(rows[0], "monitors");
-        assert_eq!(rows[2], "▸ [~] tick · watching a timer of 60s");
+        assert_eq!(rows[2], "▸ [~] tick");
+        assert_eq!(rows[3], "         watching a timer of 60s");
         assert_eq!(
-            rows[3],
+            rows[4],
             "         repeats · fired 3× · 4m12s left · declared by turn 4 · ends with its session"
         );
         assert!(rows.contains(&"    ended (2)".to_string()), "{rows:#?}");
@@ -206,6 +225,29 @@ mod tests {
             "{rows:#?}"
         );
         assert!(rows.last().unwrap().contains("x retires"), "{rows:#?}");
+    }
+
+    /// **A long command reads whole, wrapped under its row** — not cut at the pane's edge.
+    #[test]
+    fn a_monitors_command_is_shown_whole() {
+        let cmd = "command `curl -sf http://127.0.0.1:8080/health --max-time 5 -o /dev/null -w %{http_code}` exiting";
+        let p = MonitorsPane {
+            monitors: vec![MonitorRow {
+                watching: cmd.into(),
+                ..live("health")
+            }],
+            now_ms: 1_000_000,
+            selected: 0,
+        };
+        let rows = plain(&p.content(60).lines);
+        let shown: String = rows[3..]
+            .iter()
+            .take_while(|r| !r.contains("repeats"))
+            .map(|r| r.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(shown, format!("watching {cmd}"), "{rows:#?}");
+        assert!(rows.iter().all(|r| r.chars().count() <= 60), "{rows:#?}");
     }
 
     #[test]

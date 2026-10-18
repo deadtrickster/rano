@@ -2900,6 +2900,13 @@ the schema from, and writing it from memory is how the schema above went wrong o
 its first draft. Noted so the shape is not a surprise; built when there is a file
 in hand.
 
+**Postponed 2026-10-18**, by the operator, deliberately rather than for lack of a
+plan. Everything around it has landed — §20.7 tails the `*-json.log` already, §20.4
+holds the row index and the boundaries, §20.9 searches the file's bytes rather than
+the buffer — so what is missing is only the unwrap. The unblock is evidence: a real
+`*-json.log` in hand, whose field order and timestamp format can be read instead of
+remembered.
+
 ### 20.9 Search, which is what a log is FOR
 
 *"and one more thing - search. as you can imagine it is really important to be

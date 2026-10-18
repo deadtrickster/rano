@@ -4688,3 +4688,87 @@ fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
     assert!(ed.bs().pending_load.is_none());
     assert_eq!(lines(&ed).len(), 500, "a .rs is read on the spot");
 }
+
+// ---------- the mode, chosen rather than detected ----------
+
+/// **A chosen mode is used as it is**, even where detection disagrees — that is the
+/// whole point of choosing, and it is what an editor that guesses owes the person it
+/// guessed at.
+#[test]
+fn a_chosen_mode_overrules_detection() {
+    let d = temp_dir("mode_pick");
+    let p = d.0.join("notes.txt");
+    // No `=` and no `[section]`: a spaced `x = 1` is the INI shape, and this fixture
+    // must be a file the ladder says NOTHING about, or the test proves nothing.
+    fs::write(&p, "fn main() { return 1; }\n").unwrap();
+    let mut ed = test_ed("");
+    ed.text_w = 80;
+    ed.text_h = 24;
+    ed.start_load(&p).expect("open");
+    settle(&mut ed);
+    ed.tick(Instant::now());
+    // `.txt` detects as nothing, so nothing is coloured yet.
+    let before = ed.bs().hl.style_at(Pos { row: 0, col: 0 });
+    assert!(
+        before.is_none() || before == Some(Style::new()),
+        "{before:?}"
+    );
+    assert_eq!(ed.mode_name(), "plain", "a .txt is not a language");
+
+    ed.do_setmode("rust");
+    assert_eq!(
+        ed.bs().hl.mode,
+        crate::syntax::Mode::Lang(crate::syntax::Lang::Rust)
+    );
+    assert_eq!(ed.mode_name(), "rust");
+    ed.tick(Instant::now());
+    let after = ed.bs().hl.style_at(Pos { row: 0, col: 0 });
+    assert!(
+        after.is_some() && after != Some(Style::new()),
+        "choosing rust coloured nothing: {after:?}"
+    );
+}
+
+/// `plain` stops the guessing; `auto` puts the ladder back.
+#[test]
+fn plain_stops_the_guessing_and_auto_puts_it_back() {
+    let mut ed = named_ed("fn main() {}\n", "/tmp/rano_mode_auto.rs");
+    assert_eq!(ed.mode_name(), "rust", "detected from the name");
+    ed.do_setmode("plain");
+    assert_eq!(ed.bs().hl.mode, crate::syntax::Mode::Plain);
+    assert_eq!(ed.mode_name(), "plain");
+    ed.do_setmode("auto");
+    assert_eq!(ed.bs().hl.mode, crate::syntax::Mode::Detected);
+    assert_eq!(ed.mode_name(), "rust", "the ladder is back");
+}
+
+/// The prompt opens on the mode in effect, so a person can see what it is before
+/// changing it — and an unknown name says so and changes nothing.
+#[test]
+fn the_mode_prompt_opens_on_what_is_in_effect() {
+    let mut ed = named_ed("fn main() {}\n", "/tmp/rano_mode_open.rs");
+    ed.start_setmode();
+    let p = ed.prompt.as_ref().expect("a prompt");
+    assert_eq!(p.kind, PromptKind::SetMode);
+    assert_eq!(p.text, "rust", "opens on the mode in effect");
+    assert_eq!(p.cursor, 4, "with the cursor at its end");
+
+    ed.do_setmode("nonsense");
+    assert_eq!(
+        ed.bs().hl.mode,
+        crate::syntax::Mode::Detected,
+        "an unknown name changed the mode"
+    );
+    let said = ed.status_text().unwrap_or_default();
+    assert!(said.contains("No mode called"), "{said:?}");
+
+    // A columnar format is a mode by its own name.
+    ed.do_setmode("fstab");
+    assert_eq!(
+        ed.bs().hl.mode,
+        crate::syntax::Mode::Lang(crate::syntax::Lang::Columns(
+            crate::syntax::columns::Format::Fstab
+        ))
+    );
+    assert_eq!(ed.mode_name(), "fstab");
+}

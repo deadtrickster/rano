@@ -107,6 +107,15 @@ pub fn commands() -> &'static [Command] {
     ALL.get_or_init(|| {
         use Group::*;
         vec![
+            // ---- the mode ----
+            cmd(
+                "set-mode",
+                "Mode",
+                View,
+                "Set this buffer's language; `plain` stops the guessing and `auto` puts \
+                 it back.",
+                |e| e.start_setmode(),
+            ),
             // ---- files ----
             cmd(
                 "write-out",

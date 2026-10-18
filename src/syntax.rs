@@ -38,7 +38,10 @@ unsafe extern "C" {
 }
 
 /// The columnar system databases, styled without a grammar.
-mod columns;
+///
+/// `pub` because `Lang::Columns` carries a [`columns::Format`] and a caller naming a mode
+/// has to be able to name one.
+pub mod columns;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -227,6 +230,79 @@ impl Lang {
             Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Lang::Clojure => tree_sitter_clojure_orchard::LANGUAGE.into(),
         }
+    }
+}
+
+/// What a buffer's language is, and **who decided**.
+///
+/// `Detected` is the ladder's answer and the default. The other two are the user
+/// overruling it — which is the one thing detection cannot do for itself: an editor that
+/// guesses must be able to be told it guessed wrong, or the guess is permanent. That is
+/// what every editor offers as `:set filetype=` or `M-x …-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Detected,
+    Lang(Lang),
+    /// Plain text, and do not look again — the answer for a file whose "language" a
+    /// grammar would only misrepresent.
+    Plain,
+}
+
+impl Mode {
+    /// The name a status line and the mode prompt show.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Detected => "auto",
+            Mode::Lang(l) => l.name(),
+            Mode::Plain => "plain",
+        }
+    }
+}
+
+impl Lang {
+    /// Every language a person can name, for [`Lang::from_name`] and for a list.
+    ///
+    /// `MarkdownInline` is absent because it is not a buffer's language, and `Columns`
+    /// because its name comes from the format it detected rather than from the variant.
+    pub const NAMED: &'static [Lang] = &[
+        Lang::Rust,
+        Lang::Go,
+        Lang::Bash,
+        Lang::Python,
+        Lang::C,
+        Lang::Json,
+        Lang::CommonLisp,
+        Lang::JavaScript,
+        Lang::TypeScript,
+        Lang::Tsx,
+        Lang::Markdown,
+        Lang::Toml,
+        Lang::Yaml,
+        Lang::Html,
+        Lang::Css,
+        Lang::Lua,
+        Lang::Ruby,
+        Lang::Php,
+        Lang::Java,
+        Lang::Make,
+        Lang::Dockerfile,
+        Lang::Ini,
+        Lang::Diff,
+        Lang::Elisp,
+        Lang::Scheme,
+        Lang::Sql,
+        Lang::Clojure,
+    ];
+
+    /// The language a person typed, or `None` — `rust`, `ini`, `fstab`. Case does not
+    /// matter, the way a mode name should not.
+    pub fn from_name(name: &str) -> Option<Lang> {
+        let want = name.trim().to_ascii_lowercase();
+        if let Some(l) = Self::NAMED.iter().copied().find(|l| l.name() == want) {
+            return Some(l);
+        }
+        columns::detect_format(Path::new(&want)).map(Lang::Columns)
     }
 
     fn query(self) -> &'static str {
@@ -821,6 +897,13 @@ fn detect_content(sample: &str) -> Option<Lang> {
 
 /// The first [`SAMPLE_LINES`] lines of `buf`, at most [`SAMPLE_BYTES`], for
 /// [`detect_sample`].
+///
+/// Public because [`language_of`] is the one question an editor asks about a buffer
+/// outside the highlighter — what is this, as the ladder sees it.
+pub fn language_of(buf: &Buffer) -> Option<Lang> {
+    detect_sample(buf.name.as_deref(), &sample_of(buf))
+}
+
 fn sample_of(buf: &Buffer) -> String {
     let mut out = String::new();
     for r in 0..buf.row_count().min(SAMPLE_LINES) {
@@ -1290,6 +1373,9 @@ pub struct Highlighter {
     /// idle frames" is a claim about a COUNT, and a clock cannot express it
     /// without flaking.
     pub parses: u64,
+    /// **What this buffer's language is, and who decided.** `Detected` until a person
+    /// overrules it; the highlighter is per buffer, so the overrule is per buffer too.
+    pub mode: Mode,
 }
 
 impl Highlighter {
@@ -1304,7 +1390,15 @@ impl Highlighter {
             diag_tree: None,
             diag_conflicts: Vec::new(),
             parses: 0,
+            mode: Mode::Detected,
         }
+    }
+
+    /// Set the mode the user chose. The CALLER invalidates the grid: this is the
+    /// highlighter's state, and `Editor::set_mode` is what knows that a mode change
+    /// means a re-highlight and a re-parse for diagnostics.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     /// Re-parse the buffer and rebuild the style grid. No-op for scratch
@@ -1353,7 +1447,15 @@ impl Highlighter {
 
     fn refresh_rows(&mut self, buf: &Buffer, win: Option<Window>) {
         let sample = sample_of(buf);
-        let Some(lang) = detect_sample(buf.name.as_deref(), &sample) else {
+        // **Who decides**: the user if they said, the ladder otherwise. A chosen language
+        // is used as it is — even if `detect` would disagree — because that is the whole
+        // point of choosing, and `Plain` means do not look at all.
+        let lang = match self.mode {
+            Mode::Lang(l) => Some(l),
+            Mode::Plain => None,
+            Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
+        };
+        let Some(lang) = lang else {
             self.clear();
             return;
         };
@@ -1581,7 +1683,12 @@ impl Highlighter {
     /// case the caller keeps whatever it had rather than clearing it.
     pub fn parse_for_diagnostics(&mut self, buf: &Buffer) -> bool {
         let sample = sample_of(buf);
-        let Some(lang) = detect_sample(buf.name.as_deref(), &sample) else {
+        let lang = match self.mode {
+            Mode::Lang(l) => Some(l),
+            Mode::Plain => None,
+            Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
+        };
+        let Some(lang) = lang else {
             self.diag_tree = None;
             return false;
         };

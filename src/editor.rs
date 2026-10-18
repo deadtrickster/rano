@@ -2770,6 +2770,69 @@ impl Editor {
         self.loc_until = Some(Instant::now() + Duration::from_secs(2));
     }
 
+    // ---------- the mode ----------
+
+    /// The mode in effect, as a person reads it: the one they chose, or what the ladder
+    /// detected. **Bare**, because this is what the prompt opens on and it has to be a
+    /// name the prompt accepts back.
+    pub fn mode_name(&self) -> String {
+        match self.bs().hl.mode {
+            syntax::Mode::Plain => "plain".to_string(),
+            syntax::Mode::Lang(l) => l.name().to_string(),
+            syntax::Mode::Detected => syntax::language_of(&self.bs().buf)
+                .map(|l| l.name().to_string())
+                .unwrap_or_else(|| "plain".to_string()),
+        }
+    }
+
+    /// Ask for a mode, opening on the one in effect — `M-x Mode`.
+    ///
+    /// **An editor that guesses must be able to be told it guessed wrong.** Detection can
+    /// be wrong for a file whose name says nothing and whose contents are ambiguous (an
+    /// extension-less `.py` whose first statement is `x=1` reads as a shell assignment),
+    /// and without this the wrong guess is permanent for the session.
+    pub fn start_setmode(&mut self) {
+        let text = self.mode_name();
+        let cursor = text.chars().count();
+        self.prompt = Some(Prompt {
+            kind: PromptKind::SetMode,
+            text,
+            cursor,
+        });
+    }
+
+    /// Apply what was typed: a language's name, `plain` to stop the guessing, or `auto`
+    /// (and an empty answer) to put the detection back.
+    pub fn do_setmode(&mut self, text: &str) {
+        let t = text.trim();
+        let mode =
+            if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("detect") {
+                syntax::Mode::Detected
+            } else if matches!(t.to_ascii_lowercase().as_str(), "plain" | "text" | "none") {
+                syntax::Mode::Plain
+            } else if let Some(l) = syntax::Lang::from_name(t) {
+                syntax::Mode::Lang(l)
+            } else {
+                self.flash(&format!("No mode called {t:?}"));
+                return;
+            };
+        self.set_mode(mode);
+    }
+
+    /// Set the mode and invalidate what it decided: the colour grid and the diagnostics
+    /// were both computed for the old one.
+    pub fn set_mode(&mut self, mode: syntax::Mode) {
+        self.bs_mut().hl.set_mode(mode);
+        self.highlight_dirty = true;
+        self.diag_dirty = true;
+        let auto = matches!(mode, syntax::Mode::Detected);
+        let said = self.mode_name();
+        self.flash(&format!(
+            "Mode: {said}{}",
+            if auto { " (auto)" } else { "" }
+        ));
+    }
+
     // ---------- write / read / backup ----------
 
     pub(crate) fn start_write(&mut self) {

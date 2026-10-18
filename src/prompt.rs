@@ -18,6 +18,8 @@ pub enum PromptKind {
     ReplaceFind,
     ReplaceWith,
     GoTo,
+    /// `M-x Mode`: the buffer's language, chosen rather than detected.
+    SetMode,
     Exec,
     FilterCmd,
     BackupName,
@@ -48,6 +50,7 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::ReplaceFind => "Find: ",
         PromptKind::ReplaceWith => "Replace With: ",
         PromptKind::GoTo => "Go To Line: ",
+        PromptKind::SetMode => "Mode: ",
         PromptKind::Exec => "Execute: ",
         PromptKind::FilterCmd => "Filter: ",
         PromptKind::BackupName => "Backup Name: ",
@@ -237,6 +240,7 @@ impl Editor {
                         self.next_replace_ask();
                     }
                     PromptKind::GoTo => self.do_goto(&p.text),
+                    PromptKind::SetMode => self.do_setmode(&p.text),
                     PromptKind::Exec => self.do_exec(&p.text),
                     PromptKind::FilterCmd => self.do_filter(&p.text),
                     PromptKind::BackupName => self.do_backup(p.text),

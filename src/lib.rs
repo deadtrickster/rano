@@ -107,6 +107,7 @@ pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;
+pub mod plugin;
 // The render core: roles-styled spans and lines, a width-correct cell buffer,
 // widgets, and the emitter that turns a buffer into terminal rows per palette.
 // What rano draws with, and what letibot draws through.
@@ -183,6 +184,10 @@ mod search_ctrl;
 pub mod send_ctrl;
 mod todo_ctrl;
 pub mod ui;
+
+/// A path with a leading `~` made absolute against `$HOME` — the way every prompt in the editor
+/// reads one, and what a host needs when it hands rano a path a person typed.
+pub use prompt::expand_tilde;
 mod update_ctrl;
 
 #[cfg(test)]

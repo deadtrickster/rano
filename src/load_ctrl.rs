@@ -23,12 +23,59 @@ impl Editor {
     /// by the caller (it is the one failure that should not become a status
     /// line, because there is nothing on screen to attach it to).
     pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
+        // **With a plugin that answers `on_open`, a small file is read whole and synchronously.**
+        // A text transform needs the whole text, and the loader's rows are already on the glass by
+        // the time it is whole — a hook applied then would be a buffer that visibly snaps, and a
+        // load is not an undo step, so there would be no way back. Above the cap the hook is
+        // skipped with one line, and the file streams exactly as it always did.
+        if self.plugin.as_ref().is_some_and(|p| p.has("on_open")) {
+            match std::fs::metadata(path) {
+                Ok(m) if m.len() as usize <= crate::plugin::MAX_HOOK_BYTES => {
+                    let buf = self.read_file(path)?;
+                    self.adopt_read(path, buf);
+                    let n = self.bs().buf.row_count();
+                    self.flash_with_note(&format!("Read {n} lines"));
+                    return Ok(());
+                }
+                Ok(m) => {
+                    self.flash(&format!(
+                        "plugin: not run on {} ({} MiB, above the {} MiB cap)",
+                        path.display(),
+                        m.len() >> 20,
+                        crate::plugin::MAX_HOOK_BYTES >> 20
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
         // `spawn` rather than `spawn_from(path, 0)`: reading a whole file is
         // the case with a name of its own, and what every caller but the tail
         // wants.
         let job = LoadJob::spawn(path.to_path_buf())?;
         self.begin_load(path, job);
         Ok(())
+    }
+
+    /// Make `buf` the current buffer, whole: the synchronous twin of [`Self::begin_load`], for a
+    /// file read through a plugin's `on_open`. Everything the loader's first batch would have set
+    /// is set here; there is no job, because there is nothing left to read.
+    fn adopt_read(&mut self, path: &Path, mut buf: Buffer) {
+        buf.name = Some(path.to_path_buf());
+        buf.disk = crate::buffer::DiskStamp::of(path);
+        let bs = self.bs_mut();
+        bs.buf = buf;
+        bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
+        bs.scroll = 0;
+        bs.load = None;
+        bs.tail = None;
+        bs.read_only = false;
+        bs.lines_before = Some(0);
+        bs.line_count = None;
+        bs.edit_gen = bs.edit_gen.wrapping_add(1);
+        bs.wrap_extend_from = None;
+        self.highlight_dirty = true;
+        self.diag_dirty = true;
+        self.lsp_sync();
     }
 
     /// [`Self::start_load`], from byte `from` to the end of the file — the tail
@@ -522,7 +569,7 @@ impl Editor {
             None => return,
         };
         self.cancel_load();
-        match Buffer::from_file(&path) {
+        match self.read_file(&path) {
             Ok(buf) => {
                 let bs = self.bs_mut();
                 bs.load = None;

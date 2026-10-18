@@ -31,6 +31,10 @@ pub struct Config {
     /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file. See
     /// [`crate::theme`].
     pub theme: Option<String>,
+    /// **The WASM plugin**: a `.wasm` file whose `on_open`/`on_save` hooks run at the two seams
+    /// (`plans/S10-wasm-hooks.md`). `RANO_PLUGIN` overrides it. No hook is granted anything it
+    /// imports: stage 1 plugins are pure text transforms.
+    pub plugin: Option<String>,
     /// `color.ROLE = "look"` lines, in file order: one role overridden on top of the
     /// theme. Kept as written; [`crate::theme::resolve`] reads and reports them.
     pub colors: Vec<(String, String)>,
@@ -149,6 +153,7 @@ impl Default for Config {
             send_command: None,
             nano_keys: false,
             theme: None,
+            plugin: None,
             colors: Vec::new(),
         }
     }
@@ -252,6 +257,11 @@ fn parse_config(text: &str) -> Config {
             }
             "theme" => {
                 cfg.theme = (!value.is_empty()).then(|| value.to_string());
+            }
+            // A plugin is a path; an empty value is "no plugin", the same way a theme is.
+            "plugin" => {
+                let v = value.trim();
+                cfg.plugin = (!v.is_empty()).then(|| v.to_string());
             }
             _ if key.starts_with("color.") => {
                 cfg.colors

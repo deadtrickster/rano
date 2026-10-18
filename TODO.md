@@ -3121,6 +3121,19 @@ The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
   `…/rano/scripts/built-in/` when absent, **never overwritten**, and editable there — the dired
   and the DBus service are both scripts in that folder, and the folder itself is a `M-G` listing
   away.
-- [ ] **Rulings before step 1**: the engine (wasmi now vs wasmtime — measure its delta first), the
-  bus library (`zbus` vs a socket with the same three messages), and whether `read-dir` is the
-  capability to open the sandbox with.
+- [x] **The engine: wasmtime** — the operator, *"jit, we will pay for it once per callsite and that
+  is ok. because later we will rearchitect rano and letibot around it."* Measured in rano's own
+  release build (wasmtime 49): **18,497,168 B → 24,870,208 B, +6.08 MiB**. (The isolated probe said
+  +4.55 MiB on wasmtime 40; the in-build number is the one that counts.)
+- [x] **Steps 1–3 landed**: `src/plugin.rs` (export enumeration, the result block,
+  `rano_abi`/`rano_alloc`, fuel 50 M, 64 MiB memory cap, 16 MiB texts, a fresh instance per call,
+  every failure a sentence), `plugin`/`RANO_PLUGIN` in the config and the binary, and both hooks
+  wired — `Editor::read_file` (one place a file's text enters: `^R`, F8, a host's jump, the
+  command line's synchronous path) and `run_save_hook` in `write_file` after gofmt, replacing the
+  buffer as one undo step (`ActionKind::Plugin`). A hook's note rides the line that reports the
+  open or the save (`Read 3 lines — plugin: transformed on open`), so one flash tells both facts.
+  1100 tests; ten of them are the ABI's (refused ABI, refused import, sentinel, block, out of fuel,
+  non-UTF-8, out-of-bounds block, cap, summary) and four are the editor's (open, save + `M-U`,
+  a trap that leaves the save intact, a binary that never reaches a hook).
+- [ ] **Still open**: the bus library (`zbus` vs a socket with the same three messages) and whether
+  `read-dir` is the capability to open the sandbox with — steps 4–8 of the plan.

@@ -462,7 +462,7 @@ fn prompt_prev_word(p: &mut Prompt) {
 
 /// E4a: expand a leading `~` or `~/` to $HOME. `~user` is intentionally not
 /// expanded; without $HOME the input is returned unchanged.
-pub(crate) fn expand_tilde(p: &str) -> String {
+pub fn expand_tilde(p: &str) -> String {
     if p == "~" {
         return std::env::var("HOME").unwrap_or_else(|_| p.to_string());
     }

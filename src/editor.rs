@@ -52,6 +52,9 @@ pub enum ActionKind {
     /// A merge conflict resolved from the conflict view: its marker block
     /// replaced by the side taken. One undo step each, coalescing with nothing.
     Resolve,
+    /// A plugin's `on_save` output replacing the buffer before the write: one step,
+    /// coalescing with nothing, so `M-U` takes the hook's transformation back in one press.
+    Plugin,
     /// A formatter's whole-buffer rewrite on save (gofmt): one step, coalescing with
     /// nothing, so `M-U` takes the formatting back in one press.
     Format,
@@ -210,6 +213,16 @@ pub struct Editor {
     /// placeholder cell is `U+10EEEE` with combining marks, which a terminal that
     /// cannot fill it draws as garbage — so M-P on a PNG says why instead of drawing one.
     pub images: bool,
+    /// **The WASM plugin** (`plans/S10-wasm-hooks.md`): loaded from the config's `plugin` (or
+    /// `RANO_PLUGIN`), compiled once, and asked at the two seams — `on_open` when a file's text
+    /// enters, `on_save` before a save is written. `None` is a build or a config with no plugin,
+    /// and every call site treats it as "nothing to do".
+    pub plugin: Option<crate::plugin::Plugin>,
+    /// **What the plugin had to say about the last read or write**, waiting to be appended to the
+    /// message that reports it: a hook's transformation, or why it was skipped. Composed rather
+    /// than flashed twice, because the save's own line ("Wrote N bytes") is the one the reader is
+    /// reading and a second flash would replace it.
+    pub(crate) plugin_note: Option<String>,
     /// **`--edit`: open a `.log` as an ordinary file** rather than as a tail
     /// (TODO.md §20.7's escape hatch from the mode).
     ///
@@ -407,6 +420,8 @@ impl Editor {
             diff_view: None,
             diff_split: false,
             images: false,
+            plugin: None,
+            plugin_note: None,
             edit_override: false,
             graphics_out: Vec::new(),
             clipboard_out: None,
@@ -486,6 +501,15 @@ impl Editor {
                 self.prompt_hints = Some((p.kind, p.text.clone(), names));
                 true
             }
+        }
+    }
+
+    /// `msg`, with the plugin's note appended when a hook just had something to say — the two
+    /// facts in one line, because the status bar holds one.
+    pub(crate) fn flash_with_note(&mut self, msg: &str) {
+        match self.plugin_note.take() {
+            Some(note) => self.flash(&format!("{msg} — {note}")),
+            None => self.flash(msg),
         }
     }
 
@@ -3108,6 +3132,10 @@ impl Editor {
         // *here*, after the questions above are answered, so a save the reader backed out of
         // changes nothing.
         self.format_for_save();
+        // **The plugin's `on_save`, after the language's own rule** (gofmt first): what it returns
+        // is what is written *and* what the buffer becomes — one undo step, so the glass and the
+        // file never disagree.
+        self.run_save_hook();
         // The buffer's OWN encoding, not always UTF-8: a file read as cp1252 or
         // UTF-16 is written back the way it was found, or opening and saving
         // would rewrite it as UTF-8 with the characters replaced.
@@ -3137,7 +3165,7 @@ impl Editor {
                 // change while it is still alive.
                 self.lsp_flush(Instant::now());
                 self.lsp_sync();
-                self.flash(&format!("Wrote {} bytes", bytes));
+                self.flash_with_note(&format!("Wrote {bytes} bytes"));
                 if self.close_after_save {
                     self.close_after_save = false;
                     self.remove_current_buffer();
@@ -3322,6 +3350,110 @@ impl Editor {
         }
     }
 
+    /// **Load the plugin named by the config** (or `RANO_PLUGIN`). One line says what it answers,
+    /// and a plugin that cannot load is *reported and left off* — never a broken editor, because a
+    /// hook is an improvement and never a precondition.
+    pub fn set_plugin(&mut self, path: &Path) {
+        match crate::plugin::Plugin::load(path) {
+            Ok(p) => {
+                let said = p.summary();
+                self.plugin = Some(p);
+                self.flash(&format!("Plugin: {said}"));
+            }
+            Err(e) => {
+                self.plugin = None;
+                self.flash(&format!("Plugin {} not loaded: {e}", path.display()));
+            }
+        }
+    }
+
+    /// The plugin from inline bytes — the seam the tests use, so a hook can be exercised without a
+    /// `wasm32` toolchain or a file on disk. A host may use it to ship a plugin it embeds.
+    pub fn set_plugin_bytes(&mut self, wasm: &[u8], from: PathBuf) {
+        match crate::plugin::Plugin::from_bytes(wasm, from.clone()) {
+            Ok(p) => {
+                let said = p.summary();
+                self.plugin = Some(p);
+                self.flash(&format!("Plugin: {said}"));
+            }
+            Err(e) => {
+                self.plugin = None;
+                self.flash(&format!("Plugin {} not loaded: {e}", from.display()));
+            }
+        }
+    }
+
+    /// **A file, read through the open hook.** The one place a file's text enters rano (`F8`,
+    /// `^R`, a host's jump, a reload, the command line); the hook is skipped for a binary — a
+    /// binary is read-only and its text is not the file — and a hook that fails leaves the text as
+    /// it was, with one line saying so.
+    pub(crate) fn read_file(&mut self, path: &Path) -> std::io::Result<Buffer> {
+        let mut buf = Buffer::from_file(path)?;
+        if buf.binary {
+            return Ok(buf);
+        }
+        let Some(plugin) = self.plugin.as_ref().filter(|p| p.has("on_open")) else {
+            return Ok(buf);
+        };
+        let text = buf.text();
+        match plugin.open(&text) {
+            Ok(Some(new)) => {
+                if new != text {
+                    buf.set_rows(new.lines().map(|l| l.chars().collect()).collect());
+                    self.flash(&format!(
+                        "Plugin: {} changed {} on open",
+                        plugin.path().display(),
+                        path.display()
+                    ));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => self.flash(&format!(
+                "Plugin {}: {e} — opened unchanged",
+                plugin.path().display()
+            )),
+        }
+        Ok(buf)
+    }
+
+    /// **The save hook.** Called from `write_file` after `format_for_save` and before the encode:
+    /// the hook's answer *replaces the buffer* as one undo step (`ActionKind::Plugin`), so the
+    /// glass and the file are the same text; a hook that fails writes the buffer as it was and
+    /// says so.
+    fn run_save_hook(&mut self) {
+        let Some(plugin) = self.plugin.as_ref().filter(|p| p.has("on_save")) else {
+            return;
+        };
+        let before = self.bs().buf.text();
+        match plugin.save(&before) {
+            Ok(Some(new)) if new != before => {
+                let mut rows: Vec<Vec<char>> = new.lines().map(|l| l.chars().collect()).collect();
+                if rows.is_empty() {
+                    rows.push(Vec::new());
+                }
+                let n = self.bs().buf.row_count();
+                self.begin_action(ActionKind::Plugin, 0, n);
+                self.bs_mut().buf.splice_rows(0, n, rows);
+                let last = self.bs().buf.row_count().saturating_sub(1);
+                let c = self.bs().cursor;
+                self.bs_mut().cursor = Pos {
+                    row: c.row.min(last),
+                    col: c.col,
+                };
+                self.finish_step();
+                self.edit_invalidate();
+                self.plugin_note = Some("plugin: transformed on save".to_string());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.plugin_note = Some(format!(
+                    "plugin {}: {e} — saved as written",
+                    plugin.path().display()
+                ));
+            }
+        }
+    }
+
     pub(crate) fn do_read(&mut self, name: String) {
         if self.refuse_read_only("reading a file in") {
             return;
@@ -3329,7 +3461,8 @@ impl Editor {
         if name.trim().is_empty() {
             return;
         }
-        match Buffer::from_file(Path::new(&expand_tilde(&name))) {
+        let read = self.read_file(Path::new(&expand_tilde(&name)));
+        match read {
             Ok(mut read) => {
                 // The whole read comes from `Buffer::from_file`, so `^R` gets
                 // the same encoding detection as startup and remembers what it
@@ -3351,7 +3484,7 @@ impl Editor {
                 }
                 self.finish_step();
                 self.edit_invalidate();
-                self.flash(&format!("Read {} lines", count));
+                self.flash_with_note(&format!("Read {} lines", count));
             }
             Err(e) => {
                 self.flash(&format!("Error: {}", e));
@@ -3399,7 +3532,7 @@ impl Editor {
             b.disk = crate::buffer::DiskStamp::of(&path);
             (b, 0)
         } else {
-            match Buffer::from_file(&path) {
+            match self.read_file(&path) {
                 Ok(b) => {
                     let n = b.row_count();
                     (b, n)
@@ -3443,11 +3576,11 @@ impl Editor {
         // says "Tailing — showing the last N lines" in a moment).
         if !log {
             if kept {
-                self.flash(&format!(
+                self.flash_with_note(&format!(
                     "Read {count} lines into a new buffer: the other has unsaved edits (M-< goes back)"
                 ));
             } else {
-                self.flash(&format!("Read {} lines", count));
+                self.flash_with_note(&format!("Read {} lines", count));
             }
         }
         // **A picture is its own reading**: the text just loaded is a lossy decode of bytes

@@ -1,7 +1,8 @@
 # S10 — A plugin platform: WASM hooks, builtins, and reload without watching
 
 Grounded to code as of 2026-10-18: `rano` 0.9.0 @ `669ab57` plus the folder listing landed in
-`src/dirview.rs` (step 0 below). Anchors: `src/editor.rs` (`write_file` ~:3085,
+`src/dirview.rs` (step 0 below) and **steps 1–3: `src/plugin.rs` on wasmtime 49, the config's
+`plugin` key, and both hooks wired** (`read_file`/`run_save_hook`, `ActionKind::Plugin`). Anchors: `src/editor.rs` (`write_file` ~:3085,
 `format_for_save` ~:3040, `open_dir`/`start_dir`/`dir_enter`/`dir_parent`/`dir_refresh`),
 `src/buffer.rs` (`from_file` :97, `from_text` :116), `src/load_ctrl.rs` (`start_load` :25,
 `load_poll` :239, `Adopted::Finished` :351, `load_now` :513), `src/config.rs` (`parse_config`
@@ -12,6 +13,10 @@ Runtime facts verified in the local registry source (wasmi 0.40.0: `store.rs` `s
 measured with rano's release profile (`strip`, `lto`, `codegen-units=1`; the probe also set
 `panic=abort`, which rano does not, so the real delta is if anything slightly larger):
 
+**Ruled: wasmtime** — the operator, *"jit, we will pay for it once per callsite and that is ok.
+because later we will rearchitect rano and letibot around it."* The engine is behind the `Plugin`
+façade, so the ruling costs one dependency and no ABI.
+
 | | wasmi 0.40 | wasmtime 40 (`std`+`runtime`+`cranelift`) |
 |---|---|---|
 | engine | interpreter, no JIT, no unsafe codegen | Cranelift |
@@ -21,6 +26,7 @@ measured with rano's release profile (`strip`, `lto`, `codegen-units=1`; the pro
 | **1 KiB** (uppercase loop) | 12.4 µs | **15.3 µs** — slower: instantiation + call overhead |
 | **1 MiB** | 8.3 ms | **483 µs** — 17× faster |
 | **16 MiB** (the cap) | ~136 ms (extrapolated; the probe module held 4 MiB) | **7.8 ms** — ~17× faster |
+| **in rano's own build** (0.9.0, wasmtime **49**, release) | — | **+6.08 MiB**: 18,497,168 B → 24,870,208 B |
 
 ---
 

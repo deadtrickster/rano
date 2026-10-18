@@ -1235,6 +1235,133 @@ fn a_folder_that_is_not_there_says_so_and_changes_nothing() {
     assert_eq!(lines(&ed), vec!["one.txt"]);
 }
 
+/// **A WAT plugin for the editor tests**: `hook` answers a fixed text, which is enough to see
+/// both seams (open and save) without a `wasm32` toolchain or a committed binary.
+fn wat_hook(hook: &str, out: &str) -> Vec<u8> {
+    let mut body = String::new();
+    for (i, b) in out.bytes().enumerate() {
+        body.push_str(&format!(
+            "(i32.store8 (i32.const {}) (i32.const {}))",
+            1024 + i,
+            b
+        ));
+    }
+    let src = format!(
+        r#"(module
+            (memory (export "memory") 4)
+            (func (export "rano_abi") (result i32) i32.const 1)
+            (func (export "rano_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "{hook}") (param i32 i32) (result i32)
+              {body}
+              (i32.store (i32.const 2048) (i32.const 1024))
+              (i32.store (i32.const 2052) (i32.const {n}))
+              i32.const 2048))"#,
+        n = out.len()
+    );
+    wat::parse_str(&src).expect("valid wat")
+}
+
+/// **The open hook**: a file's text is the hook's answer, the file on disk is not touched, and the
+/// buffer is not "modified" — opening is a reading, not an edit.
+#[test]
+fn opening_a_file_runs_the_open_hook() {
+    let d = temp_dir("plugin_open");
+    let f = d.0.join("notes.txt");
+    fs::write(&f, "original\n").unwrap();
+    let mut ed = test_ed("");
+    ed.set_plugin_bytes(
+        &wat_hook("on_open", "hooked\n"),
+        PathBuf::from("plugin.wasm"),
+    );
+    assert!(ed.open_at(&f, 1, None).is_ok());
+    assert_eq!(lines(&ed), vec!["hooked"]);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "original\n",
+        "the file is untouched"
+    );
+    assert!(!ed.bs().buf.modified, "reading is not an edit");
+}
+
+/// **The save hook**: what is written is what the hook answered *and* what the buffer becomes —
+/// one undo step, so the glass and the file never disagree.
+#[test]
+fn saving_runs_the_save_hook_and_the_buffer_is_what_was_written() {
+    let d = temp_dir("plugin_save");
+    let f = d.0.join("out.txt");
+    fs::write(&f, "before\n").unwrap();
+    let mut ed = test_ed("before\n");
+    ed.bs_mut().buf.name = Some(f.clone());
+    ed.set_plugin_bytes(
+        &wat_hook("on_save", "after\n"),
+        PathBuf::from("plugin.wasm"),
+    );
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "after\n");
+    assert_eq!(lines(&ed), vec!["after"]);
+    assert!(!ed.bs().buf.modified);
+    // One press takes the hook's transformation back — it was an edit, and says so.
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
+    assert_eq!(lines(&ed), vec!["before"], "M-U undoes the plugin's step");
+}
+
+/// **A hook that fails is skipped, never a failed save**: the file is written as the buffer had
+/// it, and the line names the plugin.
+#[test]
+fn a_trapping_plugin_leaves_the_save_intact() {
+    let d = temp_dir("plugin_trap");
+    let f = d.0.join("out.txt");
+    fs::write(&f, "mine\n").unwrap();
+    let mut ed = test_ed("mine\n");
+    ed.bs_mut().buf.name = Some(f.clone());
+    let trap = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "rano_abi") (result i32) i32.const 1)
+            (func (export "rano_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "on_save") (param i32 i32) (result i32) unreachable))"#,
+    )
+    .unwrap();
+    ed.set_plugin_bytes(&trap, PathBuf::from("trap.wasm"));
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(
+        fs::read_to_string(&f).unwrap(),
+        "mine\n",
+        "the save went through"
+    );
+    assert!(!ed.bs().buf.modified);
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(msg.contains("trap.wasm"), "{msg}");
+    assert!(
+        msg.contains("Wrote"),
+        "the save's own line is still there: {msg}"
+    );
+}
+
+/// **A binary never reaches a plugin**: it is read-only and its text is not the file.
+#[test]
+fn a_binary_file_never_reaches_the_plugin() {
+    let d = temp_dir("plugin_binary");
+    let f = d.0.join("blob.bin");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    fs::write(&f, &bytes).unwrap();
+    let mut ed = test_ed("");
+    ed.set_plugin_bytes(
+        &wat_hook("on_open", "hooked\n"),
+        PathBuf::from("plugin.wasm"),
+    );
+    assert!(ed.open_at(&f, 1, None).is_ok());
+    assert!(ed.bs().read_only, "a binary is a view");
+    assert!(
+        !lines(&ed).iter().any(|l| l == "hooked"),
+        "the hook did not run: {:?}",
+        lines(&ed).first()
+    );
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

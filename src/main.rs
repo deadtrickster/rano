@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use rano::buffer::{Buffer, Pos};
 use rano::editor::{Area, Editor};
+use rano::expand_tilde;
 use rano::render::{self, Palette, Rect};
 use rano::send_ctrl::split_position;
 use rano::term::{self, Event, Terminal};
@@ -328,6 +329,15 @@ fn run(
     ed.start_update_check();
     if let Some(cmd) = ed.config.send_command.clone() {
         ed.on_send = Some(send_ctrl::command_sender(cmd));
+    }
+    // **The plugin**: `RANO_PLUGIN` beats the config file, and either may be absent. A plugin that
+    // cannot load says so once and leaves the editor exactly as it was.
+    if let Some(p) = std::env::var("RANO_PLUGIN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| ed.config.plugin.clone())
+    {
+        ed.set_plugin(&PathBuf::from(expand_tilde(&p)));
     }
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.

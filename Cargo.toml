@@ -42,6 +42,7 @@ tree-sitter-elisp = "1.7.2"
 tree-sitter-scheme = "0.24.7"
 tree-sitter-sequel = "0.3.11"
 tree-sitter-clojure-orchard = "0.2.8"
+wasmtime = { version = "49.0.3", default-features = false, features = ["std", "runtime", "cranelift"] }
 
 [build-dependencies]
 cc = "1"
@@ -66,3 +67,6 @@ cc = "1"
 strip = true
 lto = true
 codegen-units = 1
+
+[dev-dependencies]
+wat = "1.262.0"

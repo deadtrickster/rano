@@ -331,6 +331,35 @@ The listing is **read-only**, like a tail: it is a view, not a document, and an 
 refused with a line saying so. Everything that only moves — the arrows, `PgUp`/`PgDn`,
 search, `M-x` — works as it does over text, and a listing opens no language server.
 
+## Plugins
+
+A `.wasm` file named by `plugin` (or `RANO_PLUGIN`) gets two hooks, both optional: **`on_open`**
+when a file's text is read, and **`on_save`** when a buffer is written. A plugin is a pure text
+transform — it imports nothing at all — so the whole ABI is four exports:
+
+```wat
+(memory (export "memory") 1)                              ;; the guest's memory
+(func (export "rano_abi") (result i32) i32.const 1)       ;; the version; anything else is refused
+(func (export "rano_alloc") (param i32) (result i32))     ;; reserve n bytes -> offset
+(func (export "on_save") (param i32 i32) (result i32))    ;; (in_ptr, in_len) -> result block
+```
+
+A hook returns the offset of two little-endian `u32`s — `{out_ptr, out_len}` — or `0xFFFFFFFF`
+for "leave it alone". The hooks are found by *name*, so a later rano can add one without this
+changing.
+
+What the host guarantees, in both directions: 50 million units of fuel and 64 MiB of guest memory
+per call, 16 MiB of text in and out, and a **fresh instance per call** — nothing accumulates
+between saves. What a hook guarantees, on its side: it is **deterministic**, because on save its
+answer *replaces the buffer* as one undo step (`M-U` takes it back) so that the file and the
+screen are the same text. A second save of unchanged text therefore writes the same bytes.
+
+**A plugin never costs you a file.** No ABI, an import, a trap, running out of fuel, asking for
+more memory than allowed, answering something that is not text, or a text above the cap: the hook
+is skipped, the open or the save happens exactly as it would have without it, and one line names
+the plugin and the reason. A binary file never reaches a hook at all, and a file above 16 MiB is
+read by the streaming loader with the hook skipped (and said to be).
+
 ## Todos
 
 Open a file named `TODO.md` and the checkboxes are live. It is the
@@ -424,6 +453,10 @@ tab_width = 4      # 1..=16, how WIDE a tab is drawn (+ horizontal scrolling)
 indent = spaces
 indent_size = 4    # 1..=16, columns per indent step when it is spaces
 auto_indent = true
+# A WASM plugin: a .wasm file whose on_open / on_save hooks run at the two seams.
+# `RANO_PLUGIN` overrides it. A stage-1 hook imports nothing (a pure text transform),
+# gets fuel and a memory cap, and is skipped — never fatal — when it cannot run.
+plugin = ""
 line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
 wrap = true         # soft line wrap (M-\ toggles at runtime)

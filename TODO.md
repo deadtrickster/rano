@@ -3098,12 +3098,13 @@ The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
 - [x] **Stage 0, landed in Rust**: the folder listing (the dired) — `src/dirview.rs`, `M-G`, `F8`
   on a folder, `rano some/folder/`, `RET`/`-`/`r`/`q`, read-only, tests. It is both the working
   feature now and the *reference format* a builtin plugin has to produce.
-- [x] **The runtime, measured** (probe, rano's release profile): wasmi 0.40 — interpreter, 14
-  crates, **+0.88 MiB** (302,448 B → 1,229,920 B), module compile 903 µs, and **8.5 ms per MiB**
-  of a real transform (9.2 µs for 1 KiB). wasmtime 40 at **105 crates** (binary delta still
-  unmeasured). A hook runs once per open and once per save, so 8.5 ms/MiB is invisible on normal
-  files and ~136 ms at the 16 MiB cap — which is the fact the *probe* (§6 of the plan) turns into
-  a per-plugin number instead of an argument.
+- [x] **Both runtimes, measured on the same module and profile** (probe, 2026-10-18):
+  **wasmi 0.40** — 14 crates, **+0.88 MiB** (302,448 B → 1,229,920 B), compile 903 µs,
+  **8.3 ms/MiB** (12.4 µs for 1 KiB); **wasmtime 40** (`std`+`runtime`+`cranelift`) — **185
+  crates**, **+4.55 MiB** (→ 5,073,264 B), compile 3.17 ms, **483 µs/MiB** (17× faster per byte),
+  and *slower* at 1 KiB (15.3 µs against 12.4 µs — instantiation + call overhead). So JIT is 17×
+  the work speed for 5× the binary and 13× the crates; a hook runs once per open/save, so the
+  probe (§6 of the plan) is what turns "is JIT needed" into a per-plugin fact.
 - [x] **Hooks are discovered, not hardcoded**: the host enumerates the module's exports for
   `on_<event>` (stage 1: `on_open`, `on_save`) and `provider_<event>` (the dired-class hook), so
   *"more interesting hooks"* costs a host-side function and no ABI bump.

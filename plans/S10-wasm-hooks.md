@@ -12,13 +12,15 @@ Runtime facts verified in the local registry source (wasmi 0.40.0: `store.rs` `s
 measured with rano's release profile (`strip`, `lto`, `codegen-units=1`; the probe also set
 `panic=abort`, which rano does not, so the real delta is if anything slightly larger):
 
-| | wasmi 0.40 | wasmtime 40 (`std`+`runtime`) |
+| | wasmi 0.40 | wasmtime 40 (`std`+`runtime`+`cranelift`) |
 |---|---|---|
 | engine | interpreter, no JIT, no unsafe codegen | Cranelift |
-| crates resolved | **14** | **105** |
-| binary delta | **+0.88 MiB** (302,448 B → 1,229,920 B) | **not measured yet** — step 1 measures it if JIT is chosen |
-| module compile | 903 µs, once per process | — |
-| **per-byte work, measured** | **9.2 µs / 1 KiB, 8.5 ms / 1 MiB** (uppercase loop, ~123 MB/s) | not measured (Cranelift is typically 5–20× faster on a tight loop) |
+| crates resolved | **14** | **185** |
+| binary delta | **+0.88 MiB** (302,448 B → 1,229,920 B) | **+4.55 MiB** (302,448 B → 5,073,264 B) |
+| module compile, once | 903 µs | 3.17 ms |
+| **1 KiB** (uppercase loop) | 12.4 µs | **15.3 µs** — slower: instantiation + call overhead |
+| **1 MiB** | 8.3 ms | **483 µs** — 17× faster |
+| **16 MiB** (the cap) | ~136 ms (extrapolated; the probe module held 4 MiB) | **7.8 ms** — ~17× faster |
 
 ---
 
@@ -156,17 +158,22 @@ loaded from there exactly like a plugin the reader installed by hand.
 
 A hook runs **once per open and once per save** — never per keystroke, never per frame — so the
 cost that is always paid is the binary and the lockfile, and the cost that is sometimes paid is
-per-byte work. The measured numbers (top table) say: wasmi is **8.5 ms per MiB** of transform, so a
-100 KB save pays ~0.9 ms (invisible) and a 16 MiB one ~136 ms (real, and fuel-bounded); a JIT buys
-roughly the 5–20× ratio, which matters at the cap and not at all below a few MB.
+per-byte work. **Measured on the same WAT module, same host, same profile** (top table):
 
-So the answer to *"jit is absolutely needed"* is: **let the probe answer it per plugin**, and keep
-the engine behind the `Plugin` façade, where switching it is one line and no ABI moves. Two things
-to settle before step 1:
+- **The JIT is 17× faster per byte.** 1 MiB: 483 µs against 8.3 ms. 16 MiB: 7.8 ms against
+  ~136 ms. On the file that is large enough to matter, that is a real difference: an eighth of a
+  second a reader can feel, against one they cannot.
+- **The JIT is 5× the size and 13× the crates.** +4.55 MiB against +0.88 MiB, 185 crates against
+  14 — a quarter of the binary, for a feature that does nothing when no plugin is installed.
+- **At small sizes the interpreter wins**: 12.4 µs against 15.3 µs at 1 KiB, because a wasmtime
+  call pays instantiation and call overhead the interpreter does not. A 100 KB file costs either
+  way a fraction of a millisecond.
 
-1. **Measure wasmtime's binary delta** with rano's profile — the crate count (105) is not a size.
-2. Decide the default: **wasmi** (a third of the resvg cost, nothing to lock in) or **wasmtime**
-   (fast at the cap, +105 crates and a build time nobody has measured here).
+So *"jit is absolutely needed"* is true for **what the plugin does**, not for the hook itself. The
+plan's answer is the probe (§6): it reports each hook's cost per MiB on this machine, so the engine
+question becomes "is this plugin slow?" — a measurement — and the engine stays behind the `Plugin`
+façade, where switching it is one line and the ABI does not move. If the ruling is "wasmtime from
+the start", §4.1's cost is the number above, and the gate question in §13 comes back with it.
 
 ## 5. Bounds (all of them per call)
 
@@ -332,8 +339,11 @@ Each step lands green and is independently revertable; 1–3 are invisible to a 
 
 ## 13. Open questions (each cheap, each the operator's)
 
-1. **Engine for stage 1**: wasmi (measured, small) or wasmtime (JIT, 105 crates, delta unmeasured)?
-   The probe (§6) makes it a per-plugin fact after step 5 either way.
+1. **Engine for stage 1**, now with both numbers: **wasmi** (+0.88 MiB, 14 crates, 8.3 ms/MiB) or
+   **wasmtime** (+4.55 MiB, 185 crates, 483 µs/MiB, and 15 µs against 12 µs on a tiny input)?
+   The probe (§6) makes it a per-plugin fact after step 5 either way, and the façade makes the
+   switch one line — but the binary's size is paid whether or not a plugin exists, so this is the
+   one decision the operator should make first.
 2. **Bus library**: `zbus` or a Unix socket with the same three messages? The plan's preference is
    whatever the measurement says; the operator asked for DBus, so the socket is only the fallback.
 3. **The first capability** is `read-dir` — confirm that is the one to open the sandbox with.

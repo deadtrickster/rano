@@ -37,6 +37,9 @@ unsafe extern "C" {
     fn tree_sitter_dockerfile() -> *const ();
 }
 
+/// The columnar system databases, styled without a grammar.
+mod columns;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lang {
     Rust,
@@ -67,6 +70,12 @@ pub enum Lang {
     Make,
     Dockerfile,
     Ini,
+    /// The columnar system databases — `fstab`, `passwd`, `hosts` and their kin.
+    ///
+    /// **This one has no grammar.** [`columns::grid`] styles it, and `refresh_rows`
+    /// branches before anything would ask for a parse, which is why `language()` can
+    /// still answer for it at all.
+    Columns(columns::Format),
     Diff,
     Elisp,
     Scheme,
@@ -170,6 +179,7 @@ impl Lang {
             Lang::Make => "make",
             Lang::Dockerfile => "dockerfile",
             Lang::Ini => "ini",
+            Lang::Columns(f) => f.name(),
             Lang::Diff => "diff",
             Lang::Elisp => "elisp",
             Lang::Scheme => "scheme",
@@ -205,6 +215,12 @@ impl Lang {
                 Language::new(LanguageFn::from_raw(tree_sitter_dockerfile))
             },
             Lang::Ini => tree_sitter_ini::LANGUAGE.into(),
+            // **No grammar.** The columnar system databases are styled by
+            // [`columns::grid`] and never parsed — `refresh_rows` and
+            // `parse_for_diagnostics` both branch before they ask for this. The ini pair
+            // stands in so the signatures stay total, and the empty query below means a
+            // missed branch would colour nothing rather than something wrong.
+            Lang::Columns(_) => tree_sitter_ini::LANGUAGE.into(),
             Lang::Diff => tree_sitter_diff::LANGUAGE.into(),
             Lang::Elisp => tree_sitter_elisp::LANGUAGE.into(),
             Lang::Scheme => tree_sitter_scheme::LANGUAGE.into(),
@@ -237,6 +253,7 @@ impl Lang {
             Lang::Make => tree_sitter_make::HIGHLIGHTS_QUERY,
             Lang::Dockerfile => DOCKERFILE_HIGHLIGHTS_QUERY,
             Lang::Ini => tree_sitter_ini::HIGHLIGHTS_QUERY,
+            Lang::Columns(_) => "",
             Lang::Diff => DIFF_HIGHLIGHTS_QUERY,
             Lang::Elisp => tree_sitter_elisp::HIGHLIGHTS_QUERY,
             Lang::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
@@ -710,6 +727,12 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
             "clj" | "cljs" | "cljc" | "edn" => return Some(Lang::Clojure),
             _ => {}
         }
+    }
+    // **The columnar system databases**, by name. They have no grammar, so they are a
+    // hand-written format ([`columns`]) and not a parse. A list of names, yes — of the
+    // documented databases (`fstab(5)`, `passwd(5)`, …), not of files somebody opened.
+    if let Some(fmt) = name.and_then(columns::detect_format) {
+        return Some(Lang::Columns(fmt));
     }
     detect_filename(name).or_else(|| detect_content(sample))
 }
@@ -1364,6 +1387,20 @@ impl Highlighter {
             rows: (w.rows.0, w.rows.1.min(buf.row_count().saturating_sub(1))),
             cols: w.cols,
         });
+        // **A language with no grammar** — the columnar system databases — builds its
+        // grid from the text, with no tree and no query. It must stop here: everything
+        // below is a parse. The three installs are repeated rather than shared with this
+        // function's tail because the one thing between them is the merge-conflict tint
+        // loop, and a conflict marker inside `/etc/fstab` is not a thing.
+        if let Lang::Columns(fmt) = lang {
+            self.line_styles = columns::grid(&source, fmt);
+            self.window = parsed.map(|w| (w, base_row, base_col));
+            self.window_covers_whole = match parsed {
+                Some(w) => w.rows.0 == 0 && w.rows.1 + 1 >= buf.row_count(),
+                None => false,
+            };
+            return;
+        }
         if self.parser.set_language(&lang.language()).is_err() {
             self.clear();
             return;
@@ -1548,6 +1585,12 @@ impl Highlighter {
             self.diag_tree = None;
             return false;
         };
+        // No grammar, so no tree: the columnar databases have no tree-sitter
+        // diagnostics, and there is nothing to report from.
+        if matches!(lang, Lang::Columns(_)) {
+            self.diag_tree = None;
+            return false;
+        }
         if self.parser.set_language(&lang.language()).is_err() {
             self.diag_tree = None;
             return false;

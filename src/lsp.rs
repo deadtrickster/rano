@@ -173,6 +173,7 @@ pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
         Lang::Make
         | Lang::Dockerfile
         | Lang::Ini
+        | Lang::Columns(_)
         | Lang::Diff
         | Lang::Elisp
         | Lang::Scheme
@@ -208,6 +209,9 @@ fn language_id(lang: Lang) -> &'static str {
         Lang::Make => "make",
         Lang::Dockerfile => "dockerfile",
         Lang::Ini => "ini",
+        // Never spawned: `command_for` returns `None` for these, so the id is only
+        // here to keep the match total.
+        Lang::Columns(f) => f.name(),
         Lang::Diff => "diff",
         Lang::Elisp => "elisp",
         Lang::Scheme => "scheme",

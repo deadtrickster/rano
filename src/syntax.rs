@@ -42,6 +42,8 @@ unsafe extern "C" {
 /// `pub` because `Lang::Columns` carries a [`columns::Format`] and a caller naming a mode
 /// has to be able to name one.
 pub mod columns;
+/// The names a language is known by, generated from linguist (see the module doc).
+pub mod linguist;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -762,6 +764,24 @@ pub const SAMPLE_BYTES: usize = 2048;
 /// `sample` is the file's first [`SAMPLE_LINES`] lines ([`sample_of`] builds it
 /// from a buffer). Empty for a scratch buffer.
 pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
+    // **A whole name first**, because a name is more specific than a suffix: `tmux.conf`
+    // is a shell file and `.conf` is a config file, and linguist puts filename before
+    // extension for exactly this reason (as does vim: name, then contents).
+    //
+    // The columnar system databases are here because `fstab` IS the name.
+    if let Some(fmt) = name.and_then(columns::detect_format) {
+        return Some(Lang::Columns(fmt));
+    }
+    if let Some(l) = detect_filename(name) {
+        return Some(l);
+    }
+    if let Some(l) = name
+        .and_then(|p| p.file_name())
+        .and_then(|f| f.to_str())
+        .and_then(linguist::by_filename)
+    {
+        return Some(l);
+    }
     if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
             "rs" => return Some(Lang::Rust),
@@ -803,14 +823,22 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
             "clj" | "cljs" | "cljc" | "edn" => return Some(Lang::Clojure),
             _ => {}
         }
+        // **The rest of the extensions the standards claim**, from linguist rather than from
+        // memory: `.hpp`, `.geojson`, `.mts`, `.gitconfig`'s neighbours, the 220 of them.
+        // The match above stays because its comments say WHY a few of them are what they
+        // are; this covers the long tail nobody can hold in their head.
+        // Matched on the whole NAME rather than on `ext`, because linguist lists
+        // multi-part extensions (`.cljs.hl`, `.json.example`) that `Path::extension()`
+        // cannot see — it returns only the component after the last dot.
+        if let Some(l) = name
+            .and_then(|p| p.file_name())
+            .and_then(|f| f.to_str())
+            .and_then(linguist::by_suffix)
+        {
+            return Some(l);
+        }
     }
-    // **The columnar system databases**, by name. They have no grammar, so they are a
-    // hand-written format ([`columns`]) and not a parse. A list of names, yes — of the
-    // documented databases (`fstab(5)`, `passwd(5)`, …), not of files somebody opened.
-    if let Some(fmt) = name.and_then(columns::detect_format) {
-        return Some(Lang::Columns(fmt));
-    }
-    detect_filename(name).or_else(|| detect_content(sample))
+    detect_content(sample)
 }
 
 /// **The last resort: what a file's first lines say, when its name said nothing.**
@@ -992,7 +1020,8 @@ fn detect_shebang(line: &str) -> Option<Lang> {
         "php" => Some(Lang::Php),
         // Version-suffixed Lua interpreters: lua, lua5.4, luajit, …
         w if w.starts_with("lua") => Some(Lang::Lua),
-        _ => None,
+        // And the long tail, from linguist: `ts-node`, `bun`, `deno`, `sbcl`, …
+        other => linguist::by_interpreter(other),
     }
 }
 
@@ -5417,5 +5446,105 @@ mod content_detection {
         let s = sample_of(&b);
         assert!(s.len() <= SAMPLE_BYTES + 1, "sample is {} bytes", s.len());
         assert!(s.lines().count() <= SAMPLE_LINES);
+    }
+}
+
+/// **The generated name table is a superset of linguist's answer for our languages.**
+///
+/// The fixture is linguist's SOURCE data, not a copy of the table, which is the whole point:
+/// a row deleted from `linguist.rs` fails here, and a table that has drifted from the data
+/// fails here too. Regenerate both with `scripts/linguist-table.py <languages.yml>`.
+#[cfg(test)]
+mod linguist_table {
+    use super::*;
+    use std::path::Path;
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/linguist/our-languages.tsv");
+
+    /// What `detect_sample` says about one row of the fixture.
+    fn detects(kind: &str, value: &str) -> Option<Lang> {
+        match kind {
+            "ext" => detect_sample(Some(Path::new(&format!("x.{value}"))), ""),
+            "filename" => detect_sample(Some(Path::new(value)), ""),
+            "interpreter" => detect_sample(None, &format!("#!/usr/bin/env {value}\n")),
+            other => panic!("the fixture has a kind {other:?} this test cannot ask about"),
+        }
+    }
+
+    /// Rows where a hand-written rule deliberately answers differently. Named with the
+    /// reason, so the exception is a decision rather than a hole: the hand table above has
+    /// `.desktop -> Ini` on purpose, and linguist calls `.emacs.desktop` Elisp.
+    const OVERRIDES: &[(&str, &str, Lang)] = &[("ext", "emacs.desktop", Lang::Ini)];
+
+    #[test]
+    fn every_row_of_linguists_data_detects_as_its_language() {
+        let mut n = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for line in FIXTURE.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let mut it = line.split('\t');
+            let (name, kind, value) = match (it.next(), it.next(), it.next()) {
+                (Some(a), Some(b), Some(c)) => (a, b, c),
+                _ => panic!("bad fixture row {line:?}"),
+            };
+            let want = Lang::from_name(name)
+                .unwrap_or_else(|| panic!("the fixture names {name:?}, which no mode answers to"));
+            let over = OVERRIDES
+                .iter()
+                .find(|(k, v, _)| *k == kind && *v == value)
+                .map(|(_, _, l)| *l);
+            let expected = over.unwrap_or(want);
+            let got = detects(kind, value);
+            if got != Some(expected) {
+                wrong.push(format!(
+                    "{kind} {value:?} should be {} ({name}){}{:?}",
+                    expected.name(),
+                    if over.is_some() {
+                        ", overridden: "
+                    } else {
+                        ", got "
+                    },
+                    got
+                ));
+            }
+            n += 1;
+        }
+        assert!(n > 400, "the fixture went missing: {n} rows read");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n} rows disagree:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    /// The counts are stated in the module doc, so a regeneration that silently loses rows
+    /// (a changed YAML shape, a rename) is a failure rather than a smaller table.
+    #[test]
+    fn the_table_holds_the_rows_the_fixture_does() {
+        let fixture = FIXTURE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count();
+        let table =
+            linguist::EXTENSIONS.len() + linguist::FILENAMES.len() + linguist::INTERPRETERS.len();
+        assert_eq!(table, fixture, "the table and the fixture disagree in size");
+        assert!(
+            linguist::EXTENSIONS.len() > 200,
+            "{} extensions",
+            linguist::EXTENSIONS.len()
+        );
+        assert!(
+            linguist::FILENAMES.len() > 140,
+            "{} names",
+            linguist::FILENAMES.len()
+        );
+        assert!(
+            linguist::INTERPRETERS.len() > 50,
+            "{} interpreters",
+            linguist::INTERPRETERS.len()
+        );
     }
 }

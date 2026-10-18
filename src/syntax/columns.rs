@@ -123,10 +123,16 @@ pub fn detect_format(name: &Path) -> Option<Format> {
 /// A style grid for `src`, one cell per character, in the shape [`crate::syntax`]'s
 /// windowed refresh installs.
 ///
-/// The whole of the rule is here: comments faint, field 0 strong, separators faint.
+/// The whole of the rule is here: comments in the comment role, field 0 strong,
+/// separators faint.
 pub fn grid(src: &str, fmt: Format) -> Vec<Vec<Style>> {
     let faint = Style::of(Role::Faint);
     let strong = Style::of(Role::Strong);
+    // **A comment is the COMMENT role**, the one the syntax highlighter gives `# …` in code
+    // — not `Faint`. They render alike in the default palette (both are dim), but a theme
+    // that colours `comment` colours this too only if it wears the same role. Found by the
+    // operator asking why a `fstab` comment did not look muted where a code comment did.
+    let comment = Style::of(Role::Comment);
     let mut out = Vec::with_capacity(src.lines().count().max(1));
     for line in src.split('\n') {
         let chars: Vec<char> = line.chars().collect();
@@ -139,7 +145,7 @@ pub fn grid(src: &str, fmt: Format) -> Vec<Vec<Style>> {
             match chars.iter().position(|c| *c == '#') {
                 Some(at) => {
                     for cell in &mut row[at..] {
-                        *cell = faint.clone();
+                        *cell = comment.clone();
                     }
                     at
                 }
@@ -263,16 +269,17 @@ mod tests {
         assert_eq!(at(&r[0], 10), Style::new(), "a name");
     }
 
-    /// A comment is faint to the end of the line, and a comments-only line has no strong
-    /// column at all.
+    /// A comment wears the COMMENT role to the end of the line — the same role a `# …` in
+    /// code wears, so a theme that colours comments colours both — and a comments-only line
+    /// has no strong column at all.
     #[test]
     fn a_comment_runs_to_the_end_of_the_line() {
-        let faint = Style::of(Role::Faint);
+        let comment = Style::of(Role::Comment);
         let r = styles(
             "# /etc/fstab: static file system information\n",
             Format::Fstab,
         );
-        assert!(r[0].iter().all(|style| *style == faint));
+        assert!(r[0].iter().all(|style| *style == comment));
         // The colon databases have no comment syntax, so `#` there is content.
         let r = styles("#x:0:0:root:/root:/bin/sh", Format::Passwd);
         assert_eq!(
@@ -280,7 +287,11 @@ mod tests {
             Style::of(Role::Strong),
             "a `#` login, not a comment"
         );
-        assert_eq!(at(&r[0], 2), faint, "and its colon still separates");
+        assert_eq!(
+            at(&r[0], 2),
+            Style::of(Role::Faint),
+            "and its colon still separates"
+        );
     }
 
     /// The names, and the negatives: a `.bak` beside one of them is not the format.

@@ -635,9 +635,40 @@ const COMMONLISP_HIGHLIGHTS_QUERY: &str = r##"
 
 /// Map a file to its language: by extension first, then by the file name
 /// (`Makefile`, `Dockerfile`, `.gitconfig` — extension-less conventions),
-/// then by the shebang on line one (`#!/bin/sh`, `#!/usr/bin/env python3`)
-/// for extension-less scripts (scratch buffers get none).
+/// then by its contents, which is [`detect_sample`]'s ladder. Kept as the
+/// one-line entry point for a caller that has only the first line.
 pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
+    detect_sample(name, first_line.unwrap_or(""))
+}
+
+/// How many lines of a file the content probe reads.
+///
+/// A shebang is one line; a diff header is two; a `key = value` file needs a few
+/// before the shape is worth believing. Twelve is more than any of those and still
+/// a few hundred bytes of the buffer, which is what makes this affordable on the
+/// highlight path — it runs per refresh, not per keystroke.
+pub const SAMPLE_LINES: usize = 12;
+
+/// How many bytes of those lines the probe reads at most.
+///
+/// A buffer can hold megabyte rows; the probe must not build one to look at it.
+pub const SAMPLE_BYTES: usize = 2048;
+
+/// **Map a file to its language, the way an editor does it**: by extension, then
+/// by the file name, then — and only then — by what the first lines look like.
+///
+/// The order is the one every editor settles on, and it is not a preference.
+/// Vim's own manual: it detects *"by checking the file name and sometimes by
+/// inspecting the contents"*, and *"if the file type is not found by the name,
+/// `scripts.vim` is used to detect it from the contents"*. Emacs has the same two
+/// layers (`auto-mode-alist`, then `magic-mode-alist` on the buffer start), and
+/// GitHub's linguist runs modeline → filename → shebang → extension → heuristics →
+/// classifier, each step narrowing. Contents are the last resort everywhere,
+/// because a name is a statement and contents are evidence.
+///
+/// `sample` is the file's first [`SAMPLE_LINES`] lines ([`sample_of`] builds it
+/// from a buffer). Empty for a scratch buffer.
+pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
     if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
             "rs" => return Some(Lang::Rust),
@@ -662,7 +693,16 @@ pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
             "java" => return Some(Lang::Java),
             "mk" => return Some(Lang::Make),
             "dockerfile" => return Some(Lang::Dockerfile),
-            "ini" | "cfg" | "conf" | "properties" => return Some(Lang::Ini),
+            // Config formats by the extension's own meaning. The systemd/XDG set is
+            // linguist's `INI.extensions`, taken rather than reinvented — those files are
+            // ini by their specification, not by a list of programs. `.conf` is ours and
+            // stays: it is ambiguous everywhere else (nginx and ini configs share it) and
+            // here it is the one thing that makes the configs in `/etc` colour at all.
+            "ini" | "cfg" | "conf" | "properties" | "cnf" | "service" | "socket" | "timer"
+            | "mount" | "automount" | "target" | "slice" | "path" | "swap" | "scope"
+            | "desktop" | "directory" | "container" | "network" | "url" => {
+                return Some(Lang::Ini);
+            }
             "diff" | "patch" => return Some(Lang::Diff),
             "el" => return Some(Lang::Elisp),
             "scm" | "ss" => return Some(Lang::Scheme),
@@ -671,7 +711,107 @@ pub fn detect(name: Option<&Path>, first_line: Option<&str>) -> Option<Lang> {
             _ => {}
         }
     }
-    detect_filename(name).or_else(|| detect_shebang(first_line?))
+    detect_filename(name).or_else(|| detect_content(sample))
+}
+
+/// **The last resort: what a file's first lines say, when its name said nothing.**
+///
+/// Four shapes, in order, and deliberately no list of file names — the point of a
+/// content rule is that it does not need to know which files exist. `#!` is line
+/// one by definition (the kernel requires it at offset zero); everything else is
+/// scanned over the sample, skipping blanks and comments.
+///
+/// What is *not* here is as deliberate: a columnar file — `fstab`, `hosts`,
+/// `passwd`, `services` — gets **no** language, because no grammar here describes
+/// it and colouring one would be a confident lie rather than a guess.
+///
+/// The known misfires are the cost of the ladder, and the reason contents come
+/// last: an extension-less Python file whose first statement is `x=1` reads as a
+/// shell assignment, which `content_detection::the_misfires_are_known` pins.
+fn detect_content(sample: &str) -> Option<Lang> {
+    // 1. A shebang, on line one and nowhere else.
+    if let Some(first) = sample.split('\n').next()
+        && let Some(lang) = detect_shebang(first)
+    {
+        return Some(lang);
+    }
+    let mut after_minus = false;
+    let mut ini = false;
+    let mut section = false;
+    let mut assignment = false;
+    for line in sample.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
+            continue;
+        }
+        // 2. A unified diff: `--- a/x`, then `+++ b/x`, in that order.
+        if t.starts_with("--- ") && t.len() > 4 {
+            after_minus = true;
+            continue;
+        }
+        if after_minus && t.starts_with("+++ ") && t.len() > 4 {
+            return Some(Lang::Diff);
+        }
+        // 3. A section header.
+        if t.len() > 2 && t.starts_with('[') && t.ends_with(']') {
+            section = true;
+            continue;
+        }
+        // 4. An assignment, and the two kinds are told apart by the writer's own
+        // habit: ini spaces the `=`, a shell assignment does not, and a shell
+        // value is one word (quoted or bare) — which is what keeps `fstab`'s
+        // `UUID=… /boot/efi vfat …` out of it.
+        let Some(eq) = t.find('=') else { continue };
+        let (key, value) = (&t[..eq], t[eq + 1..].trim());
+        if value.is_empty() {
+            continue;
+        }
+        if key.ends_with([' ', '\t']) {
+            ini = true;
+            continue;
+        }
+        let ident = !key.is_empty()
+            && key.chars().enumerate().all(|(i, c)| {
+                if i == 0 {
+                    c.is_ascii_alphabetic() || c == '_'
+                } else {
+                    c.is_ascii_alphanumeric() || c == '_'
+                }
+            });
+        let quoted = value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')));
+        if ident && (quoted || !value.contains(char::is_whitespace)) {
+            assignment = true;
+        }
+    }
+    // A section is the stronger signal: a unit file has both `[Unit]` and
+    // `Environment="X=1"`, and it is an ini file.
+    if ini || section {
+        return Some(Lang::Ini);
+    }
+    if assignment {
+        return Some(Lang::Bash);
+    }
+    None
+}
+
+/// The first [`SAMPLE_LINES`] lines of `buf`, at most [`SAMPLE_BYTES`], for
+/// [`detect_sample`].
+fn sample_of(buf: &Buffer) -> String {
+    let mut out = String::new();
+    for r in 0..buf.row_count().min(SAMPLE_LINES) {
+        let Some(row) = buf.row_opt(r) else { break };
+        // Room for this row AND the newline that ends it: a single megabyte row must
+        // not push the sample past its cap, which is the whole point of the cap.
+        let room = SAMPLE_BYTES.saturating_sub(out.len() + 1);
+        out.extend(row.iter().take(room));
+        out.push('\n');
+        if out.len() >= SAMPLE_BYTES {
+            break;
+        }
+    }
+    out
 }
 
 /// A language's highlight query, **compiled once per process**.
@@ -1189,8 +1329,8 @@ impl Highlighter {
     }
 
     fn refresh_rows(&mut self, buf: &Buffer, win: Option<Window>) {
-        let first_line = buf.row_opt(0).map(|l| l.iter().collect::<String>());
-        let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
+        let sample = sample_of(buf);
+        let Some(lang) = detect_sample(buf.name.as_deref(), &sample) else {
             self.clear();
             return;
         };
@@ -1403,8 +1543,8 @@ impl Highlighter {
     /// Returns false when the language is unknown or the parse failed, in which
     /// case the caller keeps whatever it had rather than clearing it.
     pub fn parse_for_diagnostics(&mut self, buf: &Buffer) -> bool {
-        let first_line = buf.row_opt(0).map(|l| l.iter().collect::<String>());
-        let Some(lang) = detect(buf.name.as_deref(), first_line.as_deref()) else {
+        let sample = sample_of(buf);
+        let Some(lang) = detect_sample(buf.name.as_deref(), &sample) else {
             self.diag_tree = None;
             return false;
         };
@@ -4985,5 +5125,139 @@ mod window_tests {
             b < a * 4.0 + 1e-9,
             "per-row window cost grew with the document: {a:.3e} → {b:.3e} s/row"
         );
+    }
+}
+
+/// **What a file's first lines say, when its name said nothing.**
+///
+/// The ladder's last resort, and the shapes it accepts — pinned here because every
+/// one of them is a judgement about how a config file is written, and the negatives
+/// (the files that get *no* language) are as deliberate as the positives.
+#[cfg(test)]
+mod content_detection {
+    use super::*;
+
+    fn sniff(sample: &str) -> Option<Lang> {
+        detect_sample(None, sample)
+    }
+
+    /// **The case that started this.** `/etc/default/grub` has no extension and its
+    /// first line is a comment, so a one-line probe sees nothing at all; the sample
+    /// sees `GRUB_DEFAULT=0` and knows it is sourced by `sh`.
+    #[test]
+    fn an_etc_default_shell_fragment_is_bash() {
+        let grub = "# If you change this file, run 'update-grub' afterwards to update\n\
+                    # /boot/grub/grub.cfg.\n\
+                    GRUB_DEFAULT=0\n\
+                    GRUB_TIMEOUT=5\n\
+                    GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"\n";
+        assert_eq!(sniff(grub), Some(Lang::Bash));
+        // `os-release` and `environment`: quoted values, no spaces around the `=`.
+        assert_eq!(
+            sniff("PRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nNAME=\"Ubuntu\"\n"),
+            Some(Lang::Bash)
+        );
+        assert_eq!(
+            sniff("PATH=\"/usr/local/sbin:/usr/bin\"\n"),
+            Some(Lang::Bash)
+        );
+    }
+
+    /// ini by its own shape — a section header, or a spaced `=` with no section at all
+    /// (which is what a mirrorlist looks like).
+    #[test]
+    fn ini_by_shape_and_not_by_name() {
+        assert_eq!(
+            sniff("[Unit]\nDescription=thing\nWants=network.target\n"),
+            Some(Lang::Ini),
+            "a systemd unit"
+        );
+        assert_eq!(
+            sniff("# Arch Linux mirrorlist\nServer = https://mirror.example/arch\n"),
+            Some(Lang::Ini),
+            "a mirrorlist: `key = value` with no section"
+        );
+    }
+
+    #[test]
+    fn a_diff_header_pair_is_a_diff() {
+        assert_eq!(
+            sniff("--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n"),
+            Some(Lang::Diff)
+        );
+        // `--- ` alone is a horizontal rule or a signature, not a diff.
+        assert_eq!(sniff("--- just a line of dashes\n"), None);
+    }
+
+    /// **The files that get nothing, deliberately.** They have formats — `fstab(5)`
+    /// documents six fields — but no tree-sitter grammar describes them, and colouring
+    /// one with a grammar that means something else is a confident lie rather than a
+    /// guess. `columnar_config_is_its_own_problem` is where that would go.
+    #[test]
+    fn columnar_config_gets_no_language() {
+        for (what, sample) in [
+            (
+                "fstab",
+                "UUID=41A6-A18F   /boot/efi   vfat   umask=0077   0   1\n",
+            ),
+            (
+                "hosts",
+                "127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost\n",
+            ),
+            ("passwd", "root:x:0:0:root:/root:/bin/bash\n"),
+            ("login.defs", "MAIL_DIR\t/var/mail\n"),
+            ("inputrc", "set input-meta on\n"),
+            ("services", "http\t\t80/tcp\t\twww\n"),
+        ] {
+            assert_eq!(sniff(sample), None, "{what} should get no language");
+        }
+    }
+
+    /// A name is a statement and the contents are evidence: the name wins.
+    #[test]
+    fn a_name_beats_the_contents() {
+        assert_eq!(
+            detect_sample(Some(Path::new("thing.py")), "FOO=1\n"),
+            Some(Lang::Python)
+        );
+        assert_eq!(
+            detect_sample(Some(Path::new("thing.sh")), "[section]\nkey = value\n"),
+            Some(Lang::Bash)
+        );
+        // And the extension list that came from linguist's own `INI` entry.
+        for name in ["a.service", "a.socket", "a.timer", "a.desktop", "a.mount"] {
+            assert_eq!(
+                detect_sample(Some(Path::new(name)), ""),
+                Some(Lang::Ini),
+                "{name}"
+            );
+        }
+    }
+
+    /// A shebang is line one by definition — the kernel requires it at offset zero.
+    #[test]
+    fn a_shebang_is_line_one_and_nothing_else() {
+        assert_eq!(sniff("#!/usr/bin/env python3\nx=1\n"), Some(Lang::Python));
+        // On line two it is a comment, and the shape rules do not read comments.
+        assert_eq!(sniff("\n#!/usr/bin/env python3\n"), None);
+    }
+
+    /// **The misfires, pinned rather than denied.** Contents are the last resort
+    /// because they can be wrong: an extension-less Python file whose first statement
+    /// is `x=1` reads as a shell assignment. It is a known cost, and this is where it
+    /// is written down.
+    #[test]
+    fn the_misfires_are_known() {
+        assert_eq!(sniff("x=1\nprint(x)\n"), Some(Lang::Bash));
+    }
+
+    /// The probe is bounded: it never walks a document, however long its rows are.
+    #[test]
+    fn the_sample_is_bounded() {
+        let mut b = Buffer::new();
+        b.set_rows(vec![vec!['x'; 100_000]; 40]);
+        let s = sample_of(&b);
+        assert!(s.len() <= SAMPLE_BYTES + 1, "sample is {} bytes", s.len());
+        assert!(s.lines().count() <= SAMPLE_LINES);
     }
 }

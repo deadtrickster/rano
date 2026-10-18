@@ -3079,3 +3079,30 @@ because the detection had nothing to go on, which is a guess rather than a setti
   or close the save was for — the rule a failed write already followed, so a `^X` that
   cannot write does not exit.
 - [x] The question is asked *before* the formatter runs, so declining it changes nothing.
+
+## 23. Planned: WASM plugins — file-open and file-save hooks
+
+Added 2026-10-18, from the operator: *"i want to have some WASM integration finally. lets create
+a plan first. something simple - say we start with file open/file save hooks."* The plan is
+**`plans/S10-wasm-hooks.md`** — the ABI, the runtime, the failure rules, the tests and the steps.
+Nothing is implemented yet; the numbers below are what the plan was written against.
+
+- [x] **The plan** (`plans/S10-wasm-hooks.md`): one `.wasm` file, two optional exports
+  (`on_open`, `on_save`), text → text, **the guest imports nothing at all** — no filesystem, no
+  network, no editor API — so the sandbox is "a pure function over bytes" until somebody rules on
+  a host function.
+- [x] **The runtime, measured rather than picked by name** (probe, rano's release profile):
+  **wasmi 0.40** — interpreter, 14 crates, **+0.88 MiB** (302,448 B → 1,229,920 B), module compile
+  903 µs; versus **wasmtime 40** (`std`+`runtime`) at **105 crates**. A hook runs once per open
+  and once per save, so the engine's speed is not the thing being bought.
+- [x] **Bounds**: 50 M fuel per call (an infinite loop ends in `OutOfFuel`, not a hung editor),
+  64 MiB of guest memory refused by `ResourceLimiter`, a 16 MiB text cap each way, and a fresh
+  store per call so nothing accumulates.
+- [x] **The failure rule**: no ABI, an import, a trap, out of fuel, more memory, non-UTF-8 output
+  or an over-cap file all mean *the hook is skipped* and one line names it — a file is never
+  refused an open, and a save is never lost, because of a plugin.
+- [ ] **Three rulings, and the plan argues for each**: the dependency default-on vs
+  `--features wasm` (recommended: default-on); stateless per call vs a long-lived instance
+  (recommended: stateless now); one plugin vs a list with an order (recommended: one).
+- [ ] Steps 1–6 of the plan. Step 1 is the dependency alone — the point at which "no" is
+  cheapest.

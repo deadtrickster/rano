@@ -173,6 +173,7 @@ the config writes them nano's way (`^X`, `M-P`).
 | `M-<` / `M->` | Previous / next buffer |
 | `M-L` | Buffer list (Enter switches, `Del` closes the selected buffer) |
 | `M-P` | Preview a diff/patch buffer, a markdown file as prose with its pictures, a picture as a picture, or a file's merge conflicts side by side |
+| `M-G` | Open a folder as a listing: `RET` enters what is under the cursor, `-` is the folder above, `r` reads it again, `q` closes it |
 | `M-S` | Send the file, cursor and selection to `send_command` (see [Talking to a host](#talking-to-a-host)) |
 | `M-W` | Close the current buffer (asks to save it if modified) |
 | `F9` | Sort lines (whole buffer, or marked region) |
@@ -312,6 +313,23 @@ Jumps go through the same buffers:
   `file:line:col  text`, grouped by file. The text comes from the open buffer
   when there is one, so unsaved edits show. Enter jumps there like `M-.` does.
 - `M-,` unwinds either kind of jump, back into the buffer you started from.
+
+## Folders
+
+`M-G` opens a folder as a listing — the dired — and so does `F8` with a folder's name, or
+`rano some/folder/` on the command line. One row per entry, directories first and each
+marked with `/`, the folder's path in the title bar.
+
+| key | what it does |
+|---|---|
+| `RET` | Enter the entry under the cursor: a folder replaces the listing with its own, a file opens as a file |
+| `-` | The folder above |
+| `r` | Read the folder again, keeping the cursor on the entry it was on |
+| `q` / `Esc` | Close the listing |
+
+The listing is **read-only**, like a tail: it is a view, not a document, and an edit is
+refused with a line saying so. Everything that only moves — the arrows, `PgUp`/`PgDn`,
+search, `M-x` — works as it does over text, and a listing opens no language server.
 
 ## Todos
 

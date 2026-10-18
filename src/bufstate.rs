@@ -70,6 +70,10 @@ pub struct BufferState {
     /// Nav, search and everything that only moves still work: that is the
     /// point of opening a file you will not edit.
     pub read_only: bool,
+    /// **This buffer is a folder listing** (the dired): the directory it shows. The buffer's
+    /// `name` is the same path, so the title bar already says where you are; `RET` enters what
+    /// the cursor is on, `-` goes up, `r` reads it again — see `Editor::open_dir`.
+    pub dir: Option<PathBuf>,
     /// **This buffer is a tail of a file**: `-f`/`--follow` opened it at the
     /// last few screens of a file that something else is writing (TODO.md §20).
     ///
@@ -238,6 +242,7 @@ impl BufferState {
             // nothing here rano can write back without corrupting it, so refusing at the
             // keystroke is the honest answer rather than at the save.
             read_only: binary,
+            dir: None,
             tail: None,
             lines_before: Some(0),
             line_count: None,

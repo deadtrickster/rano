@@ -1155,6 +1155,86 @@ fn saving_a_go_file_runs_gofmt_first() {
     assert_eq!(fs::read_to_string(&rs).unwrap(), rust);
 }
 
+/// **A folder opens as a listing** (the dired): directories first and marked with `/`, the
+/// buffer named after the folder, read-only, and `RET` enters what the cursor is on.
+#[test]
+fn a_folder_opens_as_a_listing_and_ret_enters_it() {
+    let d = temp_dir("dired");
+    let src = d.0.join("src");
+    std::fs::create_dir_all(src.join("deep")).unwrap();
+    fs::write(d.0.join("README.md"), "hello\n").unwrap();
+    fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut ed = test_ed("");
+    ed.text_h = 20;
+    assert!(ed.open_at(&d.0, 1, None).is_ok(), "a folder is an open");
+    // The listing: the folder is the buffer's name, the rows are its entries.
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
+    assert_eq!(ed.bs().dir.as_deref(), Some(d.0.as_path()));
+    assert!(ed.bs().read_only, "a listing is a view, not a document");
+    assert_eq!(lines(&ed), vec!["src/", "README.md"]);
+    assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
+    // **RET enters**: the folder in place, the file as a file.
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(src.as_path()));
+    assert_eq!(lines(&ed), vec!["deep/", "main.rs"]);
+    // `-` is the folder above, back where we were.
+    press(&mut ed, KeyCode::Char('-'), Mods::NONE);
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
+    // And RET on a file opens it: no longer a listing.
+    ed.bs_mut().cursor = Pos { row: 1, col: 0 };
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.bs().dir.is_none(), "a file is not a listing");
+    assert_eq!(lines(&ed), vec!["hello"]);
+    assert_eq!(
+        ed.bs().buf.name.as_deref(),
+        Some(d.0.join("README.md").as_path())
+    );
+}
+
+#[test]
+fn a_listing_refreshes_keeps_its_place_and_refuses_edits() {
+    let d = temp_dir("dired_r");
+    fs::write(d.0.join("b.txt"), "x").unwrap();
+    fs::write(d.0.join("d.txt"), "x").unwrap();
+    let mut ed = test_ed("");
+    ed.text_h = 20;
+    assert!(ed.open_at(&d.0, 1, None).is_ok());
+    ed.bs_mut().cursor = Pos { row: 1, col: 0 };
+    assert_eq!(lines(&ed)[1], "d.txt");
+    // A file appears while the listing is open: `r` sees it, and the cursor is still on the
+    // entry it was on rather than on whatever now happens to be row 1.
+    fs::write(d.0.join("c.txt"), "x").unwrap();
+    press(&mut ed, KeyCode::Char('r'), Mods::NONE);
+    assert_eq!(lines(&ed), vec!["b.txt", "c.txt", "d.txt"]);
+    assert_eq!(
+        lines(&ed)[ed.bs().cursor.row],
+        "d.txt",
+        "the cursor followed it"
+    );
+    // It is a view: an edit is refused with a line saying so, and changes nothing. (A bare
+    // letter types nothing here — a mode's map is on top, so the dispatcher does not reach
+    // `insert_char` at all; `^K` is an *edit*, and that is what the gate answers.)
+    press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
+    assert_eq!(lines(&ed), vec!["b.txt", "c.txt", "d.txt"]);
+    assert!(!ed.bs().buf.modified);
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(msg.contains("Read-only"), "{msg}");
+}
+
+#[test]
+fn a_folder_that_is_not_there_says_so_and_changes_nothing() {
+    let mut ed = test_ed("the buffer stays");
+    ed.do_dir("/no/such/folder/at/all".to_string());
+    assert!(ed.bs().dir.is_none());
+    assert_eq!(lines(&ed), vec!["the buffer stays"]);
+    assert!(ed.status_text().unwrap().contains("No such folder"));
+    // The prompt path is the same answer: F8 on a folder opens it, F8 on nothing says so.
+    let d = temp_dir("dired_f8");
+    fs::write(d.0.join("one.txt"), "x").unwrap();
+    assert!(ed.open_file(&d.0.display().to_string()));
+    assert_eq!(lines(&ed), vec!["one.txt"]);
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

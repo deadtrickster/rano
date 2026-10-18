@@ -91,6 +91,7 @@ pub mod conflict;
 // `crates/ui` so that text rendering has one home; lib-only, and the editor's
 // external-change diff reaches them as `rano::diff` / `rano::sidediff`.
 pub mod diff;
+pub mod dirview;
 pub mod encoding;
 pub mod highlight;
 // A picture read off the disk (`image::read`): the PNG bytes the kitty graphics

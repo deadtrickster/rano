@@ -333,21 +333,28 @@ fn run(
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.bs_mut().goto = pos;
     if let Some(path) = load {
-        // `-f`/`--follow` FORCES the tail: it says what to do. Without it, the
-        // name decides — `start_named` is the one decision every door uses, so a
-        // `.log` opens in log mode from here, from a deferred buffer and from F8
-        // (§20.7).
-        let started = if follow {
-            ed.start_tail(&path)
+        // **A folder on the command line is a listing**, not a read: `rano .` is the door every
+        // path comes through, and a directory read as a file is a load failure with nothing on
+        // screen to say it.
+        if !follow && path.is_dir() {
+            ed.open_dir(&path);
         } else {
-            ed.start_named(&path)
-        };
-        if let Err(e) = started {
-            // The one load failure reported before a frame is drawn: there is
-            // nothing on screen yet to attach a status line to.
-            drop(terminal);
-            eprintln!("rano: cannot read {}: {}", path.display(), e);
-            std::process::exit(1);
+            // `-f`/`--follow` FORCES the tail: it says what to do. Without it, the
+            // name decides — `start_named` is the one decision every door uses, so a
+            // `.log` opens in log mode from here, from a deferred buffer and from F8
+            // (§20.7).
+            let started = if follow {
+                ed.start_tail(&path)
+            } else {
+                ed.start_named(&path)
+            };
+            if let Err(e) = started {
+                // The one load failure reported before a frame is drawn: there is
+                // nothing on screen yet to attach a status line to.
+                drop(terminal);
+                eprintln!("rano: cannot read {}: {}", path.display(), e);
+                std::process::exit(1);
+            }
         }
     }
     ed.add_deferred_buffers_at(&rest);

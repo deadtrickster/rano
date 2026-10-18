@@ -125,6 +125,35 @@ pub fn commands() -> &'static [Command] {
                 |e| e.start_write(),
             ),
             cmd(
+                "dir",
+                "Directory",
+                File,
+                "Open a folder as a listing: RET enters what is under the cursor, - is the \
+                 folder above, r reads it again, q closes it.",
+                |e| e.start_dir(),
+            ),
+            cmd(
+                "dir-enter",
+                "Enter Entry",
+                File,
+                "In a folder listing: open the entry under the cursor.",
+                |e| e.dir_enter(),
+            ),
+            cmd(
+                "dir-parent",
+                "Folder Above",
+                File,
+                "In a folder listing: the folder above this one.",
+                |e| e.dir_parent(),
+            ),
+            cmd(
+                "dir-refresh",
+                "Refresh Listing",
+                File,
+                "In a folder listing: read the folder again.",
+                |e| e.dir_refresh(),
+            ),
+            cmd(
                 "insert-file",
                 "Read File",
                 File,
@@ -756,6 +785,8 @@ pub struct Keymaps {
     /// A host's review ([`Editor::open_review`]): send from the view, and M-P
     /// closes it as it opened it.
     pub review: Keymap,
+    /// A folder listing (the dired): its own keys over the global ones.
+    pub dir: Keymap,
     pub list: Keymap,
     pub buffers: Keymap,
     pub page: Keymap,
@@ -820,6 +851,7 @@ impl Keymaps {
             .bind("M-\\", "toggle-wrap")
             .bind("M-<", "prev-buffer")
             .bind("M->", "next-buffer")
+            .bind("M-g", "dir")
             .bind("M-l", "buffer-list")
             .bind("M-w", "close-buffer")
             .bind("M-s", "send-position")
@@ -894,6 +926,13 @@ impl Keymaps {
             .bind("M-x", "execute-extended-command")
             .bind("M-<", "prev-buffer")
             .bind("M->", "next-buffer");
+        let mut dir = Keymap::new("folders");
+        dir.bind("RET", "dir-enter")
+            .bind("-", "dir-parent")
+            .bind("r", "dir-refresh")
+            .bind("q", "close-buffer")
+            .bind("ESC", "close-buffer")
+            .bind("C-g", "close-buffer");
         let mut conflict = Keymap::new("conflicts");
         conflict
             .bind("n", "conflict-next")
@@ -969,6 +1008,7 @@ impl Keymaps {
             view,
             conflict,
             review,
+            dir,
             list,
             buffers,
             page,
@@ -1087,6 +1127,11 @@ impl Editor {
             } else {
                 vec![&k.list]
             };
+        }
+        // **A folder listing**: its own keys (RET, -, r, q) over the global ones, so movement,
+        // search and M-x still work while it is open.
+        if self.bs().dir.is_some() {
+            return vec![&k.dir, &k.global];
         }
         vec![&k.global]
     }

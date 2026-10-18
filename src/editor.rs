@@ -468,6 +468,7 @@ impl Editor {
                     | PromptKind::ReadName
                     | PromptKind::OpenName
                     | PromptKind::BackupName
+                    | PromptKind::DirName
             )
         });
         match want {
@@ -3176,6 +3177,151 @@ impl Editor {
         });
     }
 
+    /// **Open `path` as a folder listing** — the dired. One row per entry (directories first,
+    /// each marked with a trailing `/`), the buffer named after the folder so the title bar
+    /// says where you are, **read-only** (a listing is a view, and every way to change one is
+    /// refused the way a tail's are), and `RET` enters what the cursor is on.
+    ///
+    /// The replacement rule is `open_file`'s: an untouched scratch makes way, and a buffer with
+    /// unsaved edits is never thrown away for a listing.
+    pub fn open_dir(&mut self, path: &Path) -> bool {
+        let rows = match crate::dirview::rows(path) {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.flash(&format!("Cannot read {}: {e}", path.display()));
+                return false;
+            }
+        };
+        let text = format!("{}\n", rows.join("\n"));
+        let buf = Buffer::from_text(
+            &text,
+            Some(path.to_path_buf()),
+            crate::encoding::Encoding::Utf8,
+        );
+        let mut state = BufferState::new(buf);
+        state.read_only = true;
+        state.dir = Some(path.to_path_buf());
+        let kept = !self.config.multibuffer && self.bs().buf.modified;
+        let scratch = {
+            let b = &self.bs().buf;
+            b.name.is_none() && !b.modified && b.row_count() <= 1 && b.text().is_empty()
+        };
+        if (self.config.multibuffer && !scratch) || kept {
+            self.buffers.push(state);
+            self.cur = self.buffers.len() - 1;
+        } else {
+            self.buffers[self.cur] = state;
+        }
+        self.highlight_dirty = true;
+        self.lsp_sync();
+        self.adjust_scroll(self.text_h);
+        self.adjust_scroll_x();
+        self.flash(&format!(
+            "{}\u{2009}entr{}",
+            rows.len(),
+            if rows.len() == 1 { "y" } else { "ies" }
+        ));
+        true
+    }
+
+    /// M-g: ask for a folder, defaulting to this buffer's own.
+    pub(crate) fn start_dir(&mut self) {
+        let from = self
+            .bs()
+            .dir
+            .clone()
+            .or_else(|| {
+                self.bs()
+                    .buf
+                    .name
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(|p| p.to_path_buf())
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let text = from.display().to_string();
+        self.prompt = Some(Prompt {
+            kind: PromptKind::DirName,
+            cursor: text.chars().count(),
+            text,
+        });
+    }
+
+    /// The answer to the folder prompt: a folder opens as a listing, a file opens as a file
+    /// (a path typed into the folder prompt that is a file is what the reader meant), and
+    /// anything else says so.
+    pub(crate) fn do_dir(&mut self, name: String) {
+        let path = PathBuf::from(expand_tilde(name.trim()));
+        if path.is_dir() {
+            self.open_dir(&path);
+        } else if path.is_file() {
+            self.open_file(&path.display().to_string());
+        } else {
+            self.flash(&format!("No such folder: {}", path.display()));
+        }
+    }
+
+    /// `RET` in a listing: enter what the cursor is on — a folder in place, a file through
+    /// `open_file`, so the multibuffer rule stays in one place.
+    pub(crate) fn dir_enter(&mut self) {
+        let Some(dir) = self.bs().dir.clone() else {
+            return;
+        };
+        let row = self.bs().cursor.row;
+        let line: String = self
+            .bs()
+            .buf
+            .row_opt(row)
+            .map(|r| r.iter().collect())
+            .unwrap_or_default();
+        let Some(path) = crate::dirview::path_at(&dir, &line) else {
+            self.flash("Nothing here to enter");
+            return;
+        };
+        if path.is_dir() {
+            self.open_dir(&path);
+        } else {
+            self.open_file(&path.display().to_string());
+        }
+    }
+
+    /// `-` in a listing: the folder above.
+    pub(crate) fn dir_parent(&mut self) {
+        let Some(dir) = self.bs().dir.clone() else {
+            return;
+        };
+        match dir.parent() {
+            Some(p) if p != dir => {
+                self.open_dir(p);
+            }
+            _ => self.flash("Already at the top"),
+        }
+    }
+
+    /// `r` in a listing: read the folder again, and keep the cursor on the entry it was on
+    /// when that entry still exists.
+    pub(crate) fn dir_refresh(&mut self) {
+        let Some(dir) = self.bs().dir.clone() else {
+            return;
+        };
+        let row = self.bs().cursor.row;
+        let here: String = self
+            .bs()
+            .buf
+            .row_opt(row)
+            .map(|r| r.iter().collect())
+            .unwrap_or_default();
+        let name = here.strip_suffix('/').unwrap_or(&here).to_string();
+        if !self.open_dir(&dir) {
+            return;
+        }
+        if let Some(i) = crate::dirview::row_of(&dir, &name) {
+            self.bs_mut().cursor = Pos { row: i, col: 0 };
+            self.adjust_scroll(self.text_h);
+        }
+    }
+
     pub(crate) fn do_read(&mut self, name: String) {
         if self.refuse_read_only("reading a file in") {
             return;
@@ -3234,6 +3380,11 @@ impl Editor {
         {
             self.set_current(i);
             return true;
+        }
+        // **A folder opens as a listing** — the same door F8, `name:line` and a host's jump
+        // come through: typing a directory should show what is in it, not fail.
+        if path.is_dir() {
+            return self.open_dir(&path);
         }
         // **A `.log` is never read here.** It opens in log mode, which is a LOAD,
         // so the file is named now and read on the next tick — the same decision

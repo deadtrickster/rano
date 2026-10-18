@@ -14,6 +14,8 @@ pub enum PromptKind {
     WriteName,
     ReadName,
     OpenName,
+    /// M-g: a folder to list (the dired).
+    DirName,
     Search,
     ReplaceFind,
     ReplaceWith,
@@ -46,6 +48,7 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::WriteName => "File Name: ",
         PromptKind::ReadName => "Read File: ",
         PromptKind::OpenName => "Open: ",
+        PromptKind::DirName => "Directory: ",
         PromptKind::Search => "Search: ",
         PromptKind::ReplaceFind => "Find: ",
         PromptKind::ReplaceWith => "Replace With: ",
@@ -77,7 +80,8 @@ impl Editor {
             PromptKind::WriteName
             | PromptKind::ReadName
             | PromptKind::OpenName
-            | PromptKind::BackupName => Some(&self.file_hist),
+            | PromptKind::BackupName
+            | PromptKind::DirName => Some(&self.file_hist),
             _ => None,
         }
     }
@@ -89,7 +93,8 @@ impl Editor {
             PromptKind::WriteName
             | PromptKind::ReadName
             | PromptKind::OpenName
-            | PromptKind::BackupName => Some(&mut self.file_hist),
+            | PromptKind::BackupName
+            | PromptKind::DirName => Some(&mut self.file_hist),
             _ => None,
         }
     }
@@ -204,6 +209,7 @@ impl Editor {
                 match p.kind {
                     PromptKind::WriteName => self.do_write(p.text),
                     PromptKind::ReadName => self.do_read(p.text),
+                    PromptKind::DirName => self.do_dir(p.text),
                     PromptKind::OpenName => {
                         // `name:line[:col]` jumps there, as on the command
                         // line. Read failed: keep the prompt open for editing.

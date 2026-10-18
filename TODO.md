@@ -3080,29 +3080,46 @@ because the detection had nothing to go on, which is a guess rather than a setti
   cannot write does not exit.
 - [x] The question is asked *before* the formatter runs, so declining it changes nothing.
 
-## 23. Planned: WASM plugins — file-open and file-save hooks
+## 23. Planned: a plugin platform — WASM hooks, builtins, reload without watching
 
-Added 2026-10-18, from the operator: *"i want to have some WASM integration finally. lets create
-a plan first. something simple - say we start with file open/file save hooks."* The plan is
-**`plans/S10-wasm-hooks.md`** — the ABI, the runtime, the failure rules, the tests and the steps.
-Nothing is implemented yet; the numbers below are what the plan was written against.
+Added 2026-10-18, from the operator, in one sitting: *"i want to have some WASM integration
+finally. lets create a plan first. something simple - say we start with file open/file save
+hooks."* — then *"so, jit is absolutely needed"*, *"so is some sort of 'slow' plugin detection"*,
+*"and then - builtin editor for them … like we have a folder where source code lives and it can be
+opened like a dired and i can enter files subfolders supported"*, *"so, we start with save and open
+it doesnt mean we stop"*, *"and we will definitely have more interesting hooks"*, *"say the whole
+'scripts folder like dired' can be a wasm plugin itself, just builtin"*, *"and we need dynamic
+reload obviously"*, *"we dont watch the files, reload is a user triggered or dbus triggered event"*,
+*"dbus can be a builtin plugin too btw"*, and *"built in as in 'ships with rano and unpacks to
+.../scripts/built-in/ - still user editable"*.
 
-- [x] **The plan** (`plans/S10-wasm-hooks.md`): one `.wasm` file, two optional exports
-  (`on_open`, `on_save`), text → text, **the guest imports nothing at all** — no filesystem, no
-  network, no editor API — so the sandbox is "a pure function over bytes" until somebody rules on
-  a host function.
-- [x] **The runtime, measured rather than picked by name** (probe, rano's release profile):
-  **wasmi 0.40** — interpreter, 14 crates, **+0.88 MiB** (302,448 B → 1,229,920 B), module compile
-  903 µs; versus **wasmtime 40** (`std`+`runtime`) at **105 crates**. A hook runs once per open
-  and once per save, so the engine's speed is not the thing being bought.
-- [x] **Bounds**: 50 M fuel per call (an infinite loop ends in `OutOfFuel`, not a hung editor),
-  64 MiB of guest memory refused by `ResourceLimiter`, a 16 MiB text cap each way, and a fresh
-  store per call so nothing accumulates.
-- [x] **The failure rule**: no ABI, an import, a trap, out of fuel, more memory, non-UTF-8 output
-  or an over-cap file all mean *the hook is skipped* and one line names it — a file is never
-  refused an open, and a save is never lost, because of a plugin.
-- [ ] **Three rulings, and the plan argues for each**: the dependency default-on vs
-  `--features wasm` (recommended: default-on); stateless per call vs a long-lived instance
-  (recommended: stateless now); one plugin vs a list with an order (recommended: one).
-- [ ] Steps 1–6 of the plan. Step 1 is the dependency alone — the point at which "no" is
-  cheapest.
+The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
+
+- [x] **Stage 0, landed in Rust**: the folder listing (the dired) — `src/dirview.rs`, `M-G`, `F8`
+  on a folder, `rano some/folder/`, `RET`/`-`/`r`/`q`, read-only, tests. It is both the working
+  feature now and the *reference format* a builtin plugin has to produce.
+- [x] **The runtime, measured** (probe, rano's release profile): wasmi 0.40 — interpreter, 14
+  crates, **+0.88 MiB** (302,448 B → 1,229,920 B), module compile 903 µs, and **8.5 ms per MiB**
+  of a real transform (9.2 µs for 1 KiB). wasmtime 40 at **105 crates** (binary delta still
+  unmeasured). A hook runs once per open and once per save, so 8.5 ms/MiB is invisible on normal
+  files and ~136 ms at the 16 MiB cap — which is the fact the *probe* (§6 of the plan) turns into
+  a per-plugin number instead of an argument.
+- [x] **Hooks are discovered, not hardcoded**: the host enumerates the module's exports for
+  `on_<event>` (stage 1: `on_open`, `on_save`) and `provider_<event>` (the dired-class hook), so
+  *"more interesting hooks"* costs a host-side function and no ABI bump.
+- [x] **Capabilities**: a plugin imports only what the config grants (`capabilities = ["read-dir"]`
+  first, because a folder listing has to read a folder); anything else is refused at
+  instantiation, by name.
+- [x] **Slow-plugin detection**: a load-time probe on a 64 KiB input (one line: `on_save 0.6 ms on
+  64 KiB (~9 ms/MiB) — ok`), per-call wall time and fuel, one line when a call crosses 50 ms, and
+  the hook disabled after three — never a failed save, and the fuel count is the
+  engine-independent measure.
+- [x] **Reload without watching**: *"we dont watch the files"* — `M-x plugin-reload` and a DBus
+  method, nothing else; the swap is atomic and a bad file keeps the module already loaded.
+- [x] **Builtins are scripts, not core**: shipped in the binary (`include_bytes!`), unpacked to
+  `…/rano/scripts/built-in/` when absent, **never overwritten**, and editable there — the dired
+  and the DBus service are both scripts in that folder, and the folder itself is a `M-G` listing
+  away.
+- [ ] **Rulings before step 1**: the engine (wasmi now vs wasmtime — measure its delta first), the
+  bus library (`zbus` vs a socket with the same three messages), and whether `read-dir` is the
+  capability to open the sandbox with.

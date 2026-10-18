@@ -782,6 +782,19 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
     {
         return Some(l);
     }
+    // **Then the longest known suffix**, before the hand-written table below: specificity
+    // is the rule, not provenance. Linguist knows `emacs.desktop` where the table below
+    // knows only `desktop`, so `x.emacs.desktop` must reach the longer one — matching a
+    // name against a whole key is what makes multi-part extensions possible at all.
+    if let Some(l) = name
+        .and_then(|p| p.file_name())
+        .and_then(|f| f.to_str())
+        .and_then(linguist::by_suffix)
+    {
+        return Some(l);
+    }
+    // The hand-written extensions, for what linguist does not list for OUR languages —
+    // `.conf` above all, which its INI does not carry because it is ambiguous elsewhere.
     if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
             "rs" => return Some(Lang::Rust),
@@ -827,16 +840,6 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
         // memory: `.hpp`, `.geojson`, `.mts`, `.gitconfig`'s neighbours, the 220 of them.
         // The match above stays because its comments say WHY a few of them are what they
         // are; this covers the long tail nobody can hold in their head.
-        // Matched on the whole NAME rather than on `ext`, because linguist lists
-        // multi-part extensions (`.cljs.hl`, `.json.example`) that `Path::extension()`
-        // cannot see — it returns only the component after the last dot.
-        if let Some(l) = name
-            .and_then(|p| p.file_name())
-            .and_then(|f| f.to_str())
-            .and_then(linguist::by_suffix)
-        {
-            return Some(l);
-        }
     }
     detect_content(sample)
 }
@@ -5471,10 +5474,11 @@ mod linguist_table {
         }
     }
 
-    /// Rows where a hand-written rule deliberately answers differently. Named with the
-    /// reason, so the exception is a decision rather than a hole: the hand table above has
-    /// `.desktop -> Ini` on purpose, and linguist calls `.emacs.desktop` Elisp.
-    const OVERRIDES: &[(&str, &str, Lang)] = &[("ext", "emacs.desktop", Lang::Ini)];
+    /// Rows where a rule answers differently on purpose. **Empty**, and it took the longest
+    /// suffix rule to get there: `x.emacs.desktop` used to lose to the table's `.desktop`
+    /// because the table ran first, and now the longer key wins — so the exception was not a
+    /// disagreement about the data, it was my ordering.
+    const OVERRIDES: &[(&str, &str, Lang)] = &[];
 
     #[test]
     fn every_row_of_linguists_data_detects_as_its_language() {

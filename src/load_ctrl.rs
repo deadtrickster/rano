@@ -300,6 +300,19 @@ impl Editor {
         }
         match outcome {
             Adopted::Nothing | Adopted::Rows(_) => {}
+            Adopted::Binary => {
+                self.load_saturated = false;
+                {
+                    let bs = self.bs_mut();
+                    bs.load = None;
+                    bs.buf.binary = true;
+                    // The rule a tailed file follows (§20.6): a view, refused at the
+                    // keystroke rather than at a save that would corrupt it.
+                    bs.read_only = true;
+                }
+                self.flash("Binary file — not shown (read only)");
+                dirty = true;
+            }
             Adopted::Encoding(enc) => {
                 // Recorded on the buffer so a save writes the file back the way
                 // it was found; no rows yet, so nothing to redraw.

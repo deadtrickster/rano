@@ -109,6 +109,11 @@ pub struct Tail {
 /// One message from the reader thread.
 #[derive(Debug)]
 pub enum LoadMsg {
+    /// **The file is not text.** A NUL in its first
+    /// [`crate::encoding::BINARY_PROBE`] bytes: the reader stopped after one chunk rather
+    /// than decode bytes that have no text to decode. `read_all` returns immediately, so a
+    /// 2 GB tarball costs one 64 KiB read instead of a whole file of rows.
+    Binary,
     /// The encoding the reader decided, sent before any row so the buffer knows
     /// how to save the file back. Only the byte-splittable encodings reach here.
     Encoding(crate::encoding::Encoding),
@@ -141,6 +146,9 @@ pub enum LoadMsg {
 pub enum Adopted {
     /// Nothing was ready (or the job is over).
     Nothing,
+    /// **The file is not text** — see [`LoadMsg::Binary`]. The job is over; nothing was
+    /// read into rows, because 64 KiB of mojibake is worse than saying so.
+    Binary,
     /// `n` rows were appended; still reading.
     Rows(usize),
     /// Rows were appended and the read finished.
@@ -267,6 +275,10 @@ impl LoadJob {
                 Ok(LoadMsg::NeedsEager(enc)) => {
                     self.done = true;
                     return Adopted::NeedsEager(enc);
+                }
+                Ok(LoadMsg::Binary) => {
+                    self.done = true;
+                    return Adopted::Binary;
                 }
                 Ok(LoadMsg::Rows(mut rows)) => {
                     debug_assert!(
@@ -551,6 +563,15 @@ fn read_all(
             }
             if tx.send(LoadMsg::Encoding(enc)).is_err() {
                 return; // the loop is gone; nothing to deliver to
+            }
+            // **A binary is not text, and reading it as text is how it gets corrupted.**
+            // The probe is git's — a NUL in the first 8000 bytes — and it runs AFTER the
+            // encoding decision, because UTF-16 is text whose bytes are half NULs: the
+            // eager path above has already claimed it, and a file that reaches here is one
+            // whose rows would split on byte newlines, so a NUL in it is not text.
+            if encoding::is_binary(&buf[..n]) {
+                let _ = tx.send(LoadMsg::Binary);
+                return;
             }
             encoding = Some(enc);
             // Only the file's own beginning can be a byte-order mark. A tail
@@ -864,6 +885,7 @@ mod tests {
             match job.poll(&mut rows) {
                 Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
                 Adopted::Encoding(_) => {}
+                Adopted::Binary => panic!("a text fixture was called binary"),
                 Adopted::NeedsEager(e) => panic!("unexpected eager path: {}", e.name()),
                 Adopted::Rows(n) => assert_eq!(n, rows.len() - before, "count matches"),
                 Adopted::Finished { rows: n, crlf: c } => {

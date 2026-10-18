@@ -4772,3 +4772,31 @@ fn the_mode_prompt_opens_on_what_is_in_effect() {
     );
     assert_eq!(ed.mode_name(), "fstab");
 }
+
+/// **A binary is not text**: not read into rows, not highlighted, and read-only — because
+/// the decode is lossy, so a save would corrupt the file it came from.
+#[test]
+fn a_binary_opens_read_only_and_unread() {
+    let d = temp_dir("binary_open");
+    let p = d.0.join("thing.pyc");
+    // A NUL in the first bytes: git's test, and the cheapest decisive one there is.
+    fs::write(&p, b"\x0d\x0d\x0a\x00 not text at all \x00").unwrap();
+    let mut ed = test_ed("");
+    ed.text_w = 80;
+    ed.text_h = 24;
+    ed.start_load(&p).expect("open");
+    settle(&mut ed);
+    assert!(ed.bs().buf.binary, "the byte mark was not seen");
+    assert!(ed.bs().read_only, "a binary is a view");
+    assert_eq!(lines(&ed).len(), 1, "nothing was read into rows");
+    assert!(!ed.loading(), "the loader is still running");
+
+    // Refused at the KEYSTROKE, not at the save: there is no correct save to make.
+    let before = ed.bs().buf.text();
+    press(&mut ed, KeyCode::Char('x'), Mods::NONE);
+    assert_eq!(ed.bs().buf.text(), before, "a binary accepted a keystroke");
+
+    // And no grammar: nothing describes decoded noise.
+    ed.tick(Instant::now());
+    assert_eq!(ed.mode_name(), "plain", "a binary was given a language");
+}

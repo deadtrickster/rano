@@ -55,6 +55,14 @@ pub struct Buffer {
     /// found, or opening a cp1252 file and saving it would rewrite it as UTF-8
     /// with replacement characters in it. See [`crate::encoding`].
     pub encoding: Encoding,
+    /// **This file is not text.** A NUL in its first
+    /// [`crate::encoding::BINARY_PROBE`] bytes, which is git's own test.
+    ///
+    /// Such a buffer opens read-only and is never highlighted: its rows are a lossy decode
+    /// of bytes that are not text, so a save would corrupt the file — the character model
+    /// has nothing to encode them back from. Set by the readers from the bytes, before any
+    /// row exists.
+    pub binary: bool,
     /// The file as it was when last read or written; `None` for a buffer
     /// that never was (a new file, a scratch buffer).
     pub disk: Option<DiskStamp>,
@@ -68,6 +76,7 @@ impl Buffer {
             modified: false,
             crlf: false,
             encoding: Encoding::Utf8,
+            binary: false,
             disk: None,
         }
     }
@@ -95,6 +104,9 @@ impl Buffer {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut b = Self::from_text(&text, Some(path.to_path_buf()), encoding);
         b.disk = disk;
+        // From the BYTES, before any row exists: a binary decodes to something, and that
+        // something must never be written back.
+        b.binary = encoding::is_binary(&bytes);
         Ok(b)
     }
 
@@ -122,6 +134,7 @@ impl Buffer {
             modified: false,
             crlf,
             encoding,
+            binary: false,
             disk: None,
         }
     }
@@ -543,6 +556,7 @@ mod tests {
             modified: false,
             crlf: false,
             encoding: Encoding::Utf8,
+            binary: false,
             disk: None,
         }
     }

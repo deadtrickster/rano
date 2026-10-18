@@ -123,6 +123,27 @@ pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
     None
 }
 
+/// How many bytes the binary probe looks at: **git's number**. `buffer_is_binary()` in
+/// git's `diff.c` checks "for any occurrence of a zero byte in the first 8000 bytes";
+/// libgit2 adds a printable-ratio on top, and a NUL alone has been enough for git for
+/// twenty years.
+pub const BINARY_PROBE: usize = 8000;
+
+/// **Whether these bytes are a binary file rather than text**: a NUL byte in the first
+/// [`BINARY_PROBE`] bytes.
+///
+/// No text file contains a NUL — not UTF-8, not any single-byte codepage — so its presence
+/// is the cheapest decisive signal there is, and it is the one git, `diff` and `grep` use to
+/// stop reading. UTF-16 does contain them, and that is correct: its NULs mean the bytes are
+/// not the text either, which is why `detect` decodes them before anything counts rows.
+///
+/// **Why it is here at all**: without it a `.pyc` or a tarball went through the encoding
+/// ladder, came out as cp1252 mojibake rows, and could be *saved back corrupted* — the
+/// character model cannot round-trip bytes it never decoded. See `Buffer::binary`.
+pub fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
+}
+
 /// Whether the bytes handed to [`detect`] are the whole file or a prefix of it.
 ///
 /// This is not a detail: a file that ENDS in the middle of a multi-byte
@@ -526,5 +547,48 @@ mod tests {
         // deliberately declined rather than misread as UTF-16.
         assert_eq!(bom_of(&[0xFF, 0xFE, 0x00, 0x00]), None);
         assert_eq!(bom_of(&[0x00, 0x00, 0xFE, 0xFF]), None);
+    }
+}
+
+/// **The byte mark**: git's rule, and the reason it is not just a nicety — a file called
+/// text that is not text used to be decoded lossily and could be saved back corrupted.
+#[cfg(test)]
+mod binary_probe {
+    use super::*;
+
+    #[test]
+    fn a_nul_in_the_first_bytes_is_a_binary() {
+        assert!(is_binary(b"\x7fELF\x00\x00\x00\x00"));
+        assert!(is_binary(b"\x00"));
+        assert!(is_binary(b"plain text, then a NUL: \x00"));
+        // A real shape: a Python bytecode header is `\r\r\n` + a NUL and a version word.
+        assert!(is_binary(b"\x0d\x0d\x0a\x00"));
+    }
+
+    /// Text of every kind rano decodes has no NUL in it, so the rule never fires on a
+    /// text file — including the cp1252 fallback, which exists precisely because *some*
+    /// bytes are not UTF-8 but are still text.
+    #[test]
+    fn text_is_not_a_binary() {
+        assert!(!is_binary(b""));
+        assert!(!is_binary("fn main() {}\n".as_bytes()));
+        assert!(!is_binary("héllo wörld 日本語 🙂\n".as_bytes()));
+        // cp1252: 0xE9 is `é` there and not `\0`, so this is text, not binary.
+        assert!(!is_binary(b"caf\xe9 au lait\n"));
+        assert!(!is_binary(&[0xff; 64]));
+    }
+
+    /// **Only the first 8000 bytes are looked at** — git's number. A text file with a NUL
+    /// deep in it (a stray byte in a huge log, say) stays text, which is what keeps the
+    /// rule cheap and keeps it from reclassifying files on the strength of one byte
+    /// 2 GB in.
+    #[test]
+    fn only_the_first_probe_is_read() {
+        let mut far = vec![b'x'; BINARY_PROBE + 100];
+        far[BINARY_PROBE + 50] = 0;
+        assert!(!is_binary(&far), "a NUL past the probe is not evidence");
+        let mut near = vec![b'x'; BINARY_PROBE + 100];
+        near[BINARY_PROBE - 1] = 0;
+        assert!(is_binary(&near), "a NUL inside the probe is");
     }
 }

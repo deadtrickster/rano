@@ -1453,6 +1453,10 @@ impl Highlighter {
         let lang = match self.mode {
             Mode::Lang(l) => Some(l),
             Mode::Plain => None,
+            // **A binary is not text.** No grammar describes decoded noise, and colouring
+            // it would be the editor pretending to read what it cannot — a chosen mode
+            // still wins, because that is what choosing means.
+            Mode::Detected if buf.binary => None,
             Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
         };
         let Some(lang) = lang else {
@@ -1686,6 +1690,10 @@ impl Highlighter {
         let lang = match self.mode {
             Mode::Lang(l) => Some(l),
             Mode::Plain => None,
+            // **A binary is not text.** No grammar describes decoded noise, and colouring
+            // it would be the editor pretending to read what it cannot — a chosen mode
+            // still wins, because that is what choosing means.
+            Mode::Detected if buf.binary => None,
             Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
         };
         let Some(lang) = lang else {

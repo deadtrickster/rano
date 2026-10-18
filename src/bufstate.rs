@@ -212,6 +212,8 @@ impl BufferState {
         if buf.rows_is_empty() {
             buf.push_row(Vec::new());
         }
+        // Read before `buf` moves into the state below.
+        let binary = buf.binary;
         let bs = Self {
             buf,
             hl: syntax::Highlighter::new(),
@@ -232,7 +234,10 @@ impl BufferState {
             },
             search_matches: None,
             exec_job: None,
-            read_only: false,
+            // **A binary is a view**, the rule a tailed file follows (§20.6): there is
+            // nothing here rano can write back without corrupting it, so refusing at the
+            // keystroke is the honest answer rather than at the save.
+            read_only: binary,
             tail: None,
             lines_before: Some(0),
             line_count: None,

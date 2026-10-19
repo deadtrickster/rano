@@ -367,6 +367,23 @@ To rebuild it: `rustup target add wasm32-unknown-unknown`, then
 beside the source. The host does not care what wrote the module — Rust, C, Zig, Go via TinyGo, or
 `wat2wasm` — only that the four exports above exist.
 
+**A folder viewer, as a plugin.** `examples/plugin-dired/` is the same idea one step further: it
+answers `provider_open` — asked *instead of* opening a path — by checking whether the path is a
+folder and, if it is, answering with its listing. It needs one capability, because a listing means
+looking at the filesystem:
+
+```toml
+plugin = "…/rano_plugin_dired.wasm"
+capabilities = ["read-dir"]
+```
+
+The host's `read_dir(path_ptr, path_len, out_ptr, out_cap)` answers the folder's text, rendered
+with the same rules as rano's own listing, so a provider and the built-in dired cannot disagree
+about what a row means. A provider is also told the viewport (`cols`, `rows`), which is what makes
+a plugin view adaptive at any terminal width. `RET`, `-`, `r` and `q` still work, because a folder
+the plugin claims keeps the listing keys — the plugin decided the content; the editor kept the
+navigation.
+
 A plugin never costs you a file.** No ABI, an import, a trap, running out of fuel, asking for
 more memory than allowed, answering something that is not text, or a text above the cap: the hook
 is skipped, the open or the save happens exactly as it would have without it, and one line names
@@ -470,6 +487,9 @@ auto_indent = true
 # `RANO_PLUGIN` overrides it. A stage-1 hook imports nothing (a pure text transform),
 # gets fuel and a memory cap, and is skipped — never fatal — when it cannot run.
 plugin = ""
+# What the plugin may import: `read-dir` is the folder-listing capability (a dired plugin).
+# Empty grants nothing, and a module importing anything ungranted is refused at load.
+capabilities = []
 line_numbers = true
 multibuffer = false # F8 pushes a new buffer instead of replacing the current one
 wrap = true         # soft line wrap (M-\ toggles at runtime)

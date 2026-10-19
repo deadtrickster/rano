@@ -80,7 +80,7 @@ function, not a schema migration:
 ;; hooks: discovered by NAME from the export section
 (func (export "on_open") (param i32 i32) (result i32))       ;; (in_ptr, in_len) -> block_ptr
 (func (export "on_save") (param i32 i32) (result i32))
-(func (export "provider_open") (param i32 i32) (result i32)) ;; §2.3
+(func (export "provider_open") (param i32 i32 i32 i32) (result i32)) ;; path, cols, rows; §2.3
 ```
 
 A hook returns the offset of a **result block** — two little-endian `u32`s, `{out_ptr, out_len}` —
@@ -117,7 +117,9 @@ It needs the one thing the text hooks did not: **a capability**. `read-dir` expo
 
 ```wat
 (func (import "rano" "read_dir") (param i32 i32 i32 i32) (result i32))
-;; (path_ptr, path_len, out_ptr, out_cap) -> bytes written, or -needed for too small
+;; (path_ptr, path_len, out_ptr, out_cap) -> bytes written, -needed for too small, i32::MIN for
+;; an error. The listing is the HOST's rendering (dirview::rows), so a provider and the built-in
+;; dired cannot disagree about what a row means.
 ```
 
 and the listing *format* is the contract the Rust dired already defines (`dirview::rows`: one
@@ -127,6 +129,34 @@ the same test.
 
 **The DBus service is a builtin plugin too** (§8) — the registry is the extension point, not a
 special case per integration.
+
+### 2.5 How a plugin's UI is drawn: it usually is not
+
+The operator, *"i wonder how drawing the ui will be handled"*. The answer stage 1 already gives:
+**a provider answers text, and the host draws it.** The plugin dired is a working example — its
+answer is the listing's text, and because that text becomes a *buffer*, everything rano does to a
+buffer applies to it: the theme's colours, the gutter, wrapping at the current width, the cursor,
+selection and the mouse, search, `M-P` previews, `M-G` navigation. The plugin wrote no drawing code
+because there is no drawing API to write against, and that is the point: the host owns the look.
+
+**The plugin is told the viewport.** `provider_open(path_ptr, path_len, cols, rows)` — a provider
+lays its answer out at the width it will be drawn at, which is what keeps a plugin view adaptive
+the way the rest of rano is. `on_open`/`on_save` take a text and need no size; a provider takes a
+path and does.
+
+Two extensions are named here and neither is in stage 1:
+
+- **Styles, as a span table** — the cheap one. A hook answers its text *plus* a list of
+  `(row, col_start, col_end, role)`, and the host maps a role name to its theme (the same roles the
+  highlighter uses). The text stays text — search and copy are unaffected — and the plugin cannot
+  write terminal escapes, so nothing a plugin says can corrupt the screen.
+- **A cell canvas** — the maximal one, for charts and things that are not text. The host hands the
+  plugin the viewport and gets back a grid of `(char, attribute)` cells to blit. It costs the text
+  semantics (there is nothing to search or copy in a canvas), so it would be a **distinct view
+  kind**, not a provider, and it is not planned.
+
+What is never offered is raw terminal output: a plugin cannot emit escape sequences, because its
+answer goes through the renderer like any other text.
 
 ### 2.4 What "builtin" means: shipped, unpacked, and the reader's to edit
 

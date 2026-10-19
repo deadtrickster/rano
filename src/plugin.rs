@@ -56,6 +56,31 @@ pub const ABI: i32 = 1;
 /// The sentinel a hook returns to mean "leave the text as it is".
 const UNCHANGED: i32 = -1;
 
+/// **What the host lets a plugin reach beyond its own text.** Stage 1 grants nothing by default;
+/// a folder viewer needs `read-dir`, and granting it is a deliberate act — the config says
+/// `capabilities = ["read-dir"]`, and a module that imports anything else is refused at
+/// instantiation, by name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    /// The `rano.read_dir` import: **the text of a folder's listing**, rendered by the host with
+    /// the same rules the built-in dired uses (`dirview::rows`: one entry per row, directories
+    /// first and marked `name/`). The plugin decides *whether* and *when* to ask; the format is
+    /// the host's, so a provider and the Rust listing cannot disagree about what a row means.
+    pub read_dir: bool,
+}
+
+impl Capabilities {
+    /// From the config's `capabilities = ["read-dir"]` list: names outside this set are ignored
+    /// there (a misspelt capability is not a grant), and the empty list grants nothing.
+    pub fn from_names(names: &[String]) -> Capabilities {
+        Capabilities {
+            read_dir: names
+                .iter()
+                .any(|n| n.trim().eq_ignore_ascii_case("read-dir")),
+        }
+    }
+}
+
 /// **A loaded plugin**: its module, compiled once, and the hooks it answers.
 #[derive(Debug)]
 pub struct Plugin {
@@ -64,6 +89,8 @@ pub struct Plugin {
     path: PathBuf,
     /// The export names that are hooks — `on_open`, `on_save`, and whatever a later version adds.
     hooks: Vec<String>,
+    /// What the config let it import.
+    caps: Capabilities,
 }
 
 impl Plugin {
@@ -71,13 +98,29 @@ impl Plugin {
     /// exports are checked here too, so a module that would fail on every save fails at load with
     /// one sentence instead.
     pub fn load(path: &Path) -> Result<Plugin, String> {
+        Self::load_with(path, Capabilities::default())
+    }
+
+    /// [`Self::load`] with the capabilities the config granted: the module may import exactly
+    /// those, and a module that imports anything else is refused here rather than at the first
+    /// save.
+    pub fn load_with(path: &Path, caps: Capabilities) -> Result<Plugin, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::from_bytes(&bytes, path.to_path_buf())
+        Self::from_bytes_with(&bytes, path.to_path_buf(), caps)
     }
 
     /// The same, from bytes — the seam the WAT fixtures in the tests come through, so a test does
     /// not need a `wasm32` toolchain or a committed binary to exercise the ABI.
     pub fn from_bytes(bytes: &[u8], path: PathBuf) -> Result<Plugin, String> {
+        Self::from_bytes_with(bytes, path, Capabilities::default())
+    }
+
+    /// [`Self::from_bytes`] under granted capabilities.
+    pub fn from_bytes_with(
+        bytes: &[u8],
+        path: PathBuf,
+        caps: Capabilities,
+    ) -> Result<Plugin, String> {
         let mut config = Config::new();
         // Fuel is what makes a hostile or simply broken loop a bounded cost.
         config.consume_fuel(true);
@@ -86,7 +129,7 @@ impl Plugin {
         // **The ABI is checked by calling it**, not by looking for the export: a module that
         // exports the name and answers 2 is a v2 module and must not be run as v1.
         let mut store = Self::store(&engine);
-        let instance = Linker::new(&engine)
+        let instance = Self::linker(&engine, caps)
             .instantiate(&mut store, &module)
             .map_err(|e| match Self::refusal(&e) {
                 Some(why) => why,
@@ -112,6 +155,7 @@ impl Plugin {
             module,
             path,
             hooks,
+            caps,
         })
     }
 
@@ -140,9 +184,95 @@ impl Plugin {
         self.call("on_save", text)
     }
 
+    /// **`provider_open`: what this path should open as**, or `None` when the plugin does not
+    /// claim it (the host then opens it the ordinary way). This is the hook a folder viewer
+    /// answers — and the one that needs a capability, because the decision is about a path and not
+    /// a text.
+    ///
+    /// **It is told the viewport** (`cols`×`rows`), because a provider's answer is laid out at the
+    /// width it will be drawn at: rano is width-adaptive throughout, and a plugin that renders
+    /// columns has to be told how many there are. `on_open`/`on_save` take a text and need no
+    /// width; a provider takes a path and does.
+    pub fn provider_open(
+        &self,
+        path: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Option<String>, String> {
+        self.call_sized("provider_open", path, cols as i32, rows as i32)
+    }
+
+    /// The linker a module is instantiated with: **one import per granted capability, and nothing
+    /// else**. A module that imports anything not here fails with the import named.
+    fn linker(engine: &Engine, caps: Capabilities) -> Linker<StoreLimits> {
+        let mut linker = Linker::new(engine);
+        if caps.read_dir {
+            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed` for a
+            // buffer too small, or `i32::MIN` for an error. The listing itself is the host's
+            // rendering — `dirview::rows`, the same one the built-in dired uses — so a provider
+            // and the Rust listing cannot disagree about what a row means.
+            let f = |mut caller: wasmtime::Caller<'_, StoreLimits>,
+                     a: u32,
+                     b: u32,
+                     c: u32,
+                     d: u32|
+             -> i32 {
+                let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+                    return i32::MIN;
+                };
+                let data = mem.data(&caller);
+                let (Ok(lo), Ok(hi)) = (usize::try_from(a), usize::try_from(b)) else {
+                    return i32::MIN;
+                };
+                let Some(hi) = lo.checked_add(hi).filter(|e| *e <= data.len()) else {
+                    return i32::MIN;
+                };
+                let Ok(path) = std::str::from_utf8(&data[lo..hi]) else {
+                    return i32::MIN;
+                };
+                let Ok(rows) = crate::dirview::rows(Path::new(path)) else {
+                    return i32::MIN;
+                };
+                let text = format!("{}\n", rows.join("\n"));
+                let out = usize::try_from(c).unwrap_or(usize::MAX);
+                if d as usize >= text.len() && out.saturating_add(text.len()) <= data.len() {
+                    let mem = mem.data_mut(&mut caller);
+                    mem[out..out + text.len()].copy_from_slice(text.as_bytes());
+                    return text.len() as i32;
+                }
+                -(text.len() as i32)
+            };
+            let _ = linker.func_wrap("rano", "read_dir", f);
+        }
+        linker
+    }
+
     /// **Run one hook over `text`.** One fresh store per call: the fuel and the memory budget are
     /// per call, and nothing a guest allocates can accumulate across saves.
     fn call(&self, hook: &str, text: &str) -> Result<Option<String>, String> {
+        self.call_with(hook, text, None)
+    }
+
+    /// [`Self::call`] for a hook that takes the viewport too — a provider, whose answer is laid out
+    /// at the width it will be drawn at: `(ptr, len, cols, rows) -> block`.
+    fn call_sized(
+        &self,
+        hook: &str,
+        text: &str,
+        cols: i32,
+        rows: i32,
+    ) -> Result<Option<String>, String> {
+        self.call_with(hook, text, Some((cols, rows)))
+    }
+
+    /// **One hook call.** The signature is two `i32`s for a text hook and four for a provider; the
+    /// viewport, when there is one, is what picks which.
+    fn call_with(
+        &self,
+        hook: &str,
+        text: &str,
+        viewport: Option<(i32, i32)>,
+    ) -> Result<Option<String>, String> {
         if !self.has(hook) {
             return Ok(None);
         }
@@ -154,7 +284,7 @@ impl Plugin {
             ));
         }
         let mut store = Self::store(&self.engine);
-        let instance = Linker::new(&self.engine)
+        let instance = Self::linker(&self.engine, self.caps)
             .instantiate(&mut store, &self.module)
             .map_err(|e| match Self::refusal(&e) {
                 Some(why) => why,
@@ -166,9 +296,6 @@ impl Plugin {
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "rano_alloc")
             .map_err(|_| "no `rano_alloc` export (wanted (i32) -> i32)".to_string())?;
-        let f = instance
-            .get_typed_func::<(i32, i32), i32>(&mut store, hook)
-            .map_err(|_| format!("`{hook}` has the wrong signature (wanted (i32, i32) -> i32)"))?;
         // The input goes where the guest asked for it, and a guest that answers with an offset
         // outside its own memory is a broken hook, not a transformed file.
         let at = alloc
@@ -184,9 +311,27 @@ impl Plugin {
                 .ok_or_else(|| "`rano_alloc` answered outside the guest's memory".to_string())?;
             data[at..end].copy_from_slice(text.as_bytes());
         }
-        let got = f
-            .call(&mut store, (at as i32, text.len() as i32))
-            .map_err(|e| format!("trapped: {e}"))?;
+        let got = match viewport {
+            None => {
+                let f = instance
+                    .get_typed_func::<(i32, i32), i32>(&mut store, hook)
+                    .map_err(|_| {
+                        format!("`{hook}` has the wrong signature (wanted (i32, i32) -> i32)")
+                    })?;
+                f.call(&mut store, (at as i32, text.len() as i32))
+            }
+            Some((cols, rows)) => {
+                let f = instance
+                    .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, hook)
+                    .map_err(|_| {
+                        format!(
+                            "`{hook}` has the wrong signature (wanted (i32, i32, i32, i32) -> i32)"
+                        )
+                    })?;
+                f.call(&mut store, (at as i32, text.len() as i32, cols, rows))
+            }
+        }
+        .map_err(|e| format!("trapped: {e}"))?;
         if got == UNCHANGED {
             return Ok(None);
         }
@@ -412,6 +557,54 @@ mod tests {
         );
         assert_eq!(p.open("hello rano").unwrap().as_deref(), Some("HELLO RANO"));
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
+    }
+
+    /// **The dired example, through the ABI**: without the grant its import is refused (the
+    /// sandbox is real), and with it `provider_open` answers a folder's listing — the same rows
+    /// the built-in dired renders.
+    #[test]
+    fn the_dired_example_needs_read_dir_and_then_lists_a_folder() {
+        let wasm: &[u8] = include_bytes!("../examples/plugin-dired/plugin.wasm");
+        // Ungranted: refused at load, and the sentence names the import, not the plugin's wishes.
+        let e = Plugin::from_bytes_with(wasm, PathBuf::from("dired.wasm"), Capabilities::default())
+            .unwrap_err();
+        assert!(e.contains("imports are not granted"), "{e}");
+        // Granted: the folder is claimed, and the answer is the host's listing.
+        let p = Plugin::from_bytes_with(
+            wasm,
+            PathBuf::from("dired.wasm"),
+            Capabilities { read_dir: true },
+        )
+        .expect("loads with the grant");
+        assert_eq!(p.hooks(), vec!["provider_open".to_string()]);
+        let dir = std::env::temp_dir().join(format!("rano_dired_example_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let listing = p
+            .provider_open(&dir.to_string_lossy(), 80, 24)
+            .expect("no failure")
+            .expect("a folder is claimed");
+        assert_eq!(
+            listing,
+            format!("{}\n", crate::dirview::rows(&dir).unwrap().join("\n"))
+        );
+        // A file is not claimed: `provider_open` answers the sentinel, which is `None` here.
+        assert_eq!(
+            p.provider_open(&dir.join("a.txt").to_string_lossy(), 80, 24)
+                .unwrap(),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capabilities_are_named_not_guessed() {
+        let names = vec!["read-dir".to_string()];
+        assert!(Capabilities::from_names(&names).read_dir);
+        assert!(Capabilities::from_names(&["READ-DIR".to_string()]).read_dir);
+        assert!(!Capabilities::from_names(&["read_file".to_string()]).read_dir);
+        assert!(!Capabilities::from_names(&[]).read_dir);
     }
 
     #[test]

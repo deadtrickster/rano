@@ -3221,14 +3221,30 @@ impl Editor {
             }
         };
         let text = format!("{}\n", rows.join("\n"));
+        self.install_view(path, &text, true);
+        self.flash_with_note(&format!(
+            "{}\u{2009}entr{}",
+            rows.len(),
+            if rows.len() == 1 { "y" } else { "ies" }
+        ));
+        true
+    }
+
+    /// **A read-only buffer holding a view of `path`** — a folder listing or anything a provider
+    /// hook answered. `dir_mode` is what decides whether `RET`/`-`/`r` mean anything: a folder is
+    /// navigable, a virtual document is read.
+    ///
+    /// The replacement rule is `open_file`'s: an untouched scratch makes way, and a buffer with
+    /// unsaved edits is never thrown away for a view.
+    fn install_view(&mut self, path: &Path, text: &str, dir_mode: bool) {
         let buf = Buffer::from_text(
-            &text,
+            text,
             Some(path.to_path_buf()),
             crate::encoding::Encoding::Utf8,
         );
         let mut state = BufferState::new(buf);
         state.read_only = true;
-        state.dir = Some(path.to_path_buf());
+        state.dir = dir_mode.then(|| path.to_path_buf());
         let kept = !self.config.multibuffer && self.bs().buf.modified;
         let scratch = {
             let b = &self.bs().buf;
@@ -3244,12 +3260,15 @@ impl Editor {
         self.lsp_sync();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        self.flash(&format!(
-            "{}\u{2009}entr{}",
-            rows.len(),
-            if rows.len() == 1 { "y" } else { "ies" }
-        ));
-        true
+    }
+
+    /// **A path the plugin claims**: `provider_open` answered a text, and that text is what opens.
+    /// A folder keeps the listing keys (`RET` enters an entry), anything else is a read-only
+    /// buffer named after the path — a document the plugin rendered.
+    fn open_provider(&mut self, path: &Path, text: String) {
+        let dir_mode = path.is_dir();
+        self.install_view(path, &text, dir_mode);
+        self.flash_with_note(&format!("{} (view)", path.display()));
     }
 
     /// M-g: ask for a folder, defaulting to this buffer's own.
@@ -3354,7 +3373,8 @@ impl Editor {
     /// and a plugin that cannot load is *reported and left off* — never a broken editor, because a
     /// hook is an improvement and never a precondition.
     pub fn set_plugin(&mut self, path: &Path) {
-        match crate::plugin::Plugin::load(path) {
+        let caps = crate::plugin::Capabilities::from_names(&self.config.capabilities);
+        match crate::plugin::Plugin::load_with(path, caps) {
             Ok(p) => {
                 let said = p.summary();
                 self.plugin = Some(p);
@@ -3370,7 +3390,18 @@ impl Editor {
     /// The plugin from inline bytes — the seam the tests use, so a hook can be exercised without a
     /// `wasm32` toolchain or a file on disk. A host may use it to ship a plugin it embeds.
     pub fn set_plugin_bytes(&mut self, wasm: &[u8], from: PathBuf) {
-        match crate::plugin::Plugin::from_bytes(wasm, from.clone()) {
+        self.set_plugin_bytes_with(wasm, from, crate::plugin::Capabilities::default())
+    }
+
+    /// [`Self::set_plugin_bytes`] under granted capabilities — the seam a test uses to exercise a
+    /// provider, which needs `read-dir`.
+    pub fn set_plugin_bytes_with(
+        &mut self,
+        wasm: &[u8],
+        from: PathBuf,
+        caps: crate::plugin::Capabilities,
+    ) {
+        match crate::plugin::Plugin::from_bytes_with(wasm, from.clone(), caps) {
             Ok(p) => {
                 let said = p.summary();
                 self.plugin = Some(p);
@@ -3511,6 +3542,28 @@ impl Editor {
         {
             self.set_current(i);
             return true;
+        }
+        // **A provider hook asks first**: "should this path open as something else?" — the folder
+        // viewer's door. `provider_open` answers a text (or nothing, and the ordinary path
+        // continues); a folder it answers keeps the listing keys, so `RET` still enters an entry.
+        if let Some(plugin) = self.plugin.as_ref().filter(|p| p.has("provider_open")) {
+            // The answer is laid out at the width it will be drawn at: rano is width-adaptive
+            // throughout, and a provider that renders columns has to be told how many.
+            let cols = self.text_w as u32;
+            let rows = self.text_h as u32;
+            match plugin.provider_open(&path.to_string_lossy(), cols, rows) {
+                Ok(Some(text)) => {
+                    self.open_provider(&path, text);
+                    return true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.plugin_note = Some(format!(
+                        "plugin {}: {e} — opened the usual way",
+                        plugin.path().display()
+                    ));
+                }
+            }
         }
         // **A folder opens as a listing** — the same door F8, `name:line` and a host's jump
         // come through: typing a directory should show what is in it, not fail.

@@ -35,6 +35,10 @@ pub struct Config {
     /// (`plans/S10-wasm-hooks.md`). `RANO_PLUGIN` overrides it. No hook is granted anything it
     /// imports: stage 1 plugins are pure text transforms.
     pub plugin: Option<String>,
+    /// **What the configured plugin may import** — `capabilities = ["read-dir"]` today. Empty (the
+    /// default) grants nothing, and a module importing anything ungranted is refused at load.
+    /// A misspelt name is ignored rather than being a grant by accident.
+    pub capabilities: Vec<String>,
     /// `color.ROLE = "look"` lines, in file order: one role overridden on top of the
     /// theme. Kept as written; [`crate::theme::resolve`] reads and reports them.
     pub colors: Vec<(String, String)>,
@@ -154,6 +158,7 @@ impl Default for Config {
             nano_keys: false,
             theme: None,
             plugin: None,
+            capabilities: Vec::new(),
             colors: Vec::new(),
         }
     }
@@ -263,6 +268,16 @@ fn parse_config(text: &str) -> Config {
                 let v = value.trim();
                 cfg.plugin = (!v.is_empty()).then(|| v.to_string());
             }
+            // `capabilities = ["read-dir"]`: a list, in the one shape this parser reads — brackets
+            // and quotes optional, so `capabilities = read-dir` is the same statement.
+            "capabilities" => {
+                cfg.capabilities = value
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|c| c.trim().trim_matches('"').trim_matches('\'').to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+            }
             _ if key.starts_with("color.") => {
                 cfg.colors
                     .push((key["color.".len()..].to_string(), value.to_string()));
@@ -347,6 +362,28 @@ mod tests {
     }
 
     /// **What a Tab inserts**, in each of the three modes, and the two keys that set it.
+    #[test]
+    fn a_capability_is_a_named_list_and_the_empty_list_grants_nothing() {
+        assert!(
+            parse_config("capabilities = [\"read-dir\"]").capabilities
+                == vec!["read-dir".to_string()]
+        );
+        assert_eq!(
+            parse_config("capabilities = read-dir").capabilities,
+            vec!["read-dir".to_string()],
+            "the brackets and quotes are optional"
+        );
+        assert_eq!(
+            parse_config("capabilities = [\"read-dir\", \"read-file\"]").capabilities,
+            vec!["read-dir".to_string(), "read-file".to_string()]
+        );
+        assert!(
+            parse_config("").capabilities.is_empty(),
+            "nothing granted by default"
+        );
+        assert!(parse_config("capabilities = []").capabilities.is_empty());
+    }
+
     #[test]
     fn the_indent_setting_says_what_a_tab_is() {
         let cfg = parse_config("indent = spaces\nindent_size = 2");

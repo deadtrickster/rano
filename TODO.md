@@ -3135,5 +3135,19 @@ The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
   1100 tests; ten of them are the ABI's (refused ABI, refused import, sentinel, block, out of fuel,
   non-UTF-8, out-of-bounds block, cap, summary) and four are the editor's (open, save + `M-U`,
   a trap that leaves the save intact, a binary that never reaches a hook).
-- [ ] **Still open**: the bus library (`zbus` vs a socket with the same three messages) and whether
-  `read-dir` is the capability to open the sandbox with — steps 4–8 of the plan.
+- [x] **Providers and the first capability** — *"ok, write dired like folder viewer as a plugin - so
+  on open it checks the path is a folder and 'opens it'"*. `provider_open(path, cols, rows)` is
+  asked before a path is opened; `capabilities = ["read-dir"]` grants the one import
+  (`rano.read_dir` → the host's own listing, `dirview::rows`), and a module importing it without
+  the grant is refused at load, by name. `examples/plugin-dired` is that plugin, built and
+  committed (254 bytes): a folder opens through it as a listing with `RET`/`-`/`r`/`q` intact, a
+  file is not claimed and opens normally. Two tests pin it (the ABI direct, and the editor
+  end-to-end); a config test pins that the empty list grants nothing.
+- [x] **How the UI is drawn** (§2.5 of the plan, answering *"i wonder how drawing the ui will be
+  handled"*): a provider answers **text** and the host draws it — the plugin dired has the theme,
+  gutter, wrapping, cursor, selection, search and `M-G` because its answer *is* a buffer. Providers
+  are told the viewport (`cols`×`rows`), so a plugin view is width-adaptive like the rest. Styles
+  would be a span table (`(row, col_start, col_end, role)`), a canvas would be a distinct view
+  kind; neither is in stage 1, and raw terminal output is never offered.
+- [ ] **Still open**: the bus library (`zbus` vs a socket with the same three messages) — steps 5–8
+  of the plan (the slow-hook probe, reload, the bus service).

@@ -1362,6 +1362,37 @@ fn a_binary_file_never_reaches_the_plugin() {
     );
 }
 
+/// **A folder opens through the plugin**: `provider_open` is asked first, the answer becomes the
+/// listing, and the editor keeps the keys — `RET` enters an entry.
+#[test]
+fn a_folder_opens_through_the_plugin() {
+    let wasm: &[u8] = include_bytes!("../examples/plugin-dired/plugin.wasm");
+    let d = temp_dir("plugin_dired");
+    std::fs::create_dir_all(d.0.join("sub")).unwrap();
+    fs::write(d.0.join("one.txt"), "one\n").unwrap();
+    let mut ed = test_ed("");
+    ed.text_h = 20;
+    ed.set_plugin_bytes_with(
+        wasm,
+        PathBuf::from("dired.wasm"),
+        crate::plugin::Capabilities { read_dir: true },
+    );
+    assert!(ed.open_at(&d.0, 1, None).is_ok());
+    // The plugin answered: the buffer is a listing with the editor's own mode and keys.
+    assert_eq!(lines(&ed), vec!["sub/", "one.txt"]);
+    assert!(ed.bs().dir.is_some(), "a folder keeps the listing keys");
+    assert!(ed.bs().read_only);
+    // RET enters: the folder through the plugin again, the file as a file.
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.join("sub").as_path()));
+    press(&mut ed, KeyCode::Char('-'), Mods::NONE);
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
+    ed.bs_mut().cursor = Pos { row: 1, col: 0 };
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.bs().dir.is_none());
+    assert_eq!(lines(&ed), vec!["one"]);
+}
+
 /// **The example plugin, end to end through the editor.** `examples/plugin-upper` is a real
 /// `wasm32` build committed as `plugin.wasm` (264 bytes, source beside it), so this uses no
 /// toolchain and no file on disk beyond a scratch file — and it is the answer to "can I write

@@ -397,6 +397,23 @@ mod tests {
         assert!(e.contains("cap"), "{e}");
     }
 
+    /// **The committed example module loads and transforms** — the artifact half of
+    /// `examples/plugin-upper`, so a change to the ABI that breaks real modules is caught here.
+    #[test]
+    fn the_example_module_loads_and_uppercases() {
+        let p = Plugin::from_bytes(
+            include_bytes!("../examples/plugin-upper/plugin.wasm"),
+            PathBuf::from("plugin-upper.wasm"),
+        )
+        .expect("the example loads");
+        assert_eq!(
+            p.hooks(),
+            vec!["on_open".to_string(), "on_save".to_string()]
+        );
+        assert_eq!(p.open("hello rano").unwrap().as_deref(), Some("HELLO RANO"));
+        assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
+    }
+
     #[test]
     fn the_summary_names_the_file_and_the_hooks() {
         let p = plugin(&format!(

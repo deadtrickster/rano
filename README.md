@@ -354,7 +354,20 @@ between saves. What a hook guarantees, on its side: it is **deterministic**, bec
 answer *replaces the buffer* as one undo step (`M-U` takes it back) so that the file and the
 screen are the same text. A second save of unchanged text therefore writes the same bytes.
 
-**A plugin never costs you a file.** No ABI, an import, a trap, running out of fuel, asking for
+**Writing one.** `examples/plugin-upper/` is a working plugin in ~90 lines of Rust that
+uppercases a file's text on open and on save; `plugin.wasm` beside it is that source, built, so
+you can run it without a `wasm32` toolchain at all:
+
+```sh
+RANO_PLUGIN=$PWD/examples/plugin-upper/plugin.wasm rano notes.txt
+```
+
+To rebuild it: `rustup target add wasm32-unknown-unknown`, then
+`cargo build --release --target wasm32-unknown-unknown` in that directory, and copy the `.wasm`
+beside the source. The host does not care what wrote the module — Rust, C, Zig, Go via TinyGo, or
+`wat2wasm` — only that the four exports above exist.
+
+A plugin never costs you a file.** No ABI, an import, a trap, running out of fuel, asking for
 more memory than allowed, answering something that is not text, or a text above the cap: the hook
 is skipped, the open or the save happens exactly as it would have without it, and one line names
 the plugin and the reason. A binary file never reaches a hook at all, and a file above 16 MiB is

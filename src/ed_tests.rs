@@ -1362,6 +1362,36 @@ fn a_binary_file_never_reaches_the_plugin() {
     );
 }
 
+/// **The example plugin, end to end through the editor.** `examples/plugin-upper` is a real
+/// `wasm32` build committed as `plugin.wasm` (264 bytes, source beside it), so this uses no
+/// toolchain and no file on disk beyond a scratch file — and it is the answer to "can I write
+/// something already": yes, and this is it running.
+#[test]
+fn the_example_plugin_transforms_through_the_editor() {
+    let wasm: &[u8] = include_bytes!("../examples/plugin-upper/plugin.wasm");
+    let d = temp_dir("example_plugin");
+    let f = d.0.join("notes.txt");
+    fs::write(&f, "hello rano\n").unwrap();
+    // The open hook: the text arrives uppercase, the file on disk does not.
+    let mut ed = test_ed("");
+    ed.set_plugin_bytes(wasm, PathBuf::from("plugin-upper.wasm"));
+    assert!(ed.open_at(&f, 1, None).is_ok());
+    assert_eq!(lines(&ed), vec!["HELLO RANO"]);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "hello rano\n");
+    let note = ed.status_text().unwrap_or_default();
+    assert!(note.contains("transformed"), "the open says so: {note}");
+    // Type something lowercase, then save: the hook has work to do, and its answer becomes the
+    // buffer too — one undo step, so `M-U` takes exactly that transformation back.
+    press(&mut ed, KeyCode::End, Mods::NONE);
+    press_text(&mut ed, "abc");
+    press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "HELLO RANOABC\n");
+    assert_eq!(lines(&ed), vec!["HELLO RANOABC"]);
+    press(&mut ed, KeyCode::Char('u'), Mods::ALT);
+    assert_eq!(lines(&ed), vec!["HELLO RANOabc"]);
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");

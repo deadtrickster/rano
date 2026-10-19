@@ -3400,18 +3400,16 @@ impl Editor {
             Ok(Some(new)) => {
                 if new != text {
                     buf.set_rows(new.lines().map(|l| l.chars().collect()).collect());
-                    self.flash(&format!(
-                        "Plugin: {} changed {} on open",
-                        plugin.path().display(),
-                        path.display()
-                    ));
+                    self.plugin_note = Some("plugin: transformed on open".to_string());
                 }
             }
             Ok(None) => {}
-            Err(e) => self.flash(&format!(
-                "Plugin {}: {e} — opened unchanged",
-                plugin.path().display()
-            )),
+            Err(e) => {
+                self.plugin_note = Some(format!(
+                    "plugin {}: {e} — opened unchanged",
+                    plugin.path().display()
+                ));
+            }
         }
         Ok(buf)
     }

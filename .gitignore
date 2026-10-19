@@ -1,1 +1,4 @@
 /target
+
+# A plugin example builds its own wasm under examples/; the committed .wasm is the artifact.
+examples/*/target

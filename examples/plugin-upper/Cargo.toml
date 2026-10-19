@@ -1,0 +1,15 @@
+[package]
+name = "rano-plugin-upper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# A plugin is a wasm module: nothing else is in here, and the target is the only platform.
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+panic = "abort"

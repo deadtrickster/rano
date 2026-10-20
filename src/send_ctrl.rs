@@ -54,12 +54,63 @@ impl Editor {
 
     /// The reader's place: the file (absolute), the cursor, and the marked
     /// region with its text when a mark is set and the region is not empty.
+    /// **What a send carries.** Every buffer is sendable — that is the rule — but a *view* does not
+    /// send a line of text, because its rows are a rendering: what it sends is the **target the
+    /// cursor is on**.
+    ///
+    /// - An ordinary buffer: its file, the cursor as line/column (1-based), the mark as a
+    ///   selection with its text.
+    /// - A folder listing: the **entry under the cursor**, as an absolute path with line 1 — the
+    ///   thing a reader is pointing at. A mark selects entries, but "several entries" is not what
+    ///   [`SendEvent`] carries (it has one path and one text selection); the first selected entry
+    ///   is sent, and the row range is the selection, which is the honest shape until the event
+    ///   grows a list.
+    /// - Any other view (a provider's rendering, a picture): its path, and no line — the file is
+    ///   what is being talked about, and there is no line of it in view.
     pub fn send_event(&self) -> SendEvent {
         let bs = self.bs();
         let point = |p: Pos| Point {
             line: p.row + 1,
             column: p.col + 1,
         };
+        if bs.synthetic {
+            let text = |row: usize| {
+                bs.buf
+                    .row_opt(row)
+                    .map(|r| r.iter().collect::<String>())
+                    .unwrap_or_default()
+            };
+            // A listing's row names an entry; a provider's row names nothing, so the view's own
+            // path is the target.
+            let entry = bs
+                .dir
+                .as_ref()
+                .and_then(|dir| crate::dirview::path_at(dir, &text(bs.cursor.row)));
+            let selection = bs.mark.and_then(|m| {
+                let (a, b) = normalize(m, bs.cursor);
+                (a != b).then(|| Selection {
+                    // The rows of the view, and the text the reader can see — which for a listing
+                    // is the entry names.
+                    start: point(a),
+                    end: point(b),
+                    text: bs
+                        .buf
+                        .copy_range(a, b)
+                        .iter()
+                        .map(|r| r.iter().collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                })
+            });
+            return SendEvent {
+                path: entry.or_else(|| bs.buf.name.as_deref().map(canonical)),
+                // A view has no line of the target in it: line 1 is the file's first line, which is
+                // where a host opening the target lands.
+                cursor: Point { line: 1, column: 1 },
+                selection,
+                modified: bs.buf.modified,
+            };
+        }
         let selection = bs.mark.and_then(|m| {
             let (a, b) = normalize(m, bs.cursor);
             (a != b).then(|| Selection {

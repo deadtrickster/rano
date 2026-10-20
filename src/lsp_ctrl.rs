@@ -39,6 +39,16 @@ impl Editor {
     /// file name and language. Stops it for scratch/unsupported files.
     pub(crate) fn lsp_sync(&mut self) {
         let bs = self.bs_mut();
+        // **A view starts no language server**, and one it had goes: the rows are a rendering, and
+        // a server handed a rendering would report diagnostics about a document that is not the
+        // file. (Today a directory's name detects no language, so this is the rule rather than the
+        // luck; a provider that renders a *file* would otherwise get a server.)
+        if bs.synthetic {
+            if bs.lsp.take().is_some() {
+                bs.lsp_diags.clear();
+            }
+            return;
+        }
         let Some(name) = bs.buf.name.clone() else {
             if bs.lsp.take().is_some() {
                 bs.lsp_diags.clear();

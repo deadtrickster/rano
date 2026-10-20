@@ -740,9 +740,15 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         // `?` and not `1`: a tail's row is not the file's line until the
         // background count has said which line it is, and claiming the first
         // one is the lie §20.3 C exists to stop (TODO.md §20.1's idea 3).
-        let pos_txt = match ed.bs().line_number(cur.row) {
-            Some(n) => format!("Ln {}, Col {}", n, cur.col + 1),
-            None => format!("Ln ?, Col {}", cur.col + 1),
+        // **A view's position is a row of the rendering**, not a line of a file: `Row 7` rather
+        // than `Ln 7`, so nobody reads a listing's entry number as a file line.
+        let pos_txt = if ed.bs().synthetic {
+            format!("Row {}", cur.row + 1)
+        } else {
+            match ed.bs().line_number(cur.row) {
+                Some(n) => format!("Ln {}, Col {}", n, cur.col + 1),
+                None => format!("Ln ?, Col {}", cur.col + 1),
+            }
         };
         let pos_w = pos_txt.chars().count();
         if let Some(msg) = ed.status_text() {
@@ -1086,6 +1092,25 @@ mod tests {
     }
 
     // ---------- gutter_width ----------
+
+    /// **A view's status reads `Row N`, not `Ln N`**: the number is a row of a rendering, and a
+    /// line claim about a directory is a claim about a file that does not exist.
+    #[test]
+    fn a_view_says_row_not_line() {
+        let mut e = ed("x");
+        e.bs_mut().synthetic = true;
+        let screen = Screen::of(&e, 40, 24);
+        let row: String = (0..40)
+            .map(|x| {
+                screen
+                    .cell((x, 21))
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(row.trim_end().ends_with("Row 1"), "{row:?}");
+        assert!(!row.contains("Ln"), "{row:?}");
+    }
 
     #[test]
     fn gutter_width_min_two_digits_plus_separator() {

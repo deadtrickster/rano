@@ -1415,6 +1415,66 @@ fn a_folder_opens_through_the_typescript_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
+/// **A view wears no line numbers and starts no language server**, and its status line says a row,
+/// not a line: the number would be a row of a rendering (`Ln 7` of a directory is a claim about a
+/// file that does not exist).
+#[test]
+fn a_view_wears_no_line_numbers_and_starts_no_server() {
+    let d = temp_dir("view_gutter");
+    fs::write(d.0.join("one.txt"), "one\n").unwrap();
+    let mut ed = test_ed("");
+    ed.show_line_numbers = true;
+    ed.text_h = 20;
+    assert!(ed.open_at(&d.0, 1, None).is_ok());
+    assert!(ed.bs().synthetic);
+    assert_eq!(ed.gutter_w(), 0, "a listing has no gutter");
+    assert!(ed.bs().lsp.is_none(), "a view starts no server");
+}
+
+/// **A send from a listing carries the entry under the cursor**, not a line of the listing: the
+/// reader is pointing at a file, and a host opening `dir:7` would land nowhere.
+#[test]
+fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let d = temp_dir("view_send");
+    fs::create_dir_all(d.0.join("src")).unwrap();
+    fs::write(d.0.join("one.txt"), "one\n").unwrap();
+    let mut ed = test_ed("");
+    ed.text_h = 20;
+    assert!(ed.open_at(&d.0, 1, None).is_ok());
+    let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
+    let sink = got.clone();
+    ed.on_send = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("sent".into())
+    }));
+    // The cursor on `src/` (dirs sort first): the entry is that folder, at line 1.
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].path.as_deref(), Some(d.0.join("src").as_path()));
+        assert_eq!(
+            g[0].cursor.line, 1,
+            "a view has no line of the target in it"
+        );
+        assert!(!g[0].modified);
+    }
+    // On a file row: that file, and the view's rows as the selection when one is marked.
+    ed.bs_mut().cursor = Pos { row: 1, col: 0 };
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g[1].path.as_deref(),
+            Some(d.0.join("one.txt").as_path()),
+            "the entry under the cursor"
+        );
+    }
+}
+
 /// **The example plugin, end to end through the editor.** `examples/plugin-upper` is a real
 /// `wasm32` build committed as `plugin.wasm` (264 bytes, source beside it), so this uses no
 /// toolchain and no file on disk beyond a scratch file — and it is the answer to "can I write

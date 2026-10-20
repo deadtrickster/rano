@@ -620,7 +620,11 @@ impl Editor {
     /// file's last line once the background count has answered, and the rows in
     /// the buffer until it does.
     pub(crate) fn gutter_w(&self) -> usize {
-        if self.show_line_numbers {
+        // **A view wears no line numbers**: the number would be the row of a rendering, not a line
+        // of a file, and a reader who reads `7` as "line 7" is reading something that does not
+        // exist. One place, because the draw, the mouse mapping, `view_w` and `adjust_scroll_x`
+        // all ask this.
+        if self.show_line_numbers && !self.bs().synthetic {
             ui::gutter_width(self.bs().line_span())
         } else {
             0
@@ -3244,6 +3248,7 @@ impl Editor {
         );
         let mut state = BufferState::new(buf);
         state.read_only = true;
+        state.synthetic = true;
         state.dir = dir_mode.then(|| path.to_path_buf());
         let kept = !self.config.multibuffer && self.bs().buf.modified;
         let scratch = {

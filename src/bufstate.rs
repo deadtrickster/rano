@@ -70,6 +70,13 @@ pub struct BufferState {
     /// Nav, search and everything that only moves still work: that is the
     /// point of opening a file you will not edit.
     pub read_only: bool,
+    /// **The rows are a rendering, not a file's lines** — a folder listing, a provider's view, a
+    /// picture. Three things follow from it, and they are the whole of the flag: **no gutter**
+    /// (there is no line 7 of a directory), **no language server** (the text is not the file, and a
+    /// server told otherwise would report on a document that does not exist), and the status line
+    /// says a **row**, not a line. A *send* still goes out — every buffer is sendable — but what it
+    /// carries is the view's target, not a line of text (`Editor::send_event`).
+    pub synthetic: bool,
     /// **This buffer is a folder listing** (the dired): the directory it shows. The buffer's
     /// `name` is the same path, so the title bar already says where you are; `RET` enters what
     /// the cursor is on, `-` goes up, `r` reads it again — see `Editor::open_dir`.
@@ -242,6 +249,7 @@ impl BufferState {
             // nothing here rano can write back without corrupting it, so refusing at the
             // keystroke is the honest answer rather than at the save.
             read_only: binary,
+            synthetic: false,
             dir: None,
             tail: None,
             lines_before: Some(0),

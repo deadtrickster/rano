@@ -1415,6 +1415,44 @@ fn a_folder_opens_through_the_typescript_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
+/// **Reproduction: a three-row file, a mouse drag, then the frame.** The operator's crash
+/// (`index out of bounds: the len is 3 but the index is 3` at `buffer.rs:171`) came from a mouse
+/// selection, so this replays exactly that: press, drag, release, draw.
+/// **A short file in a tall window draws** — with wrap OFF, which is where the crash was: the
+/// viewport's last row is `scroll + text_h`, one past the end for any buffer shorter than the
+/// window, and the highlighter indexed it (`buffer.rs:171`, "len is 3 but the index is 3").
+/// Reported as "mouse-select, then copy": the selection was not the cause — the redraw after it
+/// was, and any redraw would have hit it.
+#[test]
+fn a_short_file_in_a_tall_window_draws() {
+    for wrap in [true, false] {
+        for rows in 1..=5usize {
+            for text_h in [1usize, 3, 40] {
+                let text: String = (0..rows).map(|i| format!("line {i}\n")).collect();
+                let mut ed = test_ed(&text);
+                ed.wrap = wrap;
+                ed.text_h = text_h;
+                ed.text_w = 40;
+                ed.ensure_wrap_prefix();
+                ed.ensure_highlight();
+                let rect = crate::render::Rect::new(0, 0, 40, text_h as u16 + 4);
+                let mut buf = crate::render::Buffer::empty(rect);
+                crate::ui::draw_in(&mut buf, rect, &ed);
+            }
+        }
+    }
+    // And scrolled past the end, which is the same index from the other direction.
+    let mut ed = test_ed("one\ntwo\nthree");
+    ed.wrap = false;
+    ed.text_h = 10;
+    ed.text_w = 40;
+    ed.bs_mut().scroll = 9;
+    ed.ensure_highlight();
+    let rect = crate::render::Rect::new(0, 0, 40, 14);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+}
+
 /// **A view wears no line numbers and starts no language server**, and its status line says a row,
 /// not a line: the number would be a row of a rendering (`Ln 7` of a directory is a claim about a
 /// file that does not exist).

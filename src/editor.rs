@@ -970,7 +970,14 @@ impl Editor {
             let (r1, s1) = self.buf_row_of_visual(bs.scroll + text_h.max(1));
             (r0, r1, s0, s1)
         } else {
-            (bs.scroll, bs.scroll + text_h, 0, 0)
+            // **The last visible row is one PAST the buffer for a short file**, and this branch
+            // used to hand that index on: with wrap off, any buffer shorter than the window asked
+            // the highlighter for `row(row_count)` and panicked there (`buffer.rs:171`,
+            // "index out of bounds: the len is 3 but the index is 3"). The caller draws the frame
+            // and highlights it, so the crash arrived on a redraw — which is how it surfaced as
+            // "mouse-select, then copy".
+            let last = bs.buf.row_count().saturating_sub(1);
+            (bs.scroll.min(last), (bs.scroll + text_h).min(last), 0, 0)
         }
     }
 
@@ -981,6 +988,11 @@ impl Editor {
         let bs = self.bs();
         let last_row = bs.buf.row_count().saturating_sub(1);
         let (first_vis, last_vis, first_seg, last_seg) = self.viewport_core(text_h);
+        // Clamped again here, because this is where the indices are USED: the window is derived
+        // from the viewport, and a viewport row past the buffer is a row no parse can name.
+        let last_row_now = bs.buf.row_count().saturating_sub(1);
+        let first_vis = first_vis.min(last_row_now);
+        let last_vis = last_vis.min(last_row_now);
         let first = first_vis.saturating_sub(Self::HIGHLIGHT_MARGIN);
         // **A tail clamps the window to what is settled** (TODO.md §20.3 E).
         // Everything below the boundary is a row the file is still writing, and

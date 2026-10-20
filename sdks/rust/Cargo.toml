@@ -1,0 +1,7 @@
+[package]
+name = "rano-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Write a rano plugin in Rust, not in wasm: safe helpers over the ABI"
+license = "MIT"
+publish = false

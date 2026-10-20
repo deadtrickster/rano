@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "rano-plugin"
+version = "0.1.0"
+
+[[package]]
 name = "rano-plugin-upper"
 version = "0.1.0"
+dependencies = [
+ "rano-plugin",
+]

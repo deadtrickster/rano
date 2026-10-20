@@ -144,12 +144,36 @@ impl Plugin {
         if got != ABI {
             return Err(format!("ABI {got}, this rano speaks {ABI}"));
         }
-        // The hooks are whatever the module exports under the naming convention.
-        let hooks: Vec<String> = module
-            .exports()
-            .map(|e| e.name().to_string())
-            .filter(|n| n.starts_with("on_") || n.starts_with("provider_"))
-            .collect();
+        // The hooks are whatever the module exports under the naming convention — and each one's
+        // SIGNATURE is checked here, so a module whose hook the host could never call is refused at
+        // load rather than failing the first save. (A plugin must not name an unrelated export
+        // `on_…`: the prefix *is* the convention.)
+        let mut hooks: Vec<String> = Vec::new();
+        for e in module.exports() {
+            let name = e.name().to_string();
+            let provider = name.starts_with("provider_");
+            if !(provider || name.starts_with("on_")) {
+                continue;
+            }
+            if provider {
+                if instance
+                    .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, &name)
+                    .is_err()
+                {
+                    return Err(format!(
+                        "`{name}` has the wrong signature (a provider is (i32, i32, i32, i32) -> i32)"
+                    ));
+                }
+            } else if instance
+                .get_typed_func::<(i32, i32), i32>(&mut store, &name)
+                .is_err()
+            {
+                return Err(format!(
+                    "`{name}` has the wrong signature (a hook is (i32, i32) -> i32)"
+                ));
+            }
+            hooks.push(name);
+        }
         Ok(Plugin {
             engine,
             module,
@@ -596,6 +620,47 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **What a hook call costs after the module is compiled** — the number the save path pays.
+    #[test]
+    fn a_hook_call_is_cheap_once_the_module_is_compiled() {
+        let p = Plugin::from_bytes_with(
+            include_bytes!("../examples/plugin-upper/plugin.wasm"),
+            PathBuf::from("upper.wasm"),
+            Capabilities::default(),
+        )
+        .expect("loads");
+        // Warm: one call to register, then time a run of them.
+        p.save("hello").unwrap();
+        let n = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            assert_eq!(p.save("hello").unwrap().as_deref(), Some("HELLO"));
+        }
+        let per = t.elapsed() / n;
+        eprintln!("per hook call: {per:?}");
+        assert!(
+            per < std::time::Duration::from_millis(20),
+            "a hook call should be well under a frame: {per:?}"
+        );
+    }
+
+    /// **The TypeScript example** (AssemblyScript, built by `asc`): the same plugin as the Rust one,
+    /// through the same ABI — the point being that a plugin is not a wasm-authoring problem.
+    #[test]
+    fn the_typescript_example_loads_and_uppercases() {
+        let p = Plugin::from_bytes(
+            include_bytes!("../examples/plugin-upper-as/plugin.wasm"),
+            PathBuf::from("upper-as.wasm"),
+        )
+        .expect("the AssemblyScript example loads");
+        assert_eq!(
+            p.hooks(),
+            vec!["on_open".to_string(), "on_save".to_string()]
+        );
+        assert_eq!(p.open("hello rano").unwrap().as_deref(), Some("HELLO RANO"));
+        assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
     #[test]

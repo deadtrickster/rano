@@ -130,6 +130,38 @@ the same test.
 **The DBus service is a builtin plugin too** (§8) — the registry is the extension point, not a
 special case per integration.
 
+### 2.5a SDKs: a plugin is not a wasm-authoring problem
+
+The operator, on being shown the raw ABI: *"so bare wasm? I hoped you will show me typescript or
+rust plugins."* Right — the ABI is the contract, not the interface. Two SDKs ship in `sdks/`, and
+both examples are written against them:
+
+- **Rust** (`sdks/rust`, crate `rano-plugin`): `rano::abi!()` for the two boilerplate exports, then
+  `rano::hook(ptr, len, |text| Some(text.to_uppercase()))` per hook and
+  `rano::provider(ptr, len, cols, rows, f)` for a provider; `rano::read_dir(path)` is the one
+  capability. The arena (18 MiB, the host's 16 MiB text cap plus room), the result block and every
+  pointer check live in the SDK, so a plugin has no `unsafe` of its own. `examples/plugin-upper` is
+  ~25 lines and `examples/plugin-dired` ~20.
+- **TypeScript** (`sdks/assemblyscript/rano.ts`, AssemblyScript — TypeScript that compiles to
+  wasm): `answer(text)`, `input(ptr, len)`, `rano_abi_impl`/`rano_alloc_impl`, and
+  `readDir(path)`; a plugin is three short exports. `examples/plugin-upper-as` is it.
+
+Two lessons the TS side paid for, both now rules:
+
+1. **`on_` is the hook namespace.** An export starting with `on_` *is* a hook (that is what makes
+   new hooks free), so an unrelated export named `on_abort` was discovered and could not be called.
+   The SDK's own abort is `rano_abort`, and **the host validates every discovered hook's signature
+   at load** — a module whose hook the host could never call is refused there, naming it, instead
+   of failing the first save.
+2. **AssemblyScript's runtime imports `env.abort`**, and a stage-1 plugin may import nothing it was
+   not granted. The fix is on the plugin's side of the line (supply an abort export and build with
+   `--use abort=index/rano_abort`), not a host shim: a runtime shim in the host would be a
+   capability nobody granted.
+
+**Measured: 41 µs per hook call** once the module is compiled (a 20 KB Rust plugin, fresh store and
+instance each call, 18 MiB of linear memory) — so a save pays nothing a reader can notice, which is
+the "we pay once per callsite" the ruling assumed.
+
 ### 2.5 How a plugin's UI is drawn: it usually is not
 
 The operator, *"i wonder how drawing the ui will be handled"*. The answer stage 1 already gives:

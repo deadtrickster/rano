@@ -354,9 +354,21 @@ between saves. What a hook guarantees, on its side: it is **deterministic**, bec
 answer *replaces the buffer* as one undo step (`M-U` takes it back) so that the file and the
 screen are the same text. A second save of unchanged text therefore writes the same bytes.
 
-**Writing one.** `examples/plugin-upper/` is a working plugin in ~90 lines of Rust that
-uppercases a file's text on open and on save; `plugin.wasm` beside it is that source, built, so
-you can run it without a `wasm32` toolchain at all:
+**Writing one: Rust.** `rano-plugin` (`sdks/rust/`) is the SDK — the ABI's raw pointers, arena and
+result block live there, and a plugin is a function from `&str` to `String`:
+
+```rust
+use rano_plugin as rano;
+rano::abi!();
+
+#[unsafe(no_mangle)]
+pub extern "C" fn on_save(ptr: u32, len: u32) -> u32 {
+    rano::hook(ptr, len, |text| Some(text.to_uppercase()))
+}
+```
+
+`examples/plugin-upper/` is that plugin, and `plugin.wasm` beside it is built, so it runs without a
+`wasm32` toolchain:
 
 ```sh
 RANO_PLUGIN=$PWD/examples/plugin-upper/plugin.wasm rano notes.txt
@@ -364,8 +376,33 @@ RANO_PLUGIN=$PWD/examples/plugin-upper/plugin.wasm rano notes.txt
 
 To rebuild it: `rustup target add wasm32-unknown-unknown`, then
 `cargo build --release --target wasm32-unknown-unknown` in that directory, and copy the `.wasm`
-beside the source. The host does not care what wrote the module — Rust, C, Zig, Go via TinyGo, or
-`wat2wasm` — only that the four exports above exist.
+beside the source.
+
+**Writing one: TypeScript.** `sdks/assemblyscript/rano.ts` is the same SDK for AssemblyScript —
+TypeScript that compiles to wasm — and `examples/plugin-upper-as/` is the same plugin in it:
+
+```ts
+import { answer, input, rano_abi_impl, rano_alloc_impl } from "../../sdks/assemblyscript/rano";
+
+export function rano_abi(): i32 { return rano_abi_impl(); }
+export function rano_alloc(n: u32): u32 { return rano_alloc_impl(n); }
+export function on_save(ptr: u32, len: u32): u32 {
+  return answer(input(ptr as usize, len as usize).toUpperCase());
+}
+```
+
+```sh
+npm i -g assemblyscript && asc index.ts -o plugin.wasm --optimize --use abort=index/rano_abort
+```
+
+Two things the TS side teaches, both in that command line: AssemblyScript's runtime would import
+`env.abort`, and a plugin may import nothing it was not granted — so the example supplies its own
+abort *export* (`rano_abort`) and the build points at it. And an export whose name starts with
+`on_` **is a hook** by the ABI's convention, so anything else is named `rano_…`; the host checks
+each discovered hook's signature at load and refuses a module whose hook it could never call.
+
+The host does not care what wrote the module — Rust, C, Zig, Go via TinyGo, AssemblyScript, or
+`wat2wasm` — only that the exports above exist.
 
 **A folder viewer, as a plugin.** `examples/plugin-dired/` is the same idea one step further: it
 answers `provider_open` — asked *instead of* opening a path — by checking whether the path is a

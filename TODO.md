@@ -3149,5 +3149,15 @@ The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
   are told the viewport (`cols`×`rows`), so a plugin view is width-adaptive like the rest. Styles
   would be a span table (`(row, col_start, col_end, role)`), a canvas would be a distinct view
   kind; neither is in stage 1, and raw terminal output is never offered.
+- [x] **SDKs, because "bare wasm" is not the interface** — the operator: *"so bare wasm? I hoped you
+  will show me typescript or rust plugins"*. `sdks/rust` (crate `rano-plugin`: `abi!()`, `hook`,
+  `provider`, `read_dir`, and every pointer check) and `sdks/assemblyscript/rano.ts` (`answer`,
+  `input`, `readDir`, the two impl exports). Both examples are rewritten on them, and
+  `examples/plugin-upper-as` is the same plugin in TypeScript. Measured **41 µs per hook call**
+  once compiled (fresh store+instance, 18 MiB of memory) — the save path pays nothing visible.
+  Two rules learned by the TS build: an `on_` export *is* a hook (so unrelated exports are
+  `rano_…`, and the host now checks each hook's signature at load), and AssemblyScript's
+  `env.abort` import is solved on the plugin's side with `--use abort=index/rano_abort`, never with
+  a host shim.
 - [ ] **Still open**: the bus library (`zbus` vs a socket with the same three messages) — steps 5–8
   of the plan (the slow-hook probe, reload, the bus service).

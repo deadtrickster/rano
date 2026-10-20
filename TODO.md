@@ -3159,5 +3159,10 @@ The plan is **`plans/S10-wasm-hooks.md`**. The shape it commits to:
   `rano_…`, and the host now checks each hook's signature at load), and AssemblyScript's
   `env.abort` import is solved on the plugin's side with `--use abort=index/rano_abort`, never with
   a host shim.
+- [x] **The dired view in both languages** — `examples/plugin-dired` (Rust, ~20 lines, 15 KB) and
+  `examples/plugin-dired-as` (TypeScript, ~15 lines, 4.7 KB), both on the SDKs, both built and
+  committed, both tested the same two ways: the ABI directly (refused without the grant, the
+  listing with it, a file not claimed) and the editor end-to-end (a folder opens through the
+  plugin, `RET` enters). The editor cannot tell them apart, which is the ABI's point.
 - [ ] **Still open**: the bus library (`zbus` vs a socket with the same three messages) — steps 5–8
   of the plan (the slow-hook probe, reload, the bus service).

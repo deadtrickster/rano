@@ -332,11 +332,23 @@ fn run(
     }
     // **The plugin**: `RANO_PLUGIN` beats the config file, and either may be absent. A plugin that
     // cannot load says so once and leaves the editor exactly as it was.
+    //
+    // `RANO_CAPABILITIES` is the same override for the grant (`read-dir`, comma-separated): a
+    // capability is normally a config statement, and this is how a plugin can be *tried* — a demo,
+    // a test — without editing the config to grant something.
     if let Some(p) = std::env::var("RANO_PLUGIN")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .or_else(|| ed.config.plugin.clone())
     {
+        if let Ok(caps) = std::env::var("RANO_CAPABILITIES") {
+            let names: Vec<String> = caps
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            ed.config.capabilities = names;
+        }
         ed.set_plugin(&PathBuf::from(expand_tilde(&p)));
     }
     // 0-based, once, here: `--line 1` is the first row, and the editor's own

@@ -1393,6 +1393,28 @@ fn a_folder_opens_through_the_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
+/// **The same folder, through the TypeScript plugin**: the editor cannot tell the two apart —
+/// that is the ABI's whole point.
+#[test]
+fn a_folder_opens_through_the_typescript_plugin() {
+    let wasm: &[u8] = include_bytes!("../examples/plugin-dired-as/plugin.wasm");
+    let d = temp_dir("plugin_dired_as");
+    fs::write(d.0.join("one.txt"), "one\n").unwrap();
+    let mut ed = test_ed("");
+    ed.text_h = 20;
+    ed.set_plugin_bytes_with(
+        wasm,
+        PathBuf::from("dired-as.wasm"),
+        crate::plugin::Capabilities { read_dir: true },
+    );
+    assert!(ed.open_at(&d.0, 1, None).is_ok());
+    assert_eq!(lines(&ed), vec!["one.txt"]);
+    assert!(ed.bs().dir.is_some());
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.bs().dir.is_none(), "a file opens as a file");
+    assert_eq!(lines(&ed), vec!["one"]);
+}
+
 /// **The example plugin, end to end through the editor.** `examples/plugin-upper` is a real
 /// `wasm32` build committed as `plugin.wasm` (264 bytes, source beside it), so this uses no
 /// toolchain and no file on disk beyond a scratch file — and it is the answer to "can I write

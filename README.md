@@ -395,6 +395,16 @@ export function on_save(ptr: u32, len: u32): u32 {
 npm i -g assemblyscript && asc index.ts -o plugin.wasm --optimize --use abort=index/rano_abort
 ```
 
+`examples/plugin-dired-as/` is the folder viewer in TypeScript — the same plugin as the Rust one,
+about fifteen lines, using the SDK's `readDir`:
+
+```ts
+export function provider_open(ptr: u32, len: u32, _cols: u32, _rows: u32): u32 {
+  const listing = readDir(String.UTF8.decodeUnsafe(ptr as usize, len as usize));
+  return listing === null ? UNCHANGED : answer(listing);
+}
+```
+
 Two things the TS side teaches, both in that command line: AssemblyScript's runtime would import
 `env.abort`, and a plugin may import nothing it was not granted — so the example supplies its own
 abort *export* (`rano_abort`) and the build points at it. And an export whose name starts with
@@ -416,7 +426,12 @@ capabilities = ["read-dir"]
 
 The host's `read_dir(path_ptr, path_len, out_ptr, out_cap)` answers the folder's text, rendered
 with the same rules as rano's own listing, so a provider and the built-in dired cannot disagree
-about what a row means. A provider is also told the viewport (`cols`, `rows`), which is what makes
+about what a row means. To try it without editing your config, the grant has the same env override
+the path does:
+
+```sh
+RANO_PLUGIN=$PWD/examples/plugin-dired/plugin.wasm RANO_CAPABILITIES=read-dir rano .
+``` A provider is also told the viewport (`cols`, `rows`), which is what makes
 a plugin view adaptive at any terminal width. `RET`, `-`, `r` and `q` still work, because a folder
 the plugin claims keeps the listing keys — the plugin decided the content; the editor kept the
 navigation.

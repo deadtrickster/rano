@@ -59,6 +59,34 @@ export function rano_alloc_impl(n: u32): u32 {
   return alloc(n);
 }
 
+/** **The host's listing of `path`** — a folder's text, rendered by the host with the same rules as
+ * its own dired (directories first, `name/`), or `null` when the path is not a folder it can read.
+ * Calling this is what gives the module the `read-dir` import, so a plugin that does not want the
+ * capability does not have it. */
+@external("rano", "read_dir")
+declare function host_read_dir(pathPtr: usize, pathLen: u32, outPtr: usize, outCap: u32): i32;
+
+export function readDir(path: string): string | null {
+  const bytes = String.UTF8.encode(path);
+  let cap: usize = 1 << 20;
+  for (let i = 0; i < 2; i++) {
+    const out = heap.alloc(cap);
+    const n = host_read_dir(changetype<usize>(bytes), bytes.byteLength, out, cap as u32);
+    if (n >= 0) {
+      return String.UTF8.decodeUnsafe(out, n as usize);
+    }
+    if (n == i32.MIN_VALUE) {
+      return null;
+    }
+    const needed = (-n) as usize;
+    if (needed <= cap) {
+      return null;
+    }
+    cap = needed;
+  }
+  return null;
+}
+
 // A plugin's file, in full:
 //
 // ```ts

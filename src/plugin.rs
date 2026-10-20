@@ -663,6 +663,46 @@ mod tests {
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
+    /// **The TypeScript dired**: the same plugin as the Rust one, in AssemblyScript — refused
+    /// without the grant, listing a folder with it, not claiming a file.
+    #[test]
+    fn the_typescript_dired_needs_read_dir_and_then_lists_a_folder() {
+        let wasm: &[u8] = include_bytes!("../examples/plugin-dired-as/plugin.wasm");
+        let e = Plugin::from_bytes_with(
+            wasm,
+            PathBuf::from("dired-as.wasm"),
+            Capabilities::default(),
+        )
+        .unwrap_err();
+        assert!(e.contains("imports are not granted"), "{e}");
+        let p = Plugin::from_bytes_with(
+            wasm,
+            PathBuf::from("dired-as.wasm"),
+            Capabilities { read_dir: true },
+        )
+        .expect("loads with the grant");
+        assert_eq!(p.hooks(), vec!["provider_open".to_string()]);
+        let dir = std::env::temp_dir().join(format!("rano_dired_as_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let listing = p
+            .provider_open(&dir.to_string_lossy(), 80, 24)
+            .expect("no failure")
+            .expect("a folder is claimed");
+        assert_eq!(
+            listing,
+            format!("{}\n", crate::dirview::rows(&dir).unwrap().join("\n"))
+        );
+        assert_eq!(
+            p.provider_open(&dir.join("a.txt").to_string_lossy(), 80, 24)
+                .unwrap(),
+            None,
+            "a file is not claimed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn capabilities_are_named_not_guessed() {
         let names = vec!["read-dir".to_string()];

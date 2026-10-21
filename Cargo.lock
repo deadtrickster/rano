@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "rano"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "cc",
  "flate2",

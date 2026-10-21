@@ -95,6 +95,20 @@ impl Features {
         let ghostty = term == "xterm-ghostty" || term_program.eq_ignore_ascii_case("ghostty");
         let mut f = if ghostty && !in_tmux {
             Features::GHOSTTY
+        } else if in_tmux || term.starts_with("screen") || term.starts_with("tmux") {
+            // **One sequence survives a multiplexer, and it is the one copying needs.**
+            // tmux eats or mangles everything else here — progress bars, notifications,
+            // links, inline images — and the note that used to sit in this table said so
+            // and stopped there. But OSC 52 is not like the rest: it is the sequence tmux
+            // exists to pass along. With `set-clipboard on` it forwards it to the outer
+            // terminal, and with the default `external` it keeps it in its own paste
+            // buffer. Emitting it is therefore never wrong, and declining was: dragging a
+            // selection in rano inside byobu copied nothing, silently, because
+            // `Terminal::copy` returns early when this flag is off.
+            Features {
+                clipboard: true,
+                ..Features::default()
+            }
         } else {
             Features::default()
         };
@@ -187,7 +201,7 @@ mod tests {
             ("xterm-256color", "Apple_Terminal"),
             ("xterm-kitty", ""),
             ("xterm-256color", "WezTerm"),
-            ("screen-256color", ""),
+            ("xterm-kitty", ""),
         ] {
             assert_eq!(
                 Features::from_env(term, prog, false, ""),
@@ -195,10 +209,27 @@ mod tests {
                 "{term} {prog}"
             );
         }
-        // tmux in front of Ghostty: the sequences would be eaten or mangled.
+        // tmux in front of Ghostty: the sequences would be eaten or mangled — **except the
+        // clipboard's**, which tmux forwards (or keeps in its paste buffer). That one flag,
+        // and nothing else.
+        let tmux = Features::from_env("xterm-ghostty", "ghostty", true, "");
+        assert_eq!(tmux.names(), vec!["clipboard"]);
         assert_eq!(
-            Features::from_env("xterm-ghostty", "ghostty", true, ""),
-            Features::default()
+            tmux,
+            Features {
+                clipboard: true,
+                ..Features::default()
+            }
+        );
+        // And the same for a terminal that only says `screen`, which is what byobu leaves
+        // in `TERM` when it is not saying `tmux`.
+        assert_eq!(
+            Features::from_env("screen-256color", "", false, "").names(),
+            vec!["clipboard"]
+        );
+        assert_eq!(
+            Features::from_env("tmux-256color", "", true, "").names(),
+            vec!["clipboard"]
         );
     }
 

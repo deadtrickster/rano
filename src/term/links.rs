@@ -74,6 +74,74 @@ pub fn link_urls(row: &str) -> String {
     out
 }
 
+/// **Every WORD in a rendered row that `url_of` knows a link for, made that link** — the
+/// host's own references: `owner/repo#12`, `#12`, a commit, a branch. A word is a run of letters,
+/// digits and `/#-_.` standing on its own, its trailing sentence punctuation not part of it; the
+/// host decides, so a word it does not know stays text. Only plain text runs, as [`link_urls`]:
+/// escapes are copied through and a word inside a link already drawn is left alone.
+///
+/// `None` when nothing in the row was linked — the common case, and one that copies nothing, so a
+/// frame pays only for the rows that change.
+pub fn link_words(row: &str, url_of: &mut dyn FnMut(&str) -> Option<String>) -> Option<String> {
+    let b = row.as_bytes();
+    let word = |c: char| c.is_alphanumeric() || matches!(c, '/' | '#' | '-' | '_' | '.');
+    let mut found: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    let mut in_link = false;
+    let mut prev_word = false;
+    while i < b.len() {
+        if b[i] == 0x1b {
+            let end = escape_end(b, i);
+            let seq = &row[i..end];
+            if let Some(body) = seq.strip_prefix("\x1b]8;") {
+                let uri = body.split_once(';').map(|(_, u)| u).unwrap_or("");
+                in_link = !(uri.is_empty() || uri.starts_with('\x1b') || uri.starts_with('\x07'));
+            }
+            i = end;
+            prev_word = false;
+            continue;
+        }
+        let c = row[i..].chars().next().unwrap_or(' ');
+        if !word(c) || prev_word || in_link {
+            prev_word = word(c) && !in_link;
+            i += c.len_utf8();
+            continue;
+        }
+        let rest = &row[i..];
+        let mut end = rest
+            .char_indices()
+            .find(|(_, c)| !word(*c))
+            .map_or(rest.len(), |(k, _)| k);
+        while end > 0 && rest[..end].ends_with(['.', ',', '-', '_', '/']) {
+            end -= 1;
+        }
+        if end > 0
+            && let Some(url) = url_of(&rest[..end])
+        {
+            found.push((i, i + end, url));
+        }
+        // Past the whole run, so its tail is not tried as a word of its own.
+        let run = rest
+            .char_indices()
+            .find(|(_, c)| !word(*c))
+            .map_or(rest.len(), |(k, _)| k);
+        i += run.max(c.len_utf8());
+        prev_word = false;
+    }
+    if found.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(row.len() + found.len() * 64);
+    let mut at = 0;
+    for (a, z, url) in found {
+        out.push_str(&row[at..a]);
+        out.push_str(&format!("\x1b]8;;{url}\x1b\\{}\x1b]8;;\x1b\\", &row[a..z]));
+        at = z;
+    }
+    out.push_str(&row[at..]);
+    Some(out)
+}
+
 /// The length of the URL that `rest` starts with, or `None` when it does not start with one.
 /// Trailing sentence punctuation is not part of the URL.
 fn url_at(rest: &str) -> Option<usize> {
@@ -287,5 +355,36 @@ mod tests {
             format!("\x1b]8;;{url}\x1b\\m\x1b]8;;\x1b\\")
         );
         assert_eq!(file_url("/w", "a b"), None);
+    }
+
+    /// **The host's own references become links, and nothing else does** — a word it knows is
+    /// wrapped, one it does not stays text, an escape and a link already drawn are left alone,
+    /// and a row with nothing to link comes back as `None`.
+    #[test]
+    fn a_word_the_host_knows_is_linked() {
+        let mut url_of = |w: &str| match w {
+            "#212" => Some("https://github.com/o/r/issues/212".to_string()),
+            "o/r#7" => Some("https://github.com/o/r/issues/7".to_string()),
+            _ => None,
+        };
+        let row = "\x1b[1mfixed\x1b[0m in #212, see o/r#7. not #2120x";
+        let out = link_words(row, &mut url_of).unwrap();
+        assert!(
+            out.contains("\x1b]8;;https://github.com/o/r/issues/212\x1b\\#212\x1b]8;;\x1b\\,"),
+            "{out:?}"
+        );
+        assert!(
+            out.contains("\x1b]8;;https://github.com/o/r/issues/7\x1b\\o/r#7\x1b]8;;\x1b\\."),
+            "{out:?}"
+        );
+        assert!(out.ends_with("not #2120x"), "{out:?}");
+        assert!(out.starts_with("\x1b[1mfixed\x1b[0m"), "{out:?}");
+        assert_eq!(link_words("nothing here", &mut url_of), None);
+        let drawn = "\x1b]8;;https://x\x1b\\#212\x1b]8;;\x1b\\";
+        assert_eq!(
+            link_words(drawn, &mut url_of),
+            None,
+            "inside a link already drawn"
+        );
     }
 }

@@ -13,6 +13,11 @@
 //! (func (export "on_save") (param i32 i32) (result i32))
 //! ```
 //!
+//! **An `on_*` export is a text hook, a `provider_*` export takes the viewport too, and a host
+//! that speaks other hook kinds names their prefixes at load** ([`Plugin::load_hooks`]) — a
+//! `pane_dashboard` is the same `(i32, i32) -> i32` call as `on_save`, so a new kind of hook
+//! costs a host-side list and not an ABI version.
+//!
 //! A hook returns the offset of an 8-byte **result block** — `out_ptr` and `out_len` as
 //! little-endian `u32`s — or `0xFFFFFFFF` for **unchanged**. Two integers at an offset is the one
 //! structure every language can write without agreeing on a struct layout, and the version export
@@ -32,6 +37,7 @@
 //! listing as a plugin) is a deliberate addition, not a switch.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -91,6 +97,9 @@ pub struct Plugin {
     hooks: Vec<String>,
     /// What the config let it import.
     caps: Capabilities,
+    /// Fuel the last [`Plugin::call`] burned. An atomic rather than a `Mutex` because it is one
+    /// number written once per call and read by a status line, and `call` takes `&self`.
+    fuel: AtomicU64,
 }
 
 impl Plugin {
@@ -105,8 +114,18 @@ impl Plugin {
     /// those, and a module that imports anything else is refused here rather than at the first
     /// save.
     pub fn load_with(path: &Path, caps: Capabilities) -> Result<Plugin, String> {
+        Self::load_hooks(path, caps, &[])
+    }
+
+    /// [`Self::load`] with the capabilities the config granted and the hook prefixes the host
+    /// recognises — see [`Self::from_bytes_hooks`] for what a prefix means.
+    pub fn load_hooks(
+        path: &Path,
+        caps: Capabilities,
+        prefixes: &[&str],
+    ) -> Result<Plugin, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::from_bytes_with(&bytes, path.to_path_buf(), caps)
+        Self::from_bytes_hooks(&bytes, path.to_path_buf(), caps, prefixes)
     }
 
     /// The same, from bytes — the seam the WAT fixtures in the tests come through, so a test does
@@ -120,6 +139,24 @@ impl Plugin {
         bytes: &[u8],
         path: PathBuf,
         caps: Capabilities,
+    ) -> Result<Plugin, String> {
+        Self::from_bytes_hooks(bytes, path, caps, &[])
+    }
+
+    /// [`Self::from_bytes`] with both the capabilities and the **hook prefixes** the host
+    /// recognises: `on_` and `provider_` are always hooks, and anything named under `prefixes`
+    /// (letibot passes `pane_`, `condition_`, `notice_`, `digest_`, `link_`, `command_`, `tool_`)
+    /// is a text hook — `(i32, i32) -> i32`, refused here if it is not.
+    ///
+    /// The list is the host's, not the module's: a module cannot widen what it answers by naming
+    /// an export `pane_x`, because a host that does not know `pane_` does not see a hook at all.
+    /// An empty prefix is ignored rather than honoured, so a host's mis-built list cannot turn
+    /// every export — `rano_alloc` included — into a hook the load would then refuse.
+    pub fn from_bytes_hooks(
+        bytes: &[u8],
+        path: PathBuf,
+        caps: Capabilities,
+        prefixes: &[&str],
     ) -> Result<Plugin, String> {
         let mut config = Config::new();
         // Fuel is what makes a hostile or simply broken loop a bounded cost.
@@ -147,12 +184,17 @@ impl Plugin {
         // The hooks are whatever the module exports under the naming convention — and each one's
         // SIGNATURE is checked here, so a module whose hook the host could never call is refused at
         // load rather than failing the first save. (A plugin must not name an unrelated export
-        // `on_…`: the prefix *is* the convention.)
+        // `on_…`: the prefix *is* the convention.) A prefix the host passed in is the same kind of
+        // claim as `on_`, so it is held to the same signature.
         let mut hooks: Vec<String> = Vec::new();
         for e in module.exports() {
             let name = e.name().to_string();
             let provider = name.starts_with("provider_");
-            if !(provider || name.starts_with("on_")) {
+            let text = name.starts_with("on_")
+                || prefixes
+                    .iter()
+                    .any(|p| !p.is_empty() && name.starts_with(p));
+            if !(provider || text) {
                 continue;
             }
             if provider {
@@ -180,6 +222,7 @@ impl Plugin {
             path,
             hooks,
             caps,
+            fuel: AtomicU64::new(0),
         })
     }
 
@@ -206,6 +249,13 @@ impl Plugin {
     /// `on_save`: the text to write, or `None` when the hook left it alone.
     pub fn save(&self, text: &str) -> Result<Option<String>, String> {
         self.call("on_save", text)
+    }
+
+    /// **Fuel the last [`Self::call`] burned** — `HOOK_FUEL` minus what the store had left, so a
+    /// hook that ran out reads as the whole budget. A host that reports slowness reports this
+    /// beside the time, because fuel is the engine-independent measure of the same work.
+    pub fn last_fuel(&self) -> u64 {
+        self.fuel.load(Ordering::Relaxed)
     }
 
     /// **`provider_open`: what this path should open as**, or `None` when the plugin does not
@@ -271,9 +321,10 @@ impl Plugin {
         linker
     }
 
-    /// **Run one hook over `text`.** One fresh store per call: the fuel and the memory budget are
-    /// per call, and nothing a guest allocates can accumulate across saves.
-    fn call(&self, hook: &str, text: &str) -> Result<Option<String>, String> {
+    /// **Run any text hook**: `Ok(None)` when the plugin does not answer it or the hook left the
+    /// text alone. One fresh store per call: the fuel and the memory budget are per call, and
+    /// nothing a guest allocates can accumulate across saves.
+    pub fn call(&self, hook: &str, text: &str) -> Result<Option<String>, String> {
         self.call_with(hook, text, None)
     }
 
@@ -297,6 +348,8 @@ impl Plugin {
         text: &str,
         viewport: Option<(i32, i32)>,
     ) -> Result<Option<String>, String> {
+        // A call that never ran a guest must not report the previous call's fuel as its own.
+        self.fuel.store(0, Ordering::Relaxed);
         if !self.has(hook) {
             return Ok(None);
         }
@@ -354,8 +407,13 @@ impl Plugin {
                     })?;
                 f.call(&mut store, (at as i32, text.len() as i32, cols, rows))
             }
-        }
-        .map_err(|e| format!("trapped: {e}"))?;
+        };
+        // Recorded before the trap is turned into a sentence: an out-of-fuel hook and a slow one
+        // are the same measurement, and the gate wants the number either way.
+        let left = store.get_fuel().unwrap_or(0);
+        self.fuel
+            .store(HOOK_FUEL.saturating_sub(left), Ordering::Relaxed);
+        let got = got.map_err(|e| format!("trapped: {e}"))?;
         if got == UNCHANGED {
             return Ok(None);
         }
@@ -724,5 +782,119 @@ mod tests {
             s.contains("fixture.wasm") && s.contains("on_open") && s.contains("on_save"),
             "{s}"
         );
+    }
+
+    /// A pane hook as letibot writes one: `(i32, i32) -> i32`, answering a fixed block. The text it
+    /// answers (`"pane:x"`, at 4096) is not the input, so the test can tell the two apart.
+    const PANE: &str = r#"
+        (memory (export "memory") 4)
+        (func (export "rano_abi") (result i32) i32.const 1)
+        (func (export "rano_alloc") (param i32) (result i32) i32.const 1024)
+        (data (i32.const 4096) "pane:x")
+        (func (export "pane_x") (param i32 i32) (result i32)
+          (i32.store (i32.const 8192) (i32.const 4096))
+          (i32.store (i32.const 8196) (i32.const 6))
+          i32.const 8192)
+    "#;
+
+    /// **A prefix is the host's claim, not the module's**: without `pane_` passed, `pane_x` is an
+    /// ordinary export that answers nothing; with it, the same module is a pane hook.
+    #[test]
+    fn a_prefixed_export_is_a_hook_only_when_the_host_names_the_prefix() {
+        let p = plugin(PANE);
+        assert!(p.hooks().is_empty(), "{:?}", p.hooks());
+        assert_eq!(p.call("pane_x", "hello").unwrap(), None);
+
+        let p = Plugin::from_bytes_hooks(
+            &wat(PANE),
+            PathBuf::from("pane.wasm"),
+            Capabilities::default(),
+            &["pane_"],
+        )
+        .expect("loads");
+        assert_eq!(p.hooks(), vec!["pane_x".to_string()]);
+        assert_eq!(
+            p.call("pane_x", "hello").unwrap().as_deref(),
+            Some("pane:x")
+        );
+    }
+
+    /// The prefixes are added beside the two the ABI already defines, and hide neither.
+    #[test]
+    fn prefixes_are_added_beside_on_and_provider() {
+        let src = format!(
+            r#"{BASE}
+            (func (export "on_save") (param i32 i32) (result i32) i32.const -1)
+            (func (export "provider_open") (param i32 i32 i32 i32) (result i32) i32.const -1)"#
+        );
+        let p = Plugin::from_bytes_hooks(
+            &wat(&src),
+            PathBuf::from("x.wasm"),
+            Capabilities::default(),
+            &["pane_"],
+        )
+        .expect("loads");
+        assert_eq!(
+            p.hooks(),
+            vec!["on_save".to_string(), "provider_open".to_string()]
+        );
+    }
+
+    /// A prefixed export the host could never call is refused **at load, naming it** — the same rule
+    /// `on_` already has, for the same reason: a hook that fails on every call is a plugin that
+    /// fails at the first frame instead of at load.
+    #[test]
+    fn a_prefixed_export_with_the_wrong_signature_is_refused_naming_it() {
+        let src = r#"(module
+            (memory (export "memory") 1)
+            (func (export "rano_abi") (result i32) i32.const 1)
+            (func (export "pane_x") (param i32) (result i32) i32.const 0))"#;
+        let e = Plugin::from_bytes_hooks(
+            &wat(src),
+            PathBuf::from("pane.wasm"),
+            Capabilities::default(),
+            &["pane_"],
+        )
+        .unwrap_err();
+        assert!(e.contains("pane_x") && e.contains("signature"), "{e}");
+        // The same module without the prefix names nothing to check, so it loads.
+        Plugin::from_bytes_hooks(
+            &wat(src),
+            PathBuf::from("pane.wasm"),
+            Capabilities::default(),
+            &[],
+        )
+        .expect("loads when nothing claims pane_");
+    }
+
+    /// [`Plugin::load_hooks`] is the file half of the same thing: a name in the list is what makes a
+    /// pane hook reachable from a `.wasm` on disk.
+    #[test]
+    fn load_hooks_sees_the_prefixed_hooks_of_a_file() {
+        let path = std::env::temp_dir().join(format!("rano_pane_{}.wasm", std::process::id()));
+        std::fs::write(&path, wat(PANE)).unwrap();
+        let p = Plugin::load_hooks(&path, Capabilities::default(), &["pane_"]).expect("loads");
+        assert_eq!(p.hooks(), vec!["pane_x".to_string()]);
+        assert_eq!(
+            p.call("pane_x", "hello").unwrap().as_deref(),
+            Some("pane:x")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **`last_fuel` is the call's cost**, which is what the gate reports beside the wall time. A
+    /// hook that was not called reports nothing rather than the previous call's number.
+    #[test]
+    fn last_fuel_is_what_the_last_call_burned() {
+        let p = plugin(&format!(
+            r#"{BASE}
+            (func (export "on_save") (param i32 i32) (result i32) i32.const -1)"#
+        ));
+        assert_eq!(p.last_fuel(), 0, "no call has run yet");
+        p.save("hello").unwrap();
+        let burnt = p.last_fuel();
+        assert!(burnt > 0 && burnt <= HOOK_FUEL, "{burnt}");
+        p.call("on_open", "hello").unwrap();
+        assert_eq!(p.last_fuel(), 0, "a hook it does not export is not a call");
     }
 }

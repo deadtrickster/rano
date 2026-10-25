@@ -767,6 +767,11 @@ pub fn runs_spans(runs: &[Run], container: Role) -> Vec<Span> {
             InlineStyle::Code => on(Style::of(container).role(Role::Code), heavy, false, false),
             InlineStyle::Strikethrough => on(Style::of(container), false, false, true),
         };
+        // A link's label carries its destination, which the emitter writes as OSC 8.
+        let style = match &r.link {
+            Some(url) => style.link(url.as_str()),
+            None => style,
+        };
         push_span(&mut out, Span::styled(r.text.as_str(), style));
     }
     out
@@ -784,6 +789,7 @@ pub fn joined_runs(lines: &[Vec<Run>]) -> Vec<Run> {
             out.push(Run {
                 text: " ".to_string(),
                 style: InlineStyle::Plain,
+                link: None,
             });
         }
         out.extend(line.iter().cloned());

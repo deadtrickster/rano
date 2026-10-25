@@ -149,15 +149,15 @@ pub enum Block {
 pub struct Run {
     pub text: String,
     pub style: InlineStyle,
+    /// **Where this text links to**, when it is a link's label — `[PR #212](https://…)` keeps its
+    /// destination now that a head has a pointer and the terminal speaks OSC 8. `None` for text.
+    pub link: Option<String>,
 }
 
 /// The inline styles the conversation renderer knows.
 ///
-/// A link carries no URL. The TUI has no pointer, so a head that cannot follow a
-/// link showing the destination is noise; the *text* is the content, and an autolink
-/// (`<https://…>`) already reads as its own URL because that is what its text is. The
-/// grammar has the destination and the projection can grow a field for it if a
-/// follow-a-link feature ever arrives.
+/// A link is drawn as its label, with its destination on [`Run::link`] for a head to make the
+/// label a link; an autolink (`<https://…>`) reads as its own URL because that is its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineStyle {
     Plain,
@@ -519,11 +519,13 @@ pub fn images(text: &str) -> Vec<(String, String)> {
 /// Getting this wrong is not subtle — the first version left the markers uncovered and
 /// `runs_of` handed them back as literal `**`, which is exactly the bug this whole
 /// workstream exists to remove.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Span {
     start: usize,
     end: usize,
     style: Option<InlineStyle>,
+    /// The destination of the link this text is the label of.
+    link: Option<std::sync::Arc<str>>,
 }
 
 /// Run the inline grammar over the parts of `root` that hold inline content and
@@ -663,6 +665,7 @@ fn collect_spans(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>
                     start: a,
                     end: b,
                     style: Some(InlineStyle::Code),
+                    link: None,
                 });
             }
         }
@@ -675,11 +678,13 @@ fn collect_spans(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>
                     start: node.start,
                     end: end - 1,
                     style: None,
+                    link: None,
                 });
                 out.push(Span {
                     start: end - 1,
                     end,
                     style: Some(style),
+                    link: None,
                 });
             } else {
                 dropped(node, out);
@@ -694,6 +699,7 @@ fn collect_spans(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>
                     start: node.start + 1,
                     end: node.end - 1,
                     style: Some(style),
+                    link: None,
                 });
             }
         }
@@ -707,9 +713,21 @@ fn collect_spans(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>
         | "full_reference_link"
         | "shortcut_link"
         | "image" => {
+            // The destination, when the link writes one inline — what its label links to.
+            let dest: Option<std::sync::Arc<str>> = (node.kind == "inline_link")
+                .then(|| node.children.iter().find(|c| c.kind == "link_destination"))
+                .flatten()
+                .and_then(|d| slice(src, d.start, d.end))
+                .map(|d| d.trim_start_matches('<').trim_end_matches('>').into());
             for c in &node.children {
                 if c.kind == "link_text" || c.kind == "image_description" {
+                    let from = out.len();
                     gaps(c, src, style, out);
+                    if let Some(d) = &dest {
+                        for s in out[from..].iter_mut().filter(|s| s.style.is_some()) {
+                            s.link = Some(d.clone());
+                        }
+                    }
                 } else {
                     dropped(c, out);
                 }
@@ -726,6 +744,7 @@ fn dropped(node: &Node, out: &mut Vec<Span>) {
             start: node.start,
             end: node.end,
             style: None,
+            link: None,
         });
     }
 }
@@ -740,6 +759,7 @@ fn gaps(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>) {
                 start: cursor,
                 end: c.start,
                 style: Some(style),
+                link: None,
             });
         }
         collect_spans(c, src, style, out);
@@ -750,6 +770,7 @@ fn gaps(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>) {
             start: cursor,
             end: node.end,
             style: Some(style),
+            link: None,
         });
     }
 }
@@ -1174,11 +1195,11 @@ fn subtree_lines(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<Run>>
                     let mut line: Vec<Run> = Vec::new();
                     for cell in row.children.iter().filter(|g| g.kind == "pipe_table_cell") {
                         if !line.is_empty() {
-                            push_text(&mut line, " ", InlineStyle::Plain);
+                            push_text(&mut line, " ", InlineStyle::Plain, None);
                         }
                         let (a, b) = trim_range(src, cell.start, cell.end);
                         if let Some(t) = slice(src, a, b) {
-                            push_text(&mut line, t, InlineStyle::Plain);
+                            push_text(&mut line, t, InlineStyle::Plain, None);
                         }
                     }
                     if !line.is_empty() {
@@ -1201,7 +1222,9 @@ fn lines_of_ranges(src: &str, spans: &[Span], ranges: &[(usize, usize)], out: &m
                     out.push(std::mem::take(&mut cur));
                 }
                 if !piece.is_empty() {
-                    cur.push(run(piece.to_string(), r.style));
+                    let mut p = run(piece.to_string(), r.style);
+                    p.link = r.link.clone();
+                    cur.push(p);
                 }
             }
         }
@@ -1224,10 +1247,10 @@ fn item_runs(body: &[Node], src: &str, spans: &[Span]) -> Vec<Run> {
     let mut out: Vec<Run> = Vec::new();
     for (i, line) in lines.into_iter().enumerate() {
         if i > 0 {
-            push_text(&mut out, " ", InlineStyle::Plain);
+            push_text(&mut out, " ", InlineStyle::Plain, None);
         }
         for r in line {
-            push_text(&mut out, &r.text, r.style);
+            push_text(&mut out, &r.text, r.style, r.link.as_deref());
         }
     }
     out
@@ -1514,20 +1537,20 @@ fn runs_of(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
         if s0 > pos
             && let Some(t) = slice(src, pos, s0)
         {
-            push_text(&mut out, t, InlineStyle::Plain);
+            push_text(&mut out, t, InlineStyle::Plain, None);
         }
         if s1 > s0
             && let Some(style) = s.style
             && let Some(t) = slice(src, s0, s1)
         {
-            push_text(&mut out, t, style);
+            push_text(&mut out, t, style, s.link.as_deref());
         }
         pos = pos.max(s1);
     }
     if b > pos
         && let Some(t) = slice(src, pos, b)
     {
-        push_text(&mut out, t, InlineStyle::Plain);
+        push_text(&mut out, t, InlineStyle::Plain, None);
     }
     out
 }
@@ -1544,7 +1567,7 @@ fn runs_of(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
 /// grammar already decided which backslashes are escapes (`backslash_escape` nodes) —
 /// this only has to undo the one it recognised, which is why a `\d` in a regex keeps
 /// its backslash.
-fn push_text(out: &mut Vec<Run>, text: &str, style: InlineStyle) {
+fn push_text(out: &mut Vec<Run>, text: &str, style: InlineStyle, link: Option<&str>) {
     if text.is_empty() {
         return;
     }
@@ -1555,11 +1578,14 @@ fn push_text(out: &mut Vec<Run>, text: &str, style: InlineStyle) {
     };
     if let Some(last) = out.last_mut()
         && last.style == style
+        && last.link.as_deref() == link
     {
         last.text.push_str(&text);
         return;
     }
-    out.push(run(text, style));
+    let mut r = run(text, style);
+    r.link = link.map(str::to_string);
+    out.push(r);
 }
 
 /// Drop the backslash from `\`-punctuation, the way CommonMark reads one.
@@ -1595,7 +1621,11 @@ fn single_line(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
 }
 
 fn run(text: String, style: InlineStyle) -> Run {
-    Run { text, style }
+    Run {
+        text,
+        style,
+        link: None,
+    }
 }
 
 /// Where to settle an over-long window. `None` means nothing may settle yet.

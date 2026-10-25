@@ -147,14 +147,17 @@ fn wrapping_counts_columns_not_markup() {
         Run {
             text: "a ".into(),
             style: InlineStyle::Plain,
+            link: None,
         },
         Run {
             text: "code".into(),
             style: InlineStyle::Code,
+            link: None,
         },
         Run {
             text: " b".into(),
             style: InlineStyle::Plain,
+            link: None,
         },
     ];
     let s = runs_spans(&runs, Role::Plain);
@@ -176,18 +179,22 @@ fn the_renderer_sees_styles_not_markers() {
         Run {
             text: "plain ".into(),
             style: InlineStyle::Plain,
+            link: None,
         },
         Run {
             text: "bold".into(),
             style: InlineStyle::Bold,
+            link: None,
         },
         Run {
             text: " and ".into(),
             style: InlineStyle::Plain,
+            link: None,
         },
         Run {
             text: "code".into(),
             style: InlineStyle::Code,
+            link: None,
         },
     ];
     let s = runs_spans(&runs, Role::Plain);
@@ -432,7 +439,8 @@ mod tables {
             rows[0][1],
             vec![Run {
                 text: "a|b".into(),
-                style: InlineStyle::Plain
+                style: InlineStyle::Plain,
+                link: None,
             }],
             "an escaped pipe is a pipe, not a cell break"
         );
@@ -939,4 +947,31 @@ fn a_citation_numbers_its_lines_as_the_file_does() {
         &opts(),
     ));
     assert_eq!(plain, vec!["┌─ rust", "│ fn x() {}", "└─"]);
+}
+
+/// **A markdown link's label links to its destination** — `[PR #212](https://…)` was drawn as the
+/// words "PR #212" with nowhere to go; the label now carries the URL for the emitter's OSC 8, and
+/// the text beside it carries none.
+#[test]
+fn a_links_label_carries_its_destination() {
+    let md = "Fixed in [PR #212](https://github.com/stroppy-io/stroppy/pull/212) today.\n";
+    let lines = render_blocks(&lex(md), 80, &opts());
+    assert_eq!(text(&lines), vec!["Fixed in PR #212 today."]);
+    let linked: Vec<(&str, Option<&str>)> = spans(&lines)
+        .filter(|s| !s.content.trim().is_empty())
+        .map(|s| (s.content.as_str(), s.style.link.as_deref()))
+        .collect();
+    assert!(
+        linked.contains(&(
+            "PR #212",
+            Some("https://github.com/stroppy-io/stroppy/pull/212")
+        )),
+        "{linked:?}"
+    );
+    assert!(
+        linked
+            .iter()
+            .any(|(t, l)| t.contains("Fixed in") && l.is_none()),
+        "{linked:?}"
+    );
 }

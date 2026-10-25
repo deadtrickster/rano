@@ -5,3 +5,13 @@ edition = "2024"
 description = "Write a rano plugin in Rust, not in wasm: safe helpers over the ABI"
 license = "MIT"
 publish = false
+
+[features]
+# `json_hook`: a pane hook's input and output are JSON (plans, panes, digests), so a plugin that
+# speaks JSON should not carry a hand-rolled parser. Off by default: `on_open`/`on_save` are text,
+# and a plugin that does not parse JSON should not link serde into its `.wasm`.
+json = ["dep:serde", "dep:serde_json"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }

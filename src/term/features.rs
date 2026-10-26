@@ -40,10 +40,18 @@ pub struct Features {
     pub links: bool,
     /// Writing the system clipboard (OSC 52).
     pub clipboard: bool,
-    /// Inline images (the kitty graphics protocol).
+    /// Inline images — see [`Features::proto`] for *which* protocol said so.
     pub images: bool,
     /// Asking the terminal its background colour (OSC 11), to choose a light or dark palette.
     pub background: bool,
+    /// **How a picture is delivered**, when [`Features::images`] says one may be: the terminal's
+    /// protocol, or [`Proto::None`](crate::term::Proto::None).
+    ///
+    /// It is a field of this value rather than a second detection call, because the two answers
+    /// come from one environment and must not be able to disagree — a renderer that believed
+    /// *pictures are on* and a protocol that said *none* is a head drawing placeholders at a
+    /// terminal that fills none of them.
+    pub proto: crate::term::Proto,
 }
 
 const NAMES: [&str; 7] = [
@@ -65,6 +73,7 @@ impl Features {
         clipboard: true,
         images: true,
         background: true,
+        proto: crate::term::Proto::Kitty,
     };
 
     /// **What Ghostty gets with no override**: everything but `progress`. A busy tab's bar is
@@ -76,26 +85,48 @@ impl Features {
     };
 
     /// From this process's environment.
+    ///
+    /// **The one question this asks outside the process is tmux's `allow-passthrough`**, and only
+    /// where it can change the answer: inside a multiplexer, in front of a terminal that speaks
+    /// the kitty protocol. The spawn is a `tmux show-options` round trip, and what it buys is the
+    /// difference between a picture and a sequence tmux swallows without saying so — see
+    /// [`crate::term::proto`].
     pub fn detect() -> Features {
-        let var = |k: &str| std::env::var(k).unwrap_or_default();
-        Features::from_env(
-            &var("TERM"),
-            &var("TERM_PROGRAM"),
-            !var("TMUX").is_empty(),
-            &override_words(
-                std::env::var("RANO_TERM_FEATURES").ok(),
-                std::env::var("LETIBOT_TERM_FEATURES").ok(),
-            ),
-        )
+        let mut env = crate::term::proto::Env::now();
+        if !looks_like_kitty(&env) {
+            // Nothing else crosses tmux, so there is nothing worth a process.
+            return Features::of_env(&env, &words());
+        }
+        env.ask_passthrough();
+        Features::of_env(&env, &words())
     }
 
     /// The decision, from the four inputs that make it — a function so it can be tested
     /// without touching the environment.
+    ///
+    /// **`images` is not a switch of its own**: it is [`crate::term::Proto::of`]'s answer for this
+    /// environment, because *does this terminal take a picture* is a question about the terminal
+    /// and not about this program. Ghostty, kitty, WezTerm and iTerm2 speak one of the two
+    /// protocols and get it; Terminal.app does not and does not. tmux is the exception it has
+    /// always been — nothing crosses it without `allow-passthrough`, which [`Features::detect`]
+    /// asks tmux for and this function, having no `Env` with the answer in it, assumes off.
     pub fn from_env(term: &str, term_program: &str, in_tmux: bool, wanted: &str) -> Features {
-        let ghostty = term == "xterm-ghostty" || term_program.eq_ignore_ascii_case("ghostty");
-        let mut f = if ghostty && !in_tmux {
+        let env = crate::term::proto::Env {
+            term: term.to_string(),
+            term_program: term_program.to_string(),
+            tmux: in_tmux || term.starts_with("screen") || term.starts_with("tmux"),
+            ..crate::term::proto::Env::default()
+        };
+        Features::of_env(&env, wanted)
+    }
+
+    /// The decision, from the environment as facts.
+    fn of_env(env: &crate::term::proto::Env, wanted: &str) -> Features {
+        let ghostty =
+            env.term == "xterm-ghostty" || env.term_program.eq_ignore_ascii_case("ghostty");
+        let mut f = if ghostty && !env.tmux {
             Features::GHOSTTY
-        } else if in_tmux || term.starts_with("screen") || term.starts_with("tmux") {
+        } else if env.tmux {
             // **One sequence survives a multiplexer, and it is the one copying needs.**
             // tmux eats or mangles everything else here — progress bars, notifications,
             // links, inline images — and the note that used to sit in this table said so
@@ -112,8 +143,16 @@ impl Features {
         } else {
             Features::default()
         };
-        for word in wanted.split(',').map(str::trim).filter(|w| !w.is_empty()) {
-            match word {
+        // **Pictures are the one extra that is the terminal's to grant, not this file's** — see
+        // this function's doc. Asked last, so the override below still has the final word.
+        f.images = f.images || crate::term::proto::Proto::of(env, true).speaks();
+        let words: Vec<&str> = wanted
+            .split(',')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .collect();
+        for word in &words {
+            match *word {
                 "all" => f = Features::ALL,
                 "none" => f = Features::default(),
                 w => {
@@ -127,6 +166,23 @@ impl Features {
                 }
             }
         }
+        // **And the protocol, last, because the override has had its say by now.** The operator
+        // naming `images` (or `all`) for a terminal this build cannot place is an assertion about
+        // that terminal, and the one protocol that draws *by placeholder* — the only one a frame
+        // this program diffs can keep — is kitty. Everywhere else the names decide.
+        f.proto = if !f.images {
+            crate::term::Proto::None
+        } else if crate::term::proto::Proto::of(env, true).speaks() {
+            crate::term::proto::Proto::of(env, true)
+        } else if names_images(&words) {
+            if env.tmux {
+                crate::term::Proto::KittyPassthrough
+            } else {
+                crate::term::Proto::Kitty
+            }
+        } else {
+            crate::term::Proto::None
+        };
         f
     }
 
@@ -154,15 +210,43 @@ impl Features {
     }
 }
 
+/// **Did the override name pictures at all** — `images`, `+images` or `all`, and not
+/// `-images`/`none`, which turn them off outright.
+fn names_images(words: &[&str]) -> bool {
+    words
+        .iter()
+        .any(|w| *w == "all" || *w == "images" || *w == "+images")
+}
+
 /// The override's words: the rano-neutral name when it is set (even to empty, which is a
 /// deliberate "no override"), the letibot name otherwise.
 pub fn override_words(rano: Option<String>, letibot: Option<String>) -> String {
     rano.or(letibot).unwrap_or_default()
 }
 
+fn words() -> String {
+    override_words(
+        std::env::var("RANO_TERM_FEATURES").ok(),
+        std::env::var("LETIBOT_TERM_FEATURES").ok(),
+    )
+}
+
+/// **Whether the terminal outside the multiplexer is one of the kitty family** — the question
+/// that decides whether tmux's passthrough setting is worth asking about. Deliberately narrower
+/// than [`crate::term::proto`]'s own detection: it is a reason to run a process, so a terminal
+/// this program cannot place is not one to ask tmux about.
+fn looks_like_kitty(env: &crate::term::proto::Env) -> bool {
+    env.kitty_window
+        || env.term.contains("kitty")
+        || ["ghostty", "wezterm", "kitty"]
+            .iter()
+            .any(|p| env.term_program.eq_ignore_ascii_case(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::Proto;
 
     #[test]
     fn ghostty_gets_all_but_the_progress_bar_and_nothing_else_gets_any_by_default() {
@@ -199,9 +283,8 @@ mod tests {
         );
         for (term, prog) in [
             ("xterm-256color", "Apple_Terminal"),
-            ("xterm-kitty", ""),
-            ("xterm-256color", "WezTerm"),
-            ("xterm-kitty", ""),
+            ("xterm-256color", ""),
+            ("dumb", ""),
         ] {
             assert_eq!(
                 Features::from_env(term, prog, false, ""),
@@ -209,9 +292,30 @@ mod tests {
                 "{term} {prog}"
             );
         }
+        // **Except pictures, which are the terminal's to grant** — kitty and WezTerm speak the
+        // graphics protocol and said so in `TERM`/`TERM_PROGRAM`, so `images` is on for them and
+        // for nothing else here. See `crate::term::proto`.
+        for (term, prog) in [
+            ("xterm-kitty", ""),
+            ("xterm-256color", "WezTerm"),
+            ("xterm-256color", "iTerm.app"),
+        ] {
+            assert_eq!(
+                Features::from_env(term, prog, false, "").names(),
+                vec!["images"],
+                "{term} {prog}"
+            );
+        }
+        // And `-images` takes it away from a terminal that speaks it perfectly.
+        assert_eq!(
+            Features::from_env("xterm-kitty", "", false, "-images").names(),
+            Vec::<&str>::new()
+        );
         // tmux in front of Ghostty: the sequences would be eaten or mangled — **except the
-        // clipboard's**, which tmux forwards (or keeps in its paste buffer). That one flag,
-        // and nothing else.
+        // clipboard's**, which tmux forwards (or keeps in its paste buffer) — and pictures, which
+        // cross only with `allow-passthrough` on. `from_env` has no answer from tmux, so the
+        // picture is not claimed here; `Features::detect` asks, and
+        // `proto::tmux_takes_kitty_only_with_passthrough_and_iterm_never` holds that half.
         let tmux = Features::from_env("xterm-ghostty", "ghostty", true, "");
         assert_eq!(tmux.names(), vec!["clipboard"]);
         assert_eq!(
@@ -233,6 +337,54 @@ mod tests {
         );
     }
 
+    /// **The features and the picture protocol are one answer, not two** — a value that says
+    /// *pictures* beside a protocol that says *none* is a head drawing placeholders a terminal
+    /// never fills.
+    #[test]
+    fn pictures_and_their_protocol_agree() {
+        // The names decide where they can.
+        assert_eq!(
+            Features::from_env("xterm-ghostty", "", false, "").proto,
+            Proto::Kitty
+        );
+        assert_eq!(
+            Features::from_env("xterm-256color", "iTerm.app", false, "").proto,
+            Proto::Iterm
+        );
+        assert_eq!(
+            Features::from_env("xterm-256color", "Apple_Terminal", false, "").proto,
+            Proto::None
+        );
+        // **The operator insisting is an assertion about a terminal this build cannot place**, and
+        // the one protocol that draws by placeholder is kitty.
+        let all = Features::from_env("xterm-256color", "", false, "all");
+        assert!(all.images);
+        assert_eq!(all.proto, Proto::Kitty);
+        assert_eq!(
+            Features::from_env("xterm-256color", "", false, "images").proto,
+            Proto::Kitty
+        );
+        // Under tmux that insistence is the wrapped form, because nothing else crosses.
+        assert_eq!(
+            Features::from_env("xterm-256color", "", true, "images").proto,
+            Proto::KittyPassthrough
+        );
+        // And `-images`/`none` take the protocol with them.
+        assert_eq!(
+            Features::from_env("xterm-kitty", "", false, "-images").proto,
+            Proto::None
+        );
+        assert_eq!(
+            Features::from_env("xterm-ghostty", "", false, "none").proto,
+            Proto::None
+        );
+        // tmux in front of a kitty terminal, with no answer from tmux: no pictures and no
+        // protocol, which is the honest pair (`Features::detect` is the one that asks).
+        let tmux = Features::from_env("xterm-ghostty", "ghostty", true, "");
+        assert!(!tmux.images);
+        assert_eq!(tmux.proto, Proto::None);
+    }
+
     #[test]
     fn the_override_adds_removes_and_replaces() {
         let f = Features::from_env("xterm-ghostty", "", false, "-keys");
@@ -243,8 +395,17 @@ mod tests {
             Features::from_env("xterm-ghostty", "", false, "none"),
             Features::default()
         );
+        // **`all` under tmux is everything, delivered as the wrapped form** — the one picture
+        // protocol that crosses a multiplexer, which is not what a direct terminal gets.
         assert_eq!(
             Features::from_env("xterm-256color", "", true, "all"),
+            Features {
+                proto: Proto::KittyPassthrough,
+                ..Features::ALL
+            }
+        );
+        assert_eq!(
+            Features::from_env("xterm-256color", "", false, "all"),
             Features::ALL
         );
         // The old name still works, and the new one wins when both are set.

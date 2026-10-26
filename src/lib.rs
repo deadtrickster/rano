@@ -51,8 +51,8 @@
 //! if ed.tick(Instant::now()) {
 //!     // **The bytes a picture needs go to the terminal itself**, around the
 //!     // frame whose placeholder rows name it — and only after
-//!     // `ed.images = terminal.features().images`, which is what lets M-P offer
-//!     // a picture at all. Both are no-ops on a terminal without pictures.
+//!     // `ed.images` says the terminal speaks kitty (`Features::proto`, and
+//!     // `rano::term::proto`: placeholders are that protocol's, not iTerm2's).
 //!     if ed.images {
 //!         for bytes in ed.take_graphics() { /* write them to the terminal */ }
 //!     }

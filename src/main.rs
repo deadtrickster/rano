@@ -317,9 +317,13 @@ fn run(
     let mut ed = Editor::new(buf, cfg);
     // **What the terminal can be asked for, told to the editor once.** A picture is drawn
     // as placeholder cells, which a terminal that cannot fill them shows as garbage, so
-    // M-P on a PNG is refused — by name — where `Features::images` is off (see
-    // `term::features`).
-    ed.images = terminal.features().images;
+    // M-P on a PNG is refused — by name — where the protocol is not kitty (see
+    // `term::proto`). iTerm2's inline protocol has no placeholder: its picture is the cells
+    // it is drawn into, and this editor's painter rewrites cells.
+    ed.images = matches!(
+        terminal.features().proto,
+        rano::term::Proto::Kitty | rano::term::Proto::KittyPassthrough
+    );
     // `--edit`: the escape from the mode a `.log` NAME puts it in. Set before any
     // load, because every load asks (`Editor::log_mode_for`).
     ed.edit_override = edit;

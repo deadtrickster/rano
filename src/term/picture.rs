@@ -284,11 +284,14 @@ mod tests {
         for (i, l) in rows.iter().enumerate() {
             b.set_line(0, i as u16, l, 6);
         }
+        // The id through a binding, not a literal: `(7 >> 16) & 0xff` is clippy's
+        // `erasing_op`, and the shifts are what the colour is made of.
+        let id: u32 = 7;
         let colour = format!(
             "38;2;{};{};{};58;5;1",
-            (7 >> 16) & 0xff,
-            (7 >> 8) & 0xff,
-            7 & 0xff
+            (id >> 16) & 0xff,
+            (id >> 8) & 0xff,
+            id & 0xff
         );
         assert!(b.emit(Palette::Colour)[0].contains(&colour));
 

@@ -7,7 +7,8 @@
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::{bytes_human, clean, clean_line};
-use crate::render::{Line, Span};
+use crate::agent::tree_list::{Action, Cell, Row, TreeList};
+use crate::render::Line;
 use crate::style::Role;
 
 /// One background job, as the daemon's job table reports it.
@@ -114,92 +115,119 @@ impl JobsPane {
     /// group finished"*. Each stop's row is recorded in the result, which is what the arrows
     /// scroll to and a click hits.
     pub fn content(&self, w: usize) -> PaneLines {
-        let mut out = PaneLines::new();
-        out.push(pane::title("background jobs"));
-        out.blank();
-        if self.jobs.is_empty() {
-            out.push(pane::faint(
-                "    none. The model backgrounds a command with bash's `background: \
-                 true`; ctrl-o moves the running one.",
+        self.tree().content(w)
+    }
+
+    /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
+    ///
+    /// Its second line sits at 9 under a job and at 7 under the `finished` group — one list,
+    /// two columns, and the row is what says which, so the group row sets its own.
+    fn tree(&self) -> TreeList {
+        TreeList {
+            title: "background jobs".into(),
+            rows: self.stops().into_iter().map(|s| self.row(s)).collect(),
+            selected: self.selected,
+            empty: "none. The model backgrounds a command with bash's `background: true`; \
+                    ctrl-o moves the running one."
+                .into(),
+            fold_column: false,
+            detail_column: 9,
+            margin: 4,
+            hint: vec!["↑↓ moves".into(), "esc closes this".into()],
+            // **A job still shows running until the daemon says it settled**, which is a
+            // sentence about the table rather than about a row: it goes under the hint.
+            notes: vec![
+                "a job still shows running until the daemon says it settled — between turns, \
+                 that saying is the daemon's alone."
+                    .into(),
+            ],
+        }
+    }
+
+    /// One stop, as a row: a job, or the `finished` group.
+    fn row(&self, stop: JobStop) -> Row {
+        let i = match stop {
+            // **The `finished` fold.** A group row and not a job: there is nothing to read, and
+            // Enter folds or unfolds the settled ones.
+            JobStop::Finished => {
+                let n = self.jobs.iter().filter(|j| !j.running).count();
+                let fold = if self.finished_open { "[-]" } else { "[+]" };
+                return Row {
+                    id: Some("finished".into()),
+                    cells: vec![Cell::new(fold), Cell::new(format!("finished ({n})"))],
+                    detail: vec![
+                        if self.finished_open {
+                            "the ones that have settled · enter folds them away"
+                        } else {
+                            "enter shows the ones that have settled"
+                        }
+                        .into(),
+                    ],
+                    detail_column: Some(7),
+                    actions: vec![Action::new(
+                        "enter",
+                        if self.finished_open {
+                            "folds them away"
+                        } else {
+                            "shows the ones that have settled"
+                        },
+                    )],
+                    ..Row::default()
+                };
+            }
+            JobStop::Job(i) => i,
+        };
+        let j = &self.jobs[i];
+        let (mark, role) = if j.running {
+            ("[~]", Role::Pending)
+        } else if j.state.starts_with("exited 0") {
+            ("[x]", Role::Success)
+        } else {
+            ("[!]", Role::Failure)
+        };
+        // **A job that never ran has no duration, and the row must not claim one**
+        // (A.2, §11.6). It read
+        //
+        //     not run (could not join its scope) · 0 B out · ran 0.0s
+        //
+        // — the state word denying *ran* two fields before the row said it. The byte
+        // count stays: it is a measurement that exists (nothing was produced), and the
+        // word beside it is what says why.
+        let state = clean_line(&j.state);
+        let tail = if j.running {
+            format!("running · {} out so far", bytes_human(j.produced))
+        } else if j.never_ran {
+            format!("{state} · {} out", bytes_human(j.produced))
+        } else {
+            format!(
+                "{state} · {} out · ran {}.{:01}s",
+                bytes_human(j.produced),
+                j.elapsed_ms / 1000,
+                (j.elapsed_ms % 1000) / 100,
+            )
+        };
+        let mut detail = vec![format!("{} · {tail}", clean_line(&j.how))];
+        // **And where the output actually went, when it did not come here** (R41), on a
+        // line of its own so the file is readable rather than another clause on a row
+        // that is already long. The operator's own question — *"im not sure it lets me to
+        // see that in the jobs details, when i 'enter' a job"* — answered in the list
+        // they are looking at, before they Enter and find an empty window.
+        if let Some(path) = &j.redirect {
+            detail.push(format!(
+                "→ {} (its output is there, not in the window)",
+                clean_line(path)
             ));
         }
-        let stops = self.stops();
-        let cursor = self.selected.min(stops.len().saturating_sub(1));
-        for (k, stop) in stops.iter().enumerate() {
-            let picked = k == cursor;
-            let i = match *stop {
-                // **The `finished` fold, when the cursor is on it.** A group row and not a job:
-                // there is nothing to read, and Enter folds or unfolds the settled ones.
-                JobStop::Finished => {
-                    let n = self.jobs.iter().filter(|j| !j.running).count();
-                    let fold = if self.finished_open { "[-]" } else { "[+]" };
-                    let left = Line::raw(format!("{} {fold} finished ({n})", pane::mark(picked)));
-                    out.push_stop(pane::picked(left, picked));
-                    out.push(pane::faint(if self.finished_open {
-                        "       the ones that have settled · enter folds them away"
-                    } else {
-                        "       enter shows the ones that have settled"
-                    }));
-                    continue;
-                }
-                JobStop::Job(i) => i,
-            };
-            let j = &self.jobs[i];
-            let (mark, role) = if j.running {
-                ("[~]", Role::Pending)
-            } else if j.state.starts_with("exited 0") {
-                ("[x]", Role::Success)
-            } else {
-                ("[!]", Role::Failure)
-            };
-            out.push_stop(Line::new(vec![
-                Span::raw(format!("{} ", pane::mark(picked))),
-                Span::role(mark, role),
-                Span::raw(format!(" {} {}", clean_line(&j.id), clean_line(&j.command))),
-            ]));
-            // **A job that never ran has no duration, and the row must not claim one**
-            // (A.2, §11.6). It read
-            //
-            //     not run (could not join its scope) · 0 B out · ran 0.0s
-            //
-            // — the state word denying *ran* two fields before the row said it. The byte
-            // count stays: it is a measurement that exists (nothing was produced), and the
-            // word beside it is what says why.
-            let state = clean_line(&j.state);
-            let tail = if j.running {
-                format!("running · {} out so far", bytes_human(j.produced))
-            } else if j.never_ran {
-                format!("{state} · {} out", bytes_human(j.produced))
-            } else {
-                format!(
-                    "{state} · {} out · ran {}.{:01}s",
-                    bytes_human(j.produced),
-                    j.elapsed_ms / 1000,
-                    (j.elapsed_ms % 1000) / 100,
-                )
-            };
-            out.push(pane::faint(format!(
-                "         {} · {tail}",
-                clean_line(&j.how)
-            )));
-            // **And where the output actually went, when it did not come here** (R41), on a
-            // line of its own so the file is readable rather than another clause on a row
-            // that is already long. The operator's own question — *"im not sure it lets me to
-            // see that in the jobs details, when i 'enter' a job"* — answered in the list
-            // they are looking at, before they Enter and find an empty window.
-            if let Some(path) = &j.redirect {
-                out.push(pane::faint(format!(
-                    "         → {} (its output is there, not in the window)",
-                    clean_line(path)
-                )));
-            }
+        Row {
+            id: Some(j.id.clone()),
+            cells: vec![
+                Cell::role(mark, role),
+                Cell::new(format!("{} {}", clean_line(&j.id), clean_line(&j.command))),
+            ],
+            detail,
+            actions: vec![Action::new("enter", "reads it")],
+            ..Row::default()
         }
-        out.blank();
-        out.push(pane::faint(
-            "    a job still shows running until the daemon says it settled — between \
-             turns, that saying is the daemon's alone.",
-        ));
-        out.trimmed(w)
     }
 }
 
@@ -511,6 +539,43 @@ mod tests {
             "{lines}"
         );
         assert!(!lines.contains("ran 0.0s"), "{lines}");
+    }
+
+    /// **The hint under the list is the selected row's own keys** — the job row reads Enter
+    /// one way, the `finished` group another, and the sentence about the table sits under both
+    /// as a note of its own.
+    #[test]
+    fn the_hint_is_the_selected_rows_own_keys_and_the_table_keeps_its_own_sentence() {
+        let p = JobsPane {
+            jobs: vec![job("j1", "cargo build", true), job("j2", "sleep 30", false)],
+            finished_open: false,
+            selected: 0,
+        };
+        let drawn = plain(&p.content(400).lines);
+        let hint = |sel: usize| {
+            plain(
+                &JobsPane {
+                    selected: sel,
+                    ..p.clone()
+                }
+                .content(400)
+                .lines,
+            )
+            .into_iter()
+            .find(|l| l.contains("↑↓ moves"))
+            .expect("a hint line")
+        };
+        assert_eq!(hint(0), "    enter reads it · ↑↓ moves · esc closes this");
+        assert_eq!(
+            hint(1),
+            "    enter shows the ones that have settled · ↑↓ moves · esc closes this"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|l| l.contains("a job still shows running until the daemon says it settled")),
+            "{drawn:#?}"
+        );
     }
 
     /// The fixture the golden pin below draws: one job still running, and two that have

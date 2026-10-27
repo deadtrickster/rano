@@ -352,3 +352,31 @@ Gates to keep green while working: `cargo test`, `cargo clippy --all-targets -- 
 4. Replace/regex unification and the replace wrap loop (§2 items 1-2), since
    they share one `Matcher` refactor.
 5. §6 tests + CI, before adding features, so the remaining work stays cheap.
+
+## 9. The agent UI — one tree list (R1a)
+
+`src/agent/tree_list.rs` is now **the** renderer for "selectable rows nested in a
+list": depth and a reserved fold column, an optional number field, right-aligned
+facts, a faint second line, a recorded stop per row, and **a hint computed from the
+selected row's own actions** instead of a footer written once for the whole list.
+The session picker, the subagents pane and the jobs pane are ported onto it, and
+nothing they drew moved except that hint — each has a golden test pinning the body
+it drew before the port (commit "agent: pin the drawn body of three lists…").
+
+Still on their own renderers, and why:
+
+- **`monitors.rs`** — rows carry a wrapped `watching …` block above their facts, a
+  blank line and an `ended (N)` heading separate the dead from the live, and the
+  ended rows are not stops. Sections and blank lines between rows are the two
+  things this primitive does not do.
+- **`queue.rs`** — an empty queue returns before its footer, so the frame has no
+  hint at all in that case, and its rows are not cut to `w` anywhere.
+- **`config.rs`** — a section header sits at its own column (2), a blank line comes
+  between groups, and only the *selected* row draws its `from …` line. One frame,
+  three exceptions.
+- **`todos.rs`, `notes.rs`, `decision.rs`, `help.rs`, `asks.rs`, `logpane.rs`** — no
+  cursor over a recorded stop, or a body that wraps over several rows (a decision
+  rung, an unfolded note, a card's paragraphs): they are not this shape.
+
+Next, if the shape is wanted there too: a section/data field, and a per-row
+"detail only while picked". Both are data, and both would take `config.rs`.

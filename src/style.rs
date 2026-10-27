@@ -59,7 +59,13 @@
 
 /// What a piece of text means. Callers name these; only [`Palette`] knows what
 /// they look like.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// **A role has a wire name** (`kebab-case`: `plain`, `faint`, `user-accent`, …) because a
+/// pane plugin answers with data and its rows carry the roles they mean — a row deserialised
+/// from a hook's JSON is the same [`crate::agent::tree_list::Row`] a built-in pane builds, and
+/// the alternative was a second vocabulary of role names on the host's side of the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Role {
     /// Ordinary body text. No style at all.
     Plain,

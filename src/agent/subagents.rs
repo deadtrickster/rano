@@ -14,11 +14,12 @@
 //! the running one off the bottom; and then *"please group finished separately in the
 //! finished group which will be collapsed"*.
 
-use crate::render::{Line, Span};
+use crate::render::Line;
 use crate::style::Role;
 
 use super::pane::{self, PaneLines};
 use super::text::clean_line;
+use super::tree_list::{Action, Cell, Row, TreeList};
 
 /// One child, as the pane draws it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -92,97 +93,123 @@ impl SubagentsPane {
 
     /// Every row of the pane, each stop's first row recorded, cut to `w`.
     pub fn content(&self, w: usize) -> PaneLines {
-        let mut out = PaneLines::new();
-        out.push(pane::title("subagents"));
-        out.blank();
-        if self.agents.is_empty() {
-            out.push(pane::faint(
-                "    none spawned yet. The model spawns them with the task tool.",
-            ));
+        self.tree().content(w)
+    }
+
+    /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
+    ///
+    /// The group's `[+]`/`[-]` stays a CELL and not the list's fold column — this list is flat
+    /// (no row is nested in another), and its group marker has been three columns wide since
+    /// the operator asked for the finished children to be grouped, so the column the primitive
+    /// would reserve would be a column of nothing. Its second line sits at 7 and its hint at 4.
+    fn tree(&self) -> TreeList {
+        TreeList {
+            title: "subagents".into(),
+            rows: self.stops().into_iter().map(|s| self.row(s)).collect(),
+            selected: self.selected,
+            empty: "none spawned yet. The model spawns them with the task tool.".into(),
+            fold_column: false,
+            detail_column: 7,
+            margin: 4,
+            hint: vec![
+                "arrows move".into(),
+                "esc closes this, and from inside a subagent esc goes up to the parent".into(),
+            ],
+            notes: Vec::new(),
         }
-        let stops = self.stops();
-        let cursor = self.selected.min(stops.len().saturating_sub(1));
-        for (k, stop) in stops.iter().enumerate() {
-            let picked = k == cursor;
-            let i = match *stop {
-                // **The `finished` fold, when the cursor is on it.** A group row and not a
-                // child: there is nobody to switch into, and Enter folds or unfolds.
-                SubStop::Finished => {
-                    let n = self.agents.iter().filter(|s| s.is_finished()).count();
-                    let fold = if self.finished_open { "[-]" } else { "[+]" };
-                    let left = Line::raw(format!("{} {fold} finished ({n})", pane::mark(picked)));
-                    out.push_stop(pane::picked(left, picked));
-                    out.push(pane::faint(if self.finished_open {
-                        "       the ones that have ended · enter folds them away"
-                    } else {
-                        "       enter shows the ones that have ended"
-                    }));
-                    continue;
-                }
-                SubStop::Agent(i) => i,
-            };
-            let s = &self.agents[i];
-            let (mark, role) = match s.state.as_str() {
-                // Not a session yet: the child is copying its workspace or booting. Enter
-                // does nothing here, and the row says so below.
-                "opening" => ("[…]", Role::Plain),
-                "running" => ("[~]", Role::Pending),
-                "done" => ("[x]", Role::Success),
-                "failed" => ("[!]", Role::Failure),
-                // **No state word, which is the honest reading for a row rebuilt from the
-                // daemon's session list.** That list says whether a turn is generating and
-                // nothing about how a settled child ended, so `[?]` means *the host was not
-                // watching when it happened* — `done` or `failed` would be an invention.
-                _ => ("[?]", Role::Plain),
-            };
+    }
+
+    /// One stop, as a row: a child, or the `finished` group.
+    fn row(&self, stop: SubStop) -> Row {
+        let i = match stop {
+            // **The `finished` fold.** A group row and not a child: there is nobody to switch
+            // into, and Enter folds or unfolds.
+            SubStop::Finished => {
+                let n = self.agents.iter().filter(|s| s.is_finished()).count();
+                let fold = if self.finished_open { "[-]" } else { "[+]" };
+                return Row {
+                    id: Some("finished".into()),
+                    cells: vec![Cell::new(fold), Cell::new(format!("finished ({n})"))],
+                    detail: vec![
+                        if self.finished_open {
+                            "the ones that have ended · enter folds them away"
+                        } else {
+                            "enter shows the ones that have ended"
+                        }
+                        .into(),
+                    ],
+                    actions: vec![Action::new(
+                        "enter",
+                        if self.finished_open {
+                            "folds them away"
+                        } else {
+                            "shows the ones that have ended"
+                        },
+                    )],
+                    ..Row::default()
+                };
+            }
+            SubStop::Agent(i) => i,
+        };
+        let s = &self.agents[i];
+        let (mark, role) = match s.state.as_str() {
+            // Not a session yet: the child is copying its workspace or booting. Enter
+            // does nothing here, and the row says so below.
+            "opening" => ("[…]", Role::Plain),
+            "running" => ("[~]", Role::Pending),
+            "done" => ("[x]", Role::Success),
+            "failed" => ("[!]", Role::Failure),
+            // **No state word, which is the honest reading for a row rebuilt from the
+            // daemon's session list.** That list says whether a turn is generating and
+            // nothing about how a settled child ended, so `[?]` means *the host was not
+            // watching when it happened* — `done` or `failed` would be an invention.
+            _ => ("[?]", Role::Plain),
+        };
+        // **The row's own facts, as clauses that VANISH when the daemon did not say
+        // them.** A row rebuilt from the session list carries a child's name and its
+        // model and no role and no state, so a fixed `role {role} · {state}` would draw
+        // `role · ` with two holes in it on every rebuilt row.
+        let mut facts: Vec<String> = vec![clean_line(&s.session)];
+        if !s.role.is_empty() {
+            facts.push(format!("role {}", clean_line(&s.role)));
+        }
+        // **The child's own model, when it has one** — the operator's ask, 2026-10-05: a
+        // tree of children on different models is a fact the pane has to show.
+        if !s.model.is_empty() {
+            facts.push(format!("on {}", clean_line(&s.model)));
+        }
+        // **The state word, or the word for not having one**, and the second is a fact
+        // about the host rather than about the child — so it says which.
+        if s.state.is_empty() {
+            facts.push("state unknown".into());
+        } else if s.state == "running" && !s.generating {
+            // **A child that is up with no turn generating this instant** — parked on its
+            // own background job, or between two rounds: alive, and not generating, and
+            // the row says both rather than `running` for a child that is not.
+            facts.push("waiting".into());
+        } else {
+            facts.push(clean_line(&s.state));
+        }
+        // **The answer as the subtitle, where it belongs**: the row is the question.
+        if let (Some(a), "done") = (&s.answer, s.state.as_str()) {
+            facts.push(clean_line(a));
+        }
+        if s.state == "opening" {
+            facts.push("not attachable yet".into());
+        }
+        Row {
+            // A child is a stop whether or not the daemon named its session: the row is still
+            // a place Enter takes you (and `p` still reads it).
+            id: Some(s.session.clone()),
             // **The task, drawn whole**, the row's question.
-            let left = Line::new(vec![
-                Span::raw(format!("{} ", pane::mark(picked))),
-                Span::role(mark, role),
-                Span::raw(format!(" {}", clean_line(&s.asked))),
-            ]);
-            out.push_stop(pane::picked(left, picked));
-            // **The row's own facts, as clauses that VANISH when the daemon did not say
-            // them.** A row rebuilt from the session list carries a child's name and its
-            // model and no role and no state, so a fixed `role {role} · {state}` would draw
-            // `role · ` with two holes in it on every rebuilt row.
-            let mut facts: Vec<String> = vec![clean_line(&s.session)];
-            if !s.role.is_empty() {
-                facts.push(format!("role {}", clean_line(&s.role)));
-            }
-            // **The child's own model, when it has one** — the operator's ask, 2026-10-05: a
-            // tree of children on different models is a fact the pane has to show.
-            if !s.model.is_empty() {
-                facts.push(format!("on {}", clean_line(&s.model)));
-            }
-            // **The state word, or the word for not having one**, and the second is a fact
-            // about the host rather than about the child — so it says which.
-            if s.state.is_empty() {
-                facts.push("state unknown".into());
-            } else if s.state == "running" && !s.generating {
-                // **A child that is up with no turn generating this instant** — parked on its
-                // own background job, or between two rounds: alive, and not generating, and
-                // the row says both rather than `running` for a child that is not.
-                facts.push("waiting".into());
-            } else {
-                facts.push(clean_line(&s.state));
-            }
-            // **The answer as the subtitle, where it belongs**: the row is the question.
-            if let (Some(a), "done") = (&s.answer, s.state.as_str()) {
-                facts.push(clean_line(a));
-            }
-            if s.state == "opening" {
-                facts.push("not attachable yet".into());
-            }
-            out.push(pane::faint(format!("       {}", facts.join(" · "))));
+            cells: vec![Cell::role(mark, role), Cell::new(clean_line(&s.asked))],
+            detail: vec![facts.join(" · ")],
+            actions: vec![
+                Action::new("enter (or o)", "switches into it"),
+                Action::new("p", "reads its output"),
+            ],
+            ..Row::default()
         }
-        out.blank();
-        out.push(pane::faint(
-            "    arrows move · enter switches into the subagent (o does the same), or folds the \
-             finished group · p reads its output · esc closes this, and from inside a subagent \
-             esc goes up to the parent",
-        ));
-        out.trimmed(w)
     }
 }
 
@@ -362,6 +389,41 @@ mod tests {
         let short = o.layout(10, 2, 0);
         assert_eq!((short.start, short.end, short.pad), (0, 2, 4));
         assert!(short.footer.plain().ends_with("full: not written"));
+    }
+
+    /// **The hint under the list is the selected row's own keys.** Moving onto the `finished`
+    /// group changed the sentence from what Enter does to a child to what it does to the group —
+    /// one renderer, two rows, no hard-coded footer to be wrong about either.
+    #[test]
+    fn the_hint_is_the_selected_rows_own_keys() {
+        let p = SubagentsPane {
+            agents: vec![child("running", "port"), child("done", "scout")],
+            finished_open: false,
+            selected: 0,
+        };
+        let hint = |sel: usize| {
+            plain(
+                &SubagentsPane {
+                    selected: sel,
+                    ..p.clone()
+                }
+                .content(400)
+                .lines,
+            )
+            .into_iter()
+            .find(|l| l.contains("arrows move"))
+            .expect("a hint line")
+        };
+        assert_eq!(
+            hint(0),
+            "    enter (or o) switches into it · p reads its output · arrows move · esc closes \
+             this, and from inside a subagent esc goes up to the parent"
+        );
+        assert_eq!(
+            hint(1),
+            "    enter shows the ones that have ended · arrows move · esc closes this, and from \
+             inside a subagent esc goes up to the parent"
+        );
     }
 
     /// The fixture the golden pin below draws: one child still running, one that is still

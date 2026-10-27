@@ -7,6 +7,7 @@
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::clean_line;
+use crate::agent::tree_list::{Action, Cell, Row, TreeList};
 use crate::render::{Line, Span};
 use crate::style::Role;
 use crate::width::text as wt;
@@ -38,136 +39,202 @@ pub struct SessionRow {
     pub workspace: String,
 }
 
+/// **A row that is not a session**: a group header — how many rows it holds, whether it is
+/// open, and the sentence under it that says what Enter does.
+///
+/// It exists because rano had no such row, so letibot faked one as a [`SessionRow`] with an
+/// empty `session_id` — and the picker's footer then said *enter switches* about a row where
+/// Enter folds. A group is a stop (Enter acts on it) and it carries no number: a group line
+/// is not a number anyone can type.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionGroup {
+    /// What the group holds, in a word: `finished`, `on disk`.
+    pub name: String,
+    /// How many rows it holds, for the `(N)` after its name.
+    pub count: usize,
+    /// Unfolded.
+    pub open: bool,
+    /// The faint line under the row, saying what Enter will do to it. Empty draws none.
+    pub note: String,
+}
+
+/// One row of the session picker, in drawing order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionItem {
+    Session(SessionRow),
+    Group(SessionGroup),
+}
+
+impl From<SessionRow> for SessionItem {
+    fn from(s: SessionRow) -> SessionItem {
+        SessionItem::Session(s)
+    }
+}
+
+impl From<SessionGroup> for SessionItem {
+    fn from(g: SessionGroup) -> SessionItem {
+        SessionItem::Group(g)
+    }
+}
+
 /// The session picker's view model.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionPicker {
-    pub rows: Vec<SessionRow>,
+    pub rows: Vec<SessionItem>,
     /// The cursor, an index into `rows`; clamped when drawn.
     pub selected: usize,
 }
 
 impl SessionPicker {
+    /// **The picker, as data**: every row is a [`Row`] and the list draws it.
+    ///
+    /// The measurements the hand-written renderer used to carry are now the primitive's own
+    /// rules (`crate::agent::tree_list`): the fold column is reserved at every depth — dropping
+    /// it for a leaf put two siblings at ONE depth one column apart, so the name column was a
+    /// function of *has children* rather than of *depth* — the number field is as wide as the
+    /// list is long (`{:>2}` is right for nine rows and wrong for a box whose header reads
+    /// `1/106`: MEASURED, rows 3–99 at column 6, rows 100–104 at column 7), and the hint under
+    /// the list is the selected row's own words.
+    ///
+    /// The depth is capped at three indents: a session tree is a conversation and its
+    /// subagents, and a row four levels in would be a name pushed off the right edge to say
+    /// where it is.
+    fn tree(&self) -> TreeList {
+        let mut sessions = 0usize;
+        let rows = self
+            .rows
+            .iter()
+            .map(|item| match item {
+                SessionItem::Session(s) => {
+                    sessions += 1;
+                    session_row(s, sessions)
+                }
+                SessionItem::Group(g) => group_row(g),
+            })
+            .collect();
+        TreeList {
+            title: "sessions in this daemon".into(),
+            rows,
+            selected: self.selected,
+            empty: "none listed yet — the daemon has not answered, or this head is replaying \
+                    a recorded log and has no daemon to ask."
+                .into(),
+            fold_column: true,
+            // The full id sits at column 6, under the mark and the fold column.
+            detail_column: 6,
+            margin: 2,
+            hint: vec![
+                "↑↓ moves".into(),
+                "or type a number or part of a name and press enter".into(),
+                "/new [title] makes one".into(),
+                "/rename NAME names this one".into(),
+                "esc closes".into(),
+            ],
+            notes: vec![
+                "switching does not stop anything: a turn keeps running in the session you \
+                 left, and it is still there when you come back."
+                    .into(),
+            ],
+        }
+    }
+
     /// Every row, each session a stop. letibot truncates this to the room rather than
     /// windowing it; a host may do either with the result.
     pub fn content(&self, w: usize) -> PaneLines {
-        let mut out = PaneLines::new();
-        out.push(pane::title("sessions in this daemon"));
-        out.blank();
-        if self.rows.is_empty() {
-            out.push(pane::faint(
-                "  none listed yet — the daemon has not answered, or this head is \
-                 replaying a recorded log and has no daemon to ask.",
-            ));
-        }
-        // **And the number's field is as wide as the list is long.** `{:>2}` is right for
-        // nine-row lists and wrong for a box whose header reads `1/106`: row 100 renders `100`
-        // in a two-wide field, so **every row from 100 on sits one column right of every row
-        // before it** — MEASURED (rows 3–99 at column 6, rows 100–104 at column 7). `max(2)`
-        // keeps a short list's frame exactly as it was.
-        let digit_w = self.rows.len().to_string().len().max(2);
-        let cursor = self.selected.min(self.rows.len().saturating_sub(1));
-        for (at, s) in self.rows.iter().enumerate() {
-            // The same ladder the decision prompt draws: the mark IS the thing Enter takes,
-            // and the row it sits on is inverse. The session this head is in keeps its bold
-            // name, so "where am I" and "what Enter takes" stay two readable facts even when
-            // they are different rows.
-            let picked = at == cursor;
-            // **The fold is its own glyph beside the mark, and its COLUMN IS RESERVED either
-            // way** — the session tree is why. An empty string for a childless row saved one
-            // column, and MEASURED on a root with two children of which only one has a child:
-            //
-            // ```text
-            //   ▸+  1  this conversation      name at col 7    depth 0, has children
-            //      -  2  the first child       name at col 9    depth 1, has a child
-            //         3  the grandchild        name at col 10   depth 2, no children
-            //       4  the second child        name at col 8    depth 1, NO children
-            // ```
-            //
-            // **Two siblings at ONE depth, one column apart**, so the name column was a
-            // function of *has children* and not of *depth* — a list that cannot be read as a
-            // tree. With the column reserved the step is the indent's own two columns at every
-            // level. What it costs: a screen with no children on it moves one column right.
-            //
-            // **The fold is `+`/`-`, and it stopped being a triangle on purpose.** It was
-            // `▾`/`▸` — the shapes the cursor is made of — so a PICKED row of a folded
-            // conversation drew `▸▸`, two identical glyphs doing two different jobs, and the
-            // operator's report is exactly that.
-            let fold = match s.children {
-                None => " ",
-                Some(true) => "-",
-                Some(false) => "+",
-            };
-            let indent = "  ".repeat(s.depth.min(3));
-            let left = Line::new(vec![
-                Span::raw(format!(
-                    "{indent}{}{fold} {:>digit_w$}  ",
-                    pane::mark(picked),
-                    at + 1
-                )),
-                Span::role(
-                    clean_line(&s.name),
-                    if s.here { Role::Strong } else { Role::Plain },
-                ),
-            ]);
-            // Busy is the fact a picker exists to show: switching away from a running turn is
-            // fine — the daemon keeps generating — and switching *into* one is how you go back
-            // and watch it.
-            let mut facts: Vec<String> = Vec::new();
+        self.tree().content(w)
+    }
+}
+
+/// One session, as a row: the number you type, its fold, its name, its facts, and its full id
+/// underneath.
+fn session_row(s: &SessionRow, number: usize) -> Row {
+    // Busy is the fact a picker exists to show: switching away from a running turn is fine —
+    // the daemon keeps generating — and switching *into* one is how you go back and watch it.
+    let mut facts: Vec<String> = Vec::new();
+    if s.generating {
+        facts.push("generating".into());
+    }
+    if !s.live {
+        // The whole difference between a row that costs one keystroke and a row that costs a
+        // resume. Said in a word rather than implied by an absent "generating".
+        facts.push("on disk".into());
+    }
+    if s.rows > 0 {
+        facts.push(format!("{} rows", s.rows));
+    }
+    if s.heads > 0 {
+        facts.push(format!(
+            "{} head{}",
+            s.heads,
+            if s.heads == 1 { "" } else { "s" }
+        ));
+    }
+    if !s.model.is_empty() {
+        facts.push(clean_line(&s.model));
+    }
+    // The full id under **every** row, not only the named ones: the sessions whose id you
+    // might actually need to type — the unnamed ones — were the ones showing a truncation. The
+    // workspace goes on the same line: for a stored session it is the only thing on the row
+    // that says what the conversation was *about*.
+    let under = if s.workspace.is_empty() {
+        clean_line(&s.session_id)
+    } else {
+        format!(
+            "{}  {}",
+            clean_line(&s.session_id),
+            clean_line(&s.workspace)
+        )
+    };
+    Row {
+        // Every session is a stop, even one the host has no id for: the row is still a place
+        // Enter takes you, and today it always was.
+        id: Some(s.session_id.clone()),
+        // The name's column is a function of its depth and nothing else — the fold column is
+        // reserved for a leaf too, and the picture in this file's history is why.
+        depth: s.depth.min(3),
+        number: Some(number),
+        open: s.children,
+        cells: vec![Cell::role(
+            clean_line(&s.name),
+            if s.here { Role::Strong } else { Role::Plain },
+        )],
+        facts: vec![Cell::role(
+            facts.join(" · "),
             if s.generating {
-                facts.push("generating".into());
-            }
-            if !s.live {
-                // The whole difference between a row that costs one keystroke and a row that
-                // costs a resume. Said in a word rather than implied by an absent "generating".
-                facts.push("on disk".into());
-            }
-            if s.rows > 0 {
-                facts.push(format!("{} rows", s.rows));
-            }
-            if s.heads > 0 {
-                facts.push(format!(
-                    "{} head{}",
-                    s.heads,
-                    if s.heads == 1 { "" } else { "s" }
-                ));
-            }
-            if !s.model.is_empty() {
-                facts.push(clean_line(&s.model));
-            }
-            let right = Line::new(vec![Span::role(
-                facts.join(" · "),
-                if s.generating {
-                    Role::Pending
-                } else {
-                    Role::Faint
-                },
-            )]);
-            out.push_stop(pane::split_row(pane::picked(left, picked), right, w));
-            // The full id under **every** row, not only the named ones: the sessions whose id
-            // you might actually need to type — the unnamed ones — were the ones showing a
-            // truncation. The workspace goes on the same line: for a stored session it is the
-            // only thing on the row that says what the conversation was *about*.
-            let under = if s.workspace.is_empty() {
-                format!("      {}", clean_line(&s.session_id))
+                Role::Pending
             } else {
-                format!(
-                    "      {}  {}",
-                    clean_line(&s.session_id),
-                    clean_line(&s.workspace)
-                )
-            };
-            out.push(pane::faint(under));
-        }
-        out.blank();
-        out.push(pane::faint(
-            "  ↑↓ moves · enter switches · or type a number or part of a name and press \
-             enter · /new [title] makes one · /rename NAME names this one · esc closes",
-        ));
-        out.push(pane::faint(
-            "  switching does not stop anything: a turn keeps running in the session you \
-             left, and it is still there when you come back.",
-        ));
-        out.trimmed(w)
+                Role::Faint
+            },
+        )],
+        detail: vec![under],
+        actions: vec![Action::new("enter", "switches")],
+        ..Row::default()
+    }
+}
+
+/// One group header, as a row: what it holds and how many, its fold, and what Enter does to it.
+fn group_row(g: &SessionGroup) -> Row {
+    Row {
+        id: Some(g.name.clone()),
+        open: Some(g.open),
+        cells: vec![Cell::role(
+            format!("{} ({})", clean_line(&g.name), g.count),
+            Role::Strong,
+        )],
+        detail: if g.note.is_empty() {
+            Vec::new()
+        } else {
+            vec![g.note.clone()]
+        },
+        actions: vec![Action::new(
+            "enter",
+            if g.open {
+                "folds it away"
+            } else {
+                "unfolds it"
+            },
+        )],
+        ..Row::default()
     }
 }
 
@@ -294,7 +361,10 @@ mod tests {
         for i in 0..100 {
             rows.push(row(0, &format!("filler {i}"), None));
         }
-        let p = SessionPicker { rows, selected: 0 };
+        let p = SessionPicker {
+            rows: rows.into_iter().map(SessionItem::Session).collect(),
+            selected: 0,
+        };
         let drawn = plain(&p.content(96).lines);
         let col = |name: &str| {
             let l = drawn.iter().find(|l| l.contains(name)).unwrap();
@@ -332,11 +402,13 @@ mod tests {
                     workspace: "~/Projects/rano".into(),
                     here: true,
                     ..row(0, "work", None)
-                },
+                }
+                .into(),
                 SessionRow {
                     live: false,
                     ..row(0, "old", None)
-                },
+                }
+                .into(),
             ],
             selected: 1,
         };
@@ -438,6 +510,44 @@ mod tests {
         assert!(p.content(140).stop_rows.is_empty());
     }
 
+    /// **A group header is a row of its own**: a fold, a count, a sentence under it, no number
+    /// (a group line is not a number anyone can type) — and a hint that says what Enter does to
+    /// *it*. letibot faked this row as a session with an empty id, and the footer then said
+    /// "enter switches" about a row where Enter folds.
+    #[test]
+    fn a_group_header_folds_and_says_so_in_the_hint() {
+        let mut p = SessionPicker {
+            rows: vec![
+                row(0, "this conversation", None).into(),
+                SessionGroup {
+                    name: "on disk".into(),
+                    count: 3,
+                    open: false,
+                    note: "switching to one resumes it".into(),
+                }
+                .into(),
+                row(0, "an old one", None).into(),
+            ],
+            selected: 0,
+        };
+        let c = p.content(96);
+        let t = plain(&c.lines);
+        assert_eq!(t[4], " + on disk (3)", "{t:#?}");
+        assert_eq!(t[5], "      switching to one resumes it", "{t:#?}");
+        // The sessions keep their own numbering: a group consumes no number.
+        assert_eq!(t[6], "    2  an old one", "{t:#?}");
+        assert_eq!(c.stop_rows, vec![2, 4, 6], "a group is a stop");
+        assert!(t.iter().any(|l| l.contains("enter switches ·")), "{t:#?}");
+        // The cursor moved onto the group, and the hint followed it.
+        p.selected = 1;
+        let t = plain(&p.content(96).lines);
+        assert!(t[4].starts_with("▸+ on disk (3)"), "{t:#?}");
+        assert!(
+            t.iter().any(|l| l.contains("enter unfolds it ·")),
+            "a group says what Enter does to it: {t:#?}"
+        );
+    }
+
     /// The fixture the golden pin below draws: a conversation with two children and a
     /// grandchild, a sibling with pinned facts, and enough rows that the number field is
     /// wider than two columns.
@@ -470,7 +580,10 @@ mod tests {
             row(0, "filler nine", None),
             row(0, "filler ten", None),
         ];
-        SessionPicker { rows, selected: 1 }
+        SessionPicker {
+            rows: rows.into_iter().map(SessionItem::Session).collect(),
+            selected: 1,
+        }
     }
 
     /// **The body the session picker drew before the tree-list port** (R1a), pinned here

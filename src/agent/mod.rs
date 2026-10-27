@@ -64,6 +64,7 @@ pub mod subagents;
 pub mod text;
 pub mod todos;
 pub mod tool_row;
+pub mod tree_list;
 pub mod turn_status;
 
 /// Whether a block shows its body. Letibot's `Fold`: the conversation-wide tool fold

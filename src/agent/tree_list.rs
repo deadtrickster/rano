@@ -156,6 +156,11 @@ pub struct Row {
     /// it and the left together do not fit.
     pub facts: Vec<Cell>,
     /// The faint lines under the row, each at [`Row::detail_column`].
+    ///
+    /// On the wire this is C3's `detail?` — one string — or a list of them, because a job whose
+    /// output went to a file draws a second line and a plugin that only ever writes one should
+    /// not have to write a list.
+    #[serde(default, deserialize_with = "one_or_many")]
     pub detail: Vec<String>,
     /// Where the detail lines start, when this row is not at the list's own column — the jobs
     /// pane's `finished` group sits at 7 and a job's facts at 9.
@@ -178,6 +183,21 @@ impl Row {
         self.number = Some(n);
         self
     }
+}
+
+/// A field that is one string or a list of them — C3 writes `detail` as one, this list draws a
+/// row's second lines as many, and neither should have to know about the other.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match <Wire as serde::Deserialize>::deserialize(d)? {
+        Wire::One(s) => vec![s],
+        Wire::Many(v) => v,
+    })
 }
 
 /// **A nested tree as the flat rows the list draws**: depth-first, a parent before its
@@ -637,10 +657,10 @@ mod tests {
             "id": "s-1",
             "cells": ["[~]", "port the widgets"],
             "role": "pending",
-            "detail": ["s-1a2b · role coder"],
+            "detail": "s-1a2b · role coder",
             "actions": [{"key": "enter", "label": "opens it"}],
             "children": [
-                {"cells": ["a child"], "role": "plain"}
+                {"cells": ["a child"], "role": "plain", "detail": ["one", "two"]}
             ]
         }"#;
         let r: Row = serde_json::from_str(json).expect("a C3 row");
@@ -649,6 +669,11 @@ mod tests {
         assert_eq!(r.cells[1].text, "port the widgets");
         assert_eq!(r.cells[1].role, None, "a bare string takes the row's role");
         assert_eq!(r.detail, vec!["s-1a2b · role coder".to_string()]);
+        assert_eq!(
+            r.children[0].detail,
+            vec!["one".to_string(), "two".to_string()],
+            "C3's one detail and this list's many are the same field on the wire"
+        );
         assert_eq!(r.actions[0], Action::new("enter", "opens it"));
         assert_eq!(r.children.len(), 1);
         // A cell with a role of its own is the object form, and it survives the round trip.

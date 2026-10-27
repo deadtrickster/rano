@@ -118,6 +118,19 @@ impl JobsPane {
         self.tree().content(w)
     }
 
+    /// **The hint row [`JobsPane::content`] draws** — the selected row's own keys, then the
+    /// pane's — the sentence a host's own [`HintBar`](crate::agent::hint_bar) should carry
+    /// rather than a second copy of the same words.
+    pub fn hint_line(&self) -> Option<String> {
+        self.tree().hint_line()
+    }
+
+    /// The same sentence **without the pane's left margin**, which is what
+    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes.
+    pub fn hint_text(&self) -> Option<String> {
+        self.tree().hint_text()
+    }
+
     /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
     ///
     /// Its second line sits at 9 under a job and at 7 under the `finished` group — one list,
@@ -126,7 +139,7 @@ impl JobsPane {
         TreeList {
             title: "background jobs".into(),
             rows: self.stops().into_iter().map(|s| self.row(s)).collect(),
-            selected: self.selected,
+            selected: Some(self.selected),
             empty: "none. The model backgrounds a command with bash's `background: true`; \
                     ctrl-o moves the running one."
                 .into(),
@@ -575,6 +588,33 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("a job still shows running until the daemon says it settled")),
             "{drawn:#?}"
+        );
+    }
+
+    /// **The pane's hint leaves as data**: a host's bar reads the sentence the pane draws.
+    #[test]
+    fn the_panes_hint_is_the_hint_it_draws() {
+        let p = JobsPane {
+            jobs: vec![job("j1", "cargo build", true), job("j2", "sleep 30", false)],
+            finished_open: false,
+            selected: 1,
+        };
+        let hint_row = plain(&p.content(400).lines)
+            .into_iter()
+            .find(|l| l.contains("↑↓ moves"))
+            .expect("a hint row");
+        assert_eq!(p.hint_line().as_deref(), Some(hint_row.as_str()));
+        assert_eq!(
+            p.hint_text().as_deref(),
+            Some(hint_row.trim_start()),
+            "the bar takes the words, not the pane's margin"
+        );
+        assert!(
+            p.hint_text()
+                .unwrap()
+                .starts_with("enter shows the ones that have settled ·"),
+            "{:?}",
+            p.hint_text()
         );
     }
 

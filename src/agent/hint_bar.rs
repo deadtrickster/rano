@@ -16,6 +16,12 @@
 //! reads only these modes' built-in sentences: `QuitCard`, `Detached`, `Pick`, `Deciding`,
 //! `Editor`, `EditorBehind` — the cards and the editor pane, whose keys are rano's. The other
 //! modes' sentences are kept, corrected, for other hosts.
+//!
+//! **A pane that draws through [`crate::agent::tree_list`] has its own tail already**, and a
+//! host that opens one should pass that rather than a mode's sentence: `hint_text()` on the
+//! session picker, the subagents pane and the jobs pane is the very sentence the pane draws
+//! under its rows, computed from the row the cursor is on, so the bar and the pane cannot
+//! disagree about what Enter does where.
 
 use crate::render::{Line, Span};
 use crate::style::Role;

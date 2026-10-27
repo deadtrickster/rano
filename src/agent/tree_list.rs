@@ -43,6 +43,19 @@
 //! * **The hint is the selected row's actions, then the caller's fixed keys.** The part that
 //!   changes with the cursor comes first, because that is the part the eye has to catch: a
 //!   reader who has learnt the fixed half should not have to hunt for the word that moved.
+//! * **Nothing selected is a state of the list, not an index.** [`TreeList::selected`] is an
+//!   `Option`: `None` draws no mark, no inverse row, and no row's actions in the hint. A tree
+//!   drawn as one block inside a bigger pane — letibot's plugin pane, with the cursor two
+//!   panels away — is exactly that, and the alternative it had was to clear every row's `id`,
+//!   which suppresses the mark by throwing away the stop-ness the host's clicks need.
+//! * **A row that cannot fold says so, in data** ([`Fold::Fixed`]). Two states were not
+//!   enough: letibot's `mine` group is always open and listed as a fold, so rano drew a `+`
+//!   and wrote *enter folds it away* about a row where Enter does nothing. A fixed row keeps
+//!   the fold column reserved — a heading's name must sit in the column every other row's
+//!   name sits in — and draws nothing in it.
+//! * **The hint leaves as data** ([`TreeList::hint_text`], [`TreeList::hint_line`]): the same
+//!   sentence [`TreeList::content`] draws, so a host's own bar reads rano's words rather than
+//!   spelling them a second time — the drift letibot measured from the outside.
 //!
 //! Everything here is the caller's data: this module knows nothing about sessions, children,
 //! jobs or plugins, and never writes a sentence about any of them.
@@ -125,6 +138,65 @@ impl Action {
     }
 }
 
+/// **How a row folds**: the glyph the fold column draws, and the third state that draws none.
+///
+/// Two states were not enough for a host's own data. A group header that is always open —
+/// letibot's `mine` — has to be written `open: true` or `open: false` when only a `bool`
+/// exists, and both of those are a claim that some key folds it: rano drew the `-` and put
+/// *enter folds it away* in the hint on a row where Enter does nothing. `Fixed` is that row:
+/// no glyph, no fold action, its hint says whatever its own data says.
+///
+/// `None` on [`Row::open`] is a row that said nothing about folding — a leaf, or a caller
+/// that does not fold at all — and [`flatten`] still reads *nothing said* on a row with
+/// children as open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fold {
+    /// Has children, and they are drawn: `-` in the fold column.
+    Open,
+    /// Has children, and they are held back: `+` in the fold column. **The default**, and the
+    /// state every group a host has not opened yet is in.
+    #[default]
+    Closed,
+    /// **Not foldable at all**: the column is reserved and blank, the row carries no fold
+    /// action, and its children (if it has any) are always drawn.
+    Fixed,
+}
+
+/// **On the wire a fold is a `bool`** — `true` open, `false` closed — because that is what a
+/// C3 row has carried and what every existing caller sends. `Fixed` is the one new word, and
+/// it is the one a `bool` cannot say.
+impl serde::Serialize for Fold {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Fold::Open => s.serialize_bool(true),
+            Fold::Closed => s.serialize_bool(false),
+            Fold::Fixed => s.serialize_str("fixed"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Fold {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Fold, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Bool(bool),
+            Word(String),
+        }
+        match Wire::deserialize(d)? {
+            Wire::Bool(true) => Ok(Fold::Open),
+            Wire::Bool(false) => Ok(Fold::Closed),
+            Wire::Word(w) if w == "fixed" => Ok(Fold::Fixed),
+            // **A word this list does not know is refused rather than guessed.** A fold read
+            // as `Closed` on a string meant for something else would draw a `+` and offer a
+            // key that does nothing — the defect this enum exists to make unsayable.
+            Wire::Word(w) => Err(serde::de::Error::custom(format!(
+                "`open` is true, false or \"fixed\", not {w:?}"
+            ))),
+        }
+    }
+}
+
 /// **One row of the list**, in the order it is drawn.
 ///
 /// `id` is the whole of stop-ness: a row with one is a place the cursor can rest and a click
@@ -145,9 +217,10 @@ pub struct Row {
     pub depth: usize,
     /// The number drawn in the list's field, or `None` for a row that opts out of numbering.
     pub number: Option<usize>,
-    /// `Some(true)` has children and is open, `Some(false)` has children and is closed,
-    /// `None` is a leaf. Only read when the list reserves a fold column.
-    pub open: Option<bool>,
+    /// **Whether this row folds, and which way** — see [`Fold`]. `None` is a row that said
+    /// nothing, which [`flatten`] reads on a row with children as open. Only read when the
+    /// list reserves a fold column.
+    pub open: Option<Fold>,
     /// The role the whole row is drawn in, unless a cell says its own.
     pub role: Option<Role>,
     /// The left text, joined by one space.
@@ -203,10 +276,13 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 /// **A nested tree as the flat rows the list draws**: depth-first, a parent before its
 /// children, each child one indent step deeper.
 ///
-/// **A folded row's children are not drawn** — its `open` is `Some(false)` and they stay in
-/// the model — and a row that has children and did not say whether it is open is open, which
-/// is the reading that loses nothing: a plugin's tree arrives expanded, and a caller that
-/// means a group folded says `open: Some(false)`.
+/// **A folded row's children are not drawn** — its `open` is `Some(Fold::Closed)` and they
+/// stay in the model — and a row that has children and did not say whether it is open is
+/// open, which is the reading that loses nothing: a plugin's tree arrives expanded, and a
+/// caller that means a group folded says `open: Some(Fold::Closed)`.
+///
+/// **A fixed row is never promoted**, whatever it holds: its children are drawn, and the
+/// fold column says nothing about it — the state of a heading no key folds.
 pub fn flatten(rows: &[Row]) -> Vec<Row> {
     fn walk(rows: &[Row], depth: usize, out: &mut Vec<Row>) {
         for r in rows {
@@ -214,9 +290,9 @@ pub fn flatten(rows: &[Row]) -> Vec<Row> {
             flat.depth = depth;
             flat.children = Vec::new();
             if !r.children.is_empty() && flat.open.is_none() {
-                flat.open = Some(true);
+                flat.open = Some(Fold::Open);
             }
-            let folded = flat.open == Some(false) && !r.children.is_empty();
+            let folded = flat.open == Some(Fold::Closed) && !r.children.is_empty();
             out.push(flat);
             if !folded {
                 walk(&r.children, depth + 1, out);
@@ -235,15 +311,21 @@ pub fn flatten(rows: &[Row]) -> Vec<Row> {
 /// frame is data too, because the panes that share this shape do not share their margins:
 /// the session picker's second line starts at column 6, the subagents pane's at 7, and their
 /// footers at 2 and 4.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeList {
     /// The frame's title, drawn strong on the first row; empty draws none.
     pub title: String,
     /// The rows, in drawing order. [`flatten`] builds this from a nested tree.
     pub rows: Vec<Row>,
-    /// **The cursor, an index into the STOPS** — the rows with an `id` — not into `rows`;
+    /// **The cursor: an index into the STOPS** — the rows with an `id` — not into `rows`;
     /// clamped when drawn. Same convention as [`PaneLines::row_of`].
-    pub selected: usize,
+    ///
+    /// **`None` is *nothing is selected***: no mark on any row, no row drawn inverse, and no
+    /// row's actions in the hint. It is a state of the frame rather than an escape hatch for
+    /// an empty one — a tree drawn as one block inside a bigger pane is in it whenever the
+    /// cursor is in another panel, and the rows keep their `id`s, so the stops are still
+    /// recorded ([`PaneLines::push_stop`]) and a host's click map still knows where they are.
+    pub selected: Option<usize>,
     /// Drawn faint under the title when there are no rows. Empty draws nothing.
     pub empty: String,
     /// Reserve the one-column fold column. A list with no tree in it turns this off and its
@@ -260,6 +342,25 @@ pub struct TreeList {
     pub notes: Vec<String>,
 }
 
+impl Default for TreeList {
+    /// **A list with a cursor on its first stop**, which is what every caller had before the
+    /// cursor could be absent: choosing *nothing* is a decision a host makes, so it says so
+    /// with [`TreeList::selected`] and does not get it by leaving a field out.
+    fn default() -> TreeList {
+        TreeList {
+            title: String::new(),
+            rows: Vec::new(),
+            selected: Some(0),
+            empty: String::new(),
+            fold_column: false,
+            detail_column: 0,
+            margin: 0,
+            hint: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
 impl TreeList {
     /// How many rows the cursor can rest on.
     pub fn stops(&self) -> usize {
@@ -269,9 +370,9 @@ impl TreeList {
     /// **The row the cursor is on**, clamped the way the drawing clamps it: the table can
     /// move under the cursor (a child settling, a session going away), and an arrow pressed
     /// against a shorter list must land on a row rather than on an index that no longer
-    /// exists.
+    /// exists. `None` when nothing is selected, and when there is nothing to select.
     pub fn selected_row(&self) -> Option<&Row> {
-        let at = self.selected.min(self.stops().saturating_sub(1));
+        let at = self.selected?.min(self.stops().saturating_sub(1));
         self.rows.iter().filter(|r| r.id.is_some()).nth(at)
     }
 
@@ -286,8 +387,13 @@ impl TreeList {
         }
     }
 
-    /// **The hint line**: the selected row's own actions, then the caller's fixed keys.
-    pub fn hint_line(&self) -> Option<String> {
+    /// **The hint's sentence**: the selected row's own actions, then the caller's fixed keys,
+    /// joined by ` · ` — no margin, because the margin is the pane's frame and a `HintBar`
+    /// centres its own text. `None` when there is nothing to say at all.
+    ///
+    /// **With nothing selected the actions half is empty by construction**: no row has the
+    /// cursor, so no row's keys may be claimed to be the ones that work.
+    pub fn hint_text(&self) -> Option<String> {
         let mut items: Vec<String> = Vec::new();
         if let Some(r) = self.selected_row() {
             for a in &r.actions {
@@ -298,7 +404,19 @@ impl TreeList {
         if items.is_empty() {
             return None;
         }
-        Some(format!("{}{}", " ".repeat(self.margin), items.join(" · ")))
+        Some(items.join(" · "))
+    }
+
+    /// **The hint row [`TreeList::content`] draws**: this list's margin, then
+    /// [`TreeList::hint_text`]. Composed in one place so a host reading the hint and the pane
+    /// drawing it cannot drift into two sentences.
+    ///
+    /// A host that puts the sentence in its own bar wants [`TreeList::hint_text`]: the margin
+    /// belongs to the pane's frame, and a bar that centred a two-space indent would read as a
+    /// layout bug rather than as a key list.
+    pub fn hint_line(&self) -> Option<String> {
+        self.hint_text()
+            .map(|text| format!("{}{text}", " ".repeat(self.margin)))
     }
 
     /// Every row of the list, each stop's first row recorded, cut to `w`.
@@ -313,13 +431,15 @@ impl TreeList {
             out.push(pane::faint(format!("{margin}{}", clean_line(&self.empty))));
         }
         let digits = self.number_width();
-        let cursor = self.selected.min(self.stops().saturating_sub(1));
+        let cursor = self
+            .selected
+            .map(|at| at.min(self.stops().saturating_sub(1)));
         let mut at = 0usize;
         for r in &self.rows {
             // **A row without an id is not a stop**, so it is neither a place the cursor can
             // be nor a place a click can land: it is drawn, and that is all it is.
             let is_stop = r.id.is_some();
-            let picked = is_stop && at == cursor;
+            let picked = is_stop && cursor == Some(at);
             if is_stop {
                 at += 1;
             }
@@ -354,9 +474,11 @@ impl TreeList {
         // glyph for it: that is what keeps a name's column a function of its depth.
         let fold = if self.fold_column {
             match r.open {
-                None => " ",
-                Some(true) => "-",
-                Some(false) => "+",
+                // A leaf and a fixed row draw the same blank, and both keep the column: what
+                // is drawn in it is a function of depth, and which rows fold is not.
+                None | Some(Fold::Fixed) => " ",
+                Some(Fold::Open) => "-",
+                Some(Fold::Closed) => "+",
             }
         } else {
             ""
@@ -404,7 +526,7 @@ mod tests {
     use crate::agent::testing::{plain, role_of};
     use crate::width::text as wt;
 
-    fn row(depth: usize, open: Option<bool>, name: &str) -> Row {
+    fn row(depth: usize, open: Option<Fold>, name: &str) -> Row {
         Row {
             depth,
             open,
@@ -433,8 +555,8 @@ mod tests {
     #[test]
     fn the_fold_column_is_reserved_at_every_depth() {
         let t = list(vec![
-            row(0, Some(true), "root open").stop("root"),
-            row(1, Some(false), "child closed").stop("closed"),
+            row(0, Some(Fold::Open), "root open").stop("root"),
+            row(1, Some(Fold::Closed), "child closed").stop("closed"),
             row(1, None, "child leaf").stop("leaf"),
             row(2, None, "grandchild").stop("grand"),
         ]);
@@ -491,7 +613,7 @@ mod tests {
     fn a_row_that_opts_out_of_numbering_is_drawn_without_one() {
         let t = list(vec![
             Row {
-                open: Some(false),
+                open: Some(Fold::Closed),
                 cells: vec![Cell::new("finished (2)")],
                 ..Row::default()
             },
@@ -521,7 +643,7 @@ mod tests {
             },
             Row {
                 id: Some("finished".into()),
-                open: Some(false),
+                open: Some(Fold::Closed),
                 cells: vec![Cell::new("finished (2)")],
                 actions: vec![Action::new("enter", "folds it away")],
                 ..Row::default()
@@ -530,7 +652,7 @@ mod tests {
         t.margin = 2;
         t.hint = vec!["↑↓ moves".into(), "esc closes".into()];
         let hint = |t: &mut TreeList, sel: usize| {
-            t.selected = sel;
+            t.selected = Some(sel);
             plain(&t.content(60).lines)
                 .into_iter()
                 .find(|l| l.contains("↑↓ moves"))
@@ -547,6 +669,143 @@ mod tests {
         // And an empty list still says the fixed half rather than nothing at all.
         t.rows.clear();
         assert_eq!(hint(&mut t, 0), "  ↑↓ moves · esc closes");
+    }
+
+    /// **A row that cannot fold says so, and nothing draws a fold for it.** letibot's `mine`
+    /// group is always open and has no fold key; two states forced it to claim one, and rano
+    /// then drew the glyph and wrote *enter folds it away* about a row where Enter does
+    /// nothing. The column stays reserved — a name's column is a function of its depth, not of
+    /// what folds — and nothing is drawn in it.
+    #[test]
+    fn a_fixed_row_draws_no_fold_glyph_and_keeps_its_children() {
+        let t = list(vec![
+            row(0, Some(Fold::Fixed), "mine (3)").stop("mine"),
+            row(1, Some(Fold::Fixed), "a session under it").stop("s-1"),
+        ]);
+        let drawn = plain(&t.content(60).lines);
+        assert_eq!(drawn[0], "▸  mine (3)", "{drawn:#?}");
+        assert_eq!(drawn[1], "     a session under it", "{drawn:#?}");
+        // The column is still there: each name sits where its depth says, fold or no fold.
+        assert_eq!(column(&drawn, "mine (3)"), 3, "{drawn:#?}");
+        assert_eq!(column(&drawn, "a session"), 5, "{drawn:#?}");
+        // And in the nested form a fixed row is never promoted to a fold: its children are
+        // drawn, whatever it holds.
+        let flat = flatten(&[Row {
+            id: Some("mine".into()),
+            open: Some(Fold::Fixed),
+            cells: vec![Cell::new("mine")],
+            children: vec![row(0, None, "a child")],
+            ..Row::default()
+        }]);
+        assert_eq!(flat.len(), 2, "a fixed row's children are always drawn");
+        assert_eq!(
+            flat[0].open,
+            Some(Fold::Fixed),
+            "and nothing promotes it to open"
+        );
+        let drawn = plain(&list(flat).content(60).lines);
+        assert_eq!(drawn[0], "▸  mine", "{drawn:#?}");
+    }
+
+    /// **Nothing selected is a state of the frame, not a broken index.** A tree drawn as one
+    /// block inside a bigger pane is in it whenever the cursor is in another panel; the
+    /// alternative was to clear every row's `id`, which suppresses the mark by throwing away
+    /// the stops a host's clicks read.
+    #[test]
+    fn nothing_selected_draws_no_mark_and_keeps_every_stop() {
+        let mut t = list(vec![
+            Row {
+                id: Some("root".into()),
+                open: Some(Fold::Open),
+                cells: vec![Cell::new("root")],
+                actions: vec![Action::new("enter", "switches")],
+                ..Row::default()
+            },
+            row(1, None, "leaf").stop("leaf"),
+        ]);
+        t.selected = Some(0);
+        assert_eq!(t.hint_text().as_deref(), Some("enter switches"));
+        t.selected = None;
+        let c = t.content(60);
+        let drawn = plain(&c.lines);
+        // The stops are still stops, and recorded where they were drawn.
+        assert_eq!(c.stop_rows, vec![0, 1], "{drawn:#?}");
+        assert_eq!(t.stops(), 2);
+        assert_eq!(t.selected_row(), None);
+        assert!(!drawn.iter().any(|l| l.starts_with('▸')), "{drawn:#?}");
+        assert!(
+            !c.lines
+                .iter()
+                .any(|l| l.style.attrs.contains(crate::style::Attrs::REVERSE)),
+            "no row is picked: {drawn:#?}"
+        );
+        // No row has the cursor, so no row's keys may be claimed: the hint is the fixed half.
+        t.hint = vec!["esc closes".into()];
+        assert_eq!(t.hint_text().as_deref(), Some("esc closes"));
+        assert_eq!(t.hint_line().as_deref(), Some("esc closes"));
+        assert_eq!(
+            plain(&t.content(60).lines)
+                .into_iter()
+                .find(|l| l.contains("esc closes"))
+                .as_deref(),
+            Some("esc closes")
+        );
+        // With nothing fixed to say there is no hint row at all.
+        t.hint.clear();
+        assert_eq!(t.hint_text(), None);
+        assert_eq!(t.hint_line(), None);
+    }
+
+    /// The hint leaves the list as data: `hint_line` is the row `content` draws, margin and
+    /// all, and `hint_text` is the same sentence without that margin — what a host's bar
+    /// takes, since a bar centres its own text.
+    #[test]
+    fn the_hint_line_a_host_reads_is_the_hint_row_the_list_draws() {
+        let mut t = list(vec![row(0, None, "one").stop("a")]);
+        t.margin = 4;
+        t.hint = vec!["↑↓ moves".into(), "esc closes".into()];
+        assert_eq!(
+            t.hint_text().as_deref(),
+            Some("↑↓ moves · esc closes"),
+            "what a HintBar::line_with_tail takes"
+        );
+        assert_eq!(
+            t.hint_line().as_deref(),
+            Some("    ↑↓ moves · esc closes"),
+            "the pane's frame is the pane's"
+        );
+        assert_eq!(
+            plain(&t.content(60).lines)
+                .into_iter()
+                .find(|l| l.contains("↑↓ moves")),
+            t.hint_line(),
+            "one sentence, drawn and read"
+        );
+    }
+
+    /// **A fold crosses the wire as the `bool` C3 has carried**, plus the one word a `bool`
+    /// cannot say.
+    #[test]
+    fn a_fold_is_a_bool_on_the_wire_and_fixed_is_the_third_word() {
+        let open = |j: &str| serde_json::from_str::<Row>(j).expect("a row").open;
+        assert_eq!(open(r#"{"open":true}"#), Some(Fold::Open));
+        assert_eq!(open(r#"{"open":false}"#), Some(Fold::Closed));
+        assert_eq!(open(r#"{"open":"fixed"}"#), Some(Fold::Fixed));
+        assert_eq!(open("{}"), None, "a row that said nothing");
+        // And out again: the two bools unchanged, so a plugin that sends `true` reads `true`.
+        let wire = |f: Fold| {
+            serde_json::to_string(&Row {
+                open: Some(f),
+                ..Row::default()
+            })
+            .expect("a row")
+        };
+        assert!(wire(Fold::Open).contains(r#""open":true"#));
+        assert!(wire(Fold::Closed).contains(r#""open":false"#));
+        assert!(wire(Fold::Fixed).contains(r#""open":"fixed""#));
+        // **A word it does not know is refused** rather than read as one of the two: a fold
+        // guessed at draws a glyph and offers a key that does nothing.
+        assert!(serde_json::from_str::<Row>(r#"{"open":"shut"}"#).is_err());
     }
 
     /// **A row with no id is not a stop**: it is drawn, it takes no mark, the cursor never
@@ -619,7 +878,7 @@ mod tests {
                     ..Row::default()
                 },
                 Row {
-                    open: Some(false),
+                    open: Some(Fold::Closed),
                     cells: vec![Cell::new("shut")],
                     children: vec![row(0, None, "hidden")],
                     ..Row::default()
@@ -634,10 +893,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["root", "kept", "shut"]);
         assert_eq!(flat[1].depth, 1);
-        assert_eq!(flat[2].open, Some(false), "a row with children is foldable");
+        assert_eq!(
+            flat[2].open,
+            Some(Fold::Closed),
+            "a row with children is foldable"
+        );
         assert_eq!(
             flat[0].open,
-            Some(true),
+            Some(Fold::Open),
             "and open unless it said otherwise"
         );
         let drawn = plain(&list(flat.clone()).content(60).lines);

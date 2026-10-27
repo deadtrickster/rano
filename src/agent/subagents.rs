@@ -96,6 +96,19 @@ impl SubagentsPane {
         self.tree().content(w)
     }
 
+    /// **The hint row [`SubagentsPane::content`] draws** — the selected row's own keys, then the
+    /// pane's — so a host that draws the hint in its own [`HintBar`](crate::agent::hint_bar)
+    /// reads rano's words instead of spelling a second copy that can drift.
+    pub fn hint_line(&self) -> Option<String> {
+        self.tree().hint_line()
+    }
+
+    /// The same sentence **without the pane's left margin**, which is what
+    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes.
+    pub fn hint_text(&self) -> Option<String> {
+        self.tree().hint_text()
+    }
+
     /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
     ///
     /// The group's `[+]`/`[-]` stays a CELL and not the list's fold column — this list is flat
@@ -106,7 +119,7 @@ impl SubagentsPane {
         TreeList {
             title: "subagents".into(),
             rows: self.stops().into_iter().map(|s| self.row(s)).collect(),
-            selected: self.selected,
+            selected: Some(self.selected),
             empty: "none spawned yet. The model spawns them with the task tool.".into(),
             fold_column: false,
             detail_column: 7,
@@ -423,6 +436,34 @@ mod tests {
             hint(1),
             "    enter shows the ones that have ended · arrows move · esc closes this, and from \
              inside a subagent esc goes up to the parent"
+        );
+    }
+
+    /// **The pane's hint leaves as data**: a host's bar reads the sentence the pane draws
+    /// rather than a second copy that can name the wrong key when the cursor moves.
+    #[test]
+    fn the_panes_hint_is_the_hint_it_draws() {
+        let p = SubagentsPane {
+            agents: vec![child("running", "port"), child("done", "scout")],
+            finished_open: false,
+            selected: 1,
+        };
+        let hint_row = plain(&p.content(400).lines)
+            .into_iter()
+            .find(|l| l.contains("arrows move"))
+            .expect("a hint row");
+        assert_eq!(p.hint_line().as_deref(), Some(hint_row.as_str()));
+        assert_eq!(
+            p.hint_text().as_deref(),
+            Some(hint_row.trim_start()),
+            "the bar takes the words, not the pane's margin"
+        );
+        assert!(
+            p.hint_text()
+                .unwrap()
+                .starts_with("enter shows the ones that have ended ·"),
+            "{:?}",
+            p.hint_text()
         );
     }
 

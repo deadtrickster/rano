@@ -363,6 +363,39 @@ The session picker, the subagents pane and the jobs pane are ported onto it, and
 nothing they drew moved except that hint — each has a golden test pinning the body
 it drew before the port (commit "agent: pin the drawn body of three lists…").
 
+### Three edges letibot's port found, and what closed them
+
+Measured from outside the crate by letibot's port onto this primitive. Each was a
+place where a host had to compensate for the renderer, which is the drift the
+primitive exists to remove.
+
+- **The hint was private.** `SessionPicker::tree()` was private, so a host could not
+  read `TreeList::hint_line()` for the picker and had to spell the same
+  cursor-dependent sentence itself. Every pane now exposes `hint_line()` — exactly
+  the row `content` draws, margin and all — and `hint_text()`, the same sentence
+  without the pane's margin, which is what `HintBar::line_with_tail` takes. Both
+  come from one method on `TreeList`, so the drawn hint and the read one cannot
+  diverge. `tree()` stays private: the rest of it (title, empty state, notes) is
+  the pane's frame, and a host that needed those would be drawing the pane.
+- **Nothing selected could not be said.** `TreeList::selected` is now
+  `Option<usize>`: `None` draws no mark and no picked inverse row, and the hint is
+  the fixed half alone — no row has the cursor, so no row's keys may be claimed to
+  be the ones that work. The rows keep their `id`s, so the stops are still recorded
+  in `PaneLines::stop_rows`. A `Tree` block inside a bigger pane (letibot's plugin
+  pane, cursor two panels away) had only one workaround: clear every row's `id`,
+  which suppresses the mark by throwing away the stop-ness the host's clicks read.
+- **A group that cannot fold.** `Row::open` is `Option<Fold>` and `Fold` has a third
+  state, `Fixed`: no glyph (the column stays reserved), no fold action, and a hint
+  that never mentions folding. `SessionGroup.open: bool` became
+  `SessionGroup.fold: Fold`, because a `bool` must claim one of two folds for a
+  group that has none — rano drew `+`/`-` and wrote *enter folds it away* on
+  letibot's always-open `mine` group. `None` could not stand in for it: to
+  `flatten` a `None` fold on a row with children means *open*, so the fixed state
+  would have been erased on the nested form the plugins answer with. On the wire
+  the two old states are still `true`/`false`, so no C3 row changes; `"fixed"` is
+  the one new word, and a word the list does not know is refused rather than
+  guessed at.
+
 Still on their own renderers, and why:
 
 - **`monitors.rs`** — rows carry a wrapped `watching …` block above their facts, a

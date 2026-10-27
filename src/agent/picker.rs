@@ -7,7 +7,7 @@
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::clean_line;
-use crate::agent::tree_list::{Action, Cell, Row, TreeList};
+use crate::agent::tree_list::{Action, Cell, Fold, Row, TreeList};
 use crate::render::{Line, Span};
 use crate::style::Role;
 use crate::width::text as wt;
@@ -39,8 +39,8 @@ pub struct SessionRow {
     pub workspace: String,
 }
 
-/// **A row that is not a session**: a group header — how many rows it holds, whether it is
-/// open, and the sentence under it that says what Enter does.
+/// **A row that is not a session**: a group header — how many rows it holds, how it folds, and
+/// the sentence under it that says what Enter does.
 ///
 /// It exists because rano had no such row, so letibot faked one as a [`SessionRow`] with an
 /// empty `session_id` — and the picker's footer then said *enter switches* about a row where
@@ -48,13 +48,17 @@ pub struct SessionRow {
 /// is not a number anyone can type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionGroup {
-    /// What the group holds, in a word: `finished`, `on disk`.
+    /// What the group holds, in a word: `finished`, `on disk`, `mine`.
     pub name: String,
     /// How many rows it holds, for the `(N)` after its name.
     pub count: usize,
-    /// Unfolded.
-    pub open: bool,
-    /// The faint line under the row, saying what Enter will do to it. Empty draws none.
+    /// **How it folds** — [`Fold::Fixed`] for a group that is always open (letibot's `mine`):
+    /// no glyph, no fold key, and a hint that never says *folds*. Two states forced that group
+    /// to say `open: true` and rano then drew a `-` and wrote *enter folds it away* on a row
+    /// where Enter does nothing.
+    pub fold: Fold,
+    /// The faint line under the row, saying what Enter will do to it — or, for a fixed group,
+    /// what the group is. Empty draws none.
     pub note: String,
 }
 
@@ -115,7 +119,7 @@ impl SessionPicker {
         TreeList {
             title: "sessions in this daemon".into(),
             rows,
-            selected: self.selected,
+            selected: Some(self.selected),
             empty: "none listed yet — the daemon has not answered, or this head is replaying \
                     a recorded log and has no daemon to ask."
                 .into(),
@@ -142,6 +146,22 @@ impl SessionPicker {
     /// windowing it; a host may do either with the result.
     pub fn content(&self, w: usize) -> PaneLines {
         self.tree().content(w)
+    }
+
+    /// **The hint row [`SessionPicker::content`] draws** — the selected row's own keys and then
+    /// the picker's, margin and all. A host that puts the picker's hint somewhere else (its
+    /// [`HintBar`](crate::agent::hint_bar::HintBar), or a pane of its own that opens the
+    /// picker) reads it here rather than spelling the same cursor-dependent sentence a second
+    /// time, which is how the two drift.
+    pub fn hint_line(&self) -> Option<String> {
+        self.tree().hint_line()
+    }
+
+    /// The same sentence **without the pane's left margin**, which is what
+    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes: a
+    /// bar centres its own text, and a margin carried into it reads as a layout bug.
+    pub fn hint_text(&self) -> Option<String> {
+        self.tree().hint_text()
     }
 }
 
@@ -193,7 +213,10 @@ fn session_row(s: &SessionRow, number: usize) -> Row {
         // reserved for a leaf too, and the picture in this file's history is why.
         depth: s.depth.min(3),
         number: Some(number),
-        open: s.children,
+        // A session with children folds, and a session whose children are held back says so.
+        open: s
+            .children
+            .map(|open| if open { Fold::Open } else { Fold::Closed }),
         cells: vec![Cell::role(
             clean_line(&s.name),
             if s.here { Role::Strong } else { Role::Plain },
@@ -214,9 +237,20 @@ fn session_row(s: &SessionRow, number: usize) -> Row {
 
 /// One group header, as a row: what it holds and how many, its fold, and what Enter does to it.
 fn group_row(g: &SessionGroup) -> Row {
+    // **A group's fold is the group's own data.** `Fixed` is a group that is always open: it
+    // carries no fold action, so the hint under it cannot name one — the sentence is the
+    // picker's fixed half alone, which is what a row with no keys is entitled to say.
+    let (open, actions) = match g.fold {
+        Fold::Open => (
+            Some(Fold::Open),
+            vec![Action::new("enter", "folds it away")],
+        ),
+        Fold::Closed => (Some(Fold::Closed), vec![Action::new("enter", "unfolds it")]),
+        Fold::Fixed => (Some(Fold::Fixed), Vec::new()),
+    };
     Row {
         id: Some(g.name.clone()),
-        open: Some(g.open),
+        open,
         cells: vec![Cell::role(
             format!("{} ({})", clean_line(&g.name), g.count),
             Role::Strong,
@@ -226,14 +260,7 @@ fn group_row(g: &SessionGroup) -> Row {
         } else {
             vec![g.note.clone()]
         },
-        actions: vec![Action::new(
-            "enter",
-            if g.open {
-                "folds it away"
-            } else {
-                "unfolds it"
-            },
-        )],
+        actions,
         ..Row::default()
     }
 }
@@ -522,7 +549,7 @@ mod tests {
                 SessionGroup {
                     name: "on disk".into(),
                     count: 3,
-                    open: false,
+                    fold: Fold::Closed,
                     note: "switching to one resumes it".into(),
                 }
                 .into(),
@@ -545,6 +572,104 @@ mod tests {
         assert!(
             t.iter().any(|l| l.contains("enter unfolds it ·")),
             "a group says what Enter does to it: {t:#?}"
+        );
+    }
+
+    /// **A group that cannot fold says so** — letibot's `mine` is always open — and nothing
+    /// draws a fold for it or offers one: no `+`/`-`, no *folds* in the hint, and its `(N)`
+    /// name still in the row that every other row's is. Two states could not say this, so the
+    /// group had to claim a fold, and rano drew one where there was none.
+    #[test]
+    fn a_fixed_group_draws_no_fold_glyph_and_offers_no_fold_key() {
+        let mut p = SessionPicker {
+            rows: vec![
+                SessionGroup {
+                    name: "mine".into(),
+                    count: 3,
+                    fold: Fold::Fixed,
+                    note: "the sessions this head started".into(),
+                }
+                .into(),
+                row(0, "this conversation", None).into(),
+            ],
+            selected: 0,
+        };
+        let c = p.content(96);
+        let t = plain(&c.lines);
+        let group = t
+            .iter()
+            .find(|l| l.contains("mine (3)"))
+            .expect("the group row")
+            .clone();
+        // The fold column is still reserved — three columns before the name, the mark and
+        // the fold and the space — but nothing is drawn in it.
+        assert_eq!(group, "▸  mine (3)", "{t:#?}");
+        assert_eq!(t[3], "      the sessions this head started", "{t:#?}");
+        // It is still a stop: the arrows reach it, and its own note is drawn under it.
+        assert_eq!(c.stop_rows, vec![2, 4], "{t:#?}");
+        // And no key on it folds anything, so the hint under it says none does: the sentence
+        // opens with the picker's own half, not with an `enter …` for this row.
+        let hint = p.hint_text().expect("a hint");
+        assert!(!hint.contains("folds"), "{hint:?}");
+        assert!(!hint.starts_with("enter"), "no key acts on it: {hint:?}");
+        // A foldable group on the same cursor still says what Enter does to it.
+        p.rows[0] = SessionGroup {
+            name: "mine".into(),
+            count: 3,
+            fold: Fold::Open,
+            note: "the sessions this head started".into(),
+        }
+        .into();
+        assert!(p.hint_text().unwrap().contains("enter folds it away"));
+    }
+
+    /// **The picker's hint leaves as data**: a host's bar reads the sentence the picker draws
+    /// instead of writing a second copy of it — the drift letibot measured (it had to spell
+    /// this cursor-dependent line itself).
+    #[test]
+    fn the_pickers_hint_is_the_hint_it_draws() {
+        let mut p = SessionPicker {
+            rows: vec![
+                row(0, "this conversation", None).into(),
+                SessionGroup {
+                    name: "on disk".into(),
+                    count: 1,
+                    fold: Fold::Closed,
+                    note: String::new(),
+                }
+                .into(),
+            ],
+            selected: 0,
+        };
+        // Wide enough that `content` draws the hint whole: it cuts its rows to `w`.
+        let drawn = plain(&p.content(400).lines);
+        let hint_row = drawn
+            .iter()
+            .find(|l| l.contains("↑↓ moves"))
+            .expect("a hint row");
+        assert_eq!(p.hint_line().as_deref(), Some(hint_row.as_str()));
+        assert_eq!(
+            p.hint_text().as_deref(),
+            Some(hint_row.trim_start()),
+            "the bar takes the words, not the pane's frame"
+        );
+        assert!(p.hint_text().unwrap().starts_with("enter switches ·"));
+        // The cursor moved to the group, and the host's copy of the hint moved with it.
+        p.selected = 1;
+        assert!(
+            p.hint_text().unwrap().starts_with("enter unfolds it ·"),
+            "{:?}",
+            p.hint_text()
+        );
+        assert_eq!(
+            p.hint_line().as_deref(),
+            Some(
+                plain(&p.content(400).lines)
+                    .into_iter()
+                    .find(|l| l.contains("↑↓ moves"))
+                    .unwrap()
+                    .as_str()
+            )
         );
     }
 

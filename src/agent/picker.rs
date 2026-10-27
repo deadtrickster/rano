@@ -437,4 +437,81 @@ mod tests {
         assert!(t[1].contains("has not named its modes"), "{t:?}");
         assert!(p.content(140).stop_rows.is_empty());
     }
+
+    /// The fixture the golden pin below draws: a conversation with two children and a
+    /// grandchild, a sibling with pinned facts, and enough rows that the number field is
+    /// wider than two columns.
+    fn golden_fixture() -> SessionPicker {
+        let rows = vec![
+            SessionRow {
+                here: true,
+                generating: true,
+                rows: 42,
+                heads: 1,
+                model: "local".into(),
+                workspace: "~/Projects/rano".into(),
+                ..row(0, "this conversation", Some(true))
+            },
+            row(1, "the first child", Some(false)),
+            SessionRow {
+                live: false,
+                rows: 7,
+                ..row(2, "the grandchild", None)
+            },
+            row(1, "the second child", None),
+            SessionRow {
+                heads: 2,
+                model: "grok/grok-4.3".into(),
+                ..row(0, "a sibling", None)
+            },
+            row(0, "filler six", None),
+            row(0, "filler seven", None),
+            row(0, "filler eight", None),
+            row(0, "filler nine", None),
+            row(0, "filler ten", None),
+        ];
+        SessionPicker { rows, selected: 1 }
+    }
+
+    /// **The body the session picker drew before the tree-list port** (R1a), pinned here
+    /// first, so the port is a diff against a measurement rather than against memory.
+    ///
+    /// The *hint* below it is expected to change — it now follows the cursor — so this is
+    /// everything above the frame's last blank row: the title, the tree, the fold column,
+    /// the number field, the right-aligned facts and the full id under every row.
+    const GOLDEN_BODY: &[&str] = &[
+        "sessions in this daemon",
+        "",
+        " -  1  this conversation                                   generating · 42 rows · 1 head · local",
+        "      s-this-conversation  ~/Projects/rano",
+        "  ▸+  2  the first child",
+        "      s-the-first-child",
+        "        3  the grandchild                                                       on disk · 7 rows",
+        "      s-the-grandchild",
+        "      4  the second child",
+        "      s-the-second-child",
+        "    5  a sibling                                                         2 heads · grok/grok-4.3",
+        "      s-a-sibling",
+        "    6  filler six",
+        "      s-filler-six",
+        "    7  filler seven",
+        "      s-filler-seven",
+        "    8  filler eight",
+        "      s-filler-eight",
+        "    9  filler nine",
+        "      s-filler-nine",
+        "   10  filler ten",
+        "      s-filler-ten",
+    ];
+
+    #[test]
+    fn the_body_the_picker_drew_before_the_port_is_the_body_it_draws_after_it() {
+        let drawn = plain(&golden_fixture().content(96).lines);
+        let end = drawn
+            .iter()
+            .rposition(|l| l.is_empty())
+            .expect("the frame's blank row before the hint");
+        let body: Vec<&str> = drawn[..end].iter().map(String::as_str).collect();
+        assert_eq!(body, GOLDEN_BODY);
+    }
 }

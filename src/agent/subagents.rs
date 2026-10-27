@@ -363,4 +363,55 @@ mod tests {
         assert_eq!((short.start, short.end, short.pad), (0, 2, 4));
         assert!(short.footer.plain().ends_with("full: not written"));
     }
+
+    /// The fixture the golden pin below draws: one child still running, one that is still
+    /// opening, and one that has ended and so lives under the `finished` group.
+    fn golden_fixture() -> SubagentsPane {
+        let mut done = child("done", "scout the docs");
+        done.answer = Some("twelve files".into());
+        done.generating = false;
+        done.model = "local".into();
+        let mut running = child("running", "port the widgets");
+        running.role = "coder".into();
+        SubagentsPane {
+            agents: vec![
+                done,
+                running,
+                SubagentRow {
+                    state: "opening".into(),
+                    asked: "boot".into(),
+                    session: "s-9f".into(),
+                    ..SubagentRow::default()
+                },
+            ],
+            finished_open: false,
+            selected: 0,
+        }
+    }
+
+    /// **The body the subagents pane drew before the tree-list port** (R1a), pinned first:
+    /// everything above the frame's last blank row, which is the title, each child's row and
+    /// its facts, and the `finished` group with its legend. The hint under it is expected to
+    /// change — it now follows the cursor.
+    const GOLDEN_BODY: &[&str] = &[
+        "subagents",
+        "",
+        "▸ [~] port the widgets",
+        "       s-1a2b · role coder · running",
+        "  […] boot",
+        "       s-9f · opening · not attachable yet",
+        "  [+] finished (1)",
+        "       enter shows the ones that have ended",
+    ];
+
+    #[test]
+    fn the_body_the_pane_drew_before_the_port_is_the_body_it_draws_after_it() {
+        let drawn = plain(&golden_fixture().content(100).lines);
+        let end = drawn
+            .iter()
+            .rposition(|l| l.is_empty())
+            .expect("the frame's blank row before the hint");
+        let body: Vec<&str> = drawn[..end].iter().map(String::as_str).collect();
+        assert_eq!(body, GOLDEN_BODY);
+    }
 }

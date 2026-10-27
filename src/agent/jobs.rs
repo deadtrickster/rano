@@ -513,6 +513,45 @@ mod tests {
         assert!(!lines.contains("ran 0.0s"), "{lines}");
     }
 
+    /// The fixture the golden pin below draws: one job still running, and two that have
+    /// settled — one of them redirected to a file.
+    fn golden_fixture() -> JobsPane {
+        let mut redirected = job("j3", "cargo build > /tmp/build.log 2>&1", false);
+        redirected.redirect = Some("/tmp/build.log".into());
+        redirected.elapsed_ms = 4_000;
+        let mut running = job("j1", "cargo test --workspace", true);
+        running.produced = 1024;
+        JobsPane {
+            jobs: vec![running, job("j2", "sleep 30", false), redirected],
+            finished_open: false,
+            selected: 0,
+        }
+    }
+
+    /// **The body the jobs pane drew before the tree-list port** (R1a), pinned first:
+    /// everything above the frame's last blank row — the title, the running job with its
+    /// facts, and the `finished` group with its legend. The hint under it is expected to
+    /// change — it now follows the cursor.
+    const GOLDEN_BODY: &[&str] = &[
+        "background jobs",
+        "",
+        "▸ [~] j1 cargo test --workspace",
+        "         asked · running · 1.0 KB out so far",
+        "  [+] finished (2)",
+        "       enter shows the ones that have settled",
+    ];
+
+    #[test]
+    fn the_body_the_pane_drew_before_the_port_is_the_body_it_draws_after_it() {
+        let drawn = plain(&golden_fixture().content(100).lines);
+        let end = drawn
+            .iter()
+            .rposition(|l| l.is_empty())
+            .expect("the frame's blank row before the hint");
+        let body: Vec<&str> = drawn[..end].iter().map(String::as_str).collect();
+        assert_eq!(body, GOLDEN_BODY);
+    }
+
     #[test]
     fn an_empty_table_says_how_a_job_gets_here() {
         let lines = text(&JobsPane::default(), 120);

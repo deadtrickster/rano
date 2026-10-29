@@ -231,6 +231,56 @@ fn renderers(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
     ]
 }
 
+/// **The renderers, told to write PPM** — which is `pdftoppm`'s own default output and a
+/// fifteen-byte header in front of raw RGB. A plugin that wants pixels should not be handed a
+/// compressed file and a decoder: the host had the pixels one step earlier.
+fn renderers_rgb(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
+    let page = (page_index + 1).to_string();
+    let file = input.to_string_lossy().into_owned();
+    vec![
+        Cmd {
+            program: "pdftoppm".to_string(),
+            args: vec![
+                "-r".to_string(),
+                dpi.to_string(),
+                "-f".to_string(),
+                page.clone(),
+                "-l".to_string(),
+                page.clone(),
+                "-singlefile".to_string(),
+                file.clone(),
+                "{stem}".to_string(),
+            ],
+            prints: false,
+        },
+        Cmd {
+            program: "gs".to_string(),
+            args: vec![
+                "-q".to_string(),
+                "-dNOPAUSE".to_string(),
+                "-dBATCH".to_string(),
+                "-sDEVICE=ppmraw".to_string(),
+                "-dTextAlphaBits=4".to_string(),
+                "-dGraphicsAlphaBits=4".to_string(),
+                format!("-r{dpi}"),
+                format!("-dFirstPage={page}"),
+                format!("-dLastPage={page}"),
+                "-sOutputFile={out}".to_string(),
+                file,
+            ],
+            prints: false,
+        },
+    ]
+}
+
+/// **One page as raw RGB**: `(width, height, rgb)`, ready to be a picture without a decoder
+/// between. The same bounds as [`page_png`] — one page, its own deadline, its own caps —
+/// because the only difference is what the renderer is asked to write.
+pub fn page_rgb(path: &Path, page_index: u32, dpi: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    let ppm = page_raster(path, page_index, dpi, Limits::page(), None)?;
+    ppm_to_rgb(&ppm)
+}
+
 /// [`page_png`] with the caps and the renderers a caller chooses. `None` asks the
 /// machine; a test hands in its own stand-in so the guards are exercised without a
 /// converter being installed.
@@ -294,6 +344,120 @@ fn page_png_with(
     }
     let _ = std::fs::remove_file(&out);
     Err(last)
+}
+
+/// [`page_rgb`] with the caps and the renderers a caller chooses: the file the renderer wrote,
+/// unparsed. Split out so a test can hand in a stand-in and read the bytes back.
+fn page_raster(
+    path: &Path,
+    page_index: u32,
+    dpi: u32,
+    limits: Limits,
+    given: Option<Vec<Cmd>>,
+) -> Result<Vec<u8>, String> {
+    checked(path)?;
+    checked_dpi(dpi)?;
+    let pages = page_count(path)?;
+    if page_index >= pages {
+        return Err(page_refused(page_index, pages));
+    }
+    let out = temp_file("page", "ppm");
+    let cmds: Vec<Cmd> = match given {
+        Some(cmds) => cmds,
+        None => renderers_rgb(path, page_index, dpi),
+    }
+    .into_iter()
+    .filter(|c| on_path(&c.program))
+    .collect();
+    if cmds.is_empty() {
+        let _ = std::fs::remove_file(&out);
+        return Err(
+            "no renderer found: neither pdftoppm nor gs is on PATH, and there is nothing \
+             else to ask for a page"
+                .to_string(),
+        );
+    }
+    let mut last = String::new();
+    for cmd in &cmds {
+        match run(cmd, &out, limits) {
+            Run::Done => {
+                let bytes = read_out(&out, limits.output, "renderer");
+                let _ = std::fs::remove_file(&out);
+                return bytes;
+            }
+            Run::Refused(e) => {
+                last = e;
+                let _ = std::fs::remove_file(&out);
+            }
+            Run::Stopped(e) => {
+                let _ = std::fs::remove_file(&out);
+                return Err(e);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&out);
+    Err(last)
+}
+
+/// **A PPM's header and its pixels**, as `(width, height, rgb)`. `P6` only: a `P3` (ASCII) or a
+/// 16-bit `maxval` is refused by name, because neither is what a terminal takes.
+fn ppm_to_rgb(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut at = 0usize;
+    while fields.len() < 4 && at < bytes.len() {
+        // Whitespace between fields, comments (`#` to end of line) anywhere in the header.
+        while at < bytes.len()
+            && (bytes[at].is_ascii_whitespace()
+                || (bytes[at] == b'#' && {
+                    while at < bytes.len() && bytes[at] != b'\n' {
+                        at += 1;
+                    }
+                    true
+                }))
+        {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        if start == at {
+            break;
+        }
+        fields.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
+    }
+    if fields.len() < 4 || fields[0] != "P6" {
+        return Err(format!(
+            "not a binary PPM: {:?}",
+            fields.first().map(String::as_str).unwrap_or("")
+        ));
+    }
+    let width: u32 = fields[1]
+        .parse()
+        .map_err(|_| format!("width {:?}", fields[1]))?;
+    let height: u32 = fields[2]
+        .parse()
+        .map_err(|_| format!("height {:?}", fields[2]))?;
+    if fields[3] != "255" {
+        return Err(format!(
+            "a {}",
+            if fields[3] == "65535" {
+                "16-bit"
+            } else {
+                "non-8-bit"
+            }
+        ));
+    }
+    // One whitespace byte ends the header; everything after it is pixels.
+    let want = (width as usize) * (height as usize) * 3;
+    let data = bytes.get(at + 1..).unwrap_or_default();
+    if data.len() < want {
+        return Err(format!(
+            "{width}x{height} pixels is {want} bytes, got {}",
+            data.len()
+        ));
+    }
+    Ok((width, height, data[..want].to_vec()))
 }
 
 /// [`page_text`] with the caps and the tool a caller chooses. `None` asks the machine.
@@ -582,7 +746,13 @@ fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
         return Run::Refused("the renderer command is empty".to_string());
     }
     let shown = out.to_string_lossy().into_owned();
-    let stem = shown.trim_end_matches(".png").to_string();
+    // The stem is the name without whatever extension this call writes, which is `.png` for a
+    // picture and `.ppm` for pixels. Hard-coding one of them makes the tool write
+    // `name.ppm.ppm`, which then looks like a renderer that wrote nothing.
+    let stem = std::path::Path::new(&shown)
+        .with_extension("")
+        .to_string_lossy()
+        .into_owned();
     let mut child = std::process::Command::new(program);
     child
         .args(
@@ -801,7 +971,7 @@ mod tests {
     /// **A PDF built here**, page by page: nothing on the machine is needed to make one,
     /// and its objects are in the clear so the parsing path can be exercised without
     /// poppler. One word per page, so a page's text and a page's raster can be told apart.
-    fn fixture(words: &[&str]) -> Vec<u8> {
+    pub(super) fn fixture(words: &[&str]) -> Vec<u8> {
         let font = 3 + words.len() as u32 * 2;
         let kids: Vec<String> = (0..words.len())
             .map(|i| format!("{} 0 R", 3 + i as u32 * 2))
@@ -1408,5 +1578,93 @@ mod tests {
         let bytes = page_png_with(&pdf, 1, 150, Limits::page(), Some(gs)).expect("gs drew page 2");
         assert_eq!(bytes[..8], b"\x89PNG\r\n\x1a\n"[..]);
         assert_eq!(ihdr(&bytes), (625, 417));
+    }
+}
+
+#[cfg(test)]
+mod ppm_tests {
+    use super::*;
+
+    fn ppm(w: u32, h: u32) -> Vec<u8> {
+        let mut v = format!("P6\n{w} {h}\n255\n").into_bytes();
+        v.extend(std::iter::repeat_n(7u8, (w * h * 3) as usize));
+        v
+    }
+
+    #[test]
+    fn a_ppm_is_its_header_and_its_pixels() {
+        let (w, h, rgb) = ppm_to_rgb(&ppm(4, 3)).expect("a P6");
+        assert_eq!((w, h), (4, 3));
+        assert_eq!(rgb.len(), 4 * 3 * 3);
+        assert!(rgb.iter().all(|b| *b == 7));
+    }
+
+    /// A comment may sit anywhere whitespace may, which is the one thing a hand-rolled header
+    /// reader gets wrong.
+    #[test]
+    fn comments_in_the_header_are_skipped() {
+        let mut v = b"P6\n# written by gs\n2 2\n# another\n255\n".to_vec();
+        v.extend([1u8; 12]);
+        let (w, h, rgb) = ppm_to_rgb(&v).expect("a commented P6");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgb.len(), 12);
+    }
+
+    /// What it will not take, named: an ASCII `P3`, a 16-bit raster, and a raster short of the
+    /// pixels its own header claims.
+    #[test]
+    fn what_is_not_a_picture_the_terminal_takes_is_refused() {
+        let e = ppm_to_rgb(b"P3\n1 1\n255\n255 0 0\n").unwrap_err();
+        assert!(e.contains("not a binary PPM"), "{e}");
+        let e = ppm_to_rgb(b"P6\n1 1\n65535\n\0\0\0\0\0\0").unwrap_err();
+        assert!(e.contains("16-bit"), "{e}");
+        let mut short = ppm(2, 2);
+        short.pop();
+        let e = ppm_to_rgb(&short).unwrap_err();
+        assert!(e.contains("2x2") && e.contains("11"), "{e}");
+        assert!(ppm_to_rgb(b"").is_err());
+    }
+
+    /// **The renderers are asked for PPM, not PNG**: this is the whole point of the path, so the
+    /// argv is read back rather than trusted.
+    #[test]
+    fn the_rgb_renderers_ask_for_ppm() {
+        let cmds = renderers_rgb(Path::new("/tmp/a.pdf"), 2, 96);
+        let pdftoppm = &cmds[0];
+        assert_eq!(pdftoppm.program, "pdftoppm");
+        assert!(
+            !pdftoppm.args.iter().any(|a| a == "-png"),
+            "{:?}",
+            pdftoppm.args
+        );
+        assert_eq!(
+            pdftoppm.args.iter().filter(|a| **a == "-f").count(),
+            1,
+            "one page asked for: {:?}",
+            pdftoppm.args
+        );
+        let gs = &cmds[1];
+        assert!(
+            gs.args.iter().any(|a| a == "-sDEVICE=ppmraw"),
+            "{:?}",
+            gs.args
+        );
+    }
+
+    /// The real thing, where a renderer is installed: a page comes back as pixels whose count
+    /// matches its own size, and two pages differ.
+    #[test]
+    #[ignore = "needs pdftoppm or gs on PATH"]
+    fn a_page_renders_as_pixels_that_match_their_size() {
+        let dir = std::env::temp_dir().join(format!("rano-pdf-rgb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("two.pdf");
+        std::fs::write(&path, super::tests::fixture(&["alpha", "bravo"])).expect("write");
+        let (w, h, rgb) = page_rgb(&path, 0, 72).expect("page 1");
+        assert_eq!(rgb.len(), (w as usize) * (h as usize) * 3);
+        let (w2, h2, other) = page_rgb(&path, 1, 72).expect("page 2");
+        assert_eq!((w, h), (w2, h2));
+        assert_ne!(rgb, other, "page 2 is not page 1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

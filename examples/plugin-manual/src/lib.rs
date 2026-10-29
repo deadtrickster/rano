@@ -30,6 +30,7 @@ const DOCS: &[&str] = &[
     include_str!("../../../docs/embedding.md"),
     include_str!("../../../docs/keys.md"),
     include_str!("../../../docs/logs.md"),
+    include_str!("../../../docs/pdf.md"),
     include_str!("../../../docs/plugins.md"),
 ];
 

@@ -3845,14 +3845,15 @@ impl Editor {
         // viewer draws pixels for a terminal that takes them and a character ramp for one that
         // does not) has said which it means by answering the richer question, so the picture
         // wins where the protocol can carry it and the text answer is the fallback.
+        let mut drawn: Option<(PathBuf, crate::plugin::Picture)> = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {
             if !plugin.has("provider_picture") {
                 continue;
             }
             match plugin.provider_picture(&path.to_string_lossy(), cols, rows) {
                 Ok(Some(answer)) => {
-                    self.open_provider_picture(&path, &answer);
-                    return true;
+                    drawn = Some((path.clone(), answer));
+                    break;
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -3862,6 +3863,12 @@ impl Editor {
                     ));
                 }
             }
+        }
+        // Drawn only if the terminal can carry it; a decline falls through to the text hook.
+        if let Some((at, answer)) = drawn
+            && self.open_provider_picture(&at, &answer)
+        {
+            return true;
         }
         let mut claim = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {

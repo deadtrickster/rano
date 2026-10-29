@@ -950,10 +950,15 @@ fn opening_run(marker: &str, src: &str, body: usize) -> Option<Opening> {
                 trail,
             });
         }
-        // After prose: it must start a word, be the line's only run, and be paid off by a closing
-        // delimiter that belongs to it — otherwise it is a sentence that happens to end in
-        // backticks, and reading it as a fence is how a reply loses its second half.
-        let word = matches!(bytes[i - 1], b' ' | b'\t');
+        // After prose: it must not be glued to a word, be the line's only run, and be paid off by
+        // a closing delimiter that belongs to it — otherwise it is a sentence that happens to end
+        // in backticks, and reading it as a fence is how a reply loses its second half.
+        //
+        // **Not glued to a WORD, not "preceded by a space".** `Here is the code:```rust` is the
+        // same defect as `— ```rust` one character over — measured, it swallowed the reply's
+        // remaining paragraphs — while `a```b` is inline code glued to its sentence, which a
+        // fence would have to eat to read.
+        let word = i > 0 && !bytes[i - 1].is_ascii_alphanumeric();
         if word
             && trail.is_none()
             && closing_fence(src, body, ch, n)

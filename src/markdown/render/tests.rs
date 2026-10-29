@@ -985,6 +985,35 @@ fn a_fence_after_prose_is_a_block_labelled_with_its_info_string() {
     );
 }
 
+/// **A fence glued to a word's punctuation is still a fence** — `Here is the code:```rust` is the
+/// operator's shape one character over, and measured it swallowed the same paragraphs. `a```b`
+/// is inline code glued to its sentence, and a fence would have to eat the sentence to read it, so
+/// that stays text.
+#[test]
+fn a_fence_glued_to_punctuation_is_still_a_fence() {
+    let rows = text(&render_blocks(
+        &lex("Here is the code:```rust\nfn x() {}\n```\n\n**done**\n"),
+        80,
+        &opts(),
+    ));
+    assert_eq!(
+        rows,
+        vec![
+            "Here is the code:",
+            "",
+            "┌─ rust",
+            "│ fn x() {}",
+            "└─",
+            "",
+            "done",
+        ]
+    );
+    assert_eq!(
+        text(&render_blocks(&lex("a```b\n"), 80, &opts())),
+        vec!["a```b"]
+    );
+}
+
 /// **A fence's lines are rows, one for one** — the same reply carried a two-line block and it
 /// was drawn as ONE line with the two lines joined by a space, which is what a paragraph does to
 /// its lines and not what a code block may do to its. `N` lines in, `N` rows out, and the block

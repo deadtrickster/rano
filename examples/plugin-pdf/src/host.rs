@@ -49,7 +49,9 @@ impl Render for Host {
             // capacity the host is given and stays inside.
             let n = unsafe {
                 convert_page(
-                    page as i32,
+                    // The host counts pages from zero and the reader's state is what a person
+                    // reads, so the conversion happens here and nowhere else.
+                    page.saturating_sub(1) as i32,
                     dpi as i32,
                     out.as_mut_ptr() as u32,
                     out.len() as u32,

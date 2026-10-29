@@ -387,7 +387,14 @@ impl Plugin {
     fn linker(engine: &Engine, caps: Capabilities, scope: Option<PathBuf>) -> Linker<StoreLimits> {
         // **The one file this call is about**, resolved once: every scoped import answers for
         // it and for nothing else, so `..`, a relative spelling and a symlink all land on it.
-        let scoped = scope.and_then(|p| std::fs::canonicalize(p).ok());
+        // **The part before a `#`**, because a provider keeps its state in a fragment: a reader
+        // answers `paper.pdf#p=4` and the file it is about is `paper.pdf`. Canonicalising the
+        // whole string finds no file, and then every scoped import refuses for no visible reason.
+        let scoped = scope.and_then(|p| {
+            let text = p.to_string_lossy().into_owned();
+            let file = text.split('#').next().unwrap_or(&text);
+            std::fs::canonicalize(file).ok()
+        });
         let mut linker = Linker::new(engine);
         if caps.read_dir {
             // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed` for a
@@ -448,6 +455,8 @@ impl Plugin {
         }
         if caps.convert_page {
             // `(page, dpi, out_ptr, out_cap) -> i32`: one page of the file this call is about,
+            // **counted from zero** — the same base `pdf::page_rgb` documents. A reader that
+            // shows "page 1" converts, once, at its own edge,
             // as a PNG. `pdf::page_png` owns the deadline and the caps, and the path is scoped
             // exactly as `read_file`'s is, so the grant reaches this document and no other.
             let want = scoped.clone();
@@ -458,13 +467,24 @@ impl Plugin {
                           out_cap: u32|
                   -> i32 {
                 let Some(want) = want.as_deref() else {
+                    if std::env::var_os("RANO_PLUGIN_DEBUG").is_some() {
+                        eprintln!("rano: convert_page: no file in scope");
+                    }
                     return i32::MIN;
                 };
                 if page < 0 || dpi < 0 {
                     return i32::MIN;
                 }
-                let Ok((w, h, rgb)) = crate::pdf::page_rgb(want, page as u32, dpi as u32) else {
-                    return i32::MIN;
+                let (w, h, rgb) = match crate::pdf::page_rgb(want, page as u32, dpi as u32) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // `i32::MIN` is one answer for several reasons, and a plugin cannot say
+                        // which. `RANO_PLUGIN_DEBUG` is where a person finds out.
+                        if std::env::var_os("RANO_PLUGIN_DEBUG").is_some() {
+                            eprintln!("rano: convert_page({page}, {dpi}) refused: {e}");
+                        }
+                        return i32::MIN;
+                    }
                 };
                 // **The same block `provider_picture` answers with**, so a host and a plugin
                 // have one picture format: `[width][height][rgb]`, no decoder between them.
@@ -473,9 +493,29 @@ impl Plugin {
                 payload.extend_from_slice(&h.to_le_bytes());
                 payload.extend_from_slice(&rgb);
                 if payload.len() > MAX_HOOK_BYTES {
+                    if std::env::var_os("RANO_PLUGIN_DEBUG").is_some() {
+                        eprintln!(
+                            "rano: convert_page({page}, {dpi}) is {} MiB, above the {} MiB cap",
+                            payload.len() >> 20,
+                            MAX_HOOK_BYTES >> 20
+                        );
+                    }
                     return i32::MIN;
                 }
-                write_guest(&mut caller, out_ptr, out_cap, &payload)
+                let wrote = write_guest(&mut caller, out_ptr, out_cap, &payload);
+                if std::env::var_os("RANO_PLUGIN_DEBUG").is_some() {
+                    eprintln!(
+                        "rano: convert_page({page}, {dpi}) -> {w}x{h}, {} bytes, wrote {wrote}, cap {out_cap}",
+                        payload.len()
+                    );
+                }
+                if wrote < 0 && std::env::var_os("RANO_PLUGIN_DEBUG").is_some() {
+                    eprintln!(
+                        "rano: convert_page({page}) needs {} bytes, the plugin offered {out_cap}",
+                        payload.len()
+                    );
+                }
+                wrote
             };
             let _ = linker.func_wrap("rano", "convert_page", f);
 

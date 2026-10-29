@@ -53,7 +53,10 @@ pub const MAX_DPI: u32 = 300;
 /// fits, and a small picture of the whole page beats no picture at all. It is also the one question
 /// a refusal cannot answer, so it is what tells a page that is too big from a page that is not
 /// there.
-pub const FIT_DPI: u32 = 12;
+/// The dpi a too-big page is asked at first: low enough that anything which exists fits the
+/// answer's cap, and **not below the host's floor** — a page asked at 12 dpi is refused for the
+/// dpi, which reads as "no such page" and sends the reader down the wrong branch.
+pub const FIT_DPI: u32 = 24;
 
 /// **The most one picture answer may carry**: the ABI's own cap, `MAX_HOOK_BYTES` in
 /// `src/plugin.rs` — 16 MiB on the whole payload, the 8-byte `[width][height]` header included.

@@ -1,0 +1,17 @@
+[package]
+name = "rano-plugin-manual"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rano-plugin = { path = "../../sdks/rust" }
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+panic = "abort"

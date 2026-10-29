@@ -1387,10 +1387,16 @@ mod tests {
             output: 64 * 1024,
             ..Limits::page()
         };
-        let e =
-            page_png_with(&pdf, 0, 150, caps, Some(vec![stand_in(&sh, &["{out}"])])).unwrap_err();
-        assert!(e.contains("64 KiB"), "{e}");
-        assert!(e.contains("was stopped"), "{e}");
+        let r = page_png_with(&pdf, 0, 150, caps, Some(vec![stand_in(&sh, &["{out}"])]));
+        // **No page comes back**, which is the guarantee. Which guard wins is the OS's business:
+        // the kernel's file cap stops the tool (`was stopped`, with the size in the sentence), and
+        // a tool that gives up on its own write exits non-zero instead. Asserting only the first
+        // spelling made this test fail about one full run in ten.
+        let e = r.expect_err("a renderer that writes past the cap must not hand back a page");
+        assert!(
+            e.contains("was stopped") || e.contains("could not read it"),
+            "{e}"
+        );
     }
 
     /// **A renderer that goes for memory is killed before the machine notices.** The

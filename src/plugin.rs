@@ -1525,6 +1525,21 @@ mod tests {
         assert!(e.contains("0x4"), "{e}");
     }
 
+    /// **The example's picture buffer is three bytes a pixel**, and this is a source check on
+    /// purpose: the overflow it guards was silent. `rgb: [max_pixels]u8` bounds BYTES where
+    /// `fits()` bounds PIXELS, so the largest viewport it admits writes 262,144 bytes past the
+    /// array, and `ReleaseSmall` has no runtime safety to trap it. The build's memory minimum is
+    /// the only place it shows: 54 pages with the defect, 58 with the fix.
+    #[test]
+    fn the_stl_examples_rgb_buffer_is_three_bytes_a_pixel() {
+        let src = include_str!("../examples/plugin-stl/src/main.zig");
+        assert!(
+            src.contains("rgb: [3 * max_pixels]u8"),
+            "the picture buffer must be three bytes a pixel; `max_pixels` bytes is a third of \
+             the picture and the rest is written past it"
+        );
+    }
+
     /// A plugin that answers no picture claims nothing — the hook is found by name like any other.
     #[test]
     fn a_plugin_with_no_picture_hook_claims_nothing() {

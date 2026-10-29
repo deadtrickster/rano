@@ -91,7 +91,11 @@ var text: [2 * max_cells]u8 = undefined;
 const Picture = extern struct {
     width: u32 = 0,
     height: u32 = 0,
-    rgb: [max_pixels]u8 = undefined,
+    // **Three bytes a pixel**, and the bound `fits` enforces is a PIXEL count: `max_pixels`
+    // bytes here is a third of the picture and writes 262,144 bytes past the array at the
+    // largest viewport `fits` admits. ReleaseSmall has no runtime safety, so it corrupts the
+    // neighbouring statics silently.
+    rgb: [3 * max_pixels]u8 = undefined,
 };
 var picture: Picture = .{};
 

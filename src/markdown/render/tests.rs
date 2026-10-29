@@ -949,6 +949,139 @@ fn a_citation_numbers_its_lines_as_the_file_does() {
     assert_eq!(plain, vec!["┌─ rust", "│ fn x() {}", "└─"]);
 }
 
+/// **A fence a model put after prose is a block, and its info string is the block's title** —
+/// the operator's screenshot of a real reply (2026-10-29). The reply carried
+/// `— ```/w/firecode/scripts/vsock-exec.py:60-97` with the closing delimiter on the next line;
+/// the label was drawn as one line of **text with its backticks in it**, and the closing
+/// delimiter then opened a block that never closed. Three things are asserted together
+/// because they were one defect: the prose before the fence is prose, the fence is a block
+/// labelled with the path, and the paragraph after it is a paragraph again.
+#[test]
+fn a_fence_after_prose_is_a_block_labelled_with_its_info_string() {
+    let md = "— ```/Users/dead/Projects/firecode/firecode/scripts/vsock-exec.py:60-97\n```\n\n\
+              **The smoking gun**\n";
+    let lines = render_blocks(&lex(md), 80, &opts());
+    assert_eq!(
+        text(&lines),
+        vec![
+            "—",
+            "",
+            "┌─ /Users/dead/Projects/firecode/firecode/scripts/vsock-exec.py:60-97",
+            "└─",
+            "",
+            "The smoking gun",
+        ]
+    );
+    assert!(
+        spans(&lines).all(|s| !s.content.contains('`')),
+        "no row may carry a delimiter: {:?}",
+        text(&lines)
+    );
+    assert!(
+        spans(&lines)
+            .any(|s| s.content == "The smoking gun" && s.style.attrs.contains(Attrs::BOLD)),
+        "the paragraph after the fence is parsed: {:?}",
+        text(&lines)
+    );
+}
+
+/// **A fence's lines are rows, one for one** — the same reply carried a two-line block and it
+/// was drawn as ONE line with the two lines joined by a space, which is what a paragraph does to
+/// its lines and not what a code block may do to its. `N` lines in, `N` rows out, and the block
+/// drawn as a block so a reader can see where the code starts and stops.
+#[test]
+fn a_fences_lines_are_rows_and_are_never_joined() {
+    let md = "— ```\n\
+              ps -eo pid,etime,stat,args | grep base64   →   (nothing)\n\
+              cat /proc/loadavg                          →   0.00 0.00 0.04 1/122\n\
+              ```\n";
+    let rows = text(&render_blocks(&lex(md), 80, &opts()));
+    assert_eq!(
+        rows,
+        vec![
+            "—",
+            "",
+            "┌─",
+            "│ ps -eo pid,etime,stat,args | grep base64   →   (nothing)",
+            "│ cat /proc/loadavg                          →   0.00 0.00 0.04 1/122",
+            "└─",
+        ]
+    );
+}
+
+/// **A malformed fence does not poison what follows** — the half of the same reply that made it
+/// read as broken: after the block closed, `**bold**` was drawn with its asterisks, because the
+/// text was still inside the block. Everything inline and block-level after the fence has to
+/// behave as it does in a document that never held a fence.
+#[test]
+fn a_paragraph_after_a_malformed_fence_parses_again() {
+    let md = "— ```\n\
+              ps -eo pid,etime,stat,args | grep base64   →   (nothing)\n\
+              cat /proc/loadavg                          →   0.00 0.00 0.04 1/122\n\
+              ```\n\n\
+              **So the failure mode is a symmetric deadlock, not a lost byte.**\n\n\
+              _italic_, `code` and\n\n\
+              - a bullet\n";
+    let lines = render_blocks(&lex(md), 80, &opts());
+    let rows = text(&lines);
+    assert!(
+        rows.contains(&"So the failure mode is a symmetric deadlock, not a lost byte.".into()),
+        "the bold paragraph is not text: {rows:?}"
+    );
+    assert!(
+        spans(&lines).any(|s| s.content.starts_with("So the failure") && s.style.attrs.contains(Attrs::BOLD)),
+        "the bold paragraph is bold: {rows:?}"
+    );
+    assert!(
+        spans(&lines).any(|s| s.content == "italic" && s.style.attrs.contains(Attrs::ITALIC)),
+        "italic after the fence: {rows:?}"
+    );
+    assert!(
+        spans(&lines).any(|s| s.content == "code" && s.style.top() == Role::Code),
+        "inline code after the fence: {rows:?}"
+    );
+    assert!(
+        rows.contains(&"· a bullet".into()),
+        "a list after the fence: {rows:?}"
+    );
+    assert!(
+        spans(&lines).all(|s| !s.content.contains('*')),
+        "no asterisk reaches the screen: {rows:?}"
+    );
+}
+
+/// **A title is a label and never a delimiter** — a fence written as
+/// ` ```src/a.rs:3-9``` ` put the trailing run in the frame's title (`┌─ src/a.rs:3-9``` `). The
+/// label stops at the next run of the fence's own character, and a run as long as the opening
+/// one closes the block, which is what an empty citation written on one line means.
+#[test]
+fn an_info_string_never_carries_a_delimiter_into_the_title() {
+    for md in [
+        "```src/a.rs:3-9```\n",
+        "```src/a.rs:3-9`\nthe lines\n```\n",
+        "```src/a.rs:3-9 ```\n",
+    ] {
+        let rows = text(&render_blocks(&lex(md), 80, &opts()));
+        assert!(
+            rows.iter().all(|r| !r.contains('`')),
+            "a delimiter leaked into the output: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r == "┌─ src/a.rs:3-9"),
+            "the label is the path: {rows:?}"
+        );
+    }
+    // A line that carries a second run after prose is an inline code span, not a fence.
+    assert_eq!(
+        text(&render_blocks(
+            &lex("Run ```echo hi``` now.\n"),
+            80,
+            &opts()
+        )),
+        vec!["Run echo hi now."]
+    );
+}
+
 /// **A markdown link's label links to its destination** — `[PR #212](https://…)` was drawn as the
 /// words "PR #212" with nowhere to go; the label now carries the URL for the emitter's OSC 8, and
 /// the text beside it carries none.

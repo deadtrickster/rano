@@ -794,7 +794,10 @@ fn code_span_inner(node: &Node) -> Option<(usize, usize)> {
 /// A fenced code block found in the text.
 #[derive(Debug, Clone)]
 struct Fence {
-    /// Offset of the opening line's start — the whole line is the fence's, prefix and all.
+    /// Offset of the opening delimiter — the line's start for a fence written the ordinary way, and
+    /// the run itself for one a model put after prose (`— ```src/a.rs:3-9`). Everything before it on
+    /// that line stays prose, which is why this is an offset and not a line number: [`mask`] blanks
+    /// from here, so the words in front of the fence are still there for the block grammar to see.
     open: usize,
     /// The container syntax the opening line carries — `"> "` in a quote, an item's indent
     /// in a list, `""` at the top level. Every line of the block repeats it.
@@ -833,32 +836,164 @@ fn fences_in(src: &str) -> Vec<Fence> {
             Some(i) => off + i,
             None => src.len(),
         };
-        let (prefix, marker) = split_container(&src[off..line_end]);
-        if let Some(&ch @ (b'`' | b'~')) = marker.as_bytes().first() {
-            let n = marker.bytes().take_while(|b| *b == ch).count();
-            if n >= 3 {
-                let lang = marker[n..].trim().to_string();
-                let body = (line_end + 1).min(src.len());
-                let (close, end, closed) = match closing_fence(src, body, ch, n) {
-                    Some((start, after)) => (start, after, true),
-                    None => (src.len(), src.len(), false),
-                };
-                out.push(Fence {
-                    open: off,
-                    prefix: prefix.to_string(),
-                    body,
-                    close,
-                    end,
-                    lang,
-                    closed,
-                });
-                off = end.max(line_end + 1);
-                continue;
-            }
+        let line = &src[off..line_end];
+        let (prefix, marker) = split_container(line);
+        let body = (line_end + 1).min(src.len());
+        let column = off + (line.len() - marker.len());
+        if let Some(open) = opening_run(marker, src, body) {
+            let (at, ch, n) = (open.at, open.ch, open.n);
+            // **The label ends at the next run of the same character** — ` ```a`b ` is not a
+            // fence with a backtick in its title, and a title is never a delimiter.
+            let label_end = open.trail.map_or(marker.len(), |(j, _)| j);
+            let lang = marker[at + n..label_end].trim().to_string();
+            // A trailing run at least as long as the opening one is this fence's CLOSING
+            // delimiter, on the same line: ` ```src/a.rs:3-9``` ` is an empty citation, which is
+            // what the harness convention means by it, and reading it as prose instead left the
+            // *next* ``` to open a block that swallowed the reply.
+            let same_line = open
+                .trail
+                .filter(|&(_, len)| len >= n)
+                .map(|(j, len)| (column + j, column + j + len));
+            let (body, close, end, closed) = match same_line {
+                Some((start, after)) => (start, start, after, true),
+                None => match closing_fence(src, body, ch, n) {
+                    Some((start, after)) => (body, start, after, true),
+                    None => (body, src.len(), src.len(), false),
+                },
+            };
+            out.push(Fence {
+                // The line's start when the run starts the content column — the container syntax
+                // in front of it is not prose — and the run itself when prose precedes it.
+                open: if at == 0 { off } else { column + at },
+                prefix: prefix.to_string(),
+                body,
+                close,
+                end,
+                lang,
+                closed,
+            });
+            off = end.max(line_end + 1);
+            continue;
         }
         off = line_end + 1;
     }
     out
+}
+
+/// Where on a line's content a fence opens, and where its label stops.
+struct Opening {
+    /// Offset of the delimiter run within the line's content.
+    at: usize,
+    /// The delimiter byte.
+    ch: u8,
+    /// How many of them.
+    n: usize,
+    /// The next run of the same character on this line, if there is one — `(offset, length)`.
+    /// The label stops there, and a run at least as long as the opening one closes the fence.
+    trail: Option<(usize, usize)>,
+}
+
+/// Where on a line's content a fence opens.
+///
+/// # Two shapes open a block, and the second one is a reply the operator could not read
+///
+/// **A run that starts the line's content** — after the container syntax — is CommonMark's
+/// fence, and it is a fence whether or not its closing delimiter has arrived yet, because that
+/// is what a streaming reply looks like: the model writes the opening line and the head must be
+/// able to draw the block it is filling.
+///
+/// **A run after prose on the same line** — `— ```/w/firecode/scripts/vsock-exec.py:60-97` — is
+/// not a fence to CommonMark, and the cost of reading it as prose was measured on the operator's
+/// screen (2026-10-29): the label was drawn as one line of text with its backticks in it, and
+/// the *closing* delimiter on the next line then opened a block that never closed, so every
+/// word after it — including a paragraph of `**bold**` — was drawn as code. One odd fence made
+/// a whole reply look broken. So a run that starts a word is a fence when the document closes
+/// it; a run nothing closes is the prose it looks like, and it cannot swallow anything.
+///
+/// # A label is a label, never a delimiter
+///
+/// The label is what the line holds between the run and the next run of the same character, so
+/// a title can never carry a backtick: ` ```src/a.rs:3-9``` ` used to put the trailing run in
+/// the frame's title (`┌─ src/a.rs:3-9``` `), which is a delimiter leaked into the output. A
+/// line that carries a second run after prose is an **inline code span** — `Run ```x``` now.` —
+/// and not a fence at all, which is CommonMark's own reading ("the info string may not contain
+/// any backtick characters") applied to the shapes a reply actually contains.
+///
+/// The mid-line scan costs one pass over the rest of the window per *qualifying* line, and a
+/// line qualifies only if it holds a bare run of three or more with nothing but a label after
+/// it — which a document about markdown has, and a document about anything else does not.
+fn opening_run(marker: &str, src: &str, body: usize) -> Option<Opening> {
+    let bytes = marker.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let Some(&ch @ (b'`' | b'~')) = bytes.get(i) else {
+            i += 1;
+            continue;
+        };
+        let n = bytes[i..].iter().take_while(|b| **b == ch).count();
+        if n < 3 {
+            i += n;
+            continue;
+        }
+        let rest = &bytes[i + n..];
+        let trail = rest.iter().position(|b| *b == ch).map(|j| {
+            (
+                i + n + j,
+                rest[j..].iter().take_while(|b| **b == ch).count(),
+            )
+        });
+        if i == 0 {
+            return Some(Opening {
+                at: 0,
+                ch,
+                n,
+                trail,
+            });
+        }
+        // After prose: it must start a word, be the line's only run, and be paid off by a closing
+        // delimiter that belongs to it — otherwise it is a sentence that happens to end in
+        // backticks, and reading it as a fence is how a reply loses its second half.
+        let word = matches!(bytes[i - 1], b' ' | b'\t');
+        if word
+            && trail.is_none()
+            && closing_fence(src, body, ch, n)
+                .is_some_and(|(close, _)| !swallows_a_fence(src, body, close))
+        {
+            return Some(Opening {
+                at: i,
+                ch,
+                n,
+                trail: None,
+            });
+        }
+        i += n;
+    }
+    None
+}
+
+/// Whether the text from `body` to `close` holds a line that opens a fence of its own.
+///
+/// **A mid-line run is a guess, and a guess that would swallow another fence is the wrong one.**
+/// `a ``` b` in a paragraph, with a ```rust block three paragraphs below, has a closing delimiter
+/// in it — but the line that would close the guess is the block's own closing line, and reading
+/// the paragraph as a fence put two blocks inside a code block. A run after prose is a fence only
+/// when the delimiter that closes it is not another fence's.
+fn swallows_a_fence(src: &str, body: usize, close: usize) -> bool {
+    let mut off = body;
+    while off < close && off < src.len() {
+        let line_end = match src[off..].find('\n') {
+            Some(i) => off + i,
+            None => src.len(),
+        };
+        let (_, marker) = split_container(&src[off..line_end]);
+        if let Some(&ch @ (b'`' | b'~')) = marker.as_bytes().first()
+            && marker.bytes().take_while(|b| *b == ch).count() >= 3
+        {
+            return true;
+        }
+        off = line_end + 1;
+    }
+    false
 }
 
 /// Split a line into the container syntax it carries and what follows: `("> ", "```rust")`

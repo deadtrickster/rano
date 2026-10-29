@@ -358,6 +358,16 @@ fn run(
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.bs_mut().goto = pos;
+    // **The viewport before the open**, because a provider is told the size it will be drawn
+    // at: a plugin asked for 0 columns answers "not mine", and a view opened from the command
+    // line would silently lose to the ordinary path.
+    let (tw, th) = terminal.size();
+    ed.set_area(Area::new(
+        0,
+        0,
+        tw.min(u16::MAX as usize) as u16,
+        th.min(u16::MAX as usize) as u16,
+    ));
     if let Some(path) = load {
         // **A folder on the command line is a listing**, not a read: `rano .` is the door every
         // path comes through, and a directory read as a file is a load failure with nothing on
@@ -372,7 +382,9 @@ fn run(
             let started = if follow {
                 ed.start_tail(&path)
             } else {
-                ed.start_named(&path)
+                // One door for the command line and `M->`: a provider answers first, and a
+                // path nobody claims goes through `start_named` as before.
+                ed.open_named(&path)
             };
             if let Err(e) = started {
                 // The one load failure reported before a frame is drawn: there is

@@ -89,14 +89,18 @@ impl Counted {
     }
 }
 
-/// The route the last [`page_count`] took: 0 for none, then [`Counted::code`].
-static LAST_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+// The route the last `page_count` took: 0 for none, then `Counted::code`. **Per thread, not per
+// process**, so two callers counting at once cannot read each other's route. A macro cannot carry
+// a doc comment, which is why this is not one.
+std::thread_local! {
+    static LAST_COUNT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
 
 /// **Which route the last [`page_count`] took**, or `None` if it has not answered yet: the
 /// count is a `u32` and its signature says nothing more, so this is where a caller that
 /// wants to say which one answered finds it.
 pub fn last_count() -> Option<Counted> {
-    match LAST_COUNT.load(std::sync::atomic::Ordering::Relaxed) {
+    match LAST_COUNT.with(std::cell::Cell::get) {
         1 => Some(Counted::PdfInfo),
         2 => Some(Counted::Parsed),
         _ => None,
@@ -104,7 +108,7 @@ pub fn last_count() -> Option<Counted> {
 }
 
 fn record(which: Counted) {
-    LAST_COUNT.store(which.code(), std::sync::atomic::Ordering::Relaxed);
+    LAST_COUNT.with(|c| c.set(which.code()));
 }
 
 /// **How many pages `path` has**, by `pdfinfo` when it is on PATH and by the page tree's

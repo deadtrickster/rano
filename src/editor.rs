@@ -3332,6 +3332,80 @@ impl Editor {
         self.adjust_scroll_x();
     }
 
+    /// **Open a path the way its providers say, or the way [`Self::start_named`] does.** The
+    /// command line's door: without it a plugin view is reachable only through `M->`, because
+    /// `start_named` goes straight to a load and never asks.
+    pub fn open_named(&mut self, path: &Path) -> std::io::Result<()> {
+        if self.ask_providers(path) {
+            return Ok(());
+        }
+        self.start_named(path)
+    }
+
+    /// **Ask the providers whether this path opens as something else**, and install that view
+    /// if one answers. One door for the command line, `M->`, F8 and a host's jump — a rule
+    /// honoured at four doors out of five is a rule nobody can predict.
+    ///
+    /// `true` when a provider answered. A terminal without a picture protocol declines rather
+    /// than stopping the path: the plugin's text answer is who that answer is for.
+    pub fn ask_providers(&mut self, path: &Path) -> bool {
+        let cols = self.text_w as u32;
+        let rows = self.text_h as u32;
+        // **A provider that DRAWS is asked first.** A plugin answering both hooks (the STL
+        // viewer draws pixels for a terminal that takes them and a character ramp for one that
+        // does not) has said which it means by answering the richer question, so the picture
+        // wins where the protocol can carry it and the text answer is the fallback.
+        let mut drawn: Option<(PathBuf, crate::plugin::Picture)> = None;
+        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
+            if !plugin.has("provider_picture") {
+                continue;
+            }
+            match plugin.provider_picture(&path.to_string_lossy(), cols, rows) {
+                Ok(Some(answer)) => {
+                    drawn = Some((path.to_path_buf(), answer));
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.plugin_note = Some(format!(
+                        "plugin {}: {e} — opened the usual way",
+                        plugin.path().display()
+                    ));
+                }
+            }
+        }
+        // Drawn only if the terminal can carry it; a decline falls through to the text hook.
+        if let Some((at, answer)) = drawn
+            && self.open_provider_picture(&at, &answer)
+        {
+            return true;
+        }
+        let mut claim = None;
+        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
+            if !plugin.has("provider_open") {
+                continue;
+            }
+            match plugin.provider_open(&path.to_string_lossy(), cols, rows) {
+                Ok(Some(text)) => {
+                    claim = Some(text);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.plugin_note = Some(format!(
+                        "plugin {}: {e} — opened the usual way",
+                        plugin.path().display()
+                    ));
+                }
+            }
+        }
+        if let Some(text) = claim {
+            self.open_provider(path, text);
+            return true;
+        }
+        false
+    }
+
     /// **A path the plugin claims**: `provider_open` answered a text, and that text is what opens.
     /// A folder keeps the listing keys (`RET` enters an entry), anything else is a read-only
     /// buffer named after the path — a document the plugin rendered.
@@ -3839,58 +3913,7 @@ impl Editor {
         // providers only, so it can never shadow the hooks of the plugin the reader configured.
         // The answer is laid out at the width it will be drawn at: rano is width-adaptive
         // throughout, and a provider that renders columns has to be told how many.
-        let cols = self.text_w as u32;
-        let rows = self.text_h as u32;
-        // **A provider that DRAWS is asked first.** A plugin answering both hooks (the STL
-        // viewer draws pixels for a terminal that takes them and a character ramp for one that
-        // does not) has said which it means by answering the richer question, so the picture
-        // wins where the protocol can carry it and the text answer is the fallback.
-        let mut drawn: Option<(PathBuf, crate::plugin::Picture)> = None;
-        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
-            if !plugin.has("provider_picture") {
-                continue;
-            }
-            match plugin.provider_picture(&path.to_string_lossy(), cols, rows) {
-                Ok(Some(answer)) => {
-                    drawn = Some((path.clone(), answer));
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    self.plugin_note = Some(format!(
-                        "plugin {}: {e} — opened the usual way",
-                        plugin.path().display()
-                    ));
-                }
-            }
-        }
-        // Drawn only if the terminal can carry it; a decline falls through to the text hook.
-        if let Some((at, answer)) = drawn
-            && self.open_provider_picture(&at, &answer)
-        {
-            return true;
-        }
-        let mut claim = None;
-        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
-            if !plugin.has("provider_open") {
-                continue;
-            }
-            match plugin.provider_open(&path.to_string_lossy(), cols, rows) {
-                Ok(Some(text)) => {
-                    claim = Some(text);
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    self.plugin_note = Some(format!(
-                        "plugin {}: {e} — opened the usual way",
-                        plugin.path().display()
-                    ));
-                }
-            }
-        }
-        if let Some(text) = claim {
-            self.open_provider(&path, text);
+        if self.ask_providers(&path) {
             return true;
         }
         // **A folder opens as a listing** — the same door F8, `name:line` and a host's jump

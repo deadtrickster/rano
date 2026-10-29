@@ -6,9 +6,10 @@
 //! renderers — a module that imported anything else would be refused at instantiation and could
 //! not even say why.
 //!
-//! It also pins **which build is committed**: the default features carry no imports, because
-//! `rano.convert_page` and `rano.convert_page_text` are not in the host yet. Rebuild with
-//! `--features page-png,page-text` when they land, and change the one line below that says so.
+//! It also pins **which build is committed**: the featured one, which imports both renderers,
+//! because `src/plugin.rs` answers them when the config grants `convert-page`. A build without the
+//! features has no imports and loads anywhere, and that is what this test would catch going out by
+//! mistake.
 
 use std::path::PathBuf;
 
@@ -53,15 +54,18 @@ fn every_import_it_declares_is_a_page_renderer_from_rano() {
 
 #[test]
 fn the_committed_build_is_the_one_that_runs_against_todays_host() {
-    // The default features carry no imports. When the host grows `convert_page` and
-    // `convert_page_text`, rebuild `plugin.wasm` with
-    // `--features page-png,page-text` and flip this to expect two imports.
+    // Both renderers, in the order the linker imports them: the committed module is built with
+    // `--features page-picture,page-text`, which is the build a host granting `convert-page` can
+    // instantiate.
     let found = sections(&module());
-    assert!(
-        found.imports.is_empty(),
-        "the committed plugin.wasm imports {:?}: it was built with the page renderers, so either \
-         the host has them now (flip this test) or it was rebuilt by mistake",
-        found.imports
+    let imports: Vec<&str> = found
+        .imports
+        .iter()
+        .map(|(_, field)| field.as_str())
+        .collect();
+    assert_eq!(
+        imports, IMPORTS,
+        "the committed plugin.wasm imports {imports:?}"
     );
     assert!(found.exports.len() >= EXPORTS.len(), "{:?}", found.exports);
 }

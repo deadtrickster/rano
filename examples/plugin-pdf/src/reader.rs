@@ -29,34 +29,43 @@
 //! being refused — which is why [`missing_page`] is a sentence in the view and not an error: the
 //! reader sees "no page 13" and presses `p`. Printing "4/12" would need one more thing from the
 //! host, and it is named in `docs/pdf.md` as the first thing to add.
+//!
+//! # What a page is, as it arrives
+//!
+//! **Pixels, not a file.** The host renders the page it was asked about and writes
+//! `[width u32 LE][height u32 LE][rgb…]` into the buffer this plugin offers — the same bytes
+//! `provider_picture` answers with, so a page is never decoded, converted or copied on the way
+//! through. What that costs is a copy and the host's raster maths rather than an inflate, which is
+//! why the bound on a page is the ABI's own ([`PAGE_BYTES`]) and not the hook's fuel budget.
 
-use crate::cache::{self, Page};
-use crate::png::{self, Image};
+use crate::cache;
 
 /// The zoom a document opens at: 96 dpi, the width of a CSS inch.
 pub const DEFAULT_DPI: u32 = 96;
 
 /// The zoom's floor and ceiling. Below the floor a page is a smudge; above the ceiling it is more
-/// pixels than the plugin's arena will hold for any page worth reading.
+/// pixels than one answer may carry for any page worth reading.
 pub const MIN_DPI: u32 = 48;
 pub const MAX_DPI: u32 = 300;
 
-/// **The dpi the render ladder may fall to** when a page is too big to decode. It is below
-/// [`MIN_DPI`] because it is not a zoom the reader asked for: it is the size at which a page still
-/// fits, and a small picture of the whole page beats no picture at all.
+/// **The dpi the render ladder may fall to** when a page is too big to carry. It is below
+/// [`MIN_DPI`] because it is not a zoom the reader asked for: it is the size at which a page always
+/// fits, and a small picture of the whole page beats no picture at all. It is also the one question
+/// a refusal cannot answer, so it is what tells a page that is too big from a page that is not
+/// there.
 pub const FIT_DPI: u32 = 12;
 
-/// **The most RGB bytes one answer may carry**, and the binding constraint is not memory — it is
-/// the host's **fuel**.
+/// **The most one picture answer may carry**: the ABI's own cap, `MAX_HOOK_BYTES` in
+/// `src/plugin.rs` — 16 MiB on the whole payload, the 8-byte `[width][height]` header included.
 ///
-/// Measured on the built module (`plans/S10-wasm-hooks.md` §5 gives a hook 50 M units): decoding a
-/// page costs **~61 units per RGB byte** in wasm, inflate and unfilter together (a 405 KB page:
-/// 24.5 M). So 50 M covers about 800 KB, and half of that is kept back, because a page's deflate
-/// stream is not always as kind as the one measured. 512 KiB is ~175 000 pixels: an A4 page at
-/// about 42 dpi, which is a page you can see the shape of, at the size a terminal's cell box shows
-/// anyway. A page rendered above it is re-rendered at a lower dpi rather than refused, and a host
-/// that grants a picture hook more fuel raises this one number.
-pub const PICTURE_BYTES: usize = 512 << 10;
+/// It used to be 512 KiB, and the binding constraint was the guest's **fuel**, not memory:
+/// decoding a PNG cost ~61 units per RGB byte against a hook's 50 M. The host now hands over the
+/// pixels it had anyway, so a page costs a copy and the host's raster maths, and what binds it is
+/// the ABI. The arithmetic for the page a reader is most likely to open: A4 is 8.27×11.69 in, so a
+/// page is `8.27 × 11.69 × 3 × dpi²` bytes — **6.2 MiB at 150 dpi**, and the cap is reached at
+/// **240 dpi**. A page asked for above that is re-rendered at the dpi that fits rather than
+/// refused.
+pub const PAGE_BYTES: usize = 16 << 20;
 
 /// **The hint line**, wrapped to the viewport like everything else. Every key the reader has is
 /// named here, which is the rule the plugin dired set: a plugin view that hides its keys is a
@@ -68,8 +77,8 @@ pub const HINT: &str = "n next · p prev · g<N> goto · z/Z zoom · 0 reset · 
 /// would not instantiate at all, so this sentence is the whole reason the imports are optional.
 const NO_RENDERER: &str = "this build of the plugin has no page renderer. It needs two host \
 imports, rano.convert_page (a page as a picture) and rano.convert_page_text (a page as text), and \
-this rano provides neither. The file was still claimed, so a PDF does not open as binary noise: \
-the page is simply not there until the host half lands.";
+this build was compiled without them. The file was still claimed, so a PDF does not open as binary \
+noise: the page is simply not there.";
 
 /// A page that exists but carries no text: a scan, or a page of pictures.
 const NO_TEXT_LAYER: &str = "this page has no text layer (a scan, or a page of pictures): the \
@@ -259,7 +268,7 @@ impl Request {
 /// the host with no wasm, no PDF and no converter.
 pub trait Render {
     /// Whether a page can come back as a picture.
-    fn can_png(&self) -> bool {
+    fn can_picture(&self) -> bool {
         false
     }
 
@@ -268,10 +277,10 @@ pub trait Render {
         false
     }
 
-    /// One page, rasterized at `dpi`, as the PNG bytes the host answers.
-    fn page_png(&mut self, page: u32, dpi: u32) -> Option<Vec<u8>> {
-        let _ = (page, dpi);
-        None
+    /// One page, rasterized at `dpi`, written into `out` as `[width][height][rgb…]`.
+    fn page_picture(&mut self, page: u32, dpi: u32, out: &mut [u8]) -> Answer {
+        let _ = (page, dpi, out);
+        Answer::Nothing
     }
 
     /// One page's text, as the host's converter answers it.
@@ -279,6 +288,20 @@ pub trait Render {
         let _ = page;
         None
     }
+}
+
+/// **What one call for a page came back as**, which is the ABI's count read as three things: the
+/// bytes written, the bytes it would need (the buffer was short), or a refusal — for a picture
+/// that is a page past the end of the document and a page above [`PAGE_BYTES`] at once, and the
+/// two are only told apart by asking again at the floor dpi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// `n` bytes, written into the buffer the reader offered.
+    Page(usize),
+    /// The page needs `n` bytes and the buffer had fewer; nothing was written.
+    TooBig(usize),
+    /// No page: past the end, a file the converter will not read, or a page above the cap.
+    Nothing,
 }
 
 /// What a view's body turned out to be.
@@ -299,7 +322,7 @@ pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> O
     }
     let cols = cols.clamp(16, 512);
     let body = body(&request, cols, render);
-    let picture = request.state.mode == Mode::Auto && render.can_png();
+    let picture = request.state.mode == Mode::Auto && render.can_picture();
     let mut out: Vec<String> = Vec::new();
     out.push(state_line(&request, &body, rows, picture));
     out.extend(wrap(HINT, cols));
@@ -310,9 +333,13 @@ pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> O
     Some(out.join("\n"))
 }
 
-/// **The picture of the page the path names**, as `[width u32 LE][height u32 LE][rgb…]`, or `None`
-/// for "not mine" — a path that is not a PDF, a view in text mode, a build with no rasterizer, or
-/// a page the host did not answer.
+/// **The picture of the page the path names**, written into `out` as `[width u32 LE][height u32
+/// LE][rgb…]`, and the length of that answer — or `None` for "not mine": a path that is not a
+/// PDF, a view in text mode, a build with no rasterizer, or a page the host did not answer.
+///
+/// **`out` is the answer, not a scratch buffer.** The host writes the page where
+/// `provider_picture` is going to point, so a page as large as the cap is never copied; what the
+/// reader does is decide *which* page and *which* dpi, and check the header the host wrote.
 ///
 /// The cell box is the host's business: it is told `cols`×`rows` when it draws and it scales what
 /// it is given. That is why the zoom is a **dpi** and not a size: `z` buys detail, not centimetres.
@@ -321,29 +348,14 @@ pub fn picture(
     _cols: usize,
     _rows: usize,
     render: &mut impl Render,
-) -> Option<Vec<u8>> {
+    out: &mut [u8],
+) -> Option<usize> {
     let request = Request::parse(text);
-    if !request.claim() || request.state.mode == Mode::Text || !render.can_png() {
+    if !request.claim() || request.state.mode == Mode::Text || !render.can_picture() {
         return None;
     }
-    // The ladder: the requested dpi first, and then the dpi that fits what one call may carry. The
-    // geometry comes out of the PNG's header, so a page that is too big is never inflated at all.
-    let doc = cache::id(&request.path);
-    let mut dpi = request.state.dpi;
-    for _ in 0..3 {
-        let png = page_png(doc, request.state.page, dpi, render)?;
-        let head = png::header(&png)?;
-        if head.rgb_len() <= PICTURE_BYTES {
-            let image = png::decode(&png).ok()?;
-            return Some(frame(&image));
-        }
-        let smaller = fit(dpi, head.rgb_len());
-        if smaller >= dpi {
-            return None;
-        }
-        dpi = smaller;
-    }
-    None
+    let len = page_bytes(request.state.page, request.state.dpi, render, out)?;
+    checked(len, out)
 }
 
 /// **One key, answered as the path to open next.** The input is `"<path>\n<key>"`, which is the one
@@ -396,7 +408,7 @@ fn body(request: &Request, cols: usize, render: &mut impl Render) -> Body {
             // picture over it while search, copy and `M-P` still work on the text.
             Some(text) if !text.trim().is_empty() => return Body::Rows(page_rows(&text, cols)),
             Some(_) => return Body::Note(NO_TEXT_LAYER.to_string()),
-            None if request.state.mode == Mode::Auto && render.can_png() => {
+            None if request.state.mode == Mode::Auto && render.can_picture() => {
                 return Body::Note(format!(
                     "{}\n\nThe picture is not there either: the rasterizer answered nothing for \
                      the same page.",
@@ -406,7 +418,7 @@ fn body(request: &Request, cols: usize, render: &mut impl Render) -> Body {
             None => return Body::Note(missing_page(request.state.page)),
         }
     }
-    if request.state.mode == Mode::Auto && render.can_png() {
+    if request.state.mode == Mode::Auto && render.can_picture() {
         return Body::Note(DRAWN_BY_HOST.to_string());
     }
     Body::Note(NO_RENDERER.to_string())
@@ -432,69 +444,102 @@ fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> Str
     line
 }
 
-/// **A hit, copied out of the cache** — the lock is not held past the answer, and the entry is made
-/// the most recent by the lookup itself.
-fn cached<R>(key: cache::Key, take: impl FnOnce(&Page) -> Option<R>) -> Option<R> {
-    cache::with(|c| c.get(key).and_then(take))
-}
-
 /// **A page's text, through the cache.** A hit is a page already rendered in this call; a miss asks
-/// the host and keeps the answer.
+/// the host and keeps the answer. Only text is kept: a picture is up to 16 MiB written into the
+/// arena by the host, and the ladder asks for a different dpi every time it climbs, so there is
+/// nothing a picture entry could save.
 fn page_text(doc: u64, page: u32, render: &mut impl Render) -> Option<String> {
-    let key = cache::Key::text(doc, page);
-    if let Some(text) = cached(key, |page| match page {
-        Page::Text(text) => Some(text.clone()),
-        Page::Png(_) => None,
-    }) {
+    let key = cache::Key::new(doc, page);
+    if let Some(text) = cache::with(|c| c.get(key).cloned()) {
         return Some(text);
     }
     let text = render.page_text(page)?;
-    cache::with(|c| c.put(key, Page::Text(text.clone())));
+    cache::with(|c| c.put(key, text.clone()));
     Some(text)
 }
 
-/// **A page's picture as the host answered it, through the cache.** The PNG is what a render
-/// costs, so it is what is kept: a page asked for twice at the same dpi is rasterized once.
-fn page_png(doc: u64, page: u32, dpi: u32, render: &mut impl Render) -> Option<Vec<u8>> {
-    let key = cache::Key::picture(doc, page, dpi);
-    if let Some(bytes) = cached(key, |page| match page {
-        Page::Png(bytes) => Some(bytes.clone()),
-        Page::Text(_) => None,
-    }) {
-        return Some(bytes);
+/// **The page at the dpi the reader asked for, or at the largest one that fits**, written into
+/// `out`; the length of the answer.
+///
+/// Three things can come back and each has its own next step. An answer is the page. A buffer too
+/// small comes with the size the page needs, which is the area, which is the dpi that fits. And a
+/// refusal is "no such page" and "a page above one answer's cap" at once — the host refuses both
+/// the same way — which is why a refusal is asked again at [`FIT_DPI`], where a page that exists
+/// always fits. Only a page whose zoom is the problem costs more than one render; every other page
+/// is rendered once.
+fn page_bytes(page: u32, dpi: u32, render: &mut impl Render, out: &mut [u8]) -> Option<usize> {
+    match render.page_picture(page, dpi, out) {
+        Answer::Page(len) => return Some(len),
+        // A buffer under the cap, which in this plugin is a test's: the answer's own size says
+        // which dpi fits, and one render there is the whole ladder.
+        Answer::TooBig(need) => {
+            let smaller = fit(dpi, need, out.len());
+            if smaller >= dpi {
+                return None;
+            }
+            return match render.page_picture(page, smaller, out) {
+                Answer::Page(len) => Some(len),
+                _ => None,
+            };
+        }
+        Answer::Nothing => {}
     }
-    let bytes = render.page_png(page, dpi)?;
-    cache::with(|c| c.put(key, Page::Png(bytes.clone())));
-    Some(bytes)
-}
-
-/// **The dpi to try when a page does not fit**: the same page scaled down to the arena, by area.
-/// Never up, never below the floor.
-fn fit(dpi: u32, need: usize) -> u32 {
-    if dpi <= FIT_DPI {
-        return dpi;
+    // A refusal. The floor dpi separates a page that is too big for one answer from one that is
+    // not there at all, and it is the whole page when the zoom is the only thing wrong.
+    let floor = match render.page_picture(page, FIT_DPI, out) {
+        Answer::Page(len) => len,
+        _ => return None,
+    };
+    // The floor's own area says which dpi fits: a page's bytes grow with the square of its dpi.
+    let sharper = fit(FIT_DPI, floor, out.len());
+    if sharper <= FIT_DPI {
+        return Some(floor);
     }
-    let scale = (PICTURE_BYTES as f64 / need as f64).sqrt();
-    let smaller = (dpi as f64 * scale).floor() as u32;
-    smaller.clamp(FIT_DPI, dpi - 1)
+    match render.page_picture(page, sharper, out) {
+        Answer::Page(len) => Some(len),
+        // The page turned out bigger than its floor suggested: the floor is still the whole page,
+        // and it is rendered once more rather than trusted to have survived a refused write.
+        _ => match render.page_picture(page, FIT_DPI, out) {
+            Answer::Page(len) => Some(len),
+            _ => None,
+        },
+    }
 }
 
-/// The answer's bytes: width, height, then RGB.
-fn frame(image: &Image) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + image.rgb.len());
-    out.extend_from_slice(&image.width.to_le_bytes());
-    out.extend_from_slice(&image.height.to_le_bytes());
-    out.extend_from_slice(&image.rgb);
-    out
+/// **The dpi at which a page needing `need` bytes at `dpi` fits `cap`**: a page's RGB grows with the
+/// square of its dpi, so the scale is a square root. It answers in either direction — down when a
+/// page was too big for the buffer, up when the measurement came from the floor — and a shade
+/// conservative, because a rasterizer rounds its raster up.
+fn fit(dpi: u32, need: usize, cap: usize) -> u32 {
+    let scale = (cap as f64 / need as f64).sqrt() * 0.98;
+    let fitted = (dpi as f64 * scale).floor() as u32;
+    fitted.clamp(FIT_DPI, MAX_DPI)
 }
 
-/// Why a page is not here. It covers both reasons on purpose: the ABI answers a page or nothing,
-/// so "past the end" and "not a file the converter can read" are the same silence.
+/// **The answer, checked**: a header that describes exactly the bytes that came with it. The host
+/// is the one that wrote it, and this is what a picture is drawn from, so a header that lies is
+/// refused rather than cropped.
+fn checked(len: usize, out: &[u8]) -> Option<usize> {
+    let head = out.get(..8)?;
+    let width = u32::from_le_bytes(head[..4].try_into().ok()?);
+    let height = u32::from_le_bytes(head[4..8].try_into().ok()?);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let rgb = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(3)?;
+    (rgb.checked_add(8)? == len).then_some(len)
+}
+
+/// Why a page is not here. It covers every reason on purpose: the ABI answers a page or nothing, so
+/// "past the end", "not a file the converter can read" and "too big for one answer at this zoom"
+/// are the same silence, and `Z` is the key that rules the last one out.
 fn missing_page(page: u32) -> String {
     format!(
         "no page {page} from the renderer. It answered nothing for it, which means the page is \
-         past the end of this document, or the file is not one the converter can read. Press p to \
-         go back."
+         past the end of this document, the file is not one the converter can read, or the page is \
+         above what one answer may carry at this zoom (press Z). Press p to go back."
     )
 }
 

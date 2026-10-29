@@ -1,18 +1,21 @@
 //! **The page cache: the last few pages, explicitly, in one place.**
 //!
-//! Three entries, least-recently-used evicted, keyed by page and dpi (a text page has no dpi and
-//! says so with `dpi: 0`). Small on purpose: a page is a rasterized picture of a couple of
-//! megabytes, and the point of a reader is that moving back one page is instant while the rest of
-//! the document stays unrendered.
+//! Three entries, least-recently-used evicted, keyed by document and page. Small on purpose: the
+//! point of a reader is that moving back one page is instant while the rest of the document stays
+//! unrendered.
+//!
+//! **Only text is kept.** A page's picture is up to 16 MiB the host wrote straight into the arena
+//! where `provider_picture` answers it, so there is nowhere to put a second copy, and the render
+//! ladder asks for a different dpi at every step, so no picture entry would ever be hit. A page of
+//! text is kilobytes, and it is what search, copy and the view itself are made of.
 //!
 //! **What it can and cannot do today.** The ABI instantiates a fresh module for every call
 //! (`plans/S10-wasm-hooks.md` §2.1), so this cache is empty at the start of each call: within one
-//! call it saves the repeat render that the picture-size ladder would otherwise pay, and nothing
-//! more. The moment a host keeps one instance across a view's calls — which is the change §2.1
-//! reserves for v2 — this is already the reader's page cache and no other line moves. That is why
-//! it is a `static` with a fixed capacity rather than a local: the cost of it being useless today
-//! is one mutex that never contends, and the cost of it being absent later is a re-render per key
-//! press.
+//! call it saves a repeat ask the view would otherwise make, and nothing more. The moment a host
+//! keeps one instance across a view's calls — which is the change §2.1 reserves for v2 — this is
+//! already the reader's page cache and no other line moves. That is why it is a `static` with a
+//! fixed capacity rather than a local: the cost of it being useless today is one mutex that never
+//! contends, and the cost of it being absent later is a re-render per key press.
 
 use std::sync::Mutex;
 
@@ -20,7 +23,7 @@ use std::sync::Mutex;
 /// is a look, not a re-render) and one ahead.
 pub const PAGES: usize = 3;
 
-/// What a cached entry is keyed by. `text` rather than an enum so a key is one comparable value.
+/// What a cached entry is keyed by.
 ///
 /// **`doc` is part of the key**, a hash of the document's path: a cache that keyed only on the page
 /// number would show one document's page 3 in another document the moment a host keeps an instance
@@ -29,46 +32,20 @@ pub const PAGES: usize = 3;
 pub struct Key {
     pub doc: u64,
     pub page: u32,
-    /// The dpi a picture was rendered at; `0` for a page's text, which has no resolution.
-    pub dpi: u32,
-    pub text: bool,
 }
 
 impl Key {
-    /// A page's text.
-    pub fn text(doc: u64, page: u32) -> Key {
-        Key {
-            doc,
-            page,
-            dpi: 0,
-            text: true,
-        }
+    /// A page of a document.
+    pub fn new(doc: u64, page: u32) -> Key {
+        Key { doc, page }
     }
-
-    /// A page's picture, rendered at `dpi`.
-    pub fn picture(doc: u64, page: u32, dpi: u32) -> Key {
-        Key {
-            doc,
-            page,
-            dpi,
-            text: false,
-        }
-    }
-}
-
-/// One cached page: its text, or the PNG bytes the host answered for it. The PNG is what a render
-/// costs and what a decode reads, so it is what is kept; it is also a tenth of the RGB it becomes.
-#[derive(Clone, Debug)]
-pub enum Page {
-    Text(String),
-    Png(Vec<u8>),
 }
 
 /// The cache itself: most recently used first.
 #[derive(Debug)]
 pub struct Cache {
     cap: usize,
-    slots: Vec<(Key, Page)>,
+    slots: Vec<(Key, String)>,
 }
 
 impl Cache {
@@ -97,17 +74,17 @@ impl Cache {
     }
 
     /// **A hit, which also makes the entry the most recent.** `None` for a miss.
-    pub fn get(&mut self, key: Key) -> Option<&Page> {
+    pub fn get(&mut self, key: Key) -> Option<&String> {
         let at = self.slots.iter().position(|(k, _)| *k == key)?;
         let slot = self.slots.remove(at);
         self.slots.insert(0, slot);
-        self.slots.first().map(|(_, page)| page)
+        self.slots.first().map(|(_, text)| text)
     }
 
     /// **A page, whether or not it was already there.** Evicts the least recently used.
-    pub fn put(&mut self, key: Key, page: Page) {
+    pub fn put(&mut self, key: Key, text: String) {
         self.slots.retain(|(k, _)| *k != key);
-        self.slots.insert(0, (key, page));
+        self.slots.insert(0, (key, text));
         self.slots.truncate(self.cap);
     }
 }

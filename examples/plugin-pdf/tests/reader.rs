@@ -4,10 +4,11 @@
 //!
 //! The fake renderer is the point of the [`Render`] seam: a document with a known number of pages,
 //! a known text layer and a known rasterizer, so "a page past the end" is a case a test can *make*
-//! rather than a case it has to find a PDF for.
+//! rather than a case it has to find a PDF for. It also writes `[width][height][rgb]` into the
+//! buffer it is handed, because that is what the host does: the picture's bytes are the answer.
 
-use rano_plugin_pdf::reader::{self, HINT, Mode, Render, State, view};
-use rano_plugin_pdf::{cache, png};
+use rano_plugin_pdf::cache;
+use rano_plugin_pdf::reader::{self, Answer, HINT, Mode, Render, State, view};
 
 /// **The page cache is one static in the plugin, so the tests that read it take turns and start
 /// clean.** Without this a page one test rendered is another test's cache hit, and a test that
@@ -21,15 +22,22 @@ fn fresh() -> std::sync::MutexGuard<'static, ()> {
 
 // ---------------------------------------------------------------- a fake host
 
-type PngFn = Box<dyn Fn(u32, u32) -> Option<Vec<u8>>>;
+/// The geometry a rasterizer answers for one page at one dpi, or `None` for a page the document
+/// does not have.
+type ShotFn = Box<dyn Fn(u32, u32) -> Option<(u32, u32)>>;
 
 struct Fake {
     /// One entry a page, page 1 first. `None` is a page the converter does not answer.
     texts: Vec<Option<String>>,
-    png: Option<PngFn>,
-    can_png: bool,
+    shots: Option<ShotFn>,
+    /// The most one answer may carry: the host's own cap, which it refuses a page above before it
+    /// even looks at the buffer the guest offered.
+    cap: usize,
+    /// The colour every page of this document is.
+    rgb: [u8; 3],
+    can_picture: bool,
     can_text: bool,
-    asked_png: Vec<(u32, u32)>,
+    asked_picture: Vec<(u32, u32)>,
     asked_text: Vec<u32>,
 }
 
@@ -40,41 +48,76 @@ impl Fake {
             texts: (1..=pages)
                 .map(|n| Some(format!("page {n} of the document\nsecond line")))
                 .collect(),
-            png: None,
-            can_png: false,
+            shots: None,
+            cap: reader::PAGE_BYTES,
+            rgb: [10, 20, 30],
+            can_picture: false,
             can_text: true,
-            asked_png: Vec::new(),
+            asked_picture: Vec::new(),
             asked_text: Vec::new(),
         }
     }
 
-    /// The same, with a rasterizer that answers a solid page of `w`×`h` at any dpi — and answers
-    /// nothing for a page the document does not have, which is how "past the end" reaches the
-    /// picture path at all.
+    /// The same, with a rasterizer that answers a `w`×`h` page at any dpi — and answers nothing
+    /// for a page the document does not have, which is how "past the end" reaches the picture path
+    /// at all.
     fn rasterized(pages: u32, w: u32, h: u32) -> Fake {
         let mut fake = Fake::pdf(pages);
-        fake.can_png = true;
-        fake.png = Some(Box::new(move |page, _| {
-            (1..=pages)
-                .contains(&page)
-                .then(|| png_solid(w, h, [10, 20, 30]))
+        fake.can_picture = true;
+        fake.shots = Some(Box::new(move |page, _| {
+            (1..=pages).contains(&page).then_some((w, h))
+        }));
+        fake
+    }
+
+    /// **A page of paper**, as a rasterizer sees it: the raster grows with the dpi, so a page that
+    /// is too big at one zoom is a different size at another.
+    fn paper(pages: u32, w: f64, h: f64) -> Fake {
+        let mut fake = Fake::pdf(pages);
+        fake.can_picture = true;
+        fake.shots = Some(Box::new(move |page, dpi| {
+            (1..=pages).contains(&page).then(|| {
+                let dpi = f64::from(dpi);
+                ((w * dpi).ceil() as u32, (h * dpi).ceil() as u32)
+            })
         }));
         fake
     }
 }
 
 impl Render for Fake {
-    fn can_png(&self) -> bool {
-        self.can_png
+    fn can_picture(&self) -> bool {
+        self.can_picture
     }
 
     fn can_text(&self) -> bool {
         self.can_text
     }
 
-    fn page_png(&mut self, page: u32, dpi: u32) -> Option<Vec<u8>> {
-        self.asked_png.push((page, dpi));
-        self.png.as_ref()?(page, dpi)
+    /// **The host's answer, in the host's order**: a page above the cap is a refusal, a buffer that
+    /// is merely too small is `-needed`, and only then are the bytes written.
+    fn page_picture(&mut self, page: u32, dpi: u32, out: &mut [u8]) -> Answer {
+        self.asked_picture.push((page, dpi));
+        let Some(shots) = self.shots.as_ref() else {
+            return Answer::Nothing;
+        };
+        let Some((w, h)) = shots(page, dpi) else {
+            return Answer::Nothing;
+        };
+        let len = 8 + (w as usize) * (h as usize) * 3;
+        if len > self.cap {
+            return Answer::Nothing;
+        }
+        if len > out.len() {
+            return Answer::TooBig(len);
+        }
+        out[..4].copy_from_slice(&w.to_le_bytes());
+        out[4..8].copy_from_slice(&h.to_le_bytes());
+        let (pixels, _) = out[8..len].as_chunks_mut::<3>();
+        for pixel in pixels {
+            pixel.copy_from_slice(&self.rgb);
+        }
+        Answer::Page(len)
     }
 
     fn page_text(&mut self, page: u32) -> Option<String> {
@@ -122,9 +165,11 @@ fn a_page_past_the_end_is_a_message_in_the_view_and_not_a_panic() {
     let v = view("past-the-end.pdf#p=13", 80, 24, &mut fake).unwrap();
     assert!(v.contains("page 13"), "{v}");
     assert!(v.contains("past the end"), "{v}");
-    // Still a view with keys, so the reader can press `p` and be somewhere.
+    // Still a view with keys, so the reader can press `p` and be somewhere. The sentence is wrapped
+    // to the viewport, so it is read with the wrapping taken out.
+    let flat = v.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(v.contains("p prev"), "{v}");
-    assert!(v.contains("Press p to go back"), "{v}");
+    assert!(flat.contains("Press p to go back"), "{v}");
 }
 
 #[test]
@@ -200,7 +245,8 @@ fn a_build_with_no_renderer_answers_with_the_message_instead_of_failing() {
     assert!(v.contains("rano.convert_page"), "{v}");
     assert!(v.contains(HINT), "{v}");
     // Nothing to draw, and that is the sentinel rather than a trap.
-    assert!(reader::picture("no-renderer.pdf", 80, 24, &mut Nothing).is_none());
+    let mut out = vec![0u8; 4096];
+    assert!(reader::picture("no-renderer.pdf", 80, 24, &mut Nothing, &mut out).is_none());
 }
 
 #[test]
@@ -208,8 +254,8 @@ fn a_build_with_a_rasterizer_but_no_text_says_where_the_text_went() {
     let _fresh = fresh();
     let mut fake = Fake::pdf(1);
     fake.can_text = false;
-    fake.can_png = true;
-    fake.png = Some(Box::new(|_, _| Some(png_solid(2, 2, [1, 2, 3]))));
+    fake.can_picture = true;
+    fake.shots = Some(Box::new(|_, _| Some((2, 2))));
     let v = view("textless.pdf", 80, 24, &mut fake).unwrap();
     assert!(v.contains("drawn by the host"), "{v}");
 }
@@ -220,43 +266,72 @@ fn a_build_with_a_rasterizer_but_no_text_says_where_the_text_went() {
 fn a_picture_is_width_height_then_rgb() {
     let _fresh = fresh();
     let mut fake = Fake::rasterized(2, 3, 2);
-    let out = reader::picture("picture.pdf", 80, 24, &mut fake).expect("a page comes back");
-    assert_eq!(out.len(), 8 + 3 * 2 * 3);
+    let mut out = vec![0u8; 4096];
+    let len =
+        reader::picture("picture.pdf", 80, 24, &mut fake, &mut out).expect("a page comes back");
+    assert_eq!(len, 8 + 3 * 2 * 3);
     assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 3);
     assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 2);
-    assert_eq!(&out[8..11], &[10, 20, 30]);
-    assert_eq!(&out[8..], [10u8, 20, 30].repeat(6).as_slice());
+    assert_eq!(&out[8..len], [10u8, 20, 30].repeat(6).as_slice());
     // The zoom is asked for, not applied here: the dpi is the reader's state.
-    assert_eq!(fake.asked_png, vec![(1, 96)]);
+    assert_eq!(fake.asked_picture, vec![(1, 96)]);
 }
 
 #[test]
-fn a_page_too_big_for_the_arena_is_rendered_again_smaller() {
+fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     let _fresh = fresh();
-    // 2000×2000 is 12 MB of RGB, twice the arena's picture budget; anything below 96 dpi answers
-    // a page that fits. The second render is the ladder doing its job.
-    let mut fake = Fake::pdf(1);
-    fake.can_png = true;
-    fake.png = Some(Box::new(|_, dpi| {
-        Some(if dpi >= 96 {
-            png_solid(2000, 2000, [255, 255, 255])
-        } else {
-            png_solid(100, 100, [0, 0, 0])
-        })
-    }));
-    let out = reader::picture("huge.pdf", 80, 24, &mut fake).expect("a smaller page");
-    assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 100);
-    assert_eq!(fake.asked_png.len(), 2, "{:?}", fake.asked_png);
-    assert!(fake.asked_png[1].1 < 96, "{:?}", fake.asked_png);
+    // A buffer under the ABI's cap, which is what makes the host answer "it needs this many
+    // bytes" instead of refusing: the reader reads the page's area off that and asks again lower.
+    let mut fake = Fake::paper(1, 8.27, 11.69);
+    let mut out = vec![0u8; 64 << 10];
+    let len = reader::picture("huge.pdf", 80, 24, &mut fake, &mut out).expect("a smaller page");
+    assert_eq!(fake.asked_picture.len(), 2, "{:?}", fake.asked_picture);
+    assert_eq!(fake.asked_picture[0], (1, 96));
+    assert!(fake.asked_picture[1].1 < 96, "{:?}", fake.asked_picture);
+    // A4 at 96 dpi is 794 px wide, so anything narrower is the smaller render.
+    let width = u32::from_le_bytes(out[0..4].try_into().unwrap());
+    assert!(width < 794, "a {width}px page is not a smaller one");
+    assert!(
+        len <= out.len(),
+        "{len} bytes in a {} byte buffer",
+        out.len()
+    );
+}
+
+#[test]
+fn a_page_above_the_cap_is_rendered_at_the_dpi_that_fits() {
+    let _fresh = fresh();
+    // A4 at 300 dpi is 26 MiB of RGB, above what one answer may carry, and the host refuses it
+    // exactly as it refuses a page that is not there. The floor dpi is where a page that exists
+    // always fits, so asking there separates the two, and the floor's own area says which dpi
+    // does fit: the page is sharp, not a thumbnail.
+    let mut fake = Fake::paper(1, 8.27, 11.69);
+    let mut out = vec![0u8; reader::PAGE_BYTES];
+    reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out).expect("a sharp page");
+    assert_eq!(fake.asked_picture[0], (1, 300));
+    assert_eq!(fake.asked_picture[1], (1, reader::FIT_DPI));
+    assert_eq!(fake.asked_picture.len(), 3, "{:?}", fake.asked_picture);
+    // The cap is 16 MiB, so A4 fits up to 240 dpi and the ladder has to land under that.
+    let sharp = fake.asked_picture[2].1;
+    assert!(
+        (200..=240).contains(&sharp),
+        "{sharp} dpi is not the fit for A4"
+    );
+    let width = u32::from_le_bytes(out[0..4].try_into().unwrap());
+    assert!(width > 1900, "a {width}px page is not a sharp one");
 }
 
 #[test]
 fn text_mode_answers_no_picture_and_a_page_the_host_misses_answers_none() {
     let _fresh = fresh();
     let mut fake = Fake::rasterized(1, 4, 4);
-    assert!(reader::picture("miss.pdf#m=text", 80, 24, &mut fake).is_none());
-    assert!(reader::picture("miss.pdf#p=9", 80, 24, &mut fake).is_none());
-    assert!(reader::picture("notes.txt", 80, 24, &mut fake).is_none());
+    let mut out = vec![0u8; 4096];
+    assert!(reader::picture("miss.pdf#m=text", 80, 24, &mut fake, &mut out).is_none());
+    assert!(reader::picture("miss.pdf#p=9", 80, 24, &mut fake, &mut out).is_none());
+    assert!(reader::picture("notes.txt", 80, 24, &mut fake, &mut out).is_none());
+    // A page with no pixels is not a picture either: the header has to describe a real one.
+    let mut empty = Fake::rasterized(1, 0, 0);
+    assert!(reader::picture("empty.pdf", 80, 24, &mut empty, &mut out).is_none());
 }
 
 // ---------------------------------------------------------------- the keys
@@ -382,37 +457,34 @@ fn the_page_cache_keeps_the_last_few_pages_and_evicts_the_oldest() {
     let mut cache = cache::Cache::new(cache::PAGES);
     assert!(cache.is_empty());
     for page in 1..=cache::PAGES as u32 {
-        cache.put(
-            cache::Key::text(doc, page),
-            cache::Page::Text(format!("{page}")),
-        );
+        cache.put(cache::Key::new(doc, page), format!("{page}"));
     }
     assert_eq!(cache.len(), cache::PAGES);
-    assert_eq!(cache.keys()[0], cache::Key::text(doc, 3));
+    assert_eq!(cache.keys()[0], cache::Key::new(doc, 3));
 
     // A hit is a hit, and it makes the entry the most recent: page 1 survives the next insert.
-    assert!(cache.get(cache::Key::text(doc, 1)).is_some());
-    assert_eq!(cache.keys()[0], cache::Key::text(doc, 1));
-    cache.put(cache::Key::text(doc, 4), cache::Page::Text("4".into()));
+    assert_eq!(
+        cache.get(cache::Key::new(doc, 1)).map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(cache.keys()[0], cache::Key::new(doc, 1));
+    cache.put(cache::Key::new(doc, 4), "4".into());
     assert_eq!(cache.len(), cache::PAGES);
     let keys = cache.keys();
-    assert_eq!(keys[0], cache::Key::text(doc, 4));
-    assert!(keys.contains(&cache::Key::text(doc, 1)));
+    assert_eq!(keys[0], cache::Key::new(doc, 4));
+    assert!(keys.contains(&cache::Key::new(doc, 1)));
     // Page 2 was the least recently used and is the one that went.
-    assert!(!keys.contains(&cache::Key::text(doc, 2)), "{keys:?}");
-
-    // A picture and a text page are different entries, and two documents never share one.
-    cache.put(cache::Key::picture(doc, 1, 96), cache::Page::Png(vec![0]));
-    assert_ne!(cache::Key::text(doc, 1), cache::Key::picture(doc, 1, 96));
+    assert!(!keys.contains(&cache::Key::new(doc, 2)), "{keys:?}");
+    // Two documents never share an entry.
     assert_ne!(
-        cache::Key::text(doc, 1),
-        cache::Key::text(cache::id("other.pdf"), 1)
+        cache::Key::new(doc, 1),
+        cache::Key::new(cache::id("other.pdf"), 1)
     );
 }
 
 #[test]
 fn a_page_asked_for_twice_is_rendered_once() {
-    // The cache is the reason: the picture ladder and a second look inside one call both hit it.
+    // The cache is the reason: a second look inside one call is a hit.
     let _fresh = fresh();
     let mut fake = Fake::pdf(1);
     let v = view("twice.pdf#p=1", 80, 24, &mut fake).unwrap();
@@ -424,107 +496,4 @@ fn a_page_asked_for_twice_is_rendered_once() {
         vec![1],
         "the second view came from the cache"
     );
-}
-
-// ---------------------------------------------------------------- the PNG the host answers
-
-/// **A PNG of one solid colour**: 8-bit RGB, filter 0 on every row, and zero CRCs — the decoder
-/// does not check them (they would be a crc32 table in a plugin that reads its own host's output).
-fn png_solid(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
-    let stride = width as usize * 3;
-    let mut raw = vec![0u8; (stride + 1) * height as usize];
-    for y in 0..height as usize {
-        // Filter 0 (none) in front of every row, then the pixels.
-        let at = y * (stride + 1) + 1;
-        for x in 0..width as usize {
-            raw[at + x * 3..at + x * 3 + 3].copy_from_slice(&rgb);
-        }
-    }
-    png_of(width, height, 2, &raw)
-}
-
-fn png_of(width: u32, height: u32, color: u8, raw: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-
-    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, color, 0, 0, 0]);
-    chunk(&mut out, b"IHDR", &ihdr);
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(raw).unwrap();
-    chunk(&mut out, b"IDAT", &encoder.finish().unwrap());
-    chunk(&mut out, b"IEND", &[]);
-    out
-}
-
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    out.extend_from_slice(&[0, 0, 0, 0]);
-}
-
-#[test]
-fn a_png_decodes_to_rgb_and_its_geometry_reads_without_inflating() {
-    let bytes = png_solid(4, 3, [7, 8, 9]);
-    let head = png::header(&bytes).expect("an IHDR");
-    assert_eq!((head.width, head.height), (4, 3));
-    assert_eq!(head.rgb_len(), 4 * 3 * 3);
-    let image = png::decode(&bytes).expect("decodes");
-    assert_eq!((image.width, image.height), (4, 3));
-    assert_eq!(image.rgb, [7u8, 8, 9].repeat(12));
-
-    // Not a PNG, and a PNG with no IHDR: no geometry, and no panic.
-    assert!(png::header(b"not a picture at all, just bytes").is_none());
-    assert!(png::decode(b"not a picture at all, just bytes").is_err());
-}
-
-#[test]
-fn the_other_colour_types_and_filters_decode_to_the_same_pixels() {
-    // Gray: one byte a pixel, repeated into RGB.
-    let mut raw = vec![0u8, 200, 100];
-    raw.extend_from_slice(&[0u8, 10, 20]);
-    let image = png::decode(&png_of(2, 2, 0, &raw)).expect("gray decodes");
-    assert_eq!(
-        image.rgb,
-        vec![200, 200, 200, 100, 100, 100, 10, 10, 10, 20, 20, 20]
-    );
-
-    // RGBA: alpha is dropped, the terminal's background is the page's.
-    let raw = vec![0u8, 1, 2, 3, 255, 4, 5, 6, 0];
-    let image = png::decode(&png_of(2, 1, 6, &raw)).expect("RGBA decodes");
-    assert_eq!(image.rgb, vec![1, 2, 3, 4, 5, 6]);
-
-    // The Up filter: the second row is a delta against the first, and comes out the same.
-    let raw = vec![0u8, 9, 9, 9, 2, 0, 0, 0];
-    let image = png::decode(&png_of(1, 2, 2, &raw)).expect("Up decodes");
-    assert_eq!(image.rgb, vec![9, 9, 9, 9, 9, 9]);
-
-    // The Sub filter: each pixel is a delta against the one to its left.
-    let raw = vec![1u8, 10, 10, 10, 5, 5, 5];
-    let image = png::decode(&png_of(2, 1, 2, &raw)).expect("Sub decodes");
-    assert_eq!(image.rgb, vec![10, 10, 10, 15, 15, 15]);
-}
-
-#[test]
-fn a_png_this_decoder_does_not_read_is_a_sentence() {
-    // 16-bit, interlaced, palette, and truncated data: each is refused by name, none panics.
-    let raw = vec![0u8, 1, 2, 3, 4, 5, 6];
-    let mut sixteen = png_of(1, 1, 2, &raw);
-    sixteen[24] = 16;
-    assert!(png::decode(&sixteen).unwrap_err().contains("16-bit"));
-
-    let mut interlaced = png_of(1, 1, 2, &raw);
-    interlaced[28] = 1;
-    assert!(png::decode(&interlaced).unwrap_err().contains("interlaced"));
-
-    let palette = png_of(1, 1, 3, &raw);
-    assert!(png::decode(&palette).unwrap_err().contains("colour type 3"));
-
-    let short = &png_solid(64, 64, [1, 1, 1])[..80];
-    assert!(png::decode(short).is_err());
 }

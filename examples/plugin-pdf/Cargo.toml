@@ -10,29 +10,23 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# **Both off by default.** The two imports a page needs (`rano.convert_page` for a picture,
-# `rano.convert_page_text` for the text) are not in `src/plugin.rs` yet, and a module that imports
-# what the host cannot provide fails to instantiate — it could not even say why. A build without
-# them still claims a `.pdf` and answers it with a sentence naming what the host lacks. Turn them
-# on when the host half lands:
+# **Both off by default.** A module that imports what the host cannot provide fails to instantiate
+# and could not even say why, so the two imports are a build's choice: the config grants
+# `capabilities = ["convert-page"]` and a module built with these features is refused at load
+# without it. A build without them still claims a `.pdf` and answers it with a sentence naming what
+# the host lacks.
 #
-#   cargo build --release --target wasm32-unknown-unknown --features page-png,page-text
+#   cargo build --release --target wasm32-unknown-unknown --features page-picture,page-text
 default = []
-# `rano.convert_page(page, dpi)`: one page rasterized, as PNG bytes.
-page-png = []
-# `rano.convert_page_text(page)`: one page's text, for a terminal with no picture protocol.
+# `rano.convert_page(page, dpi, out_ptr, out_cap)`: one page rasterized, as `[width][height][rgb]`.
+page-picture = []
+# `rano.convert_page_text(page, out_ptr, out_cap)`: one page's text, for a terminal with no picture
+# protocol.
 page-text = []
 
 [dependencies]
 # The Rust SDK: the ABI's pointers, arena and result block live there, not here.
 rano-plugin = { path = "../../sdks/rust" }
-# Inflate, for the PNG a page comes back as. Pure Rust, no C, and already in rano's own lockfile
-# (through flate2), so a plugin that decodes a page costs no new crate in the tree.
-miniz_oxide = "0.9"
-
-[dev-dependencies]
-# Only to build the PNGs the decoder's tests read: the plugin never compresses anything.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [profile.release]
 opt-level = "s"

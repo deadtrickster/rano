@@ -9,15 +9,15 @@
 //!
 //! ```sh
 //! rustup target add wasm32-unknown-unknown          # once
-//! cargo build --release --target wasm32-unknown-unknown --features page-png,page-text
+//! cargo build --release --target wasm32-unknown-unknown --features page-picture,page-text
 //! cp target/wasm32-unknown-unknown/release/rano_plugin_pdf.wasm plugin.wasm
 //! ```
 //!
-//! `plugin.wasm` beside this file is built **without** those features, because the host imports
-//! they need (`rano.convert_page`, `rano.convert_page_text`) are not in `src/plugin.rs` yet: a
-//! module that imported them today would fail to instantiate and could not say why. Without them
-//! the plugin still claims a PDF and answers it with a sentence naming what the host lacks, which
-//! is a view the reader can act on rather than a binary file full of noise.
+//! `plugin.wasm` beside this file is built **with** those features, because `src/plugin.rs` answers
+//! both imports when the config grants `capabilities = ["convert-page"]`. The features stay because
+//! a host that does not grant it refuses a module that imports them at load: a build without them
+//! still claims a PDF and answers it with a sentence naming what the host lacks, which is a view
+//! the reader can act on rather than a binary file full of noise.
 //!
 //! The ABI is the one `plans/S10-wasm-hooks.md` §2.1 defines: `rano_abi`, `rano_alloc`, hooks found
 //! by name, and a hook answers the offset of `{out_ptr, out_len}` (or `0xFFFFFFFF` for "not mine").
@@ -28,20 +28,20 @@ use rano_plugin as rano;
 
 pub mod cache;
 pub mod host;
-pub mod png;
 pub mod reader;
 
 // `rano_abi` and `rano_alloc`, in the one shape the host expects.
 rano::abi!();
 
-/// The most this plugin writes into the SDK's 18 MiB arena in one answer: the block plus the
-/// payload. A picture is capped well below it by `reader::PICTURE_BYTES`.
+/// The most this plugin writes into the SDK's 18 MiB arena in one text answer: the block plus the
+/// payload. A picture is bounded by [`reader::PAGE_BYTES`] and answers in place, so it does not go
+/// through this.
 const ARENA: usize = 17 << 20;
 
 /// **A result block plus a payload**, which is `rano::answer` for bytes: the block is two
 /// little-endian `u32`s (`{out_ptr, out_len}`) at an offset the host reads, and the payload follows
 /// it in the arena. `0xFFFFFFFF` for an answer too big to fit, which the host reads as "not mine"
-/// rather than as a truncated page.
+/// rather than as a truncated view.
 fn answer(bytes: &[u8]) -> u32 {
     let len = bytes.len();
     if len == 0 || len + 8 > ARENA {
@@ -76,16 +76,34 @@ pub extern "C" fn provider_open(ptr: u32, len: u32, cols: u32, rows: u32) -> u32
 /// **The page the path names, as pixels** for the host to draw in the terminal, or `0xFFFFFFFF`
 /// when there is no picture to draw: not a PDF, text mode, a build with no rasterizer, or a page
 /// the host did not answer.
+///
+/// **The page is written where this answers it.** The block goes in the arena, the buffer the host
+/// fills starts eight bytes past it, and the block is then made to point at those very bytes: one
+/// allocation, no copy, and a page as large as the ABI's cap ([`reader::PAGE_BYTES`]) fits an 18
+/// MiB arena with room to spare. A `Vec` in between would need a second and a third copy of the
+/// same megabyte, which is why there is not one.
 #[unsafe(no_mangle)]
 pub extern "C" fn provider_picture(ptr: u32, len: u32, cols: u32, rows: u32) -> u32 {
     // SAFETY: the host's range, checked by `rano::input`.
     let Some(path) = (unsafe { rano::input(ptr, len) }) else {
         return rano::UNCHANGED;
     };
-    match reader::picture(path, cols as usize, rows as usize, &mut host::Host) {
-        Some(bytes) => answer(&bytes),
-        None => rano::UNCHANGED,
+    let at = rano::alloc(8 + reader::PAGE_BYTES as u32);
+    // SAFETY: `at + 8 .. at + 8 + PAGE_BYTES` is the arena this module's allocator just handed
+    // out — the SDK's 18 MiB, of which the page takes 16 MiB and the path above it a few bytes —
+    // and the host writes into it only within the capacity it is given.
+    let out = unsafe { core::slice::from_raw_parts_mut((at + 8) as *mut u8, reader::PAGE_BYTES) };
+    let Some(len) = reader::picture(path, cols as usize, rows as usize, &mut host::Host, out)
+    else {
+        return rano::UNCHANGED;
+    };
+    // SAFETY: the block sits at `at`, inside the same allocation, and the host reads both after
+    // the call returns.
+    unsafe {
+        std::ptr::write_unaligned(at as *mut u32, (at + 8).to_le());
+        std::ptr::write_unaligned((at + 4) as *mut u32, (len as u32).to_le());
     }
+    at
 }
 
 /// **A key, answered as the path to open next.** The input is `"<path>\n<key>"`; the answer is the

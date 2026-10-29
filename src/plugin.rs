@@ -463,13 +463,19 @@ impl Plugin {
                 if page < 0 || dpi < 0 {
                     return i32::MIN;
                 }
-                let Ok(png) = crate::pdf::page_png(want, page as u32, dpi as u32) else {
+                let Ok((w, h, rgb)) = crate::pdf::page_rgb(want, page as u32, dpi as u32) else {
                     return i32::MIN;
                 };
-                if png.len() > MAX_HOOK_BYTES {
+                // **The same block `provider_picture` answers with**, so a host and a plugin
+                // have one picture format: `[width][height][rgb]`, no decoder between them.
+                let mut payload = Vec::with_capacity(8 + rgb.len());
+                payload.extend_from_slice(&w.to_le_bytes());
+                payload.extend_from_slice(&h.to_le_bytes());
+                payload.extend_from_slice(&rgb);
+                if payload.len() > MAX_HOOK_BYTES {
                     return i32::MIN;
                 }
-                write_guest(&mut caller, out_ptr, out_cap, &png)
+                write_guest(&mut caller, out_ptr, out_cap, &payload)
             };
             let _ = linker.func_wrap("rano", "convert_page", f);
 

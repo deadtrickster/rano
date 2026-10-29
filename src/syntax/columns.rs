@@ -1,22 +1,8 @@
 //! The columnar system databases: `fstab`, `passwd`, `hosts` and their kin.
 //!
-//! **There is no tree-sitter grammar for these.** The official parser list has one for
-//! `passwd` and none at all for `fstab`, `hosts`, `group`, `services`, `protocols` or
-//! `crontab`, so this is the "simple else": the shapes are documented in their own man
-//! pages, and what an editor does with them is a small hand-written definition — vim's
-//! `runtime/syntax/fstab.vim` is one (down to a `syn keyword` list of every mount
-//! option), and its `filetype.vim` recognises `/etc/passwd` and `/etc/shadow` **by
-//! path**.
-//!
-//! One rule colours all of them: **the comment is faint, the first field is strong, the
-//! separator is faint, everything else is plain.** What varies per format is only what
-//! the man page says — the separator, and whether the format has comments at all — so
-//! the table below is rows of documented fact, not one styler per file.
-//!
-//! The fields this does *not* colour are deliberate: `fstab`'s mount options have a
-//! documented vocabulary (vim lists all fifty of them as keywords) and colouring it
-//! would be a second table to maintain for one column. What a reader needs first is where
-//! each field begins and ends, which is what the separator and the first column give.
+//! No tree-sitter grammar covers them, so each is coloured by one rule - comment faint,
+//! first field strong, separator faint - with the separator and the comment character
+//! taken from its own man page.
 
 use crate::render::Style;
 use crate::style::Role;
@@ -128,19 +114,13 @@ pub fn detect_format(name: &Path) -> Option<Format> {
 pub fn grid(src: &str, fmt: Format) -> Vec<Vec<Style>> {
     let faint = Style::of(Role::Faint);
     let strong = Style::of(Role::Strong);
-    // **A comment is the COMMENT role**, the one the syntax highlighter gives `# …` in code
-    // — not `Faint`. They render alike in the default palette (both are dim), but a theme
-    // that colours `comment` colours this too only if it wears the same role. Found by the
-    // operator asking why a `fstab` comment did not look muted where a code comment did.
+    // The same role a `# ...` in code wears, so a theme colours both.
     let comment = Style::of(Role::Comment);
     let mut out = Vec::with_capacity(src.lines().count().max(1));
     for line in src.split('\n') {
         let chars: Vec<char> = line.chars().collect();
         let mut row = vec![Style::new(); chars.len()];
-        // The comment runs to the end of the line and is all there is to say about it.
-        // **And the field walk stops there**: a comments-only line must not have its
-        // first word promoted to the strong column, which is what happened before this
-        // bound existed — the comment was painted faint and then immediately overwritten.
+        // Comments run to end of line; the field walk must stop there.
         let body = if fmt.has_comments() {
             match chars.iter().position(|c| *c == '#') {
                 Some(at) => {

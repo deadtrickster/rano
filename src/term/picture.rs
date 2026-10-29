@@ -390,11 +390,11 @@ mod tests {
     fn iterm2_re_sends_the_bytes_when_the_box_moves_and_never_deletes() {
         let mut held = Pictures::new(Proto::Iterm);
         let one = pic(1, (4, 2));
-        let mut out = held.sync(&[one.clone()]);
+        let mut out = held.sync(std::slice::from_ref(&one));
         assert_eq!(out.len(), 1);
-        assert!(held.sync(&[one.clone()]).is_empty());
+        assert!(held.sync(std::slice::from_ref(&one)).is_empty());
         let wider = pic(1, (6, 3));
-        out = held.sync(&[wider.clone()]);
+        out = held.sync(std::slice::from_ref(&wider));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], Proto::Iterm.wrap(held_escape(1, (6, 3)).as_bytes()));
         // Dropping it says nothing: there is nothing in the terminal to free.

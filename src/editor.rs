@@ -3465,9 +3465,10 @@ impl Editor {
                 return true;
             }
         };
-        if let Some(why) = pic.refusal(proto) {
-            self.flash(&why);
-            return true;
+        if pic.refusal(proto).is_some() {
+            // **Not drawn, and not the end of the path**: the plugin may also answer a text
+            // hook, and a terminal without pictures is exactly who that answer is for.
+            return false;
         }
         // The rows ARE the picture: the box's placeholders, one per cell the terminal fills.
         let text = pic
@@ -4590,16 +4591,19 @@ mod tests {
         assert!(graphics(&mut ed).is_empty());
     }
 
-    /// **A terminal that speaks no picture protocol is told why, and drawn nothing** — the
-    /// precedent a PNG already has: a placeholder nothing fills is garbage on the screen.
+    /// **A terminal that speaks no picture protocol is drawn nothing** — the precedent a PNG
+    /// already has: a placeholder nothing fills is garbage on the screen. And it is answered
+    /// `false`, because a plugin that draws may also write: the caller goes on to the text hook,
+    /// which is what a terminal without pictures is owed.
     #[test]
-    fn a_terminal_without_pictures_refuses_a_provider_picture_instead_of_drawing_it() {
+    fn a_terminal_without_pictures_declines_a_provider_picture_instead_of_drawing_it() {
         let mut ed = view_ed("still here");
         ed.images = false;
         let path = PathBuf::from("/tmp/part.stl");
-        assert!(ed.open_provider_picture(&path, &plugin_pic(8, 8)));
-        let said = &ed.status.as_ref().expect("one line saying why").text;
-        assert!(said.contains("does not take inline pictures"), "{said}");
+        assert!(
+            !ed.open_provider_picture(&path, &plugin_pic(8, 8)),
+            "a refused picture must let the text answer be tried"
+        );
         // Nothing was opened, nothing was written, and the buffer is the one that was there.
         assert_eq!(
             ed.bs().buf.text(),
@@ -4611,8 +4615,11 @@ mod tests {
         // And the same answer from a host that named the protocol rather than only `images`.
         let mut ed = view_ed("still here");
         ed.set_pictures(Proto::None);
-        assert!(ed.open_provider_picture(&path, &plugin_pic(8, 8)));
-        assert!(ed.status.as_ref().unwrap().text.contains("does not take"));
+        assert!(!ed.open_provider_picture(&path, &plugin_pic(8, 8)));
+        assert!(
+            ed.status.is_none(),
+            "declining says nothing: the text answer, or the ordinary open, speaks for itself"
+        );
         assert_eq!(
             ed.bs().buf.text(),
             "still here\n",

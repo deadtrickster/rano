@@ -46,6 +46,11 @@ pub const CONVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// needs a few tens of MiB.
 const CONVERT_RSS_CAP: u64 = 256 * 1024 * 1024;
 
+/// The address space a converter may map, which is **not** its memory budget: a threaded
+/// encoder maps far more than it holds, so a limit at the RSS number refuses work that fits.
+/// The RSS sampler is what actually bounds memory.
+const CONVERT_ADDRESS_SPACE: u64 = 4 * 1024 * 1024 * 1024;
+
 /// The most a converter may *write* (the PNG): the box it was asked to fit is under two
 /// megapixels, so a file past this is a converter that ignored the request, and it is
 /// stopped before it fills the disk with one.
@@ -223,9 +228,7 @@ pub fn box_px(width: usize) -> u32 {
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     timeout: std::time::Duration,
-    /// The child's resident memory as the sampler reads it, and what the kernel is asked
-    /// to refuse. They are the same number by default: the kernel's refusal and the
-    /// sampler's kill are two ways of enforcing one budget.
+    /// The child's resident memory as the sampler reads it.
     rss: u64,
     address_space: u64,
     output: u64,
@@ -236,7 +239,7 @@ impl Default for Limits {
         Limits {
             timeout: CONVERT_TIMEOUT,
             rss: CONVERT_RSS_CAP,
-            address_space: CONVERT_RSS_CAP,
+            address_space: CONVERT_ADDRESS_SPACE,
             output: CONVERT_OUTPUT_CAP,
         }
     }

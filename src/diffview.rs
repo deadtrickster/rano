@@ -553,13 +553,19 @@ impl Editor {
         {
             self.open_view(Source::Patch { name, text });
         } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown) {
-            let images = self.document_images(&text);
-            self.open_view(Source::Markdown { name, text, images });
+            self.open_markdown_view(name, text);
         } else if !self.show_review() {
             self.flash(
                 "Nothing to render: not a diff or patch, not markdown or a picture, and no merge conflicts",
             );
         }
+    }
+
+    /// **A markdown document as prose**: M-P's answer for a markdown buffer, and what a provider's
+    /// markdown answer opens as. One place, so the two cannot render differently.
+    pub(crate) fn open_markdown_view(&mut self, name: String, text: String) {
+        let images = self.document_images(&text);
+        self.open_view(Source::Markdown { name, text, images });
     }
 
     /// Re-render after a resize. Returns whether anything changed.
@@ -824,4 +830,42 @@ impl DiffView {
 /// file header and a hunk.
 fn looks_like_a_patch(text: &str) -> bool {
     !crate::patch::parse(text).files.is_empty() && text.lines().any(|l| l.starts_with("@@ -"))
+}
+
+/// **A document with no name to go by.** A provider answers a text for a path that need not
+/// exist, so `rano:manual` has no extension and the language ladder has nothing to say about it.
+/// It is markdown when a heading opens it *and* another block marker follows: a heading alone
+/// would make a folder listing whose first entry is `# notes/` into prose.
+pub(crate) fn looks_like_markdown(text: &str) -> bool {
+    let mut heading = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let atx = is_atx_heading(t);
+        if !heading {
+            if !atx {
+                return false;
+            }
+            heading = true;
+            continue;
+        }
+        if atx
+            || t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("```")
+            || t.starts_with('|')
+            || t.contains("](")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `# Title`: one to six `#`, then a space — CommonMark's ATX heading.
+fn is_atx_heading(t: &str) -> bool {
+    let hashes = t.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&hashes) && t[hashes..].starts_with(' ')
 }

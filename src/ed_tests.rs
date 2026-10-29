@@ -1411,6 +1411,114 @@ fn a_folder_opens_through_the_typescript_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
+/// **The manual is `docs/*.md`, or the build is stale.** The text is built from the files on disk
+/// the way the plugin's `include_str!` builds it at compile time — each file whole, ending in one
+/// newline, a blank line between — so a doc edited without rebuilding `plugin.wasm` fails here.
+/// `docs/` stays the single copy, which is the whole point of the include.
+#[test]
+fn the_manual_is_the_docs() {
+    let p = manual_plugin();
+    let got = p
+        .provider_open("rano:manual", 80, 24)
+        .expect("the provider ran")
+        .expect("the manual is mine");
+    assert_eq!(got, docs_manual());
+    assert!(got.starts_with("# Configuration\n"), "{:.40}", got);
+}
+
+/// **`provider_open` says "not mine" for an ordinary path**, so a file still opens as a file. The
+/// sentinel is the ABI's `0xFFFFFFFF`, which the SDK answers as `None`.
+#[test]
+fn the_manual_is_not_mine_for_an_ordinary_path() {
+    let p = manual_plugin();
+    for path in [
+        "/tmp/notes.txt",
+        "src/main.rs",
+        "docs/keys.md",
+        "rano:manuals",
+    ] {
+        assert_eq!(
+            p.provider_open(path, 80, 24).expect("the provider ran"),
+            None,
+            "{path} was claimed"
+        );
+    }
+}
+
+/// **`M-x manual` opens the manual**: the builtin unpacked into the reader's folder, loaded from
+/// there, the virtual path through the same door a folder takes, and the answer drawn as prose —
+/// a read-only buffer, so a view is a view and not a file.
+#[test]
+fn the_manual_opens_read_only_with_the_preview_on() {
+    let d = temp_dir("manual_open");
+    let mut ed = test_ed("");
+    ed.text_w = 80;
+    ed.text_h = 24;
+    ed.open_manual_from(&d.0);
+    assert_eq!(
+        ed.bs().buf.name.as_deref(),
+        Some(std::path::Path::new("rano:manual"))
+    );
+    assert!(ed.bs().read_only, "a view is read-only");
+    assert!(ed.bs().synthetic, "a view wears no line numbers");
+    assert_eq!(
+        ed.bs().buf.text(),
+        docs_manual(),
+        "the buffer holds the docs"
+    );
+    match ed.diff_view.as_ref().map(|v| &v.source) {
+        Some(crate::diffview::Source::Markdown { text, .. }) => {
+            assert_eq!(text, &docs_manual(), "the preview is the manual")
+        }
+        _ => panic!("the manual opens rendered, not as raw markdown"),
+    }
+    // **Unpacked, not overwritten**: the file is in `scripts/built-in/`, and a second use leaves
+    // whatever is there — here a build the reader replaced it with — exactly as it was.
+    let at = d.0.join("built-in").join("manual.wasm");
+    assert_eq!(
+        fs::read(&at).unwrap(),
+        include_bytes!("../examples/plugin-manual/plugin.wasm"),
+        "the shipped build is unpacked byte for byte"
+    );
+    fs::write(&at, b"my own build").unwrap();
+    // **Editable means editable**: the file in that folder is the plugin that runs, so a later
+    // editor loads the replacement — which is not a module — and says so instead of opening.
+    let mut later = test_ed("");
+    later.open_manual_from(&d.0);
+    assert_eq!(fs::read(&at).unwrap(), b"my own build", "never overwritten");
+    let said = later.status_text().unwrap_or_default();
+    assert!(said.contains("not loaded"), "{said}");
+}
+
+/// The manual's plugin, loaded from the committed build the binary ships.
+fn manual_plugin() -> crate::plugin::Plugin {
+    crate::plugin::Plugin::from_bytes(
+        include_bytes!("../examples/plugin-manual/plugin.wasm"),
+        PathBuf::from("manual.wasm"),
+    )
+    .expect("the committed plugin loads")
+}
+
+/// `docs/*.md` as one document, in name order: the plugin's rule, built from the files on disk.
+fn docs_manual() -> String {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    let mut docs: Vec<PathBuf> = fs::read_dir(&dir)
+        .expect("docs/")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    docs.sort();
+    let mut out = String::new();
+    for (i, p) in docs.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(fs::read_to_string(p).unwrap().trim_end_matches('\n'));
+        out.push('\n');
+    }
+    out
+}
+
 /// **Reproduction: a three-row file, a mouse drag, then the frame.** The operator's crash
 /// (`index out of bounds: the len is 3 but the index is 3` at `buffer.rs:171`) came from a mouse
 /// selection, so this replays exactly that: press, drag, release, draw.

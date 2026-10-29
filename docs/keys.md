@@ -12,7 +12,7 @@ the prefix cards all read from that table.
 - `M-x` runs any command by name. Type a few letters in any order (`wri out` finds Write
   Out). Recently run commands come first, and each row shows the command's key.
 - `C-g` (or `F1`) is the help prefix: `?` for the help page, `k` then a key to see what it
-  runs, `b` for every key in effect, `x` for `M-x`.
+  runs, `b` for every key in effect, `m` for rano's own manual, `x` for `M-x`.
 - A prefix key shows a card of what can follow when you pause after it: `M-t` for todo, the
   help prefix at once. `Esc` abandons a prefix.
 - The bottom bar shows the keys of what you are doing: the text's, a list's, a diff's,

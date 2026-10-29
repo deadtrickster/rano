@@ -218,6 +218,11 @@ pub struct Editor {
     /// enters, `on_save` before a save is written. `None` is a build or a config with no plugin,
     /// and every call site treats it as "nothing to do".
     pub plugin: Option<crate::plugin::Plugin>,
+    /// **The builtins this session unpacked and loaded** (`plans/S10-wasm-hooks.md` §2.4): today
+    /// the manual. They answer `provider_open` and nothing else — the plan's registry is plural,
+    /// and this is the smallest thing that is: a builtin must not displace the plugin the config
+    /// named, whose `on_open`/`on_save` hooks are the reader's own setup.
+    pub builtins: Vec<crate::plugin::Plugin>,
     /// **What the plugin had to say about the last read or write**, waiting to be appended to the
     /// message that reports it: a hook's transformation, or why it was skipped. Composed rather
     /// than flashed twice, because the save's own line ("Wrote N bytes") is the one the reader is
@@ -421,6 +426,7 @@ impl Editor {
             diff_split: false,
             images: false,
             plugin: None,
+            builtins: Vec::new(),
             plugin_note: None,
             edit_override: false,
             graphics_out: Vec::new(),
@@ -3282,6 +3288,77 @@ impl Editor {
         let dir_mode = path.is_dir();
         self.install_view(path, &text, dir_mode);
         self.flash_with_note(&format!("{} (view)", path.display()));
+        if !dir_mode {
+            self.preview_answered(&text);
+        }
+    }
+
+    /// **A provider's answer that is markdown opens as prose**, so the manual is readable the
+    /// moment it is asked for. A virtual document need not exist, so its path may carry no
+    /// extension (`rano:manual`) and the language ladder has nothing to go by: the text is asked
+    /// instead. A name that says what the document is still wins, and a folder listing is never
+    /// markdown.
+    fn preview_answered(&mut self, text: &str) {
+        let named = syntax::detect(self.bs().buf.name.as_deref(), None);
+        let markdown = match named {
+            Some(lang) => lang == syntax::Lang::Markdown,
+            None => crate::diffview::looks_like_markdown(text),
+        };
+        if markdown && self.diff_view.is_none() {
+            let name = self.buffer_name(self.cur);
+            self.open_markdown_view(name, text.to_string());
+        }
+    }
+
+    /// **The manual** (`M-x manual`, `C-g m`): rano's own docs as one document.
+    ///
+    /// The builtin is unpacked on first use (`scripts/built-in/manual.wasm`, never over a file
+    /// that is already there — `plans/S10` §2.4) and loaded from that folder like any plugin the
+    /// reader installed by hand, so replacing it replaces the manual. Then the virtual path goes
+    /// through `open_file`, the same door a folder takes, and `provider_open` answers it.
+    pub fn open_manual(&mut self) {
+        self.open_manual_from(&crate::builtin::scripts_dir());
+    }
+
+    /// [`Self::open_manual`] with the scripts folder given, the way `config::load_from` takes a
+    /// path: a test unpacks into its own folder instead of writing to the reader's config.
+    pub fn open_manual_from(&mut self, scripts: &Path) {
+        let builtin = &crate::builtin::MANUAL;
+        let at = match crate::builtin::unpack(scripts, builtin) {
+            Ok(at) => at,
+            Err(e) => {
+                self.flash(&format!("Manual not unpacked: {e}"));
+                return;
+            }
+        };
+        if let Some(note) = crate::builtin::newer_note(scripts, builtin) {
+            self.flash(&note);
+        }
+        let loaded = self
+            .plugin
+            .iter()
+            .chain(self.builtins.iter())
+            .any(|p| p.path() == at);
+        if !loaded {
+            // A builtin is loaded with the grant the config gives a plugin the reader installed by
+            // hand, because that is what it is: a file in their folder that they may replace.
+            let caps = crate::plugin::Capabilities::from_names(&self.config.capabilities);
+            match crate::plugin::Plugin::load_with(&at, caps) {
+                Ok(p) => self.builtins.push(p),
+                Err(e) => {
+                    self.flash(&format!("Manual {} not loaded: {e}", at.display()));
+                    return;
+                }
+            }
+        }
+        self.open_file("rano:manual");
+        // Asked for again with the manual already open: `open_file` switches buffers and closes
+        // the view, and the rendered form is what was asked for both times. Nothing is rendered
+        // when the answer was not the manual (a provider that failed leaves the path as it was).
+        if self.bs().buf.name.as_deref() == Some(Path::new("rano:manual")) {
+            let text = self.bs().buf.text();
+            self.preview_answered(&text);
+        }
     }
 
     /// M-g: ask for a folder, defaulting to this buffer's own.
@@ -3559,15 +3636,22 @@ impl Editor {
         // **A provider hook asks first**: "should this path open as something else?" — the folder
         // viewer's door. `provider_open` answers a text (or nothing, and the ordinary path
         // continues); a folder it answers keeps the listing keys, so `RET` still enters an entry.
-        if let Some(plugin) = self.plugin.as_ref().filter(|p| p.has("provider_open")) {
-            // The answer is laid out at the width it will be drawn at: rano is width-adaptive
-            // throughout, and a provider that renders columns has to be told how many.
-            let cols = self.text_w as u32;
-            let rows = self.text_h as u32;
+        //
+        // The config's plugin is asked first and the builtins after it: a builtin answers
+        // providers only, so it can never shadow the hooks of the plugin the reader configured.
+        // The answer is laid out at the width it will be drawn at: rano is width-adaptive
+        // throughout, and a provider that renders columns has to be told how many.
+        let cols = self.text_w as u32;
+        let rows = self.text_h as u32;
+        let mut claim = None;
+        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
+            if !plugin.has("provider_open") {
+                continue;
+            }
             match plugin.provider_open(&path.to_string_lossy(), cols, rows) {
                 Ok(Some(text)) => {
-                    self.open_provider(&path, text);
-                    return true;
+                    claim = Some(text);
+                    break;
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -3577,6 +3661,10 @@ impl Editor {
                     ));
                 }
             }
+        }
+        if let Some(text) = claim {
+            self.open_provider(&path, text);
+            return true;
         }
         // **A folder opens as a listing** — the same door F8, `name:line` and a host's jump
         // come through: typing a directory should show what is in it, not fail.

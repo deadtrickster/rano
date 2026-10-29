@@ -56,7 +56,7 @@ context. Several files open one buffer each: `rano src/*.rs`.
 |---|---|
 | `C-o` / `F2` | Save |
 | `C-x` | Exit |
-| `C-g` / `F1` | Help prefix: `?` page, `k` describe a key, `b` all keys, `x` run a command |
+| `C-g` / `F1` | Help prefix: `?` page, `k` describe a key, `b` all keys, `m` manual, `x` run a command |
 | `M-x` | Run any command by name |
 | `C-f` / `F3` | Search. `C-b` searches backwards |
 | `C-k` / `C-u` | Cut / paste |

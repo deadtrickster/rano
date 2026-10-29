@@ -82,6 +82,9 @@
 // own state onto them; nothing here depends on a host's crates.
 pub mod agent;
 pub mod buffer;
+// The scripts that ship in the binary and unpack into the reader's folder (`scripts/built-in/`),
+// so a builtin is a file they can read and replace rather than a path compiled in (S10 §2.4).
+pub mod builtin;
 // Merge conflicts taken apart: the file resolved ours-way and theirs-way,
 // diffed side by side with the renderers below (the editor's M-P).
 pub mod conflict;

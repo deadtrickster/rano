@@ -524,6 +524,13 @@ pub fn commands() -> &'static [Command] {
                 |e| e.open_help_overview(),
             ),
             cmd(
+                "manual",
+                "Manual",
+                Help,
+                "rano's manual: its own docs as one document, rendered.",
+                |e| e.open_manual(),
+            ),
+            cmd(
                 "describe-bindings",
                 "All Keys",
                 Help,
@@ -797,6 +804,7 @@ impl Keymaps {
                 .bind(&format!("{h} {h}"), "help")
                 .bind(&format!("{h} k"), "describe-key")
                 .bind(&format!("{h} b"), "describe-bindings")
+                .bind(&format!("{h} m"), "manual")
                 .bind(&format!("{h} x"), "execute-extended-command");
             g.name_prefix(h, "help");
         }

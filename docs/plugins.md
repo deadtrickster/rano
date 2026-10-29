@@ -123,3 +123,20 @@ each discovered hook's signature at load.
 
 The host does not care what wrote the module: Rust, C, Zig, Go through TinyGo, AssemblyScript,
 or `wat2wasm`.
+
+## The manual is one of these
+
+rano's own manual is a plugin: `examples/plugin-manual/` answers `provider_open("rano:manual")`
+with `docs/*.md` as one document, and `C-g m` (or `M-x manual`) opens it rendered. The docs are
+`include_str!`d, so `docs/` is the only copy of the manual and editing one without rebuilding the
+plugin fails a test.
+
+It ships **in the binary** and is written out on first use to
+`$XDG_CONFIG_HOME/rano/scripts/built-in/manual.wasm` (else
+`~/.config/rano/scripts/built-in/`), then loaded from there like a plugin you installed by hand.
+
+- It is **never overwritten**: edit it, or replace it with your own build, and that is what runs.
+- `scripts/built-in/.rano-version` records what was unpacked and from which release, so an
+  upgrade says the shipped one is newer instead of reverting your file.
+- `scripts/` is yours: `built-in/` holds the unpacked ones and whatever you put beside it.
+- Unpacking writes a file; it does not load one. `C-g m` is what loads the manual.

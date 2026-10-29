@@ -107,6 +107,10 @@ pub mod markdown;
 // Unified diffs read back in: a patch file parsed into files and hunks, drawn
 // with the renderers above (the editor's M-P view of a .diff/.patch buffer).
 pub mod patch;
+// A PDF page, read off the disk (`pdf`): how many there are, one page as the PNG the
+// kitty graphics protocol carries, and one page as text. The work is a tool's —
+// `pdftoppm`, `gs`, `pdftotext` — because rano carries no rasterizer (§19.2).
+pub mod pdf;
 pub mod plugin;
 // The render core: roles-styled spans and lines, a width-correct cell buffer,
 // widgets, and the emitter that turns a buffer into terminal rows per palette.

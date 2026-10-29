@@ -339,12 +339,12 @@ impl Plugin {
         Self::decode_picture(&bytes)
     }
 
-    /// The picture payload, checked: a 12-byte header, a size inside the cap, and exactly the RGB
-    /// bytes the header promised.
+    /// The picture payload, checked: `[width][height][rgb]` — an eight-byte header, the size
+    /// inside the cap, and exactly the RGB bytes the header promised.
     fn decode_picture(bytes: &[u8]) -> Result<Option<Picture>, String> {
-        if bytes.len() < 12 {
+        if bytes.len() < 8 {
             return Err(format!(
-                "`provider_picture` answered {} bytes, too short for the 12-byte header",
+                "`provider_picture` answered {} bytes, too short for the 8-byte header",
                 bytes.len()
             ));
         }
@@ -364,17 +364,17 @@ impl Plugin {
             ));
         }
         let want = want as usize;
-        if bytes.len() != 12 + want {
+        if bytes.len() != 8 + want {
             return Err(format!(
                 "`provider_picture` answered {} bytes for a {width}x{height} picture (wanted {})",
                 bytes.len(),
-                12 + want
+                8 + want
             ));
         }
         Ok(Some(Picture {
             width,
             height,
-            rgb: bytes[12..].to_vec(),
+            rgb: bytes[8..].to_vec(),
         }))
     }
 
@@ -1461,9 +1461,9 @@ mod tests {
     fn a_picture_header_that_disagrees_with_its_bytes_is_refused() {
         let p = picture_answer(2, 2, 12);
         let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
-        assert!(e.contains("wanted 24"), "{e}");
-        // The same header with its bytes is a picture.
-        let p = picture_answer(2, 2, 24);
+        assert!(e.contains("wanted 20"), "{e}");
+        // The same header with its bytes is a picture; an eight-byte header and 2x2 RGB.
+        let p = picture_answer(2, 2, 20);
         let pic = p
             .provider_picture("/tmp/model.stl", 80, 24)
             .unwrap()
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn a_picture_shorter_than_its_header_is_refused() {
-        let p = picture_answer(2, 2, 8);
+        let p = picture_answer(2, 2, 4);
         let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
         assert!(e.contains("too short"), "{e}");
     }
@@ -1525,7 +1525,7 @@ mod tests {
                   (i32.store (i32.const 4096) (i32.const 1))
                   (i32.store (i32.const 4100) (i32.const 1))
                   (i32.store (i32.const 8192) (i32.const 4096))
-                  (i32.store (i32.const 8196) (i32.const 15)))
+                  (i32.store (i32.const 8196) (i32.const 11)))
                 (else))
               (i32.const 8192))"#
         ));

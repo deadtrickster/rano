@@ -121,7 +121,9 @@ export fn provider_picture(path_ptr: u32, path_len: u32, cols: u32, rows: u32) u
     render(mesh, cols, height);
     picture.width = cols;
     picture.height = height;
-    return answer(@intFromPtr(&picture), 12 + @as(usize, cols) * height * 3);
+    // Eight bytes of header, not twelve: the struct is two `u32`s and the pixels, and a length
+    // that disagrees with the layout is a picture the host refuses.
+    return answer(@intFromPtr(&picture), 8 + @as(usize, cols) * height * 3);
 }
 
 /// The same model, as text: one character per cell through a luminance ramp, for a terminal that

@@ -83,6 +83,11 @@ pub struct Capabilities {
     /// any *other* path — `/etc/shadow` included — is refused. A text hook is asked about a text
     /// rather than a path, so it has no file to scope to and `read_file` refuses there too.
     pub read_file: bool,
+    /// **The `rano.convert_page` and `rano.convert_page_text` imports**: one page of the file
+    /// this call is about, rendered or read by the host's own converters. A plugin that shows
+    /// a document asks; the host's deadline, caps and scoping apply, so a grant cannot reach
+    /// another document and a page cannot run unbounded.
+    pub convert_page: bool,
 }
 
 impl Capabilities {
@@ -93,6 +98,7 @@ impl Capabilities {
         Capabilities {
             read_dir: has("read-dir"),
             read_file: has("read-file"),
+            convert_page: has("convert-page"),
         }
     }
 }
@@ -379,6 +385,9 @@ impl Plugin {
     /// scoped to: the host resolves it once, here, and the import answers for that file and no
     /// other.
     fn linker(engine: &Engine, caps: Capabilities, scope: Option<PathBuf>) -> Linker<StoreLimits> {
+        // **The one file this call is about**, resolved once: every scoped import answers for
+        // it and for nothing else, so `..`, a relative spelling and a symlink all land on it.
+        let scoped = scope.and_then(|p| std::fs::canonicalize(p).ok());
         let mut linker = Linker::new(engine);
         if caps.read_dir {
             // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed` for a
@@ -407,7 +416,7 @@ impl Plugin {
             // the same answers. What it will not do is read *any* path: the grant is the one file
             // this call is about, resolved so that `..`, a relative spelling and a symlink all
             // land on it, and anything else is `i32::MIN`.
-            let want = scope.and_then(|p| std::fs::canonicalize(p).ok());
+            let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           a: u32,
                           b: u32,
@@ -436,6 +445,57 @@ impl Plugin {
                 write_guest(&mut caller, c, d, &bytes)
             };
             let _ = linker.func_wrap("rano", "read_file", f);
+        }
+        if caps.convert_page {
+            // `(page, dpi, out_ptr, out_cap) -> i32`: one page of the file this call is about,
+            // as a PNG. `pdf::page_png` owns the deadline and the caps, and the path is scoped
+            // exactly as `read_file`'s is, so the grant reaches this document and no other.
+            let want = scoped.clone();
+            let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
+                          page: i32,
+                          dpi: i32,
+                          out_ptr: u32,
+                          out_cap: u32|
+                  -> i32 {
+                let Some(want) = want.as_deref() else {
+                    return i32::MIN;
+                };
+                if page < 0 || dpi < 0 {
+                    return i32::MIN;
+                }
+                let Ok(png) = crate::pdf::page_png(want, page as u32, dpi as u32) else {
+                    return i32::MIN;
+                };
+                if png.len() > MAX_HOOK_BYTES {
+                    return i32::MIN;
+                }
+                write_guest(&mut caller, out_ptr, out_cap, &png)
+            };
+            let _ = linker.func_wrap("rano", "convert_page", f);
+
+            // `(page, out_ptr, out_cap) -> i32`: the page's text, for a terminal that cannot
+            // draw — the answer a reader falls back to, not a lesser one.
+            let want = scoped.clone();
+            let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
+                          page: i32,
+                          out_ptr: u32,
+                          out_cap: u32|
+                  -> i32 {
+                let Some(want) = want.as_deref() else {
+                    return i32::MIN;
+                };
+                if page < 0 {
+                    return i32::MIN;
+                }
+                let Ok(text) = crate::pdf::page_text(want, page as u32) else {
+                    return i32::MIN;
+                };
+                if text.len() > MAX_HOOK_BYTES {
+                    return i32::MIN;
+                }
+                write_guest(&mut caller, out_ptr, out_cap, text.as_bytes())
+            };
+            let _ = linker.func_wrap("rano", "convert_page_text", f);
         }
         linker
     }
@@ -1468,5 +1528,65 @@ mod tests {
             .unwrap()
             .expect("the limiter refused the growth, so the 1x1 picture is the answer");
         assert_eq!((pic.width, pic.height), (1, 1));
+    }
+}
+
+#[cfg(test)]
+mod convert_page_tests {
+    use super::*;
+
+    /// A module that merely IMPORTS the hook: the grant is decided at instantiation, so an
+    /// import with no call is exactly the shape that tells a refusal from an admission.
+    fn importer(import: &str, params: &str) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module
+                 (import "rano" "{import}" (func (param {params}) (result i32)))
+                 (memory (export "memory") 1)
+                 (func (export "rano_abi") (result i32) i32.const 1)
+                 (func (export "rano_alloc") (param i32) (result i32) i32.const 1024)
+               )"#
+        ))
+        .expect("a module")
+        .to_vec()
+    }
+
+    /// **A grant is a capability, not a default**: a module importing `convert_page` is refused
+    /// at instantiation without it, which is the same rule `read_dir` and `read_file` follow.
+    #[test]
+    fn the_grant_is_required_to_import_it() {
+        let wasm = importer("convert_page", "i32 i32 i32 i32");
+        assert!(
+            Plugin::from_bytes_hooks(
+                &wasm,
+                PathBuf::from("t.wasm"),
+                Capabilities::default(),
+                &["provider_open"],
+            )
+            .is_err(),
+            "an ungranted import must be refused"
+        );
+        assert!(
+            Plugin::from_bytes_hooks(
+                &wasm,
+                PathBuf::from("t.wasm"),
+                Capabilities {
+                    convert_page: true,
+                    ..Capabilities::default()
+                },
+                &["provider_open"],
+            )
+            .is_ok(),
+            "the grant is what admits it"
+        );
+    }
+
+    /// The name in the config, and its spellings.
+    #[test]
+    fn the_capability_is_named_convert_page() {
+        for name in ["convert-page", "CONVERT-PAGE"] {
+            let caps = Capabilities::from_names(&[name.to_string()]);
+            assert!(caps.convert_page, "{name}");
+            assert!(!caps.read_file, "{name} is not read-file");
+        }
     }
 }

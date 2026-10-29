@@ -235,12 +235,10 @@ impl Lang {
     }
 }
 
-/// What a buffer's language is, and **who decided**.
+/// What a buffer's language is, and who decided.
 ///
-/// `Detected` is the ladder's answer and the default. The other two are the user
-/// overruling it — which is the one thing detection cannot do for itself: an editor that
-/// guesses must be able to be told it guessed wrong, or the guess is permanent. That is
-/// what every editor offers as `:set filetype=` or `M-x …-mode`.
+/// Detection cannot overrule itself: an editor that guesses must be told when it guessed
+/// wrong, or the guess is permanent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
@@ -265,8 +263,8 @@ impl Mode {
 impl Lang {
     /// Every language a person can name, for [`Lang::from_name`] and for a list.
     ///
-    /// `MarkdownInline` is absent because it is not a buffer's language, and `Columns`
-    /// because its name comes from the format it detected rather than from the variant.
+    /// `MarkdownInline` is not a buffer's language and `Columns` names itself by the format
+    /// it detected, so neither is here.
     pub const NAMED: &'static [Lang] = &[
         Lang::Rust,
         Lang::Go,
@@ -297,7 +295,7 @@ impl Lang {
         Lang::Clojure,
     ];
 
-    /// The language a person typed, or `None` — `rust`, `ini`, `fstab`. Case does not
+    /// The language a person typed — `rust`, `ini`, `fstab` — or `None`. Case does not
     /// matter, the way a mode name should not.
     pub fn from_name(name: &str) -> Option<Lang> {
         let want = name.trim().to_ascii_lowercase();
@@ -749,26 +747,13 @@ pub const SAMPLE_LINES: usize = 12;
 /// A buffer can hold megabyte rows; the probe must not build one to look at it.
 pub const SAMPLE_BYTES: usize = 2048;
 
-/// **Map a file to its language, the way an editor does it**: by extension, then
-/// by the file name, then — and only then — by what the first lines look like.
-///
-/// The order is the one every editor settles on, and it is not a preference.
-/// Vim's own manual: it detects *"by checking the file name and sometimes by
-/// inspecting the contents"*, and *"if the file type is not found by the name,
-/// `scripts.vim` is used to detect it from the contents"*. Emacs has the same two
-/// layers (`auto-mode-alist`, then `magic-mode-alist` on the buffer start), and
-/// GitHub's linguist runs modeline → filename → shebang → extension → heuristics →
-/// classifier, each step narrowing. Contents are the last resort everywhere,
-/// because a name is a statement and contents are evidence.
-///
-/// `sample` is the file's first [`SAMPLE_LINES`] lines ([`sample_of`] builds it
-/// from a buffer). Empty for a scratch buffer.
+/// Map a file to its language: by name, then by extension, then — only then — by the first
+/// lines. Contents come last in every editor, because a name is a statement and contents are
+/// evidence. `sample` is the file's first [`SAMPLE_LINES`] lines.
 pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
-    // **A whole name first**, because a name is more specific than a suffix: `tmux.conf`
-    // is a shell file and `.conf` is a config file, and linguist puts filename before
-    // extension for exactly this reason (as does vim: name, then contents).
-    //
-    // The columnar system databases are here because `fstab` IS the name.
+    // A whole name first: `tmux.conf` is shell and `.conf` is a config file, so the name
+    // is more specific than the suffix. The columnar databases are here because `fstab`
+    // is the name.
     if let Some(fmt) = name.and_then(columns::detect_format) {
         return Some(Lang::Columns(fmt));
     }
@@ -782,10 +767,9 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
     {
         return Some(l);
     }
-    // **Then the longest known suffix**, before the hand-written table below: specificity
-    // is the rule, not provenance. Linguist knows `emacs.desktop` where the table below
-    // knows only `desktop`, so `x.emacs.desktop` must reach the longer one — matching a
-    // name against a whole key is what makes multi-part extensions possible at all.
+    // Then the longest known suffix, before the hand-written table: specificity is the
+    // rule, not provenance. Linguist knows `emacs.desktop` where the table knows only
+    // `desktop`, and matching a whole key is what makes multi-part extensions work.
     if let Some(l) = name
         .and_then(|p| p.file_name())
         .and_then(|f| f.to_str())
@@ -793,7 +777,7 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
     {
         return Some(l);
     }
-    // The hand-written extensions, for what linguist does not list for OUR languages —
+    // The hand-written extensions, for what linguist does not list for our languages —
     // `.conf` above all, which its INI does not carry because it is ambiguous elsewhere.
     if let Some(ext) = name.and_then(|n| n.extension()).and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
@@ -819,11 +803,9 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
             "java" => return Some(Lang::Java),
             "mk" => return Some(Lang::Make),
             "dockerfile" => return Some(Lang::Dockerfile),
-            // Config formats by the extension's own meaning. The systemd/XDG set is
-            // linguist's `INI.extensions`, taken rather than reinvented — those files are
-            // ini by their specification, not by a list of programs. `.conf` is ours and
-            // stays: it is ambiguous everywhere else (nginx and ini configs share it) and
-            // here it is the one thing that makes the configs in `/etc` colour at all.
+            // Config formats by the extension's own meaning: the systemd/XDG set is
+            // linguist's `INI.extensions`, ini by specification. `.conf` is ours because
+            // it is ambiguous elsewhere (nginx shares it) and here it colours `/etc`.
             "ini" | "cfg" | "conf" | "properties" | "cnf" | "service" | "socket" | "timer"
             | "mount" | "automount" | "target" | "slice" | "path" | "swap" | "scope"
             | "desktop" | "directory" | "container" | "network" | "url" => {
@@ -836,10 +818,8 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
             "clj" | "cljs" | "cljc" | "edn" => return Some(Lang::Clojure),
             _ => {}
         }
-        // **The rest of the extensions the standards claim**, from linguist rather than from
-        // memory: `.hpp`, `.geojson`, `.mts`, `.gitconfig`'s neighbours, the 220 of them.
-        // The match above stays because its comments say WHY a few of them are what they
-        // are; this covers the long tail nobody can hold in their head.
+        // The long tail of extensions comes from linguist rather than memory (220 of
+        // them). The match above stays for the few whose reason is worth writing down.
     }
     detect_content(sample)
 }
@@ -926,21 +906,18 @@ fn detect_content(sample: &str) -> Option<Lang> {
     None
 }
 
-/// The first [`SAMPLE_LINES`] lines of `buf`, at most [`SAMPLE_BYTES`], for
-/// [`detect_sample`].
-///
-/// Public because [`language_of`] is the one question an editor asks about a buffer
-/// outside the highlighter — what is this, as the ladder sees it.
+/// The language the ladder gives this buffer: what is this, as the highlighter sees it.
 pub fn language_of(buf: &Buffer) -> Option<Lang> {
     detect_sample(buf.name.as_deref(), &sample_of(buf))
 }
 
+/// The first [`SAMPLE_LINES`] lines of `buf`, at most [`SAMPLE_BYTES`], for [`detect_sample`].
 fn sample_of(buf: &Buffer) -> String {
     let mut out = String::new();
     for r in 0..buf.row_count().min(SAMPLE_LINES) {
         let Some(row) = buf.row_opt(r) else { break };
-        // Room for this row AND the newline that ends it: a single megabyte row must
-        // not push the sample past its cap, which is the whole point of the cap.
+        // Room for this row and the newline that ends it: a megabyte row must not push
+        // the sample past its cap.
         let room = SAMPLE_BYTES.saturating_sub(out.len() + 1);
         out.extend(row.iter().take(room));
         out.push('\n');
@@ -5318,11 +5295,8 @@ mod window_tests {
     }
 }
 
-/// **What a file's first lines say, when its name said nothing.**
-///
-/// The ladder's last resort, and the shapes it accepts — pinned here because every
-/// one of them is a judgement about how a config file is written, and the negatives
-/// (the files that get *no* language) are as deliberate as the positives.
+/// The shapes a content probe accepts: each is a judgement about how a config file is
+/// written, and the files that get no language are as deliberate as the ones that do.
 #[cfg(test)]
 mod content_detection {
     use super::*;
@@ -5331,9 +5305,8 @@ mod content_detection {
         detect_sample(None, sample)
     }
 
-    /// **The case that started this.** `/etc/default/grub` has no extension and its
-    /// first line is a comment, so a one-line probe sees nothing at all; the sample
-    /// sees `GRUB_DEFAULT=0` and knows it is sourced by `sh`.
+    /// `/etc/default/grub` has no extension and its first line is a comment, so a one-line
+    /// probe sees nothing; the sample sees `GRUB_DEFAULT=0` and reads it as sh.
     #[test]
     fn an_etc_default_shell_fragment_is_bash() {
         let grub = "# If you change this file, run 'update-grub' afterwards to update\n\
@@ -5379,10 +5352,8 @@ mod content_detection {
         assert_eq!(sniff("--- just a line of dashes\n"), None);
     }
 
-    /// **The files that get nothing, deliberately.** They have formats — `fstab(5)`
-    /// documents six fields — but no tree-sitter grammar describes them, and colouring
-    /// one with a grammar that means something else is a confident lie rather than a
-    /// guess. `columnar_config_is_its_own_problem` is where that would go.
+    /// The files that get nothing, deliberately: no tree-sitter grammar describes them, and
+    /// colouring one with a grammar that means something else is a confident lie, not a guess.
     #[test]
     fn columnar_config_gets_no_language() {
         for (what, sample) in [
@@ -5432,10 +5403,8 @@ mod content_detection {
         assert_eq!(sniff("\n#!/usr/bin/env python3\n"), None);
     }
 
-    /// **The misfires, pinned rather than denied.** Contents are the last resort
-    /// because they can be wrong: an extension-less Python file whose first statement
-    /// is `x=1` reads as a shell assignment. It is a known cost, and this is where it
-    /// is written down.
+    /// Contents can be wrong: an extension-less Python file whose first statement is `x=1`
+    /// reads as a shell assignment. That is a known cost of putting contents last.
     #[test]
     fn the_misfires_are_known() {
         assert_eq!(sniff("x=1\nprint(x)\n"), Some(Lang::Bash));
@@ -5452,11 +5421,9 @@ mod content_detection {
     }
 }
 
-/// **The generated name table is a superset of linguist's answer for our languages.**
-///
-/// The fixture is linguist's SOURCE data, not a copy of the table, which is the whole point:
-/// a row deleted from `linguist.rs` fails here, and a table that has drifted from the data
-/// fails here too. Regenerate both with `scripts/linguist-table.py <languages.yml>`.
+/// The fixture is linguist's source data, not a copy of the table: a row deleted from
+/// `linguist.rs` fails here, and so does a table that has drifted. Regenerate both with
+/// `scripts/linguist-table.py <languages.yml>`.
 #[cfg(test)]
 mod linguist_table {
     use super::*;
@@ -5474,10 +5441,8 @@ mod linguist_table {
         }
     }
 
-    /// Rows where a rule answers differently on purpose. **Empty**, and it took the longest
-    /// suffix rule to get there: `x.emacs.desktop` used to lose to the table's `.desktop`
-    /// because the table ran first, and now the longer key wins — so the exception was not a
-    /// disagreement about the data, it was my ordering.
+    /// Rows where a rule answers differently on purpose. Empty: the longest-suffix rule
+    /// settles every case, so there is nothing to except.
     const OVERRIDES: &[(&str, &str, Lang)] = &[];
 
     #[test]

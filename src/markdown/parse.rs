@@ -402,23 +402,9 @@ fn parse_standalone(src: &str, bytes_lexed: &mut u64, lex_calls: &mut u64) -> Ve
     parse_blocks(src, &fences, bytes_lexed, lex_calls).0
 }
 
-/// `src` with every fence blanked out, byte for byte.
-///
-/// `tree-sitter-md` gets the *extent* of a fence wrong when its closing delimiter is not
-/// alone on its line (see [`fences_in`]), and the damage is not local: a block closed
-/// early leaves the parser in the wrong state, so the blocks after it are wrong too and
-/// there is no repairing them one at a time. The way out is to keep fences away from the
-/// grammar altogether. Each fence's bytes become spaces, newlines kept, which leaves the
-/// block structure *around* them exactly as it was — a fence was a separator, and blank
-/// lines are the same separator — and costs nothing in offsets, because the length is
-/// unchanged and every newline is where it was. So a node the grammar reports at byte `n`
-/// corresponds to byte `n` of the real text.
-///
-/// Replacing a multi-byte character's bytes with spaces is safe **for the masked copy**:
-/// the result is ASCII there, and no newline moved. It is not safe for the OFFSETS. The
-/// length is preserved, so a node's range still points into `src` — but a node can begin on
-/// a byte that was the second of a three-byte character, and `src` is not ASCII there.
-/// Every slice of `src` by a node offset goes through [`slice`] for that reason.
+/// `src` with every fence blanked out, byte for byte: length and newlines unchanged, so a
+/// node's byte offset still points into `src` even where [`slice`] must refuse the cut. A
+/// fence the grammar would mis-delimit never reaches it (see [`fences_in`]).
 fn mask(src: &str, fences: &[Fence]) -> String {
     if fences.is_empty() {
         return src.to_string();
@@ -435,28 +421,9 @@ fn mask(src: &str, fences: &[Fence]) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| src.to_string())
 }
 
-/// The text at `a..b`, when that range is one this source can be cut at.
-///
-/// **A stale node range is not a crash.** Every caller here slices `src` with offsets from a
-/// tree built over [`mask`]'s copy, which is byte-for-byte the same LENGTH and not the same
-/// text: a fence's bytes become spaces, so `…` (three bytes) becomes three spaces and a node
-/// can begin on the second of them. Such an offset is a boundary in the masked text and the
-/// MIDDLE of a character in `src`.
-///
-/// Skipping the range costs one span its styling. Slicing it costs the person their editor.
-/// Measured 2026-10-10 in a streaming transcript, and reproducible in **19 bytes** — see
-/// `a_stale_range_is_not_a_crash`, whose repro panics at `start byte index 12 is not a char
-/// boundary; it is inside '…' (bytes 10..13)` **through both** a whole `lex` and a push in
-/// deltas, at three different sites (`inline_spans`, `text_without_continuations`, `runs_of`).
-///
-/// **One helper for every site, not a guard at one of them.** A guard at a single site does
-/// not fix the panic, it moves it: the three sites a 19-byte repro reaches are
-/// `inline_spans`, `text_without_continuations` and `runs_of`.
-///
-/// The mismatch itself is the real bug and lives upstream of here — the tree is a projection
-/// of the masked text, so its offsets are only meaningful against that text, and the fix for
-/// that is a design change rather than a guard. This is the guard that stops it being a
-/// crash in the meantime.
+/// The text at `a..b`, when that range is one this source can be cut at. Offsets come from a
+/// tree over [`mask`]'s copy — same length, not the same text — so one can land inside a
+/// character of `src`. Skipping that span costs its styling; slicing it costs the editor.
 fn slice(src: &str, a: usize, b: usize) -> Option<&str> {
     src.get(a..b)
 }
@@ -3535,20 +3502,11 @@ mod markdown_cost {
     }
 }
 
-/// **A stale node range is not a crash.**
+/// A stale node range is not a crash.
 ///
-/// Every slice of `src` by a tree offset goes through [`super::slice`], and this is the test
-/// that says so. The repro is 19 bytes, found by sweeping generated documents and then
-/// shrinking — and **it panics through both paths**: `lex` of the same text, and the same text
-/// pushed in pieces, which is why the third test here pins the one-parse path too. An earlier
-/// reading of this was wrong and worth keeping the correction of: a sweep of 279 841 generated
-/// static documents tripped nothing, and `lex` was called safe on that basis — but the
-/// shrinker's 19 bytes is a shape the generator never produced, so the negative result was a
-/// statement about the corpus and not about `lex`. The property is per-range, not per-path.
-///
-/// Before the guard the repro panicked at three different sites depending on how the bytes
-/// arrived — `inline_spans`, `text_without_continuations` and `runs_of` — so a guard at any
-/// one of them only moved the panic along.
+/// Every slice of `src` by a tree offset goes through [`super::slice`]. The repro below is 19
+/// bytes and panics through both `lex` and a push in deltas: it is a property of the range,
+/// not of the path.
 #[cfg(test)]
 mod a_stale_range_is_not_a_crash {
     use super::*;
@@ -3574,9 +3532,8 @@ mod a_stale_range_is_not_a_crash {
         m
     }
 
-    /// **Every string a reader would see in these blocks.** The text the model wrote, not
-    /// the rendered rows: what the assertion is about is whether the guard dropped content
-    /// on its way past.
+    /// Every string a reader would see in these blocks: what the assertion is about is
+    /// whether the guard dropped content on its way past.
     fn text_of(blocks: &[Block]) -> String {
         let mut out = String::new();
         for b in blocks {
@@ -3628,8 +3585,8 @@ mod a_stale_range_is_not_a_crash {
         }
     }
 
-    /// The same text, one whole parse. **This panicked too** — the repro is not an incremental
-    /// special case, which an earlier reading of it claimed and this test is the correction of.
+    /// The same text in one whole parse: the repro is a property of the range, not of the
+    /// incremental path.
     #[test]
     fn the_same_text_is_fine_in_one_parse() {
         let blocks = lex(REPRO);
@@ -3637,9 +3594,8 @@ mod a_stale_range_is_not_a_crash {
         assert!(text_of(&blocks).contains('\u{2026}'));
     }
 
-    /// A stale range must stay a *stale range* and not become a dropped document: the blocks
-    /// either side of the fence are still there, and nothing panics with the ellipsis pushed
-    /// at every ratio.
+    /// A stale range must not become a dropped document: nothing panics with the ellipsis
+    /// pushed at every ratio, and the blocks either side of the fence survive.
     #[test]
     fn the_document_survives_being_cut_at_awkward_places() {
         let doc = format!("{REPRO}\n\n- {}\n", "\u{2026}".repeat(40));

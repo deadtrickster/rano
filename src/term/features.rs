@@ -127,15 +127,9 @@ impl Features {
         let mut f = if ghostty && !env.tmux {
             Features::GHOSTTY
         } else if env.tmux {
-            // **One sequence survives a multiplexer, and it is the one copying needs.**
-            // tmux eats or mangles everything else here — progress bars, notifications,
-            // links, inline images — and the note that used to sit in this table said so
-            // and stopped there. But OSC 52 is not like the rest: it is the sequence tmux
-            // exists to pass along. With `set-clipboard on` it forwards it to the outer
-            // terminal, and with the default `external` it keeps it in its own paste
-            // buffer. Emitting it is therefore never wrong, and declining was: dragging a
-            // selection in rano inside byobu copied nothing, silently, because
-            // `Terminal::copy` returns early when this flag is off.
+            // One sequence survives a multiplexer, and it is the one copying needs: OSC 52 is
+            // what tmux exists to pass along, to the outer terminal or to its own paste buffer,
+            // so emitting it is never wrong and `Terminal::copy` must not decline it.
             Features {
                 clipboard: true,
                 ..Features::default()
@@ -311,11 +305,9 @@ mod tests {
             Features::from_env("xterm-kitty", "", false, "-images").names(),
             Vec::<&str>::new()
         );
-        // tmux in front of Ghostty: the sequences would be eaten or mangled — **except the
-        // clipboard's**, which tmux forwards (or keeps in its paste buffer) — and pictures, which
-        // cross only with `allow-passthrough` on. `from_env` has no answer from tmux, so the
-        // picture is not claimed here; `Features::detect` asks, and
-        // `proto::tmux_takes_kitty_only_with_passthrough_and_iterm_never` holds that half.
+        // Under tmux every sequence is eaten or mangled except OSC 52, which tmux forwards
+        // or keeps in its paste buffer; pictures cross only with `allow-passthrough`, which
+        // `from_env` cannot know, so it claims none and `Features::detect` asks.
         let tmux = Features::from_env("xterm-ghostty", "ghostty", true, "");
         assert_eq!(tmux.names(), vec!["clipboard"]);
         assert_eq!(

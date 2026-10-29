@@ -2814,8 +2814,7 @@ impl Editor {
     // ---------- the mode ----------
 
     /// The mode in effect, as a person reads it: the one they chose, or what the ladder
-    /// detected. **Bare**, because this is what the prompt opens on and it has to be a
-    /// name the prompt accepts back.
+    /// detected. Bare, because the prompt opens on it and must accept it back.
     pub fn mode_name(&self) -> String {
         match self.bs().hl.mode {
             syntax::Mode::Plain => "plain".to_string(),
@@ -2826,12 +2825,9 @@ impl Editor {
         }
     }
 
-    /// Ask for a mode, opening on the one in effect — `M-x Mode`.
-    ///
-    /// **An editor that guesses must be able to be told it guessed wrong.** Detection can
-    /// be wrong for a file whose name says nothing and whose contents are ambiguous (an
-    /// extension-less `.py` whose first statement is `x=1` reads as a shell assignment),
-    /// and without this the wrong guess is permanent for the session.
+    /// Ask for a mode, opening on the one in effect (`M-x Mode`): an editor that guesses
+    /// must be able to be told it guessed wrong, or an ambiguous file's wrong detection
+    /// stays for the session.
     pub fn start_setmode(&mut self) {
         let text = self.mode_name();
         let cursor = text.chars().count();

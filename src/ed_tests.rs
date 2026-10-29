@@ -989,10 +989,9 @@ fn opening_a_picture_shows_the_picture() {
     assert!(msg.starts_with("Read"), "the ordinary reading: {msg}");
 }
 
-/// **A copy must reach the system clipboard**, not only rano's own cutbuffer. The reader:
-/// *"when i just select text without shift and try to copy it - nothing copies"* — a mouse
-/// drag selects in rano, so the terminal's own copy has nothing to work from, and rano's
-/// `M-6`/`^K` used to stop at the cutbuffer.
+/// A copy must reach the system clipboard, not only rano's own cutbuffer: a mouse drag
+/// selects in rano, so the terminal's own copy has nothing to work from, and `M-6`/`^K`
+/// have to put the text where the terminal can take it.
 #[test]
 fn a_copy_reaches_the_terminal_clipboard() {
     let mut ed = test_ed("one\ntwo\nthree\n");
@@ -1011,10 +1010,8 @@ fn a_copy_reaches_the_terminal_clipboard() {
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
     press(&mut ed, KeyCode::Char('6'), Mods::ALT);
     assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
-    // ^K cuts what is selected, and the clipboard takes it too — **the case that used to
-    // panic**: a selection from a row's first column into the next row underflowed
-    // `cut_range`'s arithmetic (`b.row - 1 - first_removed` with both 1). A mouse drag
-    // reaches it in one gesture.
+    // ^K cuts what is selected, and the clipboard takes it too: a selection from a row's
+    // first column into the next row is the shape `cut_range`'s arithmetic has to survive.
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
     assert_eq!(lines(&ed), vec!["o", "three"]);
@@ -1023,8 +1020,7 @@ fn a_copy_reaches_the_terminal_clipboard() {
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("first\n"));
     assert_eq!(lines(&ed)[0], "second");
-    // A mouse selection is a selection: dragging and letting go puts it on the clipboard,
-    // which is the gesture the complaint was about.
+    // A mouse selection is a selection: dragging and letting go puts it on the clipboard.
     let mut ed = test_ed("alpha beta\nsecond line\n");
     ed.text_w = 40;
     ed.text_h = 10;
@@ -5079,15 +5075,14 @@ fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
 
 // ---------- the mode, chosen rather than detected ----------
 
-/// **A chosen mode is used as it is**, even where detection disagrees — that is the
-/// whole point of choosing, and it is what an editor that guesses owes the person it
-/// guessed at.
+/// A chosen mode is used as it is, even where detection disagrees: that is the whole point
+/// of choosing.
 #[test]
 fn a_chosen_mode_overrules_detection() {
     let d = temp_dir("mode_pick");
     let p = d.0.join("notes.txt");
     // No `=` and no `[section]`: a spaced `x = 1` is the INI shape, and this fixture
-    // must be a file the ladder says NOTHING about, or the test proves nothing.
+    // must be a file the ladder says nothing about, or the test proves nothing.
     fs::write(&p, "fn main() { return 1; }\n").unwrap();
     let mut ed = test_ed("");
     ed.text_w = 80;
@@ -5161,8 +5156,8 @@ fn the_mode_prompt_opens_on_what_is_in_effect() {
     assert_eq!(ed.mode_name(), "fstab");
 }
 
-/// **A binary is not text**: not read into rows, not highlighted, and read-only — because
-/// the decode is lossy, so a save would corrupt the file it came from.
+/// A binary is not text: not read into rows, not highlighted, and read-only, because the
+/// decode is lossy and a save would corrupt the file it came from.
 #[test]
 fn a_binary_opens_read_only_and_unread() {
     let d = temp_dir("binary_open");
@@ -5179,7 +5174,7 @@ fn a_binary_opens_read_only_and_unread() {
     assert_eq!(lines(&ed).len(), 1, "nothing was read into rows");
     assert!(!ed.loading(), "the loader is still running");
 
-    // Refused at the KEYSTROKE, not at the save: there is no correct save to make.
+    // Refused at the keystroke, not at the save: there is no correct save to make.
     let before = ed.bs().buf.text();
     press(&mut ed, KeyCode::Char('x'), Mods::NONE);
     assert_eq!(ed.bs().buf.text(), before, "a binary accepted a keystroke");

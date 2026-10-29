@@ -28,6 +28,14 @@
 //! the placement and not the bytes ([`crate::term::graphics::image_place`] says why), and a picture
 //! the frame no longer draws is deleted **with its data** — the terminal cannot free what nothing
 //! names.
+//!
+//! # A picture is not always a PNG
+//!
+//! A file's picture is a PNG, because that is what the terminal decodes. **A plugin's picture is
+//! pixels** — `provider_picture` answers `[width][height][rgb]` — and the host does not turn them
+//! into a PNG: there is no encoder here, and the protocol takes raw RGB directly (`f=24`). That is
+//! [`Picture::of_rgb`], and the one protocol that cannot carry it says so in
+//! [`Picture::refusal`] before anything is written.
 
 use std::collections::BTreeMap;
 
@@ -36,23 +44,42 @@ use crate::term::graphics;
 use crate::term::proto::Proto;
 use crate::term::terminal::base64;
 
-/// **One picture, ready to be drawn in a box**: the id the terminal knows it by, the PNG's bytes
-/// as base64 (what both protocols carry), and the box in cells.
+/// **A picture, ready to be drawn in a box**: the id the terminal knows it by, the payload's bytes
+/// as base64 when it is a PNG (what both protocols carry) or as raw RGB when it is a plugin's
+/// pixels, and the box in cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picture {
     /// The image id. **Stable per picture** — hashed from whatever names it upstream
     /// ([`graphics::image_id`] for a row), because an id that changes every frame is a terminal
     /// filling with copies of one picture.
     pub id: u32,
-    /// The PNG, base64: what kitty's upload carries, and what iTerm2's `File=` carries.
+    /// The PNG, base64: what kitty's upload carries, and what iTerm2's `File=` carries. Empty for
+    /// a picture that is raw pixels ([`Picture::rgb`]).
     pub png_base64: String,
     /// The picture's own size in bytes — iTerm2's `size=` argument, and the only reason it is
     /// kept: the base64's length is 4/3 of it and a terminal that is told the wrong one refuses
     /// the picture.
     pub bytes: usize,
+    /// **The pixels, when the picture is not a PNG** — a plugin's `provider_picture` answer, sent
+    /// as the protocol's raw-RGB transmission instead of a file.
+    pub rgb: Option<Rgb>,
     /// The box, in cells: what the frame draws and what the terminal fills.
     pub cells: (u32, u32),
 }
+
+/// **A picture as pixels**: what a plugin draws, in the one form the terminal takes without an
+/// image format in between — 8 bits per channel, row-major, `width × height × 3` bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rgb {
+    pub width: u32,
+    pub height: u32,
+    /// Exactly `width × height × 3` bytes. [`Picture::of_rgb`] is what guarantees it.
+    pub data: Vec<u8>,
+}
+
+/// **The header a provider's answer starts with**, before its pixels: `width` and `height` as
+/// little-endian `u32`s. [`Picture::of_rgb`] is the whole of the format.
+pub const PAYLOAD_HEADER: usize = 8;
 
 impl Picture {
     /// A picture from the PNG's own bytes, cut to the box the frame will draw it in.
@@ -61,6 +88,7 @@ impl Picture {
             id,
             png_base64: base64(png),
             bytes: png.len(),
+            rgb: None,
             cells,
         }
     }
@@ -75,7 +103,99 @@ impl Picture {
             id,
             png_base64: png_base64.to_string(),
             bytes,
+            rgb: None,
             cells,
+        }
+    }
+
+    /// **A picture from the payload a plugin's `provider_picture` answered**:
+    /// `[width: u32 LE][height: u32 LE][rgb: width × height × 3]`, cut to the box a frame
+    /// `frame_width` columns wide gives it ([`graphics::image_cells`], the arithmetic a PNG's view
+    /// cuts with).
+    ///
+    /// **A payload whose length disagrees with the size it states is refused**, and so is a
+    /// zero-sized or unmeasurable one. What a bad header draws is not a small mistake: it is
+    /// whatever the bytes happen to be — pixels of the wrong shape, at the wrong place, held by a
+    /// terminal until the id is deleted.
+    pub fn of_rgb(
+        id: u32,
+        width: u32,
+        height: u32,
+        rgb: &[u8],
+        frame_width: usize,
+    ) -> Result<Picture, String> {
+        if width == 0 || height == 0 {
+            return Err(format!("a picture of {width}×{height} pixels"));
+        }
+        if rgb.len() != (width as usize) * (height as usize) * 3 {
+            return Err(format!(
+                "{width}×{height} pixels is {} bytes, got {}",
+                (width as usize) * (height as usize) * 3,
+                rgb.len()
+            ));
+        }
+        let cells =
+            graphics::image_cells(Some(width), Some(height), graphics::image_box(frame_width));
+        Ok(Picture {
+            id,
+            png_base64: String::new(),
+            bytes: rgb.len(),
+            rgb: Some(Rgb {
+                width,
+                height,
+                data: rgb.to_vec(),
+            }),
+            cells,
+        })
+    }
+
+    /// **The picture's own size in pixels**, when it carries it: raw RGB states it in its header,
+    /// and a PNG's view keeps it beside the picture ([`crate::diffview::Source::Picture`]).
+    pub fn intrinsic(&self) -> Option<(u32, u32)> {
+        self.rgb.as_ref().map(|r| (r.width, r.height))
+    }
+
+    /// **Re-cut the box for a frame `width` columns wide**, returning whether it moved — what a
+    /// resize asks a picture whose rows and placement both follow the frame.
+    pub fn refit(&mut self, frame_width: usize) -> bool {
+        let Some((w, h)) = self.intrinsic() else {
+            return false;
+        };
+        let cells = graphics::image_cells(Some(w), Some(h), graphics::image_box(frame_width));
+        if cells == self.cells {
+            return false;
+        }
+        self.cells = cells;
+        true
+    }
+
+    /// **Why this picture cannot be drawn on this terminal, or `None` when it can.** A caller asks
+    /// this before it writes anything: a picture sent to a terminal that cannot carry it is not a
+    /// picture that is missing, it is cells of garbage (placeholders nothing fills) or bytes typed
+    /// at the prompt.
+    pub fn refusal(&self, proto: Proto) -> Option<String> {
+        match proto {
+            Proto::None => Some(
+                "This terminal does not take inline pictures: RANO_TERM_FEATURES=images forces them"
+                    .to_string(),
+            ),
+            // iTerm2's protocol carries an image FILE (base64 PNG, JPEG, GIF), not a pixel
+            // buffer, and this host has no PNG encoder — so a plugin's picture needs a terminal
+            // that takes raw RGB, which is kitty's.
+            Proto::Iterm if self.rgb.is_some() => Some(
+                "This picture is pixels: it needs a terminal that takes raw RGB (kitty), not iTerm2's file protocol"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// **The transmission this picture needs**: the raw RGB where it is pixels, the PNG where it
+    /// is a file.
+    fn upload(&self) -> Vec<u8> {
+        match &self.rgb {
+            Some(r) => graphics::image_upload_rgb(self.id, r.width, r.height, &r.data),
+            None => graphics::image_upload(self.id, &self.png_base64),
         }
     }
 
@@ -105,9 +225,12 @@ impl Picture {
         match proto {
             Proto::None => Vec::new(),
             Proto::Kitty | Proto::KittyPassthrough => vec![
-                proto.wrap(&graphics::image_upload(self.id, &self.png_base64)),
+                proto.wrap(&self.upload()),
                 proto.wrap(&graphics::image_place(self.id, cols, rows)),
             ],
+            // **A picture that is pixels has no iTerm2 escape**: that protocol carries a file, so
+            // there is nothing to send. [`Picture::refusal`] is what the caller asked first.
+            Proto::Iterm if self.rgb.is_some() => Vec::new(),
             Proto::Iterm => vec![proto.wrap(self.iterm_escape().as_bytes())],
         }
     }
@@ -257,6 +380,7 @@ impl Picture {
             }
             // iTerm2 has no placement: a picture whose box moved is a picture to send again,
             // which is what a frame that repainted those cells costs on that terminal.
+            Proto::Iterm if self.rgb.is_some() => Vec::new(),
             Proto::Iterm => vec![proto.wrap(self.iterm_escape().as_bytes())],
         }
     }
@@ -403,6 +527,77 @@ mod tests {
 
     fn held_escape(id: u32, cells: (u32, u32)) -> String {
         pic(id, cells).iterm_escape()
+    }
+
+    /// **A plugin's answer is a picture**: the pixels it named, cut to the box a PNG would be
+    /// cut to at the same width — and a size that disagrees with the bytes is refused by name
+    /// rather than drawn.
+    #[test]
+    fn a_plugin_picture_is_a_picture_and_a_lying_size_is_refused() {
+        // 64×48: 9216 bytes of RGB, which is three chunks of upload (see `graphics`).
+        let (w, h) = (64u32, 48u32);
+        let rgb = vec![0x40u8; (w * h * 3) as usize];
+        let p = Picture::of_rgb(5, w, h, &rgb, 120).expect("a size that agrees");
+        assert_eq!(p.intrinsic(), Some((w, h)));
+        assert_eq!(
+            p.cells,
+            graphics::image_cells(Some(w), Some(h), graphics::image_box(120))
+        );
+        assert_eq!(p.rgb.as_ref().unwrap().data.len(), 9216);
+        assert!(p.png_base64.is_empty(), "it is not a PNG");
+        // The bytes: the raw-RGB upload, then the placement — the PNG's order, its own header.
+        let bytes = p.bytes(Proto::Kitty);
+        assert_eq!(bytes.len(), 2);
+        assert_eq!(bytes[0], graphics::image_upload_rgb(5, w, h, &rgb));
+        assert!(String::from_utf8_lossy(&bytes[0]).starts_with("\x1b_Ga=t,f=24,i=5,s=64,v=48"));
+        assert_eq!(bytes[1], graphics::image_place(5, p.cells.0, p.cells.1));
+        // The rows are the placeholders the terminal fills, as for any picture.
+        let rows = p.lines(Proto::Kitty);
+        assert_eq!(rows.len(), p.cells.1 as usize);
+        assert!(rows.iter().all(|l| l.width() == p.cells.0 as usize));
+
+        // **A size whose bytes disagree is refused**, and the sentence says both numbers.
+        let e = Picture::of_rgb(5, w, h, &rgb[..rgb.len() - 1], 120).unwrap_err();
+        assert!(e.contains("64×48") && e.contains("9215"), "{e}");
+        // A size with no pixels in it is not a picture of nothing.
+        assert!(Picture::of_rgb(5, 0, 48, &[], 120).is_err());
+    }
+
+    /// **A resize re-cuts the box, not the pixels** — the rows and the placement follow the
+    /// frame, and the upload is the terminal's already.
+    #[test]
+    fn a_resize_moves_a_providers_picture_and_the_bytes_stay() {
+        let rgb = vec![1u8; 200 * 100 * 3];
+        let mut p = Picture::of_rgb(4, 200, 100, &rgb, 120).expect("a picture");
+        let before = p.cells;
+        assert!(p.refit(40));
+        assert_ne!(p.cells, before, "a narrower frame is a smaller box");
+        assert!(!p.refit(40), "the same frame changes nothing");
+        // A PNG view is cut elsewhere (`diffview::cells_for` keeps its own size), so refit says
+        // nothing about one.
+        let mut png = pic(4, (4, 2));
+        assert!(!png.refit(40));
+        assert_eq!(png.cells, (4, 2));
+    }
+
+    /// **A picture is refused by name where the terminal cannot carry it** — never drawn as
+    /// placeholders nothing fills, and never as an iTerm2 escape with no file in it.
+    #[test]
+    fn a_picture_that_is_pixels_is_refused_by_a_terminal_that_cannot_take_it() {
+        let p = Picture::of_rgb(6, 2, 2, &[9u8; 12], 80).expect("a picture");
+        assert!(p.refusal(Proto::Kitty).is_none());
+        assert!(p.refusal(Proto::KittyPassthrough).is_none());
+        let none = p.refusal(Proto::None).expect("no protocol, a refusal");
+        assert!(none.contains("does not take inline pictures"), "{none}");
+        let iterm = p.refusal(Proto::Iterm).expect("no raw RGB there either");
+        assert!(iterm.contains("raw RGB"), "{iterm}");
+        // And nothing is written for it on that terminal: an escape with an empty payload is a
+        // file the terminal refuses.
+        assert!(p.bytes(Proto::None).is_empty());
+        assert!(p.bytes(Proto::Iterm).is_empty());
+        // A PNG is still a PNG on iTerm2: the refusal is about pixels, not pictures.
+        assert!(pic(3, (4, 2)).refusal(Proto::Iterm).is_none());
+        assert_eq!(pic(3, (4, 2)).bytes(Proto::Iterm).len(), 1);
     }
 
     /// **A terminal that takes no picture is sent no bytes at all** — not "some bytes it will

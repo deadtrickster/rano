@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::render::Style;
 use crate::style::Role;
-use crate::term::{MouseButton, MouseEvent, MouseKind};
+use crate::term::{MouseButton, MouseEvent, MouseKind, Picture, Pictures, Proto};
 
 use crate::BufferState;
 use crate::RowWrap;
@@ -23,6 +23,35 @@ use crate::search_ctrl::ReplaceState;
 use crate::syntax;
 use crate::ui;
 use crate::width;
+
+/// **The image id a plugin's picture of `path` is drawn under** — the path with a prefix, so a
+/// plugin's picture and a PNG view of the same file are two images in the terminal: their rows
+/// come from two mechanisms, and one freeing the other's data would blank a picture that is still
+/// on the glass.
+fn picture_id(path: &Path) -> u32 {
+    crate::term::graphics::image_id(&format!("plugin:{}", path.display()))
+}
+
+/// **The rows a picture's view holds**: the placeholder cells [`Picture::lines`] gives, as a
+/// buffer's rows. A buffer holds characters and no style, so the colours that say *which* image
+/// come back at draw time from the id ([`Editor::picture_row_id`], [`crate::term::graphics::placeholder_style`]).
+fn picture_rows(picture: &Picture, proto: Proto) -> Vec<Vec<char>> {
+    picture
+        .lines(proto)
+        .iter()
+        .map(|l| l.plain().chars().collect())
+        .collect()
+}
+
+/// **A picture a plugin answered, on the glass**: the buffer it was opened for and the picture
+/// itself. One at a time — a picture view is a buffer, and the rows the terminal fills are the
+/// rows of the one being drawn.
+pub(crate) struct PictureView {
+    /// The path the provider claimed. The view belongs to the buffer with this name: a buffer
+    /// that is not current is a picture the terminal is not asked to hold.
+    path: PathBuf,
+    picture: Picture,
+}
 
 #[derive(Debug, Clone)]
 pub struct Flash {
@@ -213,6 +242,19 @@ pub struct Editor {
     /// placeholder cell is `U+10EEEE` with combining marks, which a terminal that
     /// cannot fill it draws as garbage — so M-P on a PNG says why instead of drawing one.
     pub images: bool,
+    /// **Which picture protocol the terminal speaks**, when a host knows more than
+    /// [`Self::images`] says ([`Self::set_pictures`]). `Proto::None` with `images` on is
+    /// read as kitty ([`Self::picture_proto`]), which is what this editor draws: rows of
+    /// placeholder cells a terminal fills from its own copy of the picture.
+    pub(crate) proto: Proto,
+    /// **The picture a plugin answered, while it is on the glass** — the buffer it was opened
+    /// for and the picture itself, so a resize can re-cut the box and a buffer that is left can
+    /// free the terminal's copy ([`Self::sync_picture`]).
+    pub(crate) picture_view: Option<PictureView>,
+    /// **The pictures the terminal holds for [`Self::picture_view`]**, as `id → the box it is
+    /// placed in`. Separate from [`Self::images_held`], which is the views' (`diffview`): the two
+    /// mechanisms draw different rows and must not delete each other's images.
+    pub(crate) pictures: Pictures,
     /// **The WASM plugin** (`plans/S10-wasm-hooks.md`): loaded from the config's `plugin` (or
     /// `RANO_PLUGIN`), compiled once, and asked at the two seams — `on_open` when a file's text
     /// enters, `on_save` before a save is written. `None` is a build or a config with no plugin,
@@ -425,6 +467,9 @@ impl Editor {
             diff_view: None,
             diff_split: false,
             images: false,
+            proto: Proto::None,
+            picture_view: None,
+            pictures: Pictures::new(Proto::None),
             plugin: None,
             builtins: Vec::new(),
             plugin_note: None,
@@ -1861,6 +1906,9 @@ impl Editor {
         self.area = area;
         self.text_w = area.w as usize;
         self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
+        // **A picture's box follows the frame** — the same answer a PNG's view gives in
+        // `refresh_diff_view`, over the rows this one draws.
+        self.recut_picture();
         true
     }
 
@@ -3255,6 +3303,9 @@ impl Editor {
     /// The replacement rule is `open_file`'s: an untouched scratch makes way, and a buffer with
     /// unsaved edits is never thrown away for a view.
     fn install_view(&mut self, path: &Path, text: &str, dir_mode: bool) {
+        // **A view replaces a view**: a picture the terminal was holding for the one that was up
+        // goes with it, with its bytes.
+        self.close_picture();
         let buf = Buffer::from_text(
             text,
             Some(path.to_path_buf()),
@@ -3359,6 +3410,151 @@ impl Editor {
             let text = self.bs().buf.text();
             self.preview_answered(&text);
         }
+    }
+
+    // ---------- a plugin's picture ----------
+
+    /// **Told the terminal's picture protocol, once** — a host that has asked the terminal
+    /// ([`crate::term::Proto::detect`]) says so here, and [`Self::images`] follows: a protocol
+    /// that speaks takes pictures and one that does not refuses them, which is the same answer in
+    /// two words. What the terminal was holding is dropped, because a protocol that changed is
+    /// not one where the old ids mean the same thing.
+    pub fn set_pictures(&mut self, proto: Proto) {
+        self.proto = proto;
+        self.images = proto.speaks();
+        self.sync_picture();
+    }
+
+    /// **The protocol a picture is drawn with**: the one a host named ([`Self::set_pictures`]),
+    /// else kitty for a host that only said [`Self::images`] — this editor draws a picture as
+    /// placeholder cells, which is kitty's protocol, and the binary sets `images` exactly when
+    /// the terminal speaks it — else [`Proto::None`], where a picture is refused by name.
+    pub(crate) fn picture_proto(&self) -> Proto {
+        if self.proto.speaks() {
+            self.proto
+        } else if self.images {
+            Proto::Kitty
+        } else {
+            Proto::None
+        }
+    }
+
+    /// **A path a plugin answered with pixels** (`provider_picture`), drawn as the view it is:
+    /// read-only, like a tail, its rows the box's placeholder cells the terminal fills from its
+    /// own copy of the picture ([`Picture::lines`], the same cells a PNG's view draws), with the
+    /// bytes queued for the host ([`Self::take_graphics`]).
+    ///
+    /// **Refused, not drawn, where it cannot be carried**: a placeholder no terminal fills is a
+    /// screenful of garbage, and a payload whose size disagrees with its pixels is whatever the
+    /// bytes happen to be. Either way one line says so and nothing is opened.
+    ///
+    /// Returns whether the path was handled — drawn, or refused by name — so a caller that asks
+    /// before opening the file can stop either way.
+    pub fn open_provider_picture(&mut self, path: &Path, answer: &crate::plugin::Picture) -> bool {
+        let proto = self.picture_proto();
+        let pic = match Picture::of_rgb(
+            picture_id(path),
+            answer.width,
+            answer.height,
+            &answer.rgb,
+            self.text_w,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(&format!("{}: {e}", path.display()));
+                return true;
+            }
+        };
+        if let Some(why) = pic.refusal(proto) {
+            self.flash(&why);
+            return true;
+        }
+        // The rows ARE the picture: the box's placeholders, one per cell the terminal fills.
+        let text = pic
+            .lines(proto)
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<String>>()
+            .join("\n");
+        self.close_picture();
+        self.install_view(path, &text, false);
+        self.picture_view = Some(PictureView {
+            path: path.to_path_buf(),
+            picture: pic,
+        });
+        self.sync_picture();
+        self.flash_with_note(&format!("{} (picture)", path.display()));
+        true
+    }
+
+    /// **What the terminal must be told about the plugin's picture**: the upload and the placement
+    /// of one it has not been sent, the placement alone of one whose box moved (a resize re-cuts
+    /// the rows, not the pixels), and the delete of one the view no longer draws — the three
+    /// answers a PNG's view gets from [`Pictures::sync`], over a set of its own so the two kinds of
+    /// view cannot free each other's images.
+    fn sync_picture(&mut self) {
+        let mut out = self.pictures.set_proto(self.picture_proto());
+        let want: Vec<Picture> = match &self.picture_view {
+            Some(v) if self.picture_is_current(v) => vec![v.picture.clone()],
+            _ => Vec::new(),
+        };
+        out.extend(self.pictures.sync(&want));
+        self.graphics_out.extend(out);
+    }
+
+    /// Whether the picture view is the buffer on the glass: a picture the reader has moved away
+    /// from is one the terminal need not hold, and its rows are not drawn either.
+    fn picture_is_current(&self, v: &PictureView) -> bool {
+        self.bs().buf.name.as_deref() == Some(v.path.as_path())
+    }
+
+    /// **The picture is no longer on the glass** — the reader closed its buffer or opened
+    /// something else. The terminal's copy goes with it: nothing else can free it once the rows
+    /// that named it are gone.
+    fn close_picture(&mut self) {
+        if self.picture_view.take().is_some() {
+            self.sync_picture();
+        }
+    }
+
+    /// **A picture's box follows the frame**: a resize re-cuts the rows and the placement, which
+    /// is what a PNG's view does in `refresh_diff_view`. The pixels are the terminal's already.
+    fn recut_picture(&mut self) {
+        let proto = self.picture_proto();
+        let Some(mut v) = self.picture_view.take() else {
+            return;
+        };
+        let moved =
+            self.bs().buf.name.as_deref() == Some(v.path.as_path()) && v.picture.refit(self.text_w);
+        if moved {
+            self.bs_mut().buf.set_rows(picture_rows(&v.picture, proto));
+            let last = self.bs().buf.row_count().saturating_sub(1);
+            let c = self.bs().cursor;
+            self.bs_mut().cursor = Pos {
+                row: c.row.min(last),
+                col: c.col,
+            };
+            self.highlight_dirty = true;
+            self.adjust_scroll(self.text_h);
+            self.adjust_scroll_x();
+        }
+        self.picture_view = Some(v);
+        if moved {
+            self.sync_picture();
+        }
+    }
+
+    /// **The image id, when `row` is a picture view's row of placeholder cells.** The id is hashed
+    /// from the view's own name ([`picture_id`]) — the number the upload went out under — so the
+    /// renderer needs no table of what the terminal holds, which is the trick
+    /// [`crate::term::graphics::image_id`] already plays for a row of a document.
+    fn picture_row_id(&self, row: usize) -> Option<u32> {
+        let bs = self.bs();
+        if !bs.synthetic || !bs.read_only {
+            return None;
+        }
+        let name = bs.buf.name.as_deref()?;
+        crate::term::graphics::is_placeholder_row(bs.buf.row_opt(row)?).then(|| picture_id(name))
     }
 
     /// M-g: ask for a folder, defaulting to this buffer's own.
@@ -3623,6 +3819,7 @@ impl Editor {
         // **A view was of the buffer that was current**: opening a file gives that one up,
         // whether the new file lands in a new buffer or replaces it.
         self.close_view();
+        self.close_picture();
         let path = PathBuf::from(expand_tilde(path));
         // Already open in another buffer: switch to it. (Re-opening the
         // CURRENT file in single-buffer mode still re-reads it from disk —
@@ -3643,6 +3840,28 @@ impl Editor {
         // throughout, and a provider that renders columns has to be told how many.
         let cols = self.text_w as u32;
         let rows = self.text_h as u32;
+        // **A provider that DRAWS is asked first.** A plugin answering both hooks (the STL
+        // viewer draws pixels for a terminal that takes them and a character ramp for one that
+        // does not) has said which it means by answering the richer question, so the picture
+        // wins where the protocol can carry it and the text answer is the fallback.
+        for plugin in self.plugin.iter().chain(self.builtins.iter()) {
+            if !plugin.has("provider_picture") {
+                continue;
+            }
+            match plugin.provider_picture(&path.to_string_lossy(), cols, rows) {
+                Ok(Some(answer)) => {
+                    self.open_provider_picture(&path, &answer);
+                    return true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.plugin_note = Some(format!(
+                        "plugin {}: {e} — opened the usual way",
+                        plugin.path().display()
+                    ));
+                }
+            }
+        }
         let mut claim = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {
             if !plugin.has("provider_open") {
@@ -3861,6 +4080,9 @@ impl Editor {
         // The view that was up belonged to the buffer that was current (see `close_view`), and
         // a buffer that is a picture is shown as its picture, as opening one is.
         self.close_view();
+        // **A picture the terminal holds is one this buffer draws**: leaving it frees that, and
+        // coming back to it uploads again (the rows were never gone).
+        self.sync_picture();
         self.preview_if_picture();
     }
 
@@ -3932,6 +4154,7 @@ impl Editor {
     pub(crate) fn remove_current_buffer(&mut self) {
         // The view belonged to this buffer: it goes with it, pictures and all.
         self.close_view();
+        self.close_picture();
         if self.buffers.len() < 2 {
             return;
         }
@@ -4036,6 +4259,13 @@ impl Editor {
     /// slice of the frame's merged list — `ui::draw` walks the sorted list
     /// once per frame, so `all_diags` must not run per character).
     pub fn char_style_with(&self, p: Pos, diags: &[lsp::Diagnostic]) -> Style {
+        // **A picture view's cells are placeholders**: the terminal fills each one from its own
+        // copy of the image and reads *which* image from the cell's colours, so the row is drawn
+        // in [`crate::term::graphics::placeholder_style`] — and this comes first, because a
+        // selected or underlined placeholder is a cell the terminal no longer fills.
+        if let Some(id) = self.picture_row_id(p.row) {
+            return crate::term::graphics::placeholder_style(id);
+        }
         // Current search match: black on yellow (nano's default). Other
         // matches are not highlighted.
         if let Some((a, b)) = self.current_match_range()
@@ -4245,5 +4475,197 @@ impl Editor {
         } else {
             name
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view_ed(text: &str) -> Editor {
+        let mut buf = Buffer::new();
+        buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+        if buf.rows_is_empty() {
+            buf.push_row(Vec::new());
+        }
+        let mut ed = Editor::new(buf, config::Config::default());
+        ed.text_w = 120;
+        ed.text_h = 20;
+        ed.images = true;
+        ed
+    }
+
+    /// A provider's answer: `[width][height][rgb]`, the wire format the plugin half writes.
+    /// A plugin's answer, as `plugin::provider_picture` hands it over: the pixels and the size
+    /// they call themselves. The header is the plugin's to parse now, so a test that wants a
+    /// lying size builds the struct with the wrong `rgb` length.
+    fn plugin_pic(w: u32, h: u32) -> crate::plugin::Picture {
+        crate::plugin::Picture {
+            width: w,
+            height: h,
+            rgb: vec![0x20u8; (w * h * 3) as usize],
+        }
+    }
+
+    fn graphics(ed: &mut Editor) -> Vec<String> {
+        ed.take_graphics()
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect()
+    }
+
+    /// **A plugin's picture is a view**: read-only, its rows the placeholder cells the terminal
+    /// fills, and the pixels queued for the host before the frame that draws them — the same
+    /// shape a converted PNG's view has.
+    #[test]
+    fn a_provider_picture_is_the_rows_the_terminal_fills_and_the_bytes_that_fill_them() {
+        let mut ed = view_ed("the buffer this picture replaced");
+        let path = PathBuf::from("/tmp/part.stl");
+        let (w, h) = (64u32, 48u32);
+        assert!(ed.open_provider_picture(&path, &plugin_pic(w, h)));
+
+        // A view, not a document: read-only like a tail, and named after the path it claims.
+        assert!(ed.bs().read_only && ed.bs().synthetic);
+        assert_eq!(ed.bs().buf.name.as_deref(), Some(path.as_path()));
+        let cells = crate::term::graphics::image_cells(
+            Some(w),
+            Some(h),
+            crate::term::graphics::image_box(120),
+        );
+        let rows: Vec<Vec<char>> = ed.bs().buf.rows_vec();
+        assert_eq!(rows.len(), cells.1 as usize, "one row per row of the box");
+        assert!(
+            crate::term::graphics::is_placeholder_row(&rows[0]),
+            "{:?}",
+            rows[0]
+        );
+        assert_eq!(
+            crate::width::width(&rows[0], ed.tab_width),
+            cells.0 as usize
+        );
+
+        // **The cell's colour is what names the image to the terminal**, and it is the id the
+        // upload went out under — not a table the renderer has to be handed.
+        let id = crate::term::graphics::image_id(&format!("plugin:{}", path.display()));
+        let style = ed.char_style_with(Pos { row: 0, col: 0 }, &[]);
+        assert_eq!(style, crate::term::graphics::placeholder_style(id));
+        // A selection over a placeholder does not repaint it: a cell the terminal no longer
+        // recognises as its own is a picture with a hole in it.
+        ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
+        ed.bs_mut().cursor = Pos { row: 0, col: 3 };
+        assert_eq!(
+            ed.char_style_with(Pos { row: 0, col: 1 }, &[]),
+            crate::term::graphics::placeholder_style(id)
+        );
+        ed.bs_mut().mark = None;
+
+        // **Through a frame**, the row is drawn in that colour: the painter is the one that has
+        // to agree, because a picture whose cells come out plain is a picture that is not drawn.
+        let mut frame = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 24));
+        crate::ui::draw(&mut frame, &ed);
+        let colour = format!(
+            "38;2;{};{};{};58;5;1m",
+            (id >> 16) & 0xff,
+            (id >> 8) & 0xff,
+            id & 0xff
+        );
+        let emitted = frame.emit(crate::render::Palette::Colour);
+        assert!(
+            emitted[1].contains(&colour),
+            "the first text row: {:?}",
+            emitted[1]
+        );
+        assert!(emitted[1].contains('\u{10EEEE}'), "{:?}", emitted[1]);
+
+        // The terminal is told: the raw-RGB upload, then the placement the rows name.
+        let out = graphics(&mut ed);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(
+            out[0].starts_with(&format!("\x1b_Ga=t,f=24,i={id},s=64,v=48,q=2,m=")),
+            "{:?}",
+            &out[0][..40.min(out[0].len())]
+        );
+        assert!(out[1].contains("a=p,U=1") && out[1].contains(&format!("c={},", cells.0)));
+        // Nothing changed since, so nothing is sent again.
+        assert!(graphics(&mut ed).is_empty());
+    }
+
+    /// **A terminal that speaks no picture protocol is told why, and drawn nothing** — the
+    /// precedent a PNG already has: a placeholder nothing fills is garbage on the screen.
+    #[test]
+    fn a_terminal_without_pictures_refuses_a_provider_picture_instead_of_drawing_it() {
+        let mut ed = view_ed("still here");
+        ed.images = false;
+        let path = PathBuf::from("/tmp/part.stl");
+        assert!(ed.open_provider_picture(&path, &plugin_pic(8, 8)));
+        let said = &ed.status.as_ref().expect("one line saying why").text;
+        assert!(said.contains("does not take inline pictures"), "{said}");
+        // Nothing was opened, nothing was written, and the buffer is the one that was there.
+        assert_eq!(
+            ed.bs().buf.text(),
+            "still here\n",
+            "the text that was there"
+        );
+        assert!(!ed.bs().read_only);
+        assert!(graphics(&mut ed).is_empty());
+        // And the same answer from a host that named the protocol rather than only `images`.
+        let mut ed = view_ed("still here");
+        ed.set_pictures(Proto::None);
+        assert!(ed.open_provider_picture(&path, &plugin_pic(8, 8)));
+        assert!(ed.status.as_ref().unwrap().text.contains("does not take"));
+        assert_eq!(
+            ed.bs().buf.text(),
+            "still here\n",
+            "the text that was there"
+        );
+        assert!(graphics(&mut ed).is_empty());
+    }
+
+    /// **A payload whose size and pixels disagree is refused by name**: drawn, it is whatever the
+    /// bytes happen to be, held by the terminal until the id is deleted.
+    #[test]
+    fn a_payload_that_disagrees_with_its_pixels_is_refused_and_nothing_is_drawn() {
+        let mut ed = view_ed("still here");
+        let path = PathBuf::from("/tmp/part.stl");
+        let mut short = plugin_pic(16, 16);
+        short.rgb.pop();
+        assert!(ed.open_provider_picture(&path, &short));
+        let said = &ed.status.as_ref().expect("one line saying why").text;
+        assert!(said.contains("16×16") && said.contains("767"), "{said}");
+        assert_eq!(
+            ed.bs().buf.text(),
+            "still here\n",
+            "the text that was there"
+        );
+        assert!(ed.picture_view.is_none());
+        assert!(graphics(&mut ed).is_empty());
+    }
+
+    /// **A resize re-cuts the box and the terminal is given the placement alone**: the pixels are
+    /// the terminal's already, which is the whole reason the upload is not repeated.
+    #[test]
+    fn a_resize_re_cuts_a_providers_picture_and_sends_only_the_placement() {
+        let mut ed = view_ed("still here");
+        let path = PathBuf::from("/tmp/part.stl");
+        assert!(ed.open_provider_picture(&path, &plugin_pic(64, 48)));
+        let _ = graphics(&mut ed);
+        let before = ed.bs().buf.row(0).len();
+        assert!(ed.set_area(Area::new(0, 0, 40, 24)));
+        let out = graphics(&mut ed);
+        assert_eq!(out.len(), 1, "the placement only: {out:?}");
+        assert!(
+            out[0].contains("a=p,U=1") && out[0].contains("c=20,"),
+            "{out:?}"
+        );
+        assert_ne!(ed.bs().buf.row(0).len(), before, "the rows were re-cut");
+        assert!(graphics(&mut ed).is_empty(), "and then quiet again");
+        // **Leaving the view frees the terminal's copy**, with its data: nothing else can.
+        let mut ed = view_ed("still here");
+        assert!(ed.open_provider_picture(&path, &plugin_pic(64, 48)));
+        let _ = graphics(&mut ed);
+        ed.close_picture();
+        let out = graphics(&mut ed);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("a=d,d=I"), "{out:?}");
     }
 }

@@ -105,6 +105,14 @@ pub fn placeholder_style(id: u32) -> Style {
     })
 }
 
+/// **Whether a row of text is a picture's placeholder row** — the first cell of one is
+/// [`PLACEHOLDER`], which is what a buffer holding [`image_lines`]' cells holds. A renderer asks
+/// this to know a row is the terminal's to fill rather than text to draw, and styles it with
+/// [`placeholder_style`] so it knows which image.
+pub fn is_placeholder_row(row: &[char]) -> bool {
+    row.first() == Some(&PLACEHOLDER)
+}
+
 /// [`image_rows`] as lines for a cell buffer: the same clusters, one span each row, in
 /// [`placeholder_style`].
 pub fn image_lines(id: u32, cols: u32, rows: u32) -> Vec<Line> {
@@ -127,13 +135,36 @@ pub fn image_lines(id: u32, cols: u32, rows: u32) -> Vec<Line> {
 /// protocol's 4096-byte chunks, quiet (`q=2`) so the terminal sends nothing back to be typed.
 /// Where it is drawn is [`image_place`]'s, which a resize repeats without re-sending this.
 pub fn image_upload(id: u32, png_base64: &str) -> Vec<u8> {
+    upload(&format!("a=t,f=100,i={id}"), png_base64)
+}
+
+/// **The bytes that put raw RGB in the terminal's memory under `id`** — the protocol's `f=24`
+/// transmission, which is the one a plugin's provider can afford to answer: it draws pixels, and
+/// turning them into a PNG would be an encoder in the host for nothing. `s=<width>,v=<height>` is
+/// what the terminal measures the payload against, so the size and the bytes have to agree — the
+/// host refuses a payload where they do not before this is called
+/// ([`crate::term::Picture::of_rgb`]).
+///
+/// The chunking is the PNG's, character for character: 64×48 RGB is 9216 bytes, 12288 base64
+/// characters, exactly three of the protocol's chunks.
+pub fn image_upload_rgb(id: u32, width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    upload(
+        &format!("a=t,f=24,i={id},s={width},v={height}"),
+        &crate::term::terminal::base64(rgb),
+    )
+}
+
+/// **One transmission**: `head` is the first chunk's arguments (the action, the format, and the
+/// image's own), the data goes in the protocol's 4096-byte chunks, every chunk but the last says
+/// `m=1`, and `q=2` keeps the terminal from answering.
+fn upload(head: &str, base64: &str) -> Vec<u8> {
     let mut out = String::new();
-    let chunks: Vec<&[u8]> = png_base64.as_bytes().chunks(4096).collect();
+    let chunks: Vec<&[u8]> = base64.as_bytes().chunks(4096).collect();
     for (k, chunk) in chunks.iter().enumerate() {
         let more = if k + 1 < chunks.len() { 1 } else { 0 };
         let data = std::str::from_utf8(chunk).unwrap_or("");
         if k == 0 {
-            out.push_str(&format!("\x1b_Ga=t,f=100,i={id},q=2,m={more};{data}\x1b\\"));
+            out.push_str(&format!("\x1b_G{head},q=2,m={more};{data}\x1b\\"));
         } else {
             out.push_str(&format!("\x1b_Gm={more};{data}\x1b\\"));
         }
@@ -210,6 +241,49 @@ mod tests {
         assert_eq!(
             String::from_utf8(image_delete(9)).unwrap(),
             "\x1b_Ga=d,d=I,i=9,q=2\x1b\\"
+        );
+    }
+
+    /// **An RGB upload is the PNG's chunking with the pixel format's header**: `f=24` with the
+    /// size the payload is measured against, three chunks at 64×48 — the numbers the protocol's
+    /// own arithmetic gives (9216 bytes → 12288 base64 characters → 4096 × 3).
+    #[test]
+    fn an_rgb_upload_states_its_size_and_chunks_like_the_png() {
+        let (w, h) = (64u32, 48u32);
+        let rgb = vec![0x7fu8; (w * h * 3) as usize];
+        let up = String::from_utf8(image_upload_rgb(9, w, h, &rgb)).unwrap();
+        // The first chunk carries the whole header, quiet, and says another follows.
+        assert!(
+            up.starts_with("\x1b_Ga=t,f=24,i=9,s=64,v=48,q=2,m=1;"),
+            "{:?}",
+            &up[..40.min(up.len())]
+        );
+        // The data is the pixels, base64, in the protocol's 4096-byte chunks: 9216 bytes is
+        // 12288 characters and exactly three of them.
+        let chunks: Vec<&str> = up.split("\x1b\\").filter(|c| !c.is_empty()).collect();
+        assert_eq!(chunks.len(), 3, "three chunks");
+        fn data(c: &str) -> &str {
+            c.rsplit_once(';').unwrap().1
+        }
+        assert_eq!(data(chunks[0]).len(), 4096);
+        assert_eq!(data(chunks[1]).len(), 4096);
+        assert_eq!(data(chunks[2]).len(), 4096);
+        let joined: String = chunks.iter().map(|c| data(c)).collect();
+        assert_eq!(joined.len(), 12288);
+        assert_eq!(joined, crate::term::terminal::base64(&rgb), "the pixels");
+        // Every chunk but the last says another follows, and only the first has a header.
+        assert!(up.contains("\x1b_Gm=1;") && up.contains("\x1b_Gm=0;"));
+        assert_eq!(up.matches("a=t,").count(), 1, "one header, the first chunk");
+        // The PNG path chunks the same way: same count, same continuations, one other header.
+        let png = String::from_utf8(image_upload(9, &"A".repeat(12288))).unwrap();
+        assert_eq!(png.matches("\x1b_G").count(), 3);
+        assert!(png.starts_with("\x1b_Ga=t,f=100,i=9,q=2,m=1;"));
+        assert_eq!(png.matches("\x1b_Gm=").count(), 2, "the continuations");
+        // A payload that fits one chunk says so and carries no continuation at all.
+        let one = String::from_utf8(image_upload_rgb(9, 1, 1, &[1, 2, 3])).unwrap();
+        assert_eq!(
+            one, "\x1b_Ga=t,f=24,i=9,s=1,v=1,q=2,m=0;AQID\x1b\\",
+            "3 bytes is 4 base64 characters, one chunk"
         );
     }
 

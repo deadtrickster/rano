@@ -2,3 +2,6 @@
 
 # A plugin example builds its own wasm under examples/; the committed .wasm is the artifact.
 examples/*/target
+# Zig's own build outputs, for the examples that are not Rust.
+examples/*/.zig-cache
+examples/*/zig-out

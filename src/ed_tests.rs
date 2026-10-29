@@ -1371,7 +1371,10 @@ fn a_folder_opens_through_the_plugin() {
     ed.set_plugin_bytes_with(
         wasm,
         PathBuf::from("dired.wasm"),
-        crate::plugin::Capabilities { read_dir: true },
+        crate::plugin::Capabilities {
+            read_dir: true,
+            ..Default::default()
+        },
     );
     assert!(ed.open_at(&d.0, 1, None).is_ok());
     // The plugin answered: the buffer is a listing with the editor's own mode and keys.
@@ -1401,7 +1404,10 @@ fn a_folder_opens_through_the_typescript_plugin() {
     ed.set_plugin_bytes_with(
         wasm,
         PathBuf::from("dired-as.wasm"),
-        crate::plugin::Capabilities { read_dir: true },
+        crate::plugin::Capabilities {
+            read_dir: true,
+            ..Default::default()
+        },
     );
     assert!(ed.open_at(&d.0, 1, None).is_ok());
     assert_eq!(lines(&ed), vec!["one.txt"]);

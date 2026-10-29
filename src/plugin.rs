@@ -11,6 +11,8 @@
 //! (func (export "rano_alloc") (param i32) (result i32))     ;; reserve n bytes -> offset
 //! (func (export "on_open") (param i32 i32) (result i32))    ;; (in_ptr, in_len) -> block
 //! (func (export "on_save") (param i32 i32) (result i32))
+//! (func (export "provider_open") (param i32 i32 i32 i32) (result i32))    ;; path, cols, rows
+//! (func (export "provider_picture") (param i32 i32 i32 i32) (result i32)) ;; path, cols, rows
 //! ```
 //!
 //! **An `on_*` export is a text hook, a `provider_*` export takes the viewport too, and a host
@@ -21,7 +23,8 @@
 //! A hook returns the offset of an 8-byte **result block** — `out_ptr` and `out_len` as
 //! little-endian `u32`s — or `0xFFFFFFFF` for **unchanged**. Two integers at an offset is the one
 //! structure every language can write without agreeing on a struct layout, and the version export
-//! is what lets a v2 arrive without guessing.
+//! is what lets a v2 arrive without guessing. What the block's bytes *mean* is the hook's
+//! business: text for `on_*`/`provider_open`, an RGB picture for [`Plugin::provider_picture`].
 //!
 //! # What this file is not
 //!
@@ -30,11 +33,11 @@
 //! `editor.rs`/`buffer.rs`. This module answers one question — "run this hook over this text" —
 //! and every way that can fail is a `String` naming the reason.
 //!
-//! Not a sandbox the guest can leave: there are **no imports at all** in stage 1 (a module that
-//! imports anything fails to instantiate, and the failure names the import), the guest gets
-//! [`HOOK_FUEL`] fuel per call, its memory may not grow past [`HOOK_MEMORY`], and the text each way
-//! is capped at [`MAX_HOOK_BYTES`]. A capability (the first would be `read-dir`, for a folder
-//! listing as a plugin) is a deliberate addition, not a switch.
+//! Not a sandbox the guest can leave: a module imports **exactly what the config granted** and
+//! nothing by default — a module that imports anything else fails to instantiate, naming the
+//! import. The guest gets [`HOOK_FUEL`] fuel per call, its memory may not grow past
+//! [`HOOK_MEMORY`], and the bytes each way are capped at [`MAX_HOOK_BYTES`]. A capability
+//! ([`Capabilities`]) is a deliberate addition with a test, not a switch.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,10 +65,9 @@ pub const ABI: i32 = 1;
 /// The sentinel a hook returns to mean "leave the text as it is".
 const UNCHANGED: i32 = -1;
 
-/// **What the host lets a plugin reach beyond its own text.** Stage 1 grants nothing by default;
-/// a folder viewer needs `read-dir`, and granting it is a deliberate act — the config says
-/// `capabilities = ["read-dir"]`, and a module that imports anything else is refused at
-/// instantiation, by name.
+/// **What the host lets a plugin reach beyond its own text.** Nothing is granted by default; the
+/// config says `capabilities = ["read-dir"]`, and a module that imports anything else is refused
+/// at instantiation, by name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// The `rano.read_dir` import: **the text of a folder's listing**, rendered by the host with
@@ -73,17 +75,49 @@ pub struct Capabilities {
     /// first and marked `name/`). The plugin decides *whether* and *when* to ask; the format is
     /// the host's, so a provider and the Rust listing cannot disagree about what a row means.
     pub read_dir: bool,
+    /// The `rano.read_file` import: **the bytes of the one file this call is about**, because a
+    /// provider is handed a path and a viewer has to read it itself.
+    ///
+    /// It is not a filesystem door. The host answers only for the path it asked the hook about,
+    /// resolved first, so `..`, a relative spelling and a symlink all land on the same file and
+    /// any *other* path — `/etc/shadow` included — is refused. A text hook is asked about a text
+    /// rather than a path, so it has no file to scope to and `read_file` refuses there too.
+    pub read_file: bool,
 }
 
 impl Capabilities {
     /// From the config's `capabilities = ["read-dir"]` list: names outside this set are ignored
     /// there (a misspelt capability is not a grant), and the empty list grants nothing.
     pub fn from_names(names: &[String]) -> Capabilities {
+        let has = |name: &str| names.iter().any(|n| n.trim().eq_ignore_ascii_case(name));
         Capabilities {
-            read_dir: names
-                .iter()
-                .any(|n| n.trim().eq_ignore_ascii_case("read-dir")),
+            read_dir: has("read-dir"),
+            read_file: has("read-file"),
         }
+    }
+}
+
+/// **A picture a plugin answered**: `width`×`height` RGB pixels, row-major, three bytes each.
+///
+/// The ABI's payload is `[width u32 LE][height u32 LE][rgb]` — the same result block as every
+/// other hook, with a header the host can check. [`Plugin::provider_picture`] decodes and validates
+/// it, so a host that draws one never has to look at bytes it has not had checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 3` bytes, never more than [`MAX_HOOK_BYTES`].
+    pub rgb: Vec<u8>,
+}
+
+impl Picture {
+    /// One pixel, or `None` outside the picture.
+    pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let at = (y as usize * self.width as usize + x as usize) * 3;
+        Some([self.rgb[at], self.rgb[at + 1], self.rgb[at + 2]])
     }
 }
 
@@ -166,7 +200,7 @@ impl Plugin {
         // **The ABI is checked by calling it**, not by looking for the export: a module that
         // exports the name and answers 2 is a v2 module and must not be run as v1.
         let mut store = Self::store(&engine);
-        let instance = Self::linker(&engine, caps)
+        let instance = Self::linker(&engine, caps, None)
             .instantiate(&mut store, &module)
             .map_err(|e| match Self::refusal(&e) {
                 Some(why) => why,
@@ -276,9 +310,75 @@ impl Plugin {
         self.call_sized("provider_open", path, cols as i32, rows as i32)
     }
 
+    /// **`provider_picture`: the picture this path should be drawn as**, or `None` when the plugin
+    /// does not claim it. The call shape is [`Self::provider_open`]'s — `(path, cols, rows)` and
+    /// the same result block — and the bytes are `[width u32 LE][height u32 LE][rgb]` rather than
+    /// text: the hook for a viewer that is not a text view.
+    ///
+    /// **The bounds are the host's, not the plugin's to widen.** `width * height * 3` may not pass
+    /// [`MAX_HOOK_BYTES`], and the header must describe exactly the bytes that came with it. An
+    /// oversized or self-contradictory answer is an error — refused, never clipped to fit, because
+    /// a picture silently cropped is a picture that lies about what the file looks like.
+    pub fn provider_picture(
+        &self,
+        path: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Option<Picture>, String> {
+        let Some(bytes) =
+            self.call_bytes("provider_picture", path, Some((cols as i32, rows as i32)))?
+        else {
+            return Ok(None);
+        };
+        Self::decode_picture(&bytes)
+    }
+
+    /// The picture payload, checked: a 12-byte header, a size inside the cap, and exactly the RGB
+    /// bytes the header promised.
+    fn decode_picture(bytes: &[u8]) -> Result<Option<Picture>, String> {
+        if bytes.len() < 12 {
+            return Err(format!(
+                "`provider_picture` answered {} bytes, too short for the 12-byte header",
+                bytes.len()
+            ));
+        }
+        let width = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let height = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if width == 0 || height == 0 {
+            return Err(format!(
+                "`provider_picture` answered a {width}x{height} picture"
+            ));
+        }
+        let want = u64::from(width) * u64::from(height) * 3;
+        if want > MAX_HOOK_BYTES as u64 {
+            return Err(format!(
+                "`provider_picture` answered a {width}x{height} picture, {} MiB of RGB, above the {} MiB cap",
+                want >> 20,
+                MAX_HOOK_BYTES >> 20
+            ));
+        }
+        let want = want as usize;
+        if bytes.len() != 12 + want {
+            return Err(format!(
+                "`provider_picture` answered {} bytes for a {width}x{height} picture (wanted {})",
+                bytes.len(),
+                12 + want
+            ));
+        }
+        Ok(Some(Picture {
+            width,
+            height,
+            rgb: bytes[12..].to_vec(),
+        }))
+    }
+
     /// The linker a module is instantiated with: **one import per granted capability, and nothing
     /// else**. A module that imports anything not here fails with the import named.
-    fn linker(engine: &Engine, caps: Capabilities) -> Linker<StoreLimits> {
+    ///
+    /// `scope` is the path this call is about, and it is what [`Capabilities::read_file`] is
+    /// scoped to: the host resolves it once, here, and the import answers for that file and no
+    /// other.
+    fn linker(engine: &Engine, caps: Capabilities, scope: Option<PathBuf>) -> Linker<StoreLimits> {
         let mut linker = Linker::new(engine);
         if caps.read_dir {
             // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed` for a
@@ -291,32 +391,51 @@ impl Plugin {
                      c: u32,
                      d: u32|
              -> i32 {
-                let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(path) = guest_path(&mut caller, a, b) else {
                     return i32::MIN;
                 };
-                let data = mem.data(&caller);
-                let (Ok(lo), Ok(hi)) = (usize::try_from(a), usize::try_from(b)) else {
-                    return i32::MIN;
-                };
-                let Some(hi) = lo.checked_add(hi).filter(|e| *e <= data.len()) else {
-                    return i32::MIN;
-                };
-                let Ok(path) = std::str::from_utf8(&data[lo..hi]) else {
-                    return i32::MIN;
-                };
-                let Ok(rows) = crate::dirview::rows(Path::new(path)) else {
+                let Ok(rows) = crate::dirview::rows(&path) else {
                     return i32::MIN;
                 };
                 let text = format!("{}\n", rows.join("\n"));
-                let out = usize::try_from(c).unwrap_or(usize::MAX);
-                if d as usize >= text.len() && out.saturating_add(text.len()) <= data.len() {
-                    let mem = mem.data_mut(&mut caller);
-                    mem[out..out + text.len()].copy_from_slice(text.as_bytes());
-                    return text.len() as i32;
-                }
-                -(text.len() as i32)
+                write_guest(&mut caller, c, d, text.as_bytes())
             };
             let _ = linker.func_wrap("rano", "read_dir", f);
+        }
+        if caps.read_file {
+            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`, the same shape as `read_dir` and
+            // the same answers. What it will not do is read *any* path: the grant is the one file
+            // this call is about, resolved so that `..`, a relative spelling and a symlink all
+            // land on it, and anything else is `i32::MIN`.
+            let want = scope.and_then(|p| std::fs::canonicalize(p).ok());
+            let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
+                          a: u32,
+                          b: u32,
+                          c: u32,
+                          d: u32|
+                  -> i32 {
+                let Some(path) = guest_path(&mut caller, a, b) else {
+                    return i32::MIN;
+                };
+                let Some(want) = want.as_deref() else {
+                    return i32::MIN;
+                };
+                let Ok(asked) = std::fs::canonicalize(&path) else {
+                    return i32::MIN;
+                };
+                if asked != want {
+                    return i32::MIN;
+                }
+                let Ok(bytes) = std::fs::read(&asked) else {
+                    return i32::MIN;
+                };
+                // Over the cap is a refusal, not a clip: half a file is not the file.
+                if bytes.len() > MAX_HOOK_BYTES {
+                    return i32::MIN;
+                }
+                write_guest(&mut caller, c, d, &bytes)
+            };
+            let _ = linker.func_wrap("rano", "read_file", f);
         }
         linker
     }
@@ -348,6 +467,22 @@ impl Plugin {
         text: &str,
         viewport: Option<(i32, i32)>,
     ) -> Result<Option<String>, String> {
+        let Some(bytes) = self.call_bytes(hook, text, viewport)? else {
+            return Ok(None);
+        };
+        let out = std::str::from_utf8(&bytes)
+            .map_err(|_| format!("`{hook}` answered bytes that are not text"))?;
+        Ok(Some(out.to_string()))
+    }
+
+    /// **One hook call, in bytes**: the same engine work for a text hook and for a picture, which
+    /// differ only in what the host makes of the answer.
+    fn call_bytes(
+        &self,
+        hook: &str,
+        text: &str,
+        viewport: Option<(i32, i32)>,
+    ) -> Result<Option<Vec<u8>>, String> {
         // A call that never ran a guest must not report the previous call's fuel as its own.
         self.fuel.store(0, Ordering::Relaxed);
         if !self.has(hook) {
@@ -360,8 +495,12 @@ impl Plugin {
                 MAX_HOOK_BYTES >> 20
             ));
         }
+        // **What `read_file` may answer for**: a call with a viewport is a provider, and a
+        // provider's input is a path — so that path is the one file this call is about. A text
+        // hook is asked about a text, so it has no file to scope to and the import refuses.
+        let scope = viewport.map(|_| PathBuf::from(text));
         let mut store = Self::store(&self.engine);
-        let instance = Self::linker(&self.engine, self.caps)
+        let instance = Self::linker(&self.engine, self.caps, scope)
             .instantiate(&mut store, &self.module)
             .map_err(|e| match Self::refusal(&e) {
                 Some(why) => why,
@@ -434,16 +573,14 @@ impl Plugin {
             .checked_add(out_len)
             .filter(|end| *end <= data.len())
             .ok_or_else(|| format!("`{hook}` answered {out_len} bytes outside its memory"))?;
-        let out = std::str::from_utf8(&data[out_ptr..end])
-            .map_err(|_| format!("`{hook}` answered bytes that are not text"))?;
-        if out.len() > MAX_HOOK_BYTES {
+        if out_len > MAX_HOOK_BYTES {
             return Err(format!(
                 "`{hook}` answered {} MiB, above the {} MiB cap",
-                out.len() >> 20,
+                out_len >> 20,
                 MAX_HOOK_BYTES >> 20
             ));
         }
-        Ok(Some(out.to_string()))
+        Ok(Some(data[out_ptr..end].to_vec()))
     }
 
     /// A store with the budget this host allows a hook: fuel, and a memory cap the guest's own
@@ -464,9 +601,7 @@ impl Plugin {
     fn refusal(e: &wasmtime::Error) -> Option<String> {
         let text = e.to_string();
         if text.contains("unknown import") || text.contains("incompatible import type") {
-            Some(format!(
-                "imports are not granted to a plugin in stage 1 ({text})"
-            ))
+            Some(format!("imports are not granted to this plugin ({text})"))
         } else if text.contains("out of fuel") {
             Some("out of fuel".to_string())
         } else {
@@ -482,6 +617,44 @@ impl Plugin {
             format!("{} ({})", self.path.display(), self.hooks.join(", "))
         }
     }
+}
+
+/// The path a capability import was handed, read out of the guest's own memory: a range inside
+/// `memory` that is text, or nothing.
+fn guest_path(
+    caller: &mut wasmtime::Caller<'_, StoreLimits>,
+    ptr: u32,
+    len: u32,
+) -> Option<PathBuf> {
+    let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+        return None;
+    };
+    let data = mem.data(&*caller);
+    let lo = usize::try_from(ptr).ok()?;
+    let len = usize::try_from(len).ok()?;
+    let hi = lo.checked_add(len).filter(|end| *end <= data.len())?;
+    let text = std::str::from_utf8(&data[lo..hi]).ok()?;
+    Some(PathBuf::from(text))
+}
+
+/// A capability import's answer: the bytes written, `-needed` when the guest's buffer is too
+/// small for them, `i32::MIN` when there is no guest memory to write into at all.
+fn write_guest(
+    caller: &mut wasmtime::Caller<'_, StoreLimits>,
+    out_ptr: u32,
+    out_cap: u32,
+    bytes: &[u8],
+) -> i32 {
+    let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+        return i32::MIN;
+    };
+    let out = usize::try_from(out_ptr).unwrap_or(usize::MAX);
+    let room = mem.data(&*caller).len();
+    if out_cap as usize >= bytes.len() && out.saturating_add(bytes.len()) <= room {
+        mem.data_mut(caller)[out..out + bytes.len()].copy_from_slice(bytes);
+        return bytes.len() as i32;
+    }
+    -(bytes.len() as i32)
 }
 
 /// A WAT fixture, compiled with the `wat` dev-dependency. Tests only: production loads `.wasm`
@@ -655,7 +828,10 @@ mod tests {
         let p = Plugin::from_bytes_with(
             wasm,
             PathBuf::from("dired.wasm"),
-            Capabilities { read_dir: true },
+            Capabilities {
+                read_dir: true,
+                ..Default::default()
+            },
         )
         .expect("loads with the grant");
         assert_eq!(p.hooks(), vec!["provider_open".to_string()]);
@@ -736,7 +912,10 @@ mod tests {
         let p = Plugin::from_bytes_with(
             wasm,
             PathBuf::from("dired-as.wasm"),
-            Capabilities { read_dir: true },
+            Capabilities {
+                read_dir: true,
+                ..Default::default()
+            },
         )
         .expect("loads with the grant");
         assert_eq!(p.hooks(), vec!["provider_open".to_string()]);
@@ -896,5 +1075,398 @@ mod tests {
         assert!(burnt > 0 && burnt <= HOOK_FUEL, "{burnt}");
         p.call("on_open", "hello").unwrap();
         assert_eq!(p.last_fuel(), 0, "a hook it does not export is not a call");
+    }
+
+    // -- `read_file`, and what it will not read ----------------------------------------------
+
+    /// A module with the `read_file` import and two answers, `ok` and `no`, so a test reads the
+    /// host's decision rather than a plugin's opinion.
+    const READ_FILE: &str = r#"
+        (import "rano" "read_file" (func $read_file (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 4)
+        (func (export "rano_abi") (result i32) i32.const 1)
+        (func (export "rano_alloc") (param i32) (result i32) i32.const 1024)
+        (data (i32.const 6000) "ok")
+        (data (i32.const 6010) "no")
+    "#;
+
+    fn read_file_caps() -> Capabilities {
+        Capabilities {
+            read_file: true,
+            ..Default::default()
+        }
+    }
+
+    /// A fresh directory for a test, named so two runs cannot collide.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rano_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A provider that reads the path it was handed — the one file the call is about — and answers
+    /// those bytes, or `no` when the host refused.
+    fn self_reader() -> Plugin {
+        let src = format!(
+            r#"{READ_FILE}
+            (func (export "provider_open") (param $p i32) (param $l i32) (param i32) (param i32) (result i32)
+              (local $got i32)
+              (local.set $got
+                (call $read_file (local.get $p) (local.get $l) (i32.const 7000) (i32.const 2048)))
+              (if (i32.le_s (local.get $got) (i32.const 0))
+                (then
+                  (i32.store (i32.const 8000) (i32.const 6010))
+                  (i32.store (i32.const 8004) (i32.const 2)))
+                (else
+                  (i32.store (i32.const 8000) (i32.const 7000))
+                  (i32.store (i32.const 8004) (local.get $got))))
+              (i32.const 8000))"#
+        );
+        Plugin::from_bytes_with(
+            &wat(&src),
+            PathBuf::from("read-file.wasm"),
+            read_file_caps(),
+        )
+        .expect("loads with the grant")
+    }
+
+    /// A provider that reads one path compiled into it, whatever path the call was about.
+    fn other_reader(path: &str) -> Plugin {
+        let src = format!(
+            r#"{READ_FILE}
+            (data (i32.const 4096) "{path}")
+            (func (export "provider_open") (param i32 i32 i32 i32) (result i32)
+              (local $got i32)
+              (local.set $got
+                (call $read_file (i32.const 4096) (i32.const {len}) (i32.const 7000) (i32.const 2048)))
+              (if (i32.le_s (local.get $got) (i32.const 0))
+                (then
+                  (i32.store (i32.const 8000) (i32.const 6010))
+                  (i32.store (i32.const 8004) (i32.const 2)))
+                (else
+                  (i32.store (i32.const 8000) (i32.const 6000))
+                  (i32.store (i32.const 8004) (i32.const 2))))
+              (i32.const 8000))"#,
+            len = path.len()
+        );
+        Plugin::from_bytes_with(
+            &wat(&src),
+            PathBuf::from("read-file.wasm"),
+            read_file_caps(),
+        )
+        .expect("loads with the grant")
+    }
+
+    #[test]
+    fn read_file_is_refused_without_the_grant() {
+        let src = format!("(module {READ_FILE})");
+        let e = Plugin::from_bytes(&wat(&src), PathBuf::from("read-file.wasm")).unwrap_err();
+        assert!(
+            e.contains("imports are not granted") && e.contains("read_file"),
+            "{e}"
+        );
+    }
+
+    /// **The grant is the file the call is about, not a filesystem door.** The same module, called
+    /// the same way, is answered for the path it was handed and refused for every other one — a
+    /// sibling, `/etc/shadow`, or a path a text hook would have liked to read.
+    #[test]
+    fn read_file_answers_only_for_the_file_the_call_was_about() {
+        let dir = temp_dir("read_file_scope");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "A\n").unwrap();
+        std::fs::write(&b, "B\n").unwrap();
+        let a_text = a.to_string_lossy().to_string();
+
+        // The file the call is about: answered, byte for byte.
+        let p = self_reader();
+        assert_eq!(
+            p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
+            Some("A\n")
+        );
+
+        // A sibling in the same folder: refused, because it is not the file that was asked about.
+        let p = other_reader(&b.to_string_lossy());
+        assert_eq!(
+            p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
+            Some("no"),
+            "a granted read_file must not read a path the call is not about"
+        );
+
+        // A file outside the reader's world entirely: the same refusal.
+        let p = other_reader("/etc/shadow");
+        assert_eq!(
+            p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
+            Some("no"),
+            "read-file is not a filesystem capability"
+        );
+
+        // Another spelling of the same file resolves to it, and is answered.
+        let dots = format!(
+            "{}/../{}/a.txt",
+            dir.display(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        let p = other_reader(&dots);
+        assert_eq!(
+            p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
+            Some("ok"),
+            "`..` and `.` spell the same file"
+        );
+
+        // A text hook is asked about a text, not a path, so it has no file to scope to.
+        let src = format!(
+            r#"{READ_FILE}
+            (data (i32.const 4096) "{a_text}")
+            (func (export "on_open") (param i32 i32) (result i32)
+              (local $got i32)
+              (local.set $got
+                (call $read_file (i32.const 4096) (i32.const {len}) (i32.const 7000) (i32.const 2048)))
+              (if (i32.le_s (local.get $got) (i32.const 0))
+                (then
+                  (i32.store (i32.const 8000) (i32.const 6010))
+                  (i32.store (i32.const 8004) (i32.const 2)))
+                (else
+                  (i32.store (i32.const 8000) (i32.const 6000))
+                  (i32.store (i32.const 8004) (i32.const 2))))
+              (i32.const 8000))"#,
+            len = a_text.len()
+        );
+        let p = Plugin::from_bytes_with(
+            &wat(&src),
+            PathBuf::from("read-file.wasm"),
+            read_file_caps(),
+        )
+        .expect("loads with the grant");
+        assert_eq!(
+            p.call("on_open", "some text").unwrap().as_deref(),
+            Some("no"),
+            "a text hook has no file to read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file above [`MAX_HOOK_BYTES`] is refused rather than handed over in pieces: the guest
+    /// asked for a buffer it cannot fill, and the host says no instead of clipping.
+    #[test]
+    fn read_file_will_not_answer_a_file_above_the_cap() {
+        let dir = temp_dir("read_file_cap");
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![b'x'; MAX_HOOK_BYTES + 1]).unwrap();
+        let p = self_reader();
+        assert_eq!(
+            p.provider_open(&big.to_string_lossy(), 80, 24)
+                .unwrap()
+                .as_deref(),
+            Some("no")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- `provider_picture` ------------------------------------------------------------------
+
+    /// The fixture, from the crate root, so the test does not depend on the working directory.
+    fn stl_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugin-stl/fixtures")
+            .join(name)
+    }
+
+    fn stl_plugin() -> Plugin {
+        Plugin::from_bytes_with(
+            include_bytes!("../examples/plugin-stl/plugin.wasm"),
+            PathBuf::from("plugin-stl.wasm"),
+            read_file_caps(),
+        )
+        .expect("the STL example loads with read-file")
+    }
+
+    /// **The Zig example, through both new capabilities**: refused without `read-file`, and with
+    /// it a `.stl` path is a picture and, for a terminal with no graphics protocol, a character
+    /// ramp. Anything else is "not mine".
+    #[test]
+    fn the_stl_example_needs_read_file_and_then_renders() {
+        let wasm: &[u8] = include_bytes!("../examples/plugin-stl/plugin.wasm");
+        let e = Plugin::from_bytes_with(wasm, PathBuf::from("stl.wasm"), Capabilities::default())
+            .unwrap_err();
+        assert!(
+            e.contains("imports are not granted") && e.contains("read_file"),
+            "{e}"
+        );
+
+        let p = stl_plugin();
+        assert_eq!(
+            p.hooks(),
+            vec!["provider_open".to_string(), "provider_picture".to_string()]
+        );
+
+        // Not an STL: not mine, either way.
+        let txt = stl_fixture("cube.stl").with_extension("txt");
+        assert_eq!(
+            p.provider_picture(&txt.to_string_lossy(), 80, 24).unwrap(),
+            None
+        );
+        assert_eq!(
+            p.provider_open(&txt.to_string_lossy(), 80, 24).unwrap(),
+            None
+        );
+
+        // An STL: a well-formed header, two pixels per cell, and a cube actually drawn.
+        let ascii = stl_fixture("cube.stl");
+        let picture = p
+            .provider_picture(&ascii.to_string_lossy(), 80, 24)
+            .unwrap()
+            .expect("a cube is claimed");
+        assert_eq!(
+            (picture.width, picture.height),
+            (80, 48),
+            "2 pixels per cell"
+        );
+        assert_eq!(picture.rgb.len(), 80 * 48 * 3);
+        let corner = picture.pixel(0, 0).unwrap();
+        let lit = (0..48u32)
+            .flat_map(|y| (0..80u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| picture.pixel(x, y).unwrap() != corner)
+            .count();
+        assert!(lit > 100, "the cube should be drawn: {lit} pixels lit");
+        eprintln!("provider_picture fuel: {}", p.last_fuel());
+
+        // The binary flavour of the same cube: the same picture, so both readers agree.
+        let binary = p
+            .provider_picture(&stl_fixture("cube-binary.stl").to_string_lossy(), 80, 24)
+            .unwrap()
+            .expect("claimed");
+        assert_eq!(binary, picture, "binary and ASCII parse to one cube");
+
+        // A viewport no plugin could fill is refused by the plugin itself, not clipped.
+        assert_eq!(
+            p.provider_picture(&ascii.to_string_lossy(), 4000, 4000)
+                .unwrap(),
+            None,
+            "a viewport above the plugin's own cap is not mine"
+        );
+
+        // The fallback: one character per cell, for a terminal with no graphics protocol.
+        let text = p
+            .provider_open(&ascii.to_string_lossy(), 40, 12)
+            .unwrap()
+            .expect("claimed");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 12, "{text}");
+        assert!(
+            lines.iter().all(|l| l.chars().count() == 40),
+            "a line per row of 40 cells: {text}"
+        );
+        assert!(
+            text.chars().any(|c| c != ' ' && c != '\n'),
+            "the ramp should draw something: {text}"
+        );
+        eprintln!("provider_open fuel: {}", p.last_fuel());
+    }
+
+    /// A `provider_picture` that answers a header and nothing else, so the bounds can be tested
+    /// without a renderer.
+    fn picture_answer(width: u32, height: u32, out_len: u32) -> Plugin {
+        plugin(&format!(
+            r#"{BASE}
+            (func (export "provider_picture") (param i32 i32 i32 i32) (result i32)
+              (i32.store (i32.const 4096) (i32.const {width}))
+              (i32.store (i32.const 4100) (i32.const {height}))
+              (i32.store (i32.const 8192) (i32.const 4096))
+              (i32.store (i32.const 8196) (i32.const {out_len}))
+              i32.const 8192)"#
+        ))
+    }
+
+    /// **Refused, never clipped**: 4096×4096 is 48 MiB of RGB, and the header alone says so.
+    #[test]
+    fn an_oversized_picture_is_refused_rather_than_clipped() {
+        let p = picture_answer(4096, 4096, 12);
+        let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
+        assert!(e.contains("cap") && e.contains("4096x4096"), "{e}");
+    }
+
+    /// A header is a claim about the bytes that follow it, and a claim that does not hold is an
+    /// error rather than a picture the host has to guess the shape of.
+    #[test]
+    fn a_picture_header_that_disagrees_with_its_bytes_is_refused() {
+        let p = picture_answer(2, 2, 12);
+        let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
+        assert!(e.contains("wanted 24"), "{e}");
+        // The same header with its bytes is a picture.
+        let p = picture_answer(2, 2, 24);
+        let pic = p
+            .provider_picture("/tmp/model.stl", 80, 24)
+            .unwrap()
+            .expect("claimed");
+        assert_eq!((pic.width, pic.height, pic.rgb.len()), (2, 2, 12));
+    }
+
+    #[test]
+    fn a_picture_shorter_than_its_header_is_refused() {
+        let p = picture_answer(2, 2, 8);
+        let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
+        assert!(e.contains("too short"), "{e}");
+    }
+
+    #[test]
+    fn a_picture_with_no_pixels_is_refused() {
+        let p = picture_answer(0, 4, 12);
+        let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
+        assert!(e.contains("0x4"), "{e}");
+    }
+
+    /// A plugin that answers no picture claims nothing — the hook is found by name like any other.
+    #[test]
+    fn a_plugin_with_no_picture_hook_claims_nothing() {
+        let p = Plugin::from_bytes(
+            include_bytes!("../examples/plugin-upper/plugin.wasm"),
+            PathBuf::from("upper.wasm"),
+        )
+        .expect("loads");
+        assert_eq!(p.provider_picture("/tmp/model.stl", 80, 24).unwrap(), None);
+    }
+
+    /// **The fuel budget is the call's, whatever hook it is**: a picture that never finishes ends
+    /// in `OutOfFuel` rather than in a hung editor, and the whole budget is what it burnt.
+    #[test]
+    fn a_picture_that_never_finishes_runs_out_of_fuel() {
+        let p = plugin(&format!(
+            r#"{BASE}
+            (func (export "provider_picture") (param i32 i32 i32 i32) (result i32)
+              (loop $l (br $l)) (i32.const -1))"#
+        ));
+        let t = std::time::Instant::now();
+        let e = p.provider_picture("/tmp/model.stl", 80, 24).unwrap_err();
+        assert!(e.contains("fuel") || e.contains("trapped"), "{e}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "bounded");
+        assert_eq!(p.last_fuel(), HOOK_FUEL, "the whole budget was burnt");
+    }
+
+    /// **The memory cap is the call's too.** The guest tries to grow 125 MiB and answers a 1×1
+    /// picture when the limiter says no — which it does, so the picture comes back rather than a
+    /// grown memory.
+    #[test]
+    fn a_picture_hook_cannot_grow_past_the_memory_cap() {
+        let p = plugin(&format!(
+            r#"{BASE}
+            (func (export "provider_picture") (param i32 i32 i32 i32) (result i32)
+              (if (i32.eq (memory.grow (i32.const 2000)) (i32.const -1))
+                (then
+                  (i32.store (i32.const 4096) (i32.const 1))
+                  (i32.store (i32.const 4100) (i32.const 1))
+                  (i32.store (i32.const 8192) (i32.const 4096))
+                  (i32.store (i32.const 8196) (i32.const 15)))
+                (else))
+              (i32.const 8192))"#
+        ));
+        let pic = p
+            .provider_picture("/tmp/model.stl", 80, 24)
+            .unwrap()
+            .expect("the limiter refused the growth, so the 1x1 picture is the answer");
+        assert_eq!((pic.width, pic.height), (1, 1));
     }
 }

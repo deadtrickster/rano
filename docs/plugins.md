@@ -11,6 +11,8 @@ text and answers text. Nothing else is imported unless a capability grants it.
 (func (export "rano_alloc") (param i32) (result i32)) ;; reserve n bytes -> offset
 (func (export "on_open") (param i32 i32) (result i32)) ;; (in_ptr, in_len) -> result block
 (func (export "on_save") (param i32 i32) (result i32))
+(func (export "provider_open") (param i32 i32 i32 i32) (result i32))    ;; (path, cols, rows)
+(func (export "provider_picture") (param i32 i32 i32 i32) (result i32)) ;; (path, cols, rows)
 ```
 
 A hook returns the offset of two little-endian `u32`s, `{out_ptr, out_len}`, or `0xFFFFFFFF`
@@ -18,11 +20,13 @@ for "leave it alone". The hooks are found by name, so a later rano can add one w
 changing. An `on_*` export is a text hook. A `provider_*` export takes the viewport too.
 
 `on_open` runs when a file's text is read. `on_save` runs when a buffer is written.
+`provider_open` is asked first when a path is opened, and answers the text the path should open
+as. `provider_picture` answers an RGB picture instead — see [A picture](#a-picture).
 
 ## What the host guarantees
 
 - 50 million units of fuel and 64 MiB of guest memory per call.
-- 16 MiB of text in and out, each way.
+- 16 MiB of text in and out, each way — and 16 MiB of RGB in a picture.
 - A fresh instance per call, so nothing accumulates between saves.
 - The answer to `on_save` replaces the buffer as one undo step, so the file and the screen
   hold the same text. A second save of unchanged text writes the same bytes.
@@ -42,6 +46,16 @@ A plugin imports nothing by default. `capabilities = ["read-dir"]` grants one im
 rendered by the host with the same rules as rano's own listing, so a plugin view and the
 built-in dired cannot disagree about what a row means. It answers the bytes written, `-needed`
 for a buffer too small, or `i32::MIN` for an error.
+
+`capabilities = ["read-file"]` grants a second, `rano.read_file` with the same shape and the
+same answers: the bytes of a file. **It is scoped to one file.** A provider is handed a path,
+so a viewer has to read the bytes itself — but the host answers only for *the path that call
+was about*, resolved first, so `..`, a relative spelling and a symlink all land on that file and
+any other path is refused with `i32::MIN`. A plugin granted `read-file` cannot read
+`/etc/shadow`, a sibling of the file it was asked about, or anything else because it felt like
+it. A text hook (`on_open`, `on_save`) is asked about a text rather than a path, so it has no
+file to scope to and `read_file` refuses there too. A file above 16 MiB is refused rather than
+handed over in pieces.
 
 A module that imports anything ungranted is refused at load, by name. A misspelt capability
 grants nothing.
@@ -70,6 +84,51 @@ export function provider_open(ptr: u32, len: u32, _cols: u32, _rows: u32): u32 {
 A provider is told the viewport (`cols`, `rows`), so a plugin view is adaptive at any terminal
 width. `RET`, `-`, `r` and `q` still work: the plugin decides the content, the editor keeps
 the navigation.
+
+## A picture
+
+Some things are not text. `provider_picture(path_ptr, path_len, cols, rows)` is the same call
+as `provider_open` — same arguments, same result block, `0xFFFFFFFF` for "not mine" — and its
+answer is an RGB picture rather than a text:
+
+```
+[width: u32 LE][height: u32 LE][rgb: width * height * 3]
+```
+
+Pixels are row-major, three bytes each, top row first. `width * height * 3` may not pass 16 MiB,
+and the header must describe exactly the bytes that came with it: a picture that is oversized or
+that disagrees with its own header is refused, never clipped to fit, because a picture silently
+cropped is a picture that lies about what the file looks like. A host that draws pictures asks
+`provider_picture` before `provider_open` for the same path; a host that cannot draw one asks
+only `provider_open`, so a viewer should answer both and let the host choose.
+
+A terminal cell is about twice as tall as it is wide. A plugin that renders a scene should take
+that into account — either by returning an image with the aspect of the cell area (`cols` wide
+and `2 * rows` tall, which is what the STL example does) or by squashing its projection. The
+host scales whatever it is given into the `cols` × `rows` cell rectangle.
+
+## A 3D viewer, in Zig
+
+`examples/plugin-stl/` is the worked example of both of the above: a provider written in Zig
+against the raw ABI, with a fixed-buffer allocator and no WASI, that turns a `*.stl` file into a
+picture and, for a terminal with no graphics protocol, into characters through a luminance ramp.
+It asks for `read-file`, because a provider is handed a path and nothing else.
+
+```sh
+RANO_PLUGIN=$PWD/examples/plugin-stl/plugin.wasm RANO_CAPABILITIES=read-file rano model.stl
+```
+
+It answers `provider_picture` with `cols` × `2 * rows` RGB pixels, and `provider_open` with
+`rows` lines of `cols` characters for the same path. Which one is drawn is the host's decision.
+It refuses rather than half-draws: a model above 12,000 facets or 1 MiB, or a viewport above
+131,072 pixels, is "not mine" and the file opens as text. Its STL reader, 3D maths and
+depth-buffered flat-shaded rasteriser are ported from letim (`src/stl.zig`, `src/math3d.zig`,
+`src/raster.zig`), Apache-2.0 as of commit `15d2338`.
+
+```sh
+cd examples/plugin-stl
+zig build && cp zig-out/bin/plugin.wasm plugin.wasm   # zig 0.16, target wasm32-freestanding
+```
 
 ## Writing one in Rust
 

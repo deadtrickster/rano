@@ -1,10 +1,6 @@
-//! The editor's side of async loading: adopt rows into the buffer as they
-//! arrive, and say so on the status line while it is happening.
-//!
-//! The pattern is `lsp_ctrl.rs`'s: a job held on the editor, polled once per
-//! loop iteration, returning whether anything changed so the frame is redrawn.
-//! What is different here is that the job feeds the *buffer* rather than a
-//! side channel, so adoption is what makes the file appear.
+//! The editor's side of async loading: adopt rows into the buffer as they arrive,
+//! and say so on the status line. The pattern is `lsp_ctrl.rs`'s, except that the
+//! job feeds the buffer itself, so adoption is what makes the file appear.
 
 use crate::buffer::Buffer;
 use crate::editor::Editor;
@@ -15,19 +11,13 @@ use crate::loader::{
 use std::path::Path;
 
 impl Editor {
-    /// Start reading `path` on a worker. The buffer becomes an empty document
-    /// with that name — so language detection, the title bar and the gutter are
-    /// right from the first frame — and rows are adopted as they arrive.
-    ///
-    /// Returns whether a job started; a file that cannot be opened is reported
-    /// by the caller (it is the one failure that should not become a status
-    /// line, because there is nothing on screen to attach it to).
+    /// Start reading `path` on a worker: the buffer becomes an empty document with
+    /// that name, so detection and the title bar are right from the first frame. The
+    /// caller reports a file that cannot be opened, having nothing on screen to attach to.
     pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
-        // **With a plugin that answers `on_open`, a small file is read whole and synchronously.**
-        // A text transform needs the whole text, and the loader's rows are already on the glass by
-        // the time it is whole — a hook applied then would be a buffer that visibly snaps, and a
-        // load is not an undo step, so there would be no way back. Above the cap the hook is
-        // skipped with one line, and the file streams exactly as it always did.
+        // With a plugin that answers `on_open`, a small file is read whole and
+        // synchronously: a text transform needs the whole text, and a load is not an
+        // undo step, so a hook applied later would snap with no way back.
         if self.plugin.as_ref().is_some_and(|p| p.has("on_open")) {
             match std::fs::metadata(path) {
                 Ok(m) if m.len() as usize <= crate::plugin::MAX_HOOK_BYTES => {
@@ -78,38 +68,26 @@ impl Editor {
         self.lsp_sync();
     }
 
-    /// [`Self::start_load`], from byte `from` to the end of the file — the tail
-    /// path, whose offset comes from [`crate::loader::tail_offset`].
-    ///
-    /// Everything else is identical on purpose: a tail is a file read that
-    /// begins later, so the reader, the batching, the adoption budget, the
-    /// diagnostics refresh and the cursor's arrival are all the same machinery.
-    /// What makes it a tail is the offset, and what remembers that it is one is
-    /// [`crate::BufferState::tail`].
+    /// [`Self::start_load`], from byte `from` to the end of the file — the tail path,
+    /// whose offset comes from [`crate::loader::tail_offset`]. A tail is a file read
+    /// that begins later; what marks it is the offset and [`crate::BufferState::tail`].
     pub fn start_load_from(&mut self, path: &Path, from: u64) -> std::io::Result<()> {
         let job = LoadJob::spawn_from(path.to_path_buf(), from)?;
         self.begin_load(path, job);
         Ok(())
     }
 
-    /// [`Self::start_load_from`], **and keep reading the file as it grows** —
-    /// `-f`/`--follow` (TODO.md §20.3 D). Same load, same buffer, same
-    /// everything; the reader simply does not stop at the end.
+    /// [`Self::start_load_from`], and keep reading the file as it grows —
+    /// `-f`/`--follow`. Same load, same buffer; the reader does not stop at the end.
     pub fn start_follow_from(&mut self, path: &Path, from: u64) -> std::io::Result<()> {
         let job = LoadJob::spawn_follow_from(path.to_path_buf(), from)?;
         self.begin_load(path, job);
         Ok(())
     }
 
-    /// The buffer's half of opening a file: name it, give it the one row a
-    /// `Buffer` always holds, hand it the job, and invalidate what a new file
-    /// invalidates.
-    ///
-    /// Shared by the two openers above because a tail differs from a plain read
-    /// in exactly one thing — the byte the reader starts at — and in nothing a
-    /// buffer knows. Which is also why the view flags are cleared here and set
-    /// by `start_tail` afterwards: reading a file is reading a file, and what
-    /// view it is read INTO comes from the caller.
+    /// The buffer's half of opening a file: name it, hand it the job, and invalidate
+    /// what a new file invalidates. Shared by the openers above because a tail differs
+    /// in exactly one thing, the byte the reader starts at; the caller sets the view flags.
     fn begin_load(&mut self, path: &Path, job: LoadJob) {
         {
             let bs = self.bs_mut();
@@ -122,13 +100,9 @@ impl Editor {
             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
             bs.scroll = 0;
             bs.load = Some(job);
-            // This BufferState holds a NEW document from disk, so the two flags
-            // that describe the previous one's view are cleared. `tail` because
-            // a load that is not a tail must not look like one — it would land at
-            // the bottom and remember a size from another file. `read_only`
-            // because that is what `open_file` does too: a freshly read document
-            // is writable unless the caller says otherwise, and `start_tail` says
-            // otherwise one line after this returns.
+            // This BufferState holds a NEW document from disk, so the flags describing
+            // the previous view are cleared: `tail`, or a load that is not a tail would
+            // land at the bottom of another file, and `read_only`, which the caller resets.
             bs.tail = None;
             bs.read_only = false;
             bs.lines_before = Some(0);
@@ -138,25 +112,14 @@ impl Editor {
         self.lsp_sync();
         self.highlight_dirty = true;
         self.ensure_wrap_prefix();
-        // **A picture opens as the picture** — the rows arriving underneath are a lossy
-        // decode of bytes that are not text (see `Editor::preview_if_picture`). Done before
-        // the loader's rows land, because the view reads the file, not the buffer.
+        // A picture opens as the picture: the rows arriving underneath are a lossy
+        // decode of bytes that are not text, and the view reads the file.
         self.preview_if_picture();
     }
 
-    /// Whether `path` opens in LOG MODE: **its name ends in `.log`, and that is
-    /// the whole rule** (TODO.md §20.7).
-    ///
-    /// Deliberately not a path rule (`/var/log/`) and not a content sniff. A
-    /// first draft of §20.7 had `/var/log/` as a second case, written from one
-    /// `ls` of one directory — which is how a predicate acquires a rule per file
-    /// its author happened to see, and then a bug per file they did not. The name
-    /// is all of it: `--edit` is the escape from the mode, and `-f` is the escape
-    /// from the rule (it opens ANY file this way).
-    ///
-    /// `.log` on its own does not count — that is a dotfile, not a log, and the
-    /// rule is an extension. Case does not matter: `.LOG` is the same file on
-    /// every filesystem a log gets written to.
+    /// Whether `path` opens in LOG MODE: its name ends in `.log`, and that is the whole
+    /// rule — not a path rule (`/var/log/`) and not a content sniff, because a rule per
+    /// directory its author saw is a bug per directory they did not. `--edit` escapes it.
     pub fn log_mode_for(&self, path: &Path) -> bool {
         if self.edit_override {
             return false;
@@ -167,13 +130,9 @@ impl Editor {
         name.len() > 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".log")
     }
 
-    /// Open `path` the way its NAME says it should be opened: as a log if it is
-    /// one, as a file otherwise.
-    ///
-    /// **One decision, called from every door** — the command line, a deferred
-    /// buffer, a file opened later with F8 — because a rule applied at four doors
-    /// out of five is a rule nobody can predict, and the fifth door is the one
-    /// that reads a 2 GiB log into a buffer and freezes the frame.
+    /// Open `path` the way its name says: as a log if it is one, as a file otherwise.
+    /// One decision, called from every door — the command line, a deferred buffer, F8 —
+    /// because a rule applied at four doors out of five is no rule, and the fifth freezes.
     pub fn start_named(&mut self, path: &Path) -> std::io::Result<()> {
         if self.log_mode_for(path) {
             self.start_tail(path)
@@ -182,25 +141,9 @@ impl Editor {
         }
     }
 
-    /// Open `path` as a tail: the last few screens, read from the end, read-only,
-    /// and followed as it grows — `-f`/`--follow`, or a `.log` name (§20.7).
-    ///
-    /// Three things are decided here and nowhere else:
-    ///
-    /// - **Where to start reading.** [`tail_offset`] scans *backwards*, so a
-    ///   2 GiB log opens showing its last screens for a read of a few hundred
-    ///   KiB rather than the whole file.
-    /// - **That it follows.** The reader does not stop when it reaches the end
-    ///   (§20.3 D). A log is a file somebody is still writing; a view that froze
-    ///   at the instant it was opened would be a snapshot nobody asked for.
-    /// - **That it is a view.** The operator's rule, and the reason is at the
-    ///   keystroke (§20.6): a tailed file is one something else is writing, so
-    ///   an edit that could never be saved is work lost silently.
-    ///
-    /// `size_at_open` is recorded rather than used: §20.3 E is its reader, and
-    /// it is the line between "this row was here before us and can be styled
-    /// like a file's" and "this row is still arriving". Remembered now so that
-    /// opening a tail and following one are not two notions of "the file".
+    /// Open `path` as a tail — `-f`/`--follow`, or a `.log` name: the last few screens,
+    /// read from the end, read-only, and followed as it grows. Three things are decided
+    /// here: where to start ([`tail_offset`] scans backwards), that it follows, that it is a view.
     pub fn start_tail(&mut self, path: &Path) -> std::io::Result<()> {
         let mut file = std::fs::File::open(path)?;
         let size = file.metadata()?.len();
@@ -214,34 +157,26 @@ impl Editor {
                 rows_at_open: None,
             });
             bs.read_only = true;
-            // The tail's row 1 is the file's row `lines_before + 1`, and nothing
-            // knows `lines_before` yet — so the numbering is honestly unknown
-            // until the scan below answers, and the gutter says so rather than
-            // saying `1` (TODO.md §20.3 C).
+            // The tail's row 1 is not the file's row 1, and nothing knows which
+            // it is yet, so the numbering is honestly unknown until the scan below
+            // answers and the gutter says so rather than saying `1`.
             bs.lines_before = None;
         }
         self.start_line_count(path, from);
         Ok(())
     }
 
-    /// Start the background count of the file's lines before byte `upto` — the
-    /// tail's offset, so **only the bytes above the tail are scanned**: the
-    /// rows below it are the ones already in the buffer.
-    ///
-    /// A failure here is not fatal and is not flashed: the only consequence is
-    /// that the numbering stays unknown, which `BufferState::line_number`
-    /// already expresses, and an error banner at open for a file that read
-    /// perfectly would be a worse answer than a blank gutter.
+    /// Start the background count of the file's lines before byte `upto` — the tail's
+    /// offset, so only the bytes above the tail are scanned. A failure is not flashed:
+    /// the numbering stays unknown, which `BufferState::line_number` already expresses.
     fn start_line_count(&mut self, path: &Path, upto: u64) {
         let job = LineCountJob::spawn(path.to_path_buf(), upto).ok();
         self.bs_mut().line_count = job;
     }
 
-    /// Adopt the line count if it has answered. Never blocks.
-    ///
-    /// Returns whether the frame needs redrawing. A `Progress` one does: the
-    /// status line counts up, which is how a long scan on a 2 GiB log is told
-    /// apart from a hung one.
+    /// Adopt the line count if it has answered, never blocking. Returns whether
+    /// the frame needs redrawing: a `Progress` one does, because the status line
+    /// counting up is how a long scan is told apart from a hung one.
     pub(crate) fn line_count_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().line_count.as_mut() else {
             return false;
@@ -276,13 +211,9 @@ impl Editor {
         self.bs().line_count.is_some()
     }
 
-    /// Adopt whatever the loader has ready, bounded by
-    /// [`loader::ADOPT_BUDGET`]. Returns whether the frame needs redrawing.
-    ///
-    /// Never waits: an idle job returns `false` immediately, which is what
-    /// keeps the loop's iteration short and the keyboard live while a 184 MB
-    /// file is still arriving. When the budget is exhausted it says so, so the
-    /// loop can skip its idle wait and keep going — see `load_saturated`.
+    /// Adopt whatever the loader has ready, bounded by [`loader::ADOPT_BUDGET`], and
+    /// return whether the frame needs redrawing. Never waits: an idle job returns
+    /// `false` at once, and a saturated one says so, so the loop skips its idle wait.
     pub(crate) fn load_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().load.as_mut() else {
             return false;
@@ -297,17 +228,9 @@ impl Editor {
             // An append, not an edit: tell the wrap table it can extend from
             // where it already is rather than re-measuring the whole file.
             let was = bs.buf.row_count();
-            // **The view holds the end if it already had it.** A tail that
-            // yanked the scroll back on every arriving line would make reading
-            // the last few hundred lines of a busy log impossible; one that
-            // never moved would stop being a follow at all. So: stay at the
-            // bottom if the bottom was on screen, and otherwise leave the view
-            // exactly where the user put it.
-            //
-            // Compared in rows, and `scroll` counts VISUAL rows when wrap is
-            // on — the same number for a log, whose rows wrap only if it has
-            // very long ones, and being wrong costs one frame's scroll
-            // position rather than a wrong row.
+            // The view holds the end if it already had it: a tail that yanked the scroll
+            // back on every arriving line would make reading a busy log impossible, and
+            // one that never moved would stop being a follow.
             let at_end = was <= text_h || bs.scroll + text_h >= was;
             // The buffer starts with one empty row. The first batch replaces
             // it rather than following it, so a file does not appear to begin
@@ -333,12 +256,9 @@ impl Editor {
                 // `--line` and a tail ask for opposite ends of the file.
                 bs.goto = None;
             }
-            // **A settled tail does not re-highlight when the file grows.** Rows
-            // past the boundary are never styled (§20.3 E) and the rows before
-            // it have not changed, so a refresh has nothing to do — and a log
-            // being written appends constantly, which is the per-keystroke cost
-            // §16 exists to avoid, arriving in a new shape. An ordinary buffer,
-            // and a tail whose boundary is not known yet, dirty as before.
+            // A settled tail does not re-highlight when the file grows: rows past the
+            // boundary are never styled and the rows before it have not changed, while a
+            // log being written appends constantly.
             let settled_tail = bs.tail_settled();
             bs.edit_gen = bs.edit_gen.wrapping_add(1);
             if !settled_tail {
@@ -353,7 +273,7 @@ impl Editor {
                     let bs = self.bs_mut();
                     bs.load = None;
                     bs.buf.binary = true;
-                    // The rule a tailed file follows (§20.6): a view, refused at the
+                    // The rule a tailed file follows: a view, refused at the
                     // keystroke rather than at a save that would corrupt it.
                     bs.read_only = true;
                 }
@@ -366,10 +286,9 @@ impl Editor {
                 self.bs_mut().buf.encoding = enc;
             }
             Adopted::NeedsEager(enc) => {
-                // UTF-16: this reader cannot split its rows on byte newlines,
-                // so the file is read whole. Correct, and the eager path is
-                // what any size of such a file needs anyway — but it must not
-                // leave the editor stuck in a loading state.
+                // UTF-16: this reader cannot split its rows on byte newlines, so
+                // the file is read whole — but the editor must not be left stuck
+                // in a loading state.
                 self.bs_mut().load = None;
                 let path = self.bs().buf.name.clone();
                 if let Some(path) = path {
@@ -397,11 +316,9 @@ impl Editor {
             }
             Adopted::Finished { crlf, .. } => {
                 self.load_saturated = false;
-                // Once the file is whole, re-run the diagnostics so what is
-                // reported is the document rather than whatever had arrived at
-                // the 300 ms mark. Deliberately here and not per batch: a
-                // whole-document parse every 300 ms through a large load is the
-                // cost §16 exists to avoid, and a todo file is kilobytes.
+                // Once the file is whole, re-run the diagnostics so what is reported is
+                // the document rather than whatever had arrived at the 300 ms mark. Not
+                // per batch: a whole-document parse through a large load is the cost.
                 self.diag_dirty = true;
                 let rows = {
                     let bs = self.bs_mut();
@@ -419,11 +336,9 @@ impl Editor {
                     rows
                 };
                 if self.bs().tail.is_some() {
-                    // **Not "Read N lines".** `rows` here is the tail we asked
-                    // for — 200, or the whole file if it is shorter — and the
-                    // file's own line count has not been measured. §20.1's idea
-                    // 3 is the increment that measures it; this line is the one
-                    // that would otherwise state it wrongly (TODO.md §20.3 C).
+                    // Not "Read N lines": `rows` is the tail we asked for, and the
+                    // file's own line count has not been measured, so this line
+                    // would otherwise state it wrongly.
                     self.flash(&format!(
                         "Tailing — showing the last {} line{}",
                         rows,
@@ -448,25 +363,17 @@ impl Editor {
                         bs.buf.push_row(Vec::new());
                     }
                     let rows = bs.buf.row_count();
-                    // **The styling boundary** (§20.3 E): this is the moment it
-                    // becomes true that everything from here down arrived after
-                    // the tail was read, so it is a row the file is still
-                    // writing. Recorded on the way through rather than computed
-                    // later, because later is after more rows have arrived.
+                    // The styling boundary: everything from here down arrived after
+                    // the tail was read, so it is a row the file is still writing.
+                    // Recorded on the way through, because later is after more rows.
                     if let Some(t) = bs.tail.as_mut() {
                         t.rows_at_open = Some(rows);
                     }
                     rows
                 };
-                // **Not "Read N lines".** `rows` here is the tail we asked for,
-                // and the file's own line count is the background scan's
-                // (`BufferState::line_number`), not this. Saying 200 for a
-                // 400 000-line file is the lie §20.3 C exists to remove.
-                //
-                // It is also a statement about the MOMENT the file was read, so
-                // a row arriving afterwards makes it stale — bounded by the
-                // flash's own three seconds rather than tracked, and after that
-                // the gutter's numbers (which do keep up) are the answer.
+                // Not "Read N lines": `rows` is the tail we asked for, and the file's
+                // own count is the background scan's. It is also a statement about the
+                // moment the file was read, so the flash's three seconds bound it.
                 self.flash(&format!(
                     "Tailing — showing the last {} line{}",
                     rows,
@@ -484,21 +391,16 @@ impl Editor {
         dirty
     }
 
-    /// Whether the buffer's text is still arriving — and a follower that has
-    /// read everything the file had answers **false**, because there is nothing
-    /// in flight: the view is complete and something else may or may not write
-    /// more to it. A host that asked "has the text all arrived" wants that
-    /// answer, and it is what keeps the loop's wait at the idle cadence rather
-    /// than at the loading one (see `next_wakeup`).
+    /// Whether the buffer's text is still arriving. A follower that has read
+    /// everything the file had answers false: the view is complete, which is what keeps
+    /// the loop's wait at the idle cadence rather than the loading one.
     pub fn loading(&self) -> bool {
         self.bs().load.as_ref().is_some_and(|j| !j.caught_up())
     }
 
-    /// The status-line text for a load in flight, or `None`.
-    ///
-    /// The operator's criterion from TODO.md §13.6 — "the minimum that makes
-    /// the user happy and not confused" — is why this exists at all: a blank
-    /// frame is confusing, "reading huge.log" is not.
+    /// The status-line text for a load in flight, or `None`: a blank frame is
+    /// confusing, "reading huge.log" is not, and the loader's rows are what make
+    /// the difference visible.
     pub(crate) fn loading_text(&self) -> Option<String> {
         let job = self.bs().load.as_ref()?;
         // A follower with nothing left to read is not a load in flight, so it
@@ -513,14 +415,9 @@ impl Editor {
         ))
     }
 
-    /// The status-line text for a tail's line count in flight, or `None`.
-    ///
-    /// **Deliberately not `loading_text`'s**, because a load in flight and a
-    /// count in flight are not equally important: a load is the difference
-    /// between a frozen frame and a working one, while a count is a number
-    /// arriving late. So this one loses to a flash — a refusal such as
-    /// "Read-only buffer — typing refused" must never be displaced by it — and
-    /// it is said only while the gutter has nothing to say (§20.3 C).
+    /// The status-line text for a tail's line count in flight, or `None`. Weaker than
+    /// `loading_text` on purpose: a count is a number arriving late, so it loses to a
+    /// flash — a refusal must never be displaced by it.
     pub(crate) fn counting_text(&self) -> Option<String> {
         let job = self.bs().line_count.as_ref()?;
         Some(format!("Counting lines… {} so far", job.counted))
@@ -538,11 +435,9 @@ impl Editor {
         }
     }
 
-    /// Start the deferred read of a file named on the command line, now that
-    /// its buffer is current. Called once per loop iteration, so whatever
-    /// made the buffer current — M->, the buffer list, a close, ^X's save
-    /// prompt — the file starts arriving on the next frame. Returns whether
-    /// anything changed.
+    /// Start the deferred read of a file named on the command line, now that its
+    /// buffer is current. Called once per loop iteration, so whatever made the
+    /// buffer current, the file starts arriving on the next frame.
     pub(crate) fn start_pending_load(&mut self) -> bool {
         let Some(path) = self.bs_mut().pending_load.take() else {
             return false;
@@ -553,10 +448,9 @@ impl Editor {
         true
     }
 
-    /// Make the current buffer whole, synchronously: a deferred file is read
-    /// now and a load in flight is replaced by a full read. For jumps
-    /// (definition, usages) into a buffer that has not finished arriving —
-    /// they need the target row to exist before the cursor is put on it.
+    /// Make the current buffer whole, synchronously: a deferred file is read now and a
+    /// load in flight is replaced by a full read, because a jump into a buffer that has
+    /// not finished arriving needs the target row to exist before the cursor lands.
     pub(crate) fn load_now(&mut self) {
         let pending = self.bs_mut().pending_load.take();
         let in_flight = self.bs().load.is_some();
@@ -577,9 +471,8 @@ impl Editor {
                 bs.edit_gen = bs.edit_gen.wrapping_add(1);
                 bs.wrap_extend_from = None;
                 // The buffer is the whole file now, so it is no longer a tail:
-                // `size_at_open` would be describing a view that this read has
-                // just replaced with the file itself. Read-only is left alone —
-                // that was asked for, and a whole read does not unask it.
+                // `size_at_open` would describe a view this read has replaced. Read-
+                // only is left alone — that was asked for, and a read does not unask it.
                 bs.tail = None;
                 // And every row of the file is here, so the file's line 1 is
                 // row 0 and there is nothing left to count.
@@ -735,9 +628,8 @@ mod tests {
 
     #[test]
     fn a_latin1_file_opens_with_its_letters_intact() {
-        // The bug this fixes: a file that is not valid UTF-8 used to be refused
-        // outright. It is now the last rung of the ladder, so it opens — and
-        // the buffer remembers how to save it back.
+        // A file that is not valid UTF-8 is the last rung of the ladder, so it
+        // opens — and the buffer remembers how to save it back.
         let t = Temp::new("latin1b.bin", b"caf\xe9 latin-1\n");
         let mut ed = ed();
         ed.start_load(&t.0).expect("start");
@@ -767,9 +659,8 @@ mod tests {
 
     #[test]
     fn a_utf8_bom_is_not_the_first_column() {
-        // The quiet bug: the BOM validated as UTF-8, so the file opened with
-        // U+FEFF as the buffer's first character — invisible, but Home, click
-        // positioning and `^`-anchored regexes all saw it.
+        // A BOM validates as UTF-8, so without stripping it the file opens with
+        // U+FEFF as its first character: invisible, but a real column.
         let bytes = [&[0xEF, 0xBB, 0xBF][..], b"hello\n"].concat();
         let t = Temp::new("bom.txt", &bytes);
         let mut ed = ed();
@@ -839,7 +730,7 @@ mod tests {
             ed.load_poll();
         }
         assert_eq!(rows(&ed), ["let x = 1;"]);
-        // The flash reports the line count, as the old eager path did.
+        // The flash reports the line count.
         let status = ed.status_text().unwrap_or_default();
         assert!(status.contains('1'), "reports the line count: {status:?}");
     }

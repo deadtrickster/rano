@@ -1,50 +1,7 @@
 //! File encodings: what the bytes are, and how to keep them that way.
 //!
-//! Before this module `Buffer::from_file` was one line —
-//! `fs::read_to_string(path)?` — and its `InvalidData` error was the whole
-//! story: a file that was not valid UTF-8 could not be opened at all, and a
-//! UTF-8 BOM *validated* so it opened with `U+FEFF` as the buffer's first
-//! character: invisible, but a real column that `Home`, click positioning and
-//! `^`-anchored regexes all saw. Measured (§13.5): of six common shapes of one
-//! small document, **three were refused** and a fourth was quietly wrong.
-//!
-//! # The ladder
-//!
-//! Cheapest evidence first, and it stops as soon as the answer is certain:
-//!
-//! 1. **A BOM.** Four to six byte comparisons, and in practice it *defines*
-//!    UTF-16 and UTF-32 — a BOM-less UTF-16 file is a guess for anyone.
-//! 2. **The prefix validates as UTF-8.** Overwhelming evidence, and it needs no
-//!    table: every multi-byte sequence is checked by the decoder itself.
-//! 3. **Otherwise, the single-byte legacy encoding.** This is the rung that
-//!    needs a decision. Every byte maps to a character in windows-1252, which
-//!    is a superset of latin-1 and is what a file "that is not UTF-8" almost
-//!    always is — so the file opens and reads correctly rather than being
-//!    refused.
-//!
-//! It is deliberately dependency-free. `chardetng` (Mozilla's detector, with
-//! `encoding_rs` for the decoding) is the right tool for the legacy East-Asian
-//! encodings — Shift-JIS, EUC-JP, GB18030 — which rung 3 cannot tell apart from
-//! cp1252. That is the extension point, and it is a dependency decision rather
-//! than an oversight: rung 3 as written covers every non-UTF-8 file measured
-//! here, and the heavy detector is worth adding only when a legacy CJK file
-//! actually turns up.
-//!
-//! # Detection is a prefix, not a pass
-//!
-//! The ladder reads only what it is given, so it costs one 64 KiB read rather
-//! than a scan of the file: measured at **8 µs against 46 ms** on a 193 MB file,
-//! agreeing with the whole-file answer on every shape tried. `chardetng` is
-//! designed for the same discipline ("If you want to perform detection on just
-//! the prefix of a longer stream, do not pass `last=true`") — this ladder simply
-//! never needed to be told.
-//!
-//! # Why it travels with the buffer
-//!
-//! A save re-encodes, so a file written as cp1252 is not silently rewritten as
-//! UTF-8 with replacement characters in it. That is the whole reason
-//! [`Encoding`] lives on the [`Buffer`](crate::buffer::Buffer) beside `crlf`,
-//! which is the same idea for line endings.
+//! Cheapest evidence first: a BOM, else valid UTF-8, else windows-1252, which maps every
+//! byte so a legacy file opens rather than being refused; a save then re-encodes it.
 
 /// How a file's bytes map to characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,13 +44,9 @@ impl Encoding {
         }
     }
 
-    /// Whether the file's rows can be split on `0x0A` BYTES.
-    ///
-    /// True for the UTF-8 family, and that is what makes the lazy loader
-    /// possible: in UTF-8 a `0x0A` byte is always a newline, because multi-byte
-    /// sequences use lead bytes `C2`–`F4` and continuation bytes `80`–`BF`.
-    /// UTF-16 stores `U+000A` as two bytes, so its rows cannot be found without
-    /// decoding — which is why it takes the eager path.
+    /// Whether the file's rows can be split on `0x0A` BYTES, which is what makes
+    /// the lazy loader possible: in UTF-8 a `0x0A` is always a newline, while
+    /// UTF-16 stores `U+000A` as two bytes and has to be decoded to find rows.
     pub fn rows_split_on_byte_newlines(self) -> bool {
         matches!(self, Self::Utf8 | Self::Utf8Bom | Self::Cp1252)
     }
@@ -106,9 +59,8 @@ pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
     if prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
         || prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
     {
-        // UTF-32 is not supported: it is vanishingly rare in text files and
-        // pretending otherwise would be worse than saying so. The BOM is still
-        // reported as *some* BOM, so the caller can refuse it by name.
+        // UTF-32 is not supported and saying so beats misreading it as UTF-16:
+        // the caller refuses the file by name instead of opening nonsense.
         return None;
     }
     if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -123,33 +75,20 @@ pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
     None
 }
 
-/// How many bytes the binary probe looks at: **git's number**. `buffer_is_binary()` in
-/// git's `diff.c` checks "for any occurrence of a zero byte in the first 8000 bytes";
-/// libgit2 adds a printable-ratio on top, and a NUL alone has been enough for git for
-/// twenty years.
+/// How many bytes [`is_binary`] looks at: 8000, git's number, which checks for a
+/// zero byte in exactly this many.
 pub const BINARY_PROBE: usize = 8000;
 
-/// **Whether these bytes are a binary file rather than text**: a NUL byte in the first
-/// [`BINARY_PROBE`] bytes.
-///
-/// No text file contains a NUL — not UTF-8, not any single-byte codepage — so its presence
-/// is the cheapest decisive signal there is, and it is the one git, `diff` and `grep` use to
-/// stop reading. UTF-16 does contain them, and that is correct: its NULs mean the bytes are
-/// not the text either, which is why `detect` decodes them before anything counts rows.
-///
-/// **Why it is here at all**: without it a `.pyc` or a tarball went through the encoding
-/// ladder, came out as cp1252 mojibake rows, and could be *saved back corrupted* — the
-/// character model cannot round-trip bytes it never decoded. See `Buffer::binary`.
+/// Whether these bytes are a binary file rather than text: a NUL byte in the
+/// first [`BINARY_PROBE`] bytes. UTF-16 has NULs too and is decoded before this
+/// matters; without it a `.pyc` would open as mojibake and could be saved back.
 pub fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
 }
 
-/// Whether the bytes handed to [`detect`] are the whole file or a prefix of it.
-///
-/// This is not a detail: a file that ENDS in the middle of a multi-byte
-/// sequence is not UTF-8, while a *prefix* that stops there is — the reader cut
-/// it, the author did not write it. The caller always knows which case it is
-/// (it knows whether it read 64 KiB or the whole file), so it says.
+/// Whether the bytes handed to [`detect`] are the whole file or a prefix: a
+/// sequence cut off at the end is the reader's doing in one case and the file's
+/// in the other, and only the caller knows which it read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// More bytes follow; a truncated final sequence is the reader's doing.
@@ -158,25 +97,9 @@ pub enum Scope {
     Whole,
 }
 
-/// Decide the encoding — the BOM if there is one, else UTF-8 if the bytes
-/// validate, else windows-1252.
-///
-/// `prefix` may be the whole file or its first 64 KiB; the answer is the same
-/// either way for every case measured. A prefix that is valid UTF-8 except for
-/// a *truncated* final sequence is still UTF-8 — a cut at a chunk boundary is
-/// not evidence about the file.
-///
-/// **The prefix has to be big enough to contain a whole offending sequence.**
-/// A cp1252 file whose first bytes are ASCII looks exactly like UTF-8 until
-/// something that is not valid UTF-8 turns up, and a prefix that stops before
-/// that will say `Utf8` — correctly, about the bytes it was given. Note
-/// "sequence", not "byte": a cp1252 `é` is the single byte `0xE9`, which in
-/// UTF-8 is the *lead* of a three-byte character, so a prefix ending exactly
-/// there is genuinely ambiguous until the next byte shows it is not a
-/// continuation. So the caller's read size is part of the answer's quality:
-/// 64 KiB is the number this module is measured and used at, and it is what
-/// makes rung 3 reliable in practice. A ten-byte prefix is not evidence of
-/// anything but those ten bytes.
+/// Decide the encoding: the BOM if there is one, else UTF-8 if the bytes validate,
+/// else windows-1252. A truncated final sequence is the reader's cut in a prefix and
+/// the file's own in a whole file, so a prefix must hold a whole offending sequence.
 pub fn detect(bytes: &[u8], scope: Scope) -> Encoding {
     if let Some(enc) = bom_of(bytes) {
         return enc;
@@ -191,14 +114,9 @@ pub fn detect(bytes: &[u8], scope: Scope) -> Encoding {
     }
 }
 
-/// The scalar a byte maps to in windows-1252.
-///
-/// Bytes `0x00`–`0x7F` and `0xA0`–`0xFF` are latin-1, which is the identity.
-/// `0x80`–`0x9F` are the C1 range, where windows-1252 differs from latin-1 by
-/// putting printable characters (curly quotes, dashes, the euro sign) where the
-/// control codes are. Five of those byte values are *undefined* in the
-/// standard; they are left as their C1 control, which is what every decoder in
-/// practice does and keeps the mapping total.
+/// The scalar a byte maps to in windows-1252: latin-1 everywhere but `0x80`–`0x9F`,
+/// where the standard's printable characters (curly quotes, dashes, the euro sign)
+/// replace the control codes. The five undefined bytes stay controls, keeping it total.
 fn cp1252_char(b: u8) -> char {
     const C1: [char; 32] = [
         '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
@@ -214,23 +132,19 @@ fn cp1252_char(b: u8) -> char {
 }
 
 /// The byte a windows-1252 character came from, or `None` when it did not.
-///
-/// The inverse of [`cp1252_char`], built from it so the two cannot drift — a
-/// hand-written table would be a second copy of those 32 entries.
+/// The inverse of [`cp1252_char`], asked of it so the two cannot drift.
 fn cp1252_byte(c: char) -> Option<u8> {
     let u = c as u32;
     if u < 0x80 || (0xA0..=0xFF).contains(&u) {
         return Some(u as u8);
     }
-    // The C1 range: the only byte values that are not latin-1. Found by asking
-    // `cp1252_char`, so the two directions cannot drift.
+    // The C1 range is the only part that is not latin-1.
     (0x80..=0x9Fu8).find(|b| cp1252_char(*b) == c)
 }
 
-/// Decode `bytes` as `enc`, with the BOM stripped.
-///
-/// `Err` for the two cases that are genuinely unreadable: a UTF-16 byte length
-/// that cannot hold whole code units, or a lone surrogate.
+/// Decode `bytes` as `enc`, with the BOM stripped. `Err` for the two cases that
+/// are genuinely unreadable: a UTF-16 byte length that cannot hold whole code
+/// units, or a lone surrogate.
 pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
     let bom = enc.bom();
     let body = bytes.strip_prefix(bom).unwrap_or(bytes);
@@ -283,11 +197,8 @@ fn decode_utf16(body: &[u8], big_endian: bool) -> Result<String, String> {
     Ok(out)
 }
 
-/// Encode `text` as `enc`, BOM included.
-///
-/// The inverse of [`decode`] for every encoding: reading a file and writing it
-/// back unchanged must produce the same bytes, which is what the round-trip
-/// test asserts per encoding.
+/// Encode `text` as `enc`, BOM included. The inverse of [`decode`], so a file
+/// read and written back unchanged produces the same bytes.
 pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(text.len() + enc.bom().len());
     out.extend_from_slice(enc.bom());
@@ -322,12 +233,9 @@ pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
-    /// The shapes from §13.5, as bytes.
-    ///
-    /// Two texts, because a cp1252 file cannot hold CJK — asking it to would be
-    /// testing the refusal, which `a_character_outside_cp1252_is_refused` does
-    /// on purpose. The cp1252 shape is what such a file actually looks like:
-    /// latin-1 letters and the C1 range's curly quotes.
+    /// Every shape a file arrives in, as bytes. Two texts, because cp1252 cannot
+    /// hold CJK: the western shape is what such a file really contains, latin-1
+    /// letters and the C1 range's curly quotes.
     fn shapes() -> Vec<(&'static str, Encoding, Vec<u8>)> {
         let text = "hello caf\u{e9} \u{4e2d}\u{6587} line\nsecond line\n";
         let western = "hello caf\u{e9} \u{201C}quoted\u{201D} line\nsecond line\n";
@@ -369,24 +277,21 @@ mod tests {
         for (label, want, bytes) in shapes() {
             assert_eq!(detect(&bytes, Scope::Whole), want, "{label}");
         }
-        // And detection is a PREFIX operation: any prefix that contains the
-        // BOM, or an offending byte, gives the same answer as the whole file.
-        // For UTF-8 and the BOM cases that is every prefix; for cp1252 it is
-        // every prefix at or past the first non-ASCII byte, because before that
-        // the file IS valid UTF-8 — see the note on `detect`.
+        // Detection is a PREFIX operation: any prefix past the BOM, or past the
+        // first offending byte, gives the whole file's answer. A legacy file
+        // before that byte IS valid UTF-8 — see the note on `detect`.
         for (label, want, bytes) in shapes() {
             let from = if want == Encoding::Cp1252 {
-                // Past the first byte that is invalid UTF-8, and one more: that
-                // byte alone is an incomplete sequence and reads as UTF-8 from
-                // a prefix (see `detect`), and it takes the NEXT byte to show
-                // it is not a continuation.
+                // One byte past the first invalid one: that byte alone is an
+                // incomplete sequence and needs the next to show it is not a
+                // continuation.
                 bytes
                     .iter()
                     .position(|b| *b >= 0x80)
                     .map(|i| (i + 2).min(bytes.len()))
                     .unwrap_or(bytes.len())
             } else {
-                // A BOM is enough on its own, which is the point of rung 1.
+                // A BOM is enough on its own.
                 want.bom().len().max(1)
             };
             for cut in from..=bytes.len() {
@@ -396,10 +301,8 @@ mod tests {
                     "{label} cut at {cut}"
                 );
             }
-            // Shorter than that, only a BOM case is knowable — and it is
-            // knowable from the BOM alone, which is the point of rung 1. A
-            // legacy file has no BOM, so a short prefix of one is not evidence
-            // about anything but those bytes.
+            // Shorter than that, only a BOM case is knowable: a legacy file has
+            // no BOM, so a short prefix of one is evidence of nothing.
             if !want.bom().is_empty() {
                 for cut in want.bom().len()..from {
                     assert_eq!(
@@ -414,9 +317,8 @@ mod tests {
 
     #[test]
     fn a_short_prefix_of_a_legacy_file_reads_as_utf8_and_that_is_why_size_matters() {
-        // Pins the limitation `detect` documents, so it is a known property
-        // rather than a latent surprise: the first bytes of a cp1252 file are
-        // ASCII, and ASCII is valid UTF-8.
+        // Pins the limitation `detect` documents: the first bytes of a cp1252
+        // file are ASCII, and ASCII is valid UTF-8.
         let bytes = encode("hello caf\u{e9}", Encoding::Cp1252).unwrap();
         assert_eq!(
             detect(&bytes[..5], Scope::Prefix),
@@ -432,8 +334,7 @@ mod tests {
 
     #[test]
     fn a_file_ending_mid_sequence_is_not_utf8_but_a_prefix_is() {
-        // The distinction `Scope` exists for, and the bug a test caught: these
-        // two byte strings are IDENTICAL, and the right answer differs.
+        // What `Scope` exists for: the same bytes, and the answer differs.
         let bytes = b"hello caf\xe9"; // cp1252 'é', and an incomplete UTF-8 lead
         assert_eq!(detect(bytes, Scope::Whole), Encoding::Cp1252);
         assert_eq!(detect(bytes, Scope::Prefix), Encoding::Utf8);
@@ -441,8 +342,7 @@ mod tests {
 
     #[test]
     fn a_prefix_cut_mid_sequence_is_still_utf8() {
-        // A 3-byte character split across the 64 KiB a caller happens to read:
-        // a truncated final sequence is not evidence about the file.
+        // A 3-byte character split across the 64 KiB a caller happens to read.
         let text = "a".repeat(64) + "\u{4e2d}";
         let bytes = text.as_bytes();
         let cut = bytes.len() - 1; // one byte into the character
@@ -451,9 +351,9 @@ mod tests {
 
     #[test]
     fn a_utf8_bom_is_stripped_and_not_a_column() {
-        // The quiet bug: the BOM validated, so the file opened with U+FEFF as
-        // the first character — invisible, but Home and click positioning saw
-        // it, and a `^`-anchored regex saw it.
+        // A BOM validates, so without stripping it the file opens with U+FEFF as
+        // its first character: invisible, but Home and `^`-anchored regexes see
+        // it.
         let bytes = [&[0xEF, 0xBB, 0xBF][..], b"hello\n"].concat();
         let enc = detect(&bytes, Scope::Whole);
         assert_eq!(enc, Encoding::Utf8Bom);
@@ -550,8 +450,7 @@ mod tests {
     }
 }
 
-/// **The byte mark**: git's rule, and the reason it is not just a nicety — a file called
-/// text that is not text used to be decoded lossily and could be saved back corrupted.
+/// The byte mark: git's NUL rule, and the boundaries it is defined at.
 #[cfg(test)]
 mod binary_probe {
     use super::*;
@@ -565,9 +464,9 @@ mod binary_probe {
         assert!(is_binary(b"\x0d\x0d\x0a\x00"));
     }
 
-    /// Text of every kind rano decodes has no NUL in it, so the rule never fires on a
-    /// text file — including the cp1252 fallback, which exists precisely because *some*
-    /// bytes are not UTF-8 but are still text.
+    /// Text of every kind rano decodes has no NUL in it, so the rule never fires
+    /// on a text file — the cp1252 fallback included, which exists for bytes that
+    /// are not UTF-8 but are still text.
     #[test]
     fn text_is_not_a_binary() {
         assert!(!is_binary(b""));
@@ -578,10 +477,8 @@ mod binary_probe {
         assert!(!is_binary(&[0xff; 64]));
     }
 
-    /// **Only the first 8000 bytes are looked at** — git's number. A text file with a NUL
-    /// deep in it (a stray byte in a huge log, say) stays text, which is what keeps the
-    /// rule cheap and keeps it from reclassifying files on the strength of one byte
-    /// 2 GB in.
+    /// Only the first [`BINARY_PROBE`] bytes are looked at, which keeps the rule
+    /// cheap and stops one stray byte 2 GB into a log from reclassifying it.
     #[test]
     fn only_the_first_probe_is_read() {
         let mut far = vec![b'x'; BINARY_PROBE + 100];

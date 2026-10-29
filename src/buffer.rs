@@ -33,35 +33,20 @@ pub struct Pos {
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    /// The rows, in chunks.
-    ///
-    /// Private, and it has been since the accessor layer landed: everything
-    /// outside this module goes through the methods below, which is what made
-    /// this swap a change to one file plus the fifteen callers that wanted a
-    /// contiguous `&[Vec<char>]`.
-    ///
-    /// **Stage A of TODO.md §16.3**: chunked, and every row resident. A
-    /// structural edit shifts one chunk instead of every row header below it —
-    /// 1.3 ms per line insert at 2.6M rows was the number. The lazy half (a
-    /// row decoded from the file on demand) is stage B: it is what saves the
-    /// 835 MB, and it is the half that can silently blank a row, so it goes
-    /// second and behind an API that cannot lie about a missing row.
+    /// The rows, in chunks: a structural edit shifts one chunk, not every row
+    /// header below it. Private so every read goes through the methods below,
+    /// which is what lets the store change without touching the callers.
     lines: Rows,
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
-    /// How the bytes map to these characters. Carried on the buffer for the
-    /// same reason `crlf` is: a save has to write the file back the way it was
-    /// found, or opening a cp1252 file and saving it would rewrite it as UTF-8
-    /// with replacement characters in it. See [`crate::encoding`].
+    /// How the bytes map to these characters. Carried like `crlf` so a save
+    /// writes the file back as it was found, rather than rewriting a cp1252 file
+    /// as UTF-8 with replacement characters in it.
     pub encoding: Encoding,
-    /// **This file is not text.** A NUL in its first
-    /// [`crate::encoding::BINARY_PROBE`] bytes, which is git's own test.
-    ///
-    /// Such a buffer opens read-only and is never highlighted: its rows are a lossy decode
-    /// of bytes that are not text, so a save would corrupt the file — the character model
-    /// has nothing to encode them back from. Set by the readers from the bytes, before any
-    /// row exists.
+    /// This file is not text: a NUL in its first
+    /// [`crate::encoding::BINARY_PROBE`] bytes, git's own test. Such a buffer
+    /// opens read-only and is never highlighted, since a save would corrupt it.
     pub binary: bool,
     /// The file as it was when last read or written; `None` for a buffer
     /// that never was (a new file, a scratch buffer).
@@ -89,11 +74,9 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    /// Read `path`, detecting its encoding.
-    ///
-    /// The ladder is in [`crate::encoding`]; what it buys here is that a
-    /// UTF-16 or windows-1252 file opens at all, and that a UTF-8 BOM is
-    /// stripped rather than becoming an invisible first column.
+    /// Read `path`, detecting its encoding: a UTF-16 or windows-1252 file opens
+    /// at all, and a UTF-8 BOM is stripped rather than becoming an invisible
+    /// first column.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
         // Stamped BEFORE the read: a write that lands during it then shows
         // as a change, which errs toward asking.
@@ -104,8 +87,8 @@ impl Buffer {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut b = Self::from_text(&text, Some(path.to_path_buf()), encoding);
         b.disk = disk;
-        // From the BYTES, before any row exists: a binary decodes to something, and that
-        // something must never be written back.
+        // From the BYTES, before any row exists: a binary decodes to something,
+        // and that something must never be written back.
         b.binary = encoding::is_binary(&bytes);
         Ok(b)
     }
@@ -152,21 +135,11 @@ impl Buffer {
     }
 
     // ---------- row access ----------
-    //
-    // Everything outside this module reads rows through these rather than the
-    // `lines` field, so that the field can become a chunked, lazily-decoded
-    // store (TODO.md §16.3) without touching the callers. They are one line
-    // each today, delegating to `Vec<Vec<char>>`; the point is that the callers
-    // stop caring which it is.
-    //
-    // The TYPE is `&Vec<char>` rather than `&[char]` on purpose: it makes every
-    // existing read site a rename rather than a rewrite, because `Vec<char>`
-    // derefs to `[char]` so `.len()`, `.iter()`, `[c]`, `==` and every slice
-    // method carry over unchanged.
+    // Every read goes through these, so the store can change without touching
+    // callers; `&Vec<char>` derefs to `[char]`, which keeps each site a rename.
 
-    /// Row `r`. Panics when out of range, exactly as the `lines[r]` it replaced
-    /// did, so that migrating a call site cannot change which inputs panic.
-    /// Use `row_opt` where the old code used `lines.get(r)`.
+    /// Row `r`. Panics when out of range, like the `lines[r]` it replaced, so
+    /// migrating a call site cannot change which inputs panic.
     pub fn row(&self, r: usize) -> &Vec<char> {
         &self.lines[r]
     }
@@ -186,28 +159,21 @@ impl Buffer {
         self.lines.iter()
     }
 
-    /// A copy of rows `[a, b)`.
-    ///
-    /// This replaces a `&[Vec<char>]` slice: the rows live in chunks, so there
-    /// is no contiguous range to lend out. Every caller of the slice it replaced
-    /// was O(document) already — a whole-buffer search, an export, the undo
-    /// region capture — so the copy is the same order as the work around it.
+    /// A copy of rows `[a, b)`: the rows live in chunks, so there is no
+    /// contiguous range to lend out. Every caller was O(document) already.
     pub fn rows_range(&self, a: usize, b: usize) -> Vec<Vec<char>> {
         self.lines.range(a, b)
     }
 
-    /// Every row, as a flat `Vec`.
-    ///
-    /// For the callers that want the whole document and never did anything but
-    /// iterate it (the highlighter's error walk, the search matcher, export).
+    /// Every row, as a flat `Vec`: for the callers that want the whole document
+    /// and never did anything but iterate it (the highlighter's error walk, the
+    /// search matcher, export).
     pub fn rows_vec(&self) -> Vec<Vec<char>> {
         self.lines.to_vec()
     }
 
-    /// Sort rows `[a, b)` in place.
-    ///
-    /// Replaces handing out a `&mut [Vec<char>]` to `sort_lines`: the rows are
-    /// copied out, sorted, and copied back, which is the same order as the sort.
+    /// Sort rows `[a, b)` in place: a chunked store cannot lend out a
+    /// `&mut [Vec<char>]`, so the rows are copied out, sorted and copied back.
     pub fn sort_rows_by<F>(&mut self, a: usize, b: usize, f: F)
     where
         F: FnMut(&Vec<char>, &Vec<char>) -> std::cmp::Ordering,
@@ -244,11 +210,9 @@ impl Buffer {
         self.lines.extend(rows);
     }
 
-    /// Replace rows `[start, end)` with `items`.
-    ///
-    /// Takes explicit bounds rather than a range, because callers use both
-    /// `start..end` and `a..=b` and converting the second at the call site is
-    /// one character where guessing inside would be a bug.
+    /// Replace rows `[start, end)` with `items`. Explicit bounds because callers
+    /// use both `start..end` and `a..=b`, and converting at the call site is one
+    /// character where guessing inside would be a bug.
     pub fn splice_rows<I>(&mut self, start: usize, end: usize, items: I)
     where
         I: IntoIterator<Item = Vec<char>>,
@@ -296,14 +260,9 @@ impl Buffer {
         Pos { row, col }
     }
 
-    /// Whether this buffer holds at least `cap` bytes of text, stopping as
-    /// soon as the answer is known.
-    ///
-    /// A predicate rather than a length on purpose: the exact size needs a
-    /// pass over every line, and the only caller wants to compare against a
-    /// threshold. This is O(rows until `cap` is reached) — bounded by `cap`,
-    /// whatever the document's size — so asking "is this a big file?" stays
-    /// cheap on a file that is enormous.
+    /// Whether this buffer holds at least `cap` bytes of text, stopping as soon
+    /// as the answer is known. A predicate rather than a length: the exact size
+    /// needs a pass over every line, and the only caller compares a threshold.
     pub fn is_at_least(&self, cap: usize) -> bool {
         let mut n = 0usize;
         for l in self.lines.iter() {
@@ -350,13 +309,9 @@ impl Buffer {
         joined
     }
 
-    /// The file's bytes: `file_text` in the buffer's own encoding, BOM
-    /// included.
-    ///
-    /// The save path uses this rather than `file_text`, so a file read as
-    /// cp1252 is written as cp1252. A character the encoding cannot represent
-    /// is an error rather than a `?`: silently replacing a character is data
-    /// loss, and the caller can say so instead.
+    /// The file's bytes: `file_text` in the buffer's own encoding, BOM included.
+    /// A character the encoding cannot represent is an error rather than a `?`,
+    /// because silently replacing one is data loss the caller could have reported.
     pub fn file_bytes(&self) -> Result<Vec<u8>, String> {
         encoding::encode(&self.file_text(), self.encoding)
     }
@@ -425,13 +380,9 @@ impl Buffer {
             out.push(first);
         }
         let first_removed = self.remove_empty_line(a.row) as usize;
-        // Whole rows strictly between a's and b's rows. **`end` is exclusive and in
-        // POST-removal coordinates**: `b.row` is a pre-removal index, so it shifts down with
-        // the rest (`b.row - first_removed`), and the rows to take are those before it. The
-        // `- 1` this used to carry, paired with `end + 1` below, underflowed on the ordinary
-        // case it was written for — a selection from a row's first column to somewhere in the
-        // NEXT row (`b.row - 1 - first_removed` with both 1) — which is a mouse drag, and
-        // then ^K. Found by `a_copy_reaches_the_terminal_clipboard`.
+        // Whole rows strictly between a's and b's rows. `end` is exclusive and
+        // in POST-removal coordinates, so `b.row` shifts down with the rows
+        // removed above it.
         let r = a.row + 1 - first_removed;
         let end = b.row - first_removed;
         if r < end {
@@ -450,7 +401,7 @@ impl Buffer {
     }
 
     /// Copy the region [a, b) in row-major order without modifying the
-    /// buffer (M-6). Empty edge fragments are dropped.
+    /// buffer. Empty edge fragments are dropped.
     pub fn copy_range(&self, a: Pos, b: Pos) -> Vec<Vec<char>> {
         let mut out: Vec<Vec<char>> = Vec::new();
         if a.row == b.row {
@@ -634,7 +585,8 @@ mod tests {
 
     #[test]
     fn cut_range_whole_lines_no_infinite_loop() {
-        // Regression: the middle-row loop used to never advance `r`.
+        // Whole rows in the middle are taken exactly once, and the loop
+        // terminates.
         let mut b = buf("111\n222\n333\n444");
         let out = b.cut_range(Pos { row: 0, col: 0 }, Pos { row: 2, col: 0 });
         assert_eq!(
@@ -898,8 +850,8 @@ mod tests {
 
     #[test]
     fn crlf_mixed_eol_detected() {
-        // characterization: any \r\n in the file flips the flag, so LF-only
-        // rows come back with \r\n on save (nano behaves the same)
+        // Any \r\n in the file flips the flag, so LF-only rows come back with
+        // \r\n on save.
         let path = tmp_path("crlf_mixed");
         fs::write(&path, "a\nb\r\n").unwrap();
         let b = Buffer::from_file(&path).unwrap();

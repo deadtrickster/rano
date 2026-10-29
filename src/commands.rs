@@ -1,17 +1,8 @@
 //! Every command, by name, and every key that reaches one.
 //!
-//! **One table of commands** ([`commands`]): a name (`write-out`), a title for
-//! people (`Write Out`), a line of documentation, the group it is shown under,
-//! and what it does. **Keymaps** ([`Keymaps`]) say which keys reach which
-//! command, in the global layer and in each mode (a diff view, the conflict
-//! view, a list, a help page, the palette). Dispatch, the bottom bar, the help
-//! pages, `M-x` and the which-key cards all read these two — nothing else says
-//! what a key does, so nothing else can drift from it.
-//!
-//! The shape is emacs's: commands are named and documented, keymaps are layered
-//! (a mode's map over the global one) and can nest (`M-t t`), `M-x` runs any
-//! command by name, and a prefix key held still for a moment shows what can
-//! follow it. The keys themselves are nano's where nano has one.
+//! One table of commands (name, title, documentation line, group, action) and keymaps
+//! saying which keys reach which command; dispatch, the bar, the help pages, `M-x` and the
+//! which-key cards all read these two, so nothing else can drift. The shape is emacs's.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -773,13 +764,9 @@ pub struct Keymaps {
     /// A picture: one column, and no keys but its own scrolling — the same `s` rule as
     /// `markdown`.
     pub picture: Keymap,
-    /// **The keys that reach past a view.** A view's own maps were the whole stack, so F8
-    /// did nothing at all while a preview was up: a reader looking at a picture could not
-    /// open another file, switch buffers, close one, or reach M-x. These are the keys that
-    /// mean the same thing wherever they are pressed; a view's own bindings still win,
-    /// because this map is stacked under them. Deliberately NOT stacked over the save
-    /// question (`DiffKind::Save`), which is waiting for an answer rather than being read —
-    /// these keys would walk away from it.
+    /// The keys that reach past a view, so a preview is not a place with no way
+    /// out: F8, M-W, M-x, M-< / M->. Stacked under a view's own bindings, and
+    /// deliberately NOT over the save question, which is waiting for an answer.
     pub view: Keymap,
     pub conflict: Keymap,
     /// A host's review ([`Editor::open_review`]): send from the view, and M-P
@@ -1081,11 +1068,9 @@ enum Decision {
 }
 
 impl Editor {
-    /// The keymaps in effect, most specific first.
-    ///
-    /// A host's maps ([`Self::push_keymap`]) come first, last pushed first,
-    /// over whatever the editor's own stack is at the moment — so a host's
-    /// chord works in a list or a diff as well as in the text.
+    /// The keymaps in effect, most specific first: a host's maps come first, last
+    /// pushed first, over the editor's own stack, so a host's chord works in a
+    /// list or a diff as well as in the text.
     pub(crate) fn active_keymaps(&self) -> Vec<&Keymap> {
         let mut stack: Vec<&Keymap> = self.host_keymaps.iter().rev().collect();
         stack.extend(self.editor_keymaps());
@@ -1112,10 +1097,9 @@ impl Editor {
                 DiffKind::Conflict => &k.conflict,
                 DiffKind::Review => &k.review,
             };
-            // **The keys that reach past a view** — F8, M-W, M-x, M-< / M-> — are stacked
-            // under the view's own, so a preview is not a place with no way out but Esc. The
-            // save question is the exception: it is waiting for an answer, and these keys
-            // would walk away from a save that has not been decided.
+            // The keys that reach past a view — F8, M-W, M-x, M-< / M-> — are stacked
+            // under the view's own, so a preview is not a place with no way out. The
+            // save question is the exception: these keys would walk away from it.
             return match kind {
                 DiffKind::Save => vec![own, &k.diff],
                 _ => vec![own, &k.diff, &k.view],
@@ -1128,21 +1112,17 @@ impl Editor {
                 vec![&k.list]
             };
         }
-        // **A folder listing**: its own keys (RET, -, r, q) over the global ones, so movement,
-        // search and M-x still work while it is open.
+        // A folder listing: its own keys (RET, -, r, q) over the global ones, so
+        // movement, search and M-x still work while it is open.
         if self.bs().dir.is_some() {
             return vec![&k.dir, &k.global];
         }
         vec![&k.global]
     }
 
-    /// One key through the keymaps: a command runs, a prefix waits for the next
-    /// key (its card shows after [`CARD_DELAY`]), and an unbound printable
-    /// character is typed — into the text, or into the `M-x` query.
-    ///
-    /// A command name no editor command has can only have come from a host's
-    /// map; it is returned for the host to run rather than reported as
-    /// missing.
+    /// One key through the keymaps: a command runs, a prefix waits for the next key
+    /// (its card shows after [`CARD_DELAY`]), and an unbound printable character is
+    /// typed. A command no editor command has came from a host's map, so it is returned.
     pub(crate) fn dispatch_key(&mut self, key: Key) -> KeyOutcome {
         let mut seq = std::mem::take(&mut self.pending.keys);
         let describing = std::mem::take(&mut self.pending.describe);
@@ -1229,10 +1209,9 @@ impl Editor {
         CARD_DELAY.checked_sub(since.elapsed())
     }
 
-    /// The bar's entries for what is in effect: `(key, title)`, in the
-    /// configured notation.
-    /// A pending prefix shows what can follow it; the global layer shows
-    /// [`BAR`]; a mode shows its own maps.
+    /// The bar's entries for what is in effect, `(key, title)` in the configured
+    /// notation: a pending prefix shows what can follow it, the global layer shows
+    /// [`BAR`], and a mode shows its own maps.
     pub(crate) fn bar_items(&self) -> Vec<(String, String)> {
         let nano = self.config.nano_keys;
         let note = |seq: &[Key]| crate::help::notation(nano, seq);

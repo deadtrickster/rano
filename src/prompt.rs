@@ -71,8 +71,8 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
 impl Editor {
     // ---------- prompt history ----------
 
-    /// The history list recorded for a prompt kind, if any (E4b): Search
-    /// queries, Exec/Filter commands, and file names.
+    /// The history list recorded for a prompt kind, if any: Search queries,
+    /// Exec/Filter commands, and file names.
     fn history_for(&self, kind: PromptKind) -> Option<&Vec<String>> {
         match kind {
             PromptKind::Search => Some(&self.search_hist),
@@ -253,7 +253,7 @@ impl Editor {
                     _ => {}
                 }
             }
-            // E4d: modifier-specific arms MUST sit above the modifier-blind
+            // Modifier-specific arms MUST sit above the modifier-blind
             // Char/Left/Right arms below, or M-b/M-f type letters instead of
             // moving by words.
             KeyCode::Char('b') if alt => {
@@ -264,7 +264,7 @@ impl Editor {
                 prompt_next_word(&mut p);
                 self.prompt = Some(p);
             }
-            // F5: search-modifier toggles, Search prompt ONLY, and above the
+            // Search-modifier toggles, Search prompt ONLY, and above the
             // modifier-blind arms so M-c/M-r toggle instead of typing.
             KeyCode::Char('c') if alt && matches!(p.kind, PromptKind::Search) => {
                 self.search_case_sensitive = !self.search_case_sensitive;
@@ -294,9 +294,8 @@ impl Editor {
                 prompt_next_word(&mut p);
                 self.prompt = Some(p);
             }
-            // E4b: Up cycles into the history (newest first); Down walks
-            // back forward, and past the newest entry restores the text that
-            // was being edited when cycling began.
+            // Up cycles into the history, newest first; Down walks forward, and
+            // past the newest entry restores the text being edited when cycling began.
             KeyCode::Up => {
                 let entry = self.history_for(p.kind).and_then(|h| {
                     if h.is_empty() {
@@ -332,8 +331,8 @@ impl Editor {
                 }
                 self.prompt = Some(p);
             }
-            // E4c: Tab completes file paths (only in the path-ish prompts;
-            // other kinds fall through to the re-store arm below).
+            // Tab completes file paths, in the path-ish prompts only; other kinds
+            // fall through to the re-store arm below.
             KeyCode::Tab
                 if matches!(
                     p.kind,
@@ -419,10 +418,9 @@ fn prompt_backspace(p: &mut Prompt) {
     p.text = v.into_iter().collect();
 }
 
-// E4d: word motion inside prompts, over the same word chars (alphanumeric
-// or '_') as the buffer's prev_word/next_word. Forward skips whitespace,
-// then the word (or a single non-word char), then any trailing whitespace;
-// backward is symmetric without the trailing skip.
+// Word motion inside prompts, over the same word chars (alphanumeric or '_')
+// as the buffer's prev_word/next_word. Forward skips whitespace, then the word
+// (or a single non-word char), then trailing whitespace; backward is symmetric.
 fn prompt_next_word(p: &mut Prompt) {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let v: Vec<char> = p.text.chars().collect();
@@ -460,7 +458,7 @@ fn prompt_prev_word(p: &mut Prompt) {
     p.cursor = c;
 }
 
-/// E4a: expand a leading `~` or `~/` to $HOME. `~user` is intentionally not
+/// Expand a leading `~` or `~/` to $HOME. `~user` is intentionally not
 /// expanded; without $HOME the input is returned unchanged.
 pub fn expand_tilde(p: &str) -> String {
     if p == "~" {
@@ -474,11 +472,9 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
-/// E4c: complete a file-path prefix against the filesystem. Splits at the
-/// last '/', reads that directory ("." when there is none), and collects
-/// matching entries — hidden ones only when the typed part starts with '.',
-/// directories suffixed with '/', sorted. Returns the longest common prefix
-/// (directory part re-attached) plus the candidates.
+/// Complete a file-path prefix against the filesystem: split at the last '/', read that
+/// directory, and collect matching entries — hidden ones only when the typed part starts
+/// with '.', directories suffixed with '/', sorted. Returns the common prefix and the candidates.
 pub(crate) fn complete_path(prefix: &str) -> Option<(String, Vec<String>)> {
     let (dir, file) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),

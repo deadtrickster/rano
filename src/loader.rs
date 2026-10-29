@@ -1,29 +1,7 @@
 //! Reading a file without blocking the event loop.
 //!
-//! The freeze this removes: before it, `main()` read and decoded the whole file
-//! *before* the terminal was even initialised, so `rano huge.log` was a dead
-//! screen — no frame, no chrome, no event loop, so not even `^C` — for 575 ms at
-//! 184 MB and about six seconds at 2 GB. Measured: `bench_cold_open`.
-//!
-//! Three things about the shape are deliberate, and each is a bug avoided
-//! rather than a detail chosen (see TODO.md §14.6):
-//!
-//! 1. **It hands out chunks, not a buffer.** The first screenful of a 193 MB
-//!    file costs one 64 KiB read — **37 µs** — because the top of a file does
-//!    not need the file. A single `read_to_string` cannot do that, and cannot be
-//!    abandoned either.
-//!
-//! 2. **`poll` never waits.** `try_recv`, never `recv`: a receiver that blocks
-//!    moves the stall from the read to the wait and leaves the loop just as
-//!    dead. This is the same contract `lsp_poll` and `exec_poll` already keep.
-//!
-//! 3. **Adoption is budgeted.** `while let Ok(chunk) = rx.try_recv()` is
-//!    unbounded, so a worker faster than the loop turns adoption itself into the
-//!    stall it was meant to fix. One `poll` takes at most [`ADOPT_BUDGET`] rows.
-//!
-//! Cancellation is one `AtomicBool` checked between reads, so a 193 MB read is
-//! abandoned within a chunk (**~5 ms**) rather than at the end — set by `^C`,
-//! by an edit, and by opening another file.
+//! Chunks, not a buffer, so a first screenful costs one 64 KiB read; `poll` never waits;
+//! adoption is budgeted, or a fast worker becomes the stall it was meant to fix.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -38,80 +16,45 @@ use std::time::Duration;
 const CHUNK: usize = 64 * 1024;
 
 /// Rows per message. Small enough that the loop interleaves with the worker,
-/// large enough that the channel is not the cost.
-///
-/// A message never carries more than this, which is what makes the adoption
-/// budget below a true bound rather than "usually".
+/// large enough that the channel is not the cost — and a hard cap, which is what
+/// makes the adoption budget a true bound rather than "usually".
 const BATCH: usize = 512;
 
-/// Rows one [`LoadJob::poll`] may adopt at most — **exactly**, because it is a
-/// whole number of batches.
-///
-/// On an mpsc channel a batch that does not fit cannot be put back, so a budget
-/// that was not a multiple of [`BATCH`] would be exceeded by up to one batch.
-/// Making it a multiple turns "stop when the budget is reached" into a hard
-/// bound, and the loop between adoptions is what stops a fast disk from making
-/// the loader the stall.
+/// Rows one [`LoadJob::poll`] may adopt at most: a whole number of batches, so
+/// the bound is exact. A batch that does not fit cannot be put back on an mpsc
+/// channel, so a budget that was not a multiple of [`BATCH`] would overshoot.
 pub const ADOPT_BUDGET: usize = 8 * BATCH;
 
-/// How many rows a tail (`-f`/`--follow`) opens with.
-///
-/// Several screens at any realistic terminal height — `Editor::HIGHLIGHT_MARGIN`
-/// is 200 rows for the same reason — and deliberately fewer than one [`BATCH`],
-/// so the whole tail lands in the first poll rather than arriving in lumps.
-///
-/// This is the number of rows the view STARTS with, not the number it keeps:
-/// TODO.md §20.4's budget is what makes a tail nobody is looking at cheap, and
-/// that is a later increment than the open.
+/// How many rows a tail (`-f`/`--follow`) opens with: several screens at any
+/// realistic terminal height, and deliberately fewer than one [`BATCH`], so the
+/// whole tail lands in the first poll rather than arriving in lumps.
 pub const TAIL_ROWS: usize = 200;
 
 /// The first window [`tail_offset`] reads, widened 4x until it holds
-/// [`TAIL_ROWS`] rows.
-///
-/// One [`CHUNK`]: page-cache friendly, and more than enough for the common log
-/// shape, so the widening loop does not run at all. Its COST is what matters —
-/// a 2 GiB log opens for this much reading and not the file's.
+/// [`TAIL_ROWS`] rows: one [`CHUNK`], so a 2 GiB log opens for this much reading
+/// and not the file's.
 pub const TAIL_WINDOW: u64 = CHUNK as u64;
 
-/// A buffer opened at the tail of a file: `-f`/`--follow`, and later a `.log`
-/// name (TODO.md §20.7).
-///
-/// It exists to remember the one number the rest of the mode is defined
-/// against, §20.1's idea 2: **the size at open**. Below it, the file was there
-/// before we were, so a row can be numbered, styled and searched like any other
-/// file's. At or above it, the rows are still arriving, and are neither styled
-/// nor counted until their newline lands — which is what makes "settled" a fact
-/// about the file rather than a guess about the user's patience.
+/// A buffer opened at the tail of a file (`-f`/`--follow`), remembering the one
+/// number the rest of the mode is defined against, the size at open: below it a
+/// row can be numbered, styled and searched; at or above it rows are arriving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tail {
-    /// The file's length when it was opened.
-    ///
-    /// Read by no one yet: increment E (settle-before-styling) is its first
-    /// reader, and increment D (following the growth) is its second.
+    /// The file's length when it was opened. Read by no one yet: settle-before-
+    /// styling and following the growth are its first readers.
     #[allow(dead_code)]
     pub size_at_open: u64,
-    /// **The boundary styling stops at**, in buffer rows: everything below this
-    /// index arrived after the tail was read, so it is a row the file is still
-    /// writing and must not be coloured (TODO.md §20.1's idea 4, §20.3 E).
-    ///
-    /// A ROW COUNT rather than a byte offset, and that is not a shortcut: the
-    /// buffer holds `Vec<char>` rows and has no per-row byte index, so "rows at
-    /// or after byte `size_at_open`" is not a question it can answer — but
-    /// "rows appended after the tail read" is exactly the same set, and the
-    /// moment it becomes known is [`crate::loader::Adopted::CaughtUp`].
-    ///
-    /// `None` until that moment, which is honest rather than empty: while the
-    /// initial read is still arriving the boundary is unknown, and the rows in
-    /// hand are precisely the ones that were in the file before us.
+    /// The boundary styling stops at, in buffer rows: at or above this index a row
+    /// arrived after the tail was read. A row count, not a byte offset, since the
+    /// buffer has no per-row byte index. `None` until `Adopted::CaughtUp`.
     pub rows_at_open: Option<usize>,
 }
 
 /// One message from the reader thread.
 #[derive(Debug)]
 pub enum LoadMsg {
-    /// **The file is not text.** A NUL in its first
-    /// [`crate::encoding::BINARY_PROBE`] bytes: the reader stopped after one chunk rather
-    /// than decode bytes that have no text to decode. `read_all` returns immediately, so a
+    /// The file is not text: a NUL in its first
+    /// [`crate::encoding::BINARY_PROBE`] bytes. `read_all` returns immediately, so a
     /// 2 GB tarball costs one 64 KiB read instead of a whole file of rows.
     Binary,
     /// The encoding the reader decided, sent before any row so the buffer knows
@@ -124,16 +67,13 @@ pub enum LoadMsg {
     /// row back until its newline arrives, so a chunk boundary can never
     /// split one.
     Rows(Vec<Vec<char>>),
-    /// The end of the file. Carries whether it used CRLF, decided by the same
-    /// pass that split the rows (a second scan would be a second full read).
-    ///
-    /// Sent once by a reading job and never by a following one: a follower has
-    /// no end, and this would be a message about a file that has one.
+    /// The end of the file, carrying whether it used CRLF, decided by the same pass
+    /// that split the rows. Sent once by a reading job and never by a follower: a
+    /// follower has no end, and this would be a message about a file that has one.
     Done { crlf: bool },
-    /// **Everything that exists has been read** — sent once by a follower when
-    /// it first reaches the end, and never by a plain reader (for which that is
-    /// `Done`). The rows in the buffer are settled at this moment; what arrives
-    /// after it is the file growing.
+    /// Everything that exists has been read: sent once by a follower when it first
+    /// reaches the end, never by a plain reader (for which that is `Done`). The
+    /// rows in the buffer are settled at this moment; what arrives after is growth.
     CaughtUp { crlf: bool },
     /// The read failed: unreadable, or not UTF-8. A message rather than an
     /// `eprintln!`, so it can become a status line instead of vanishing into a
@@ -146,8 +86,8 @@ pub enum LoadMsg {
 pub enum Adopted {
     /// Nothing was ready (or the job is over).
     Nothing,
-    /// **The file is not text** — see [`LoadMsg::Binary`]. The job is over; nothing was
-    /// read into rows, because 64 KiB of mojibake is worse than saying so.
+    /// The file is not text — see [`LoadMsg::Binary`]. The job is over; nothing
+    /// was read into rows, because 64 KiB of mojibake is worse than saying so.
     Binary,
     /// `n` rows were appended; still reading.
     Rows(usize),
@@ -171,11 +111,8 @@ pub struct LoadJob {
     /// Set when `Done` or `Failed` has been seen, so `poll` stops asking.
     done: bool,
     /// Set when `CaughtUp` has been seen: this job is a follower that has read
-    /// everything the file had, and is waiting for it to grow.
-    ///
-    /// It is what tells "a read in flight" (a frozen-looking screen) apart from
-    /// "a follower with nothing to do" (an ordinary, finished view), which are
-    /// the same `Some(job)` in [`crate::BufferState::load`].
+    /// everything the file had and is waiting for it to grow, which tells a
+    /// finished view apart from a read in flight in [`crate::BufferState::load`].
     caught_up: bool,
     /// Rows handed out so far, for the status line.
     pub rows_read: usize,
@@ -190,29 +127,16 @@ impl LoadJob {
         Self::spawn_from(path, 0)
     }
 
-    /// Start reading `path` from byte `from` onward — the tail path, paired
-    /// with [`tail_offset`].
-    ///
-    /// The seek happens HERE, on the caller's thread and before the worker
-    /// exists, for the same reason the open does: a position that could not be
-    /// taken is the caller's problem to report now, not a status line after a
-    /// frame has been drawn.
-    ///
-    /// `from` is also what tells the reader whether the bytes it sees first are
-    /// the file's start, which is a real difference and not a formality: at 0 a
-    /// byte-order mark is a mark and is skipped, and at a tail offset the same
-    /// three bytes are content.
+    /// Start reading `path` from byte `from` onward — the tail path, paired with
+    /// [`tail_offset`]. The seek happens on the caller's thread, so a position that
+    /// could not be taken is reported now; at 0 a BOM is skipped, at an offset it is content.
     pub fn spawn_from(path: PathBuf, from: u64) -> io::Result<Self> {
         Self::open(path, from, false)
     }
 
-    /// Start reading `path` from `from` **and keep reading it as it grows** —
-    /// `-f`/`--follow` (TODO.md §20.3 D).
-    ///
-    /// The reader is the same one, with two differences that are the whole of
-    /// following: at the end of the file it waits and looks again instead of
-    /// finishing, and it says [`Adopted::CaughtUp`] once when it first gets
-    /// there rather than [`Adopted::Finished`].
+    /// Start reading `path` from `from` and keep reading it as it grows —
+    /// `-f`/`--follow`. The reader is the same one, with two differences: at the
+    /// end it waits and looks again, and it says [`Adopted::CaughtUp`] once.
     pub fn spawn_follow_from(path: PathBuf, from: u64) -> io::Result<Self> {
         Self::open(path, from, true)
     }
@@ -239,33 +163,23 @@ impl LoadJob {
         })
     }
 
-    /// Whether this job is a follower that has read everything the file had.
-    ///
-    /// A follower with nothing to do is a finished view, not a read in flight:
-    /// it must not hold the frame at [`crate::host`]'s loading cadence, and it
-    /// must not keep saying "Reading…" over the status line for ever.
+    /// Whether this job is a follower that has read everything the file had. Such a
+    /// job is a finished view, not a read in flight: it must not hold the frame at
+    /// [`crate::host`]'s loading cadence, nor keep saying "Reading…" for ever.
     pub fn caught_up(&self) -> bool {
         self.caught_up
     }
 
-    /// Append at most [`ADOPT_BUDGET`] rows to `out`. **Never blocks.**
-    ///
-    /// Returns as soon as the channel is empty, so the loop can draw; the
-    /// budget is what stops a fast worker from starving the frame. Rows go into
-    /// the caller's `Vec` rather than into the return value because the caller
-    /// already has one — the buffer's own rows — and copying them twice to say
-    /// "here are your rows" would be the only allocation this adds.
-    ///
-    /// A `Finished` with zero rows is the normal ending for a file whose last
-    /// batch landed in an earlier poll; `out` may be left untouched.
+    /// Append at most [`ADOPT_BUDGET`] rows to `out`, and never block: it returns as
+    /// soon as the channel is empty so the loop can draw. A `Finished` with zero rows
+    /// is the normal ending for a file whose last batch landed in an earlier poll.
     pub fn poll(&mut self, out: &mut Vec<Vec<char>>) -> Adopted {
         if self.done {
             return Adopted::Nothing;
         }
         let before = out.len();
-        // The bound is exact because every `Rows` message carries at most
-        // `BATCH` rows and the budget is a whole number of batches: eight
-        // messages reach it and the loop stops. See `ADOPT_BUDGET`.
+        // The bound is exact: every `Rows` message carries at most `BATCH` rows
+        // and the budget is a whole number of batches.
         while out.len() - before < ADOPT_BUDGET {
             match self.rx.try_recv() {
                 Ok(LoadMsg::Encoding(enc)) => {
@@ -335,11 +249,9 @@ impl LoadJob {
     }
 }
 
-/// One row's bytes as characters, in the file's encoding.
-///
-/// A whole row at a time is what makes a multi-byte character split across two
-/// chunk reads a non-event: the bytes accumulate until the newline, so the
-/// sequence is never cut.
+/// One row's bytes as characters, in the file's encoding. A whole row at a time is
+/// what makes a multi-byte character split across two chunk reads a non-event: the
+/// bytes accumulate until the newline.
 fn decode_row(
     bytes: &[u8],
     encoding: Option<crate::encoding::Encoding>,
@@ -354,22 +266,9 @@ fn decode_row(
     }
 }
 
-/// Where the tail of a file begins: the byte offset of the first of its last
-/// `rows` rows.
-///
-/// **Scans backwards from the end, so the cost is the tail and not the file.**
-/// That is the whole point for a log: a 2 GiB file opens showing its last
-/// screenful for a read of a few hundred KiB, where reading from the start to
-/// find it costs the whole file. `bench_cold_open`'s 37 µs for a first
-/// screenful is the precedent — this is the same idea applied to the other end.
-///
-/// The window widens by 4x until it holds more than `rows` newlines or reaches
-/// the start of the file, so a file of one enormous row (a stack trace with no
-/// breaks, an unterminated line) is correct rather than special — it just reads
-/// more to get there, and reports 0 because that row's start IS the file's.
-///
-/// Returns `size` when there is nothing to show, so a caller can read from it
-/// and get nothing.
+/// Where the tail of a file begins: the byte offset of the first of its last `rows`
+/// rows, found by scanning backwards, so the cost is the tail and not the file. The
+/// window widens 4x until it holds enough newlines; `size` means nothing to show.
 pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::Result<u64> {
     if size == 0 || rows == 0 {
         return Ok(size);
@@ -425,11 +324,8 @@ pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::
 }
 
 /// The rows of `[from, size)` — the tail a caller reads after [`tail_offset`].
-///
-/// Split from the offset so the two can be tested apart: this is the read, and it
-/// is deliberately a plain forward read from a byte the caller already has.
-/// [`crate::logtail::LogTail::last_rows`] is its caller — the pane that draws the
-/// end of a file it never holds.
+/// Split from the offset so the two can be tested apart; its caller is
+/// [`crate::logtail::LogTail::last_rows`].
 pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(from))?;
     let mut out = Vec::new();
@@ -437,24 +333,14 @@ pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// How long a follower waits at the end of the file before looking again.
-///
-/// A poll rather than an inotify watch, deliberately: one syscall per tenth of
-/// a second costs nothing next to a frame, and it does not need a descriptor, a
-/// platform, or a story for the case where the file is replaced rather than
-/// appended to. `tail -f` looks cleverer and is the same mechanism underneath —
-/// including the one consequence worth naming: **a file that is replaced rather
-/// than appended to is not noticed**, because the descriptor is still the old
-/// one. (`tail -F` follows the NAME; that is a different feature and is not
-/// this one.)
+/// How long a follower waits at the end of the file before looking again: a poll, not
+/// an inotify watch, because one syscall per tenth of a second costs nothing next to a
+/// frame. A file replaced rather than appended to is therefore not noticed.
 const FOLLOW_SLEEP: Duration = Duration::from_millis(100);
 
 /// Send `batch` as a `Rows` message, leaving it empty. Returns whether the loop
-/// it was sent to is still there.
-///
-/// A separate function because there are three moments to send: the batch is
-/// full, and — for a follower — the end of the file was reached, which is the
-/// one a plain read does not have.
+/// it was sent to is still there. A separate function because there are three
+/// moments to send: full, end of file, and end of a follower's catch-up.
 fn send_batch(tx: &mpsc::Sender<LoadMsg>, batch: &mut Vec<Vec<char>>) -> bool {
     if batch.is_empty() {
         return true;
@@ -462,21 +348,9 @@ fn send_batch(tx: &mpsc::Sender<LoadMsg>, batch: &mut Vec<Vec<char>>) -> bool {
     tx.send(LoadMsg::Rows(std::mem::take(batch))).is_ok()
 }
 
-/// The reader thread: one pass, decoding rows as their newlines arrive.
-///
-/// It never re-reads and never holds the whole file: `pending` is one partial
-/// row, and a row is sent as soon as it is complete.
-///
-/// `from` is where the file was positioned before the thread started, and it is
-/// the only difference between reading a file and reading its tail: the loop is
-/// the same, and so is every message it sends.
-///
-/// `follow` is the second difference, and it is two lines of it: at the end of
-/// the file a follower waits and looks again instead of finishing, and it says
-/// `CaughtUp` once instead of `Done`. **`pending` is deliberately NOT flushed in
-/// follow mode** — a row the file has not finished writing is not a row, and
-/// emitting it would put half a stack trace on screen as if it were whole
-/// (TODO.md §20.5) and give §20.3 E a row to style that is about to change.
+/// The reader thread: one pass, decoding rows as their newlines arrive. In follow mode
+/// it waits at the end and says `CaughtUp` once instead of `Done`, and `pending` is NOT
+/// flushed then: a row the file has not finished writing is not a row.
 fn read_all(
     mut file: File,
     from: u64,
@@ -490,8 +364,7 @@ fn read_all(
     let mut batch: Vec<Vec<char>> = Vec::with_capacity(BATCH);
     let mut crlf = false;
     // The first chunk decides the encoding, from the same 64 KiB prefix the
-    // ladder is measured at (TODO.md §13.5: 8 µs against 46 ms for a
-    // whole-file scan, agreeing with the whole-file answer on every shape).
+    // ladder is meant to see.
     let mut encoding: Option<Encoding> = None;
     let mut first = true;
     let mut first_chunk_bom = false;
@@ -505,34 +378,20 @@ fn read_all(
                 if !follow {
                     break;
                 }
-                // **Flush the whole rows FIRST** — before the message that says
-                // this is all of them, and before waiting.
-                //
-                // A follower never reaches the end of `read_all`, and the end of
-                // the file is what flushes the last partial batch for a plain
-                // read. Without this, a file that grew by less than
-                // [`BATCH`] rows would show NOTHING at all: the rows would sit
-                // in `batch` for ever. (Written here because the first version
-                // of this had exactly that bug, and a followed file simply
-                // stayed empty.)
+                // Flush the whole rows FIRST, before the message that says this is
+                // all of them: the end of the file is what flushes the last partial
+                // batch for a plain read, and a follower never reaches it.
                 if !send_batch(tx, &mut batch) {
                     return;
                 }
-                // Everything that exists has been read. Say so ONCE — this is
-                // "the file so far", not a per-growth event — and then wait for
-                // it to grow, holding `pending` (see this function's note on why
-                // a partial row is not emitted).
-                //
-                // Once is enough because in follow mode every row that reaches
-                // the buffer ended in a newline, so unlike a plain read there is
-                // no unsettled tail in it: the file has no end and every row in
-                // hand is one the file finished writing.
+                // Everything that exists has been read. Say so ONCE, then wait for the
+                // file to grow, holding `pending` back: every row in hand ended in a
+                // newline, so unlike a plain read there is no unsettled tail in it.
                 if !said_caught_up {
                     said_caught_up = true;
                     // `crlf` as of this moment. A file that switches convention
-                    // AFTER it is caught up does not update it — and does not
-                    // need to: a tail is read-only, so the flag never reaches a
-                    // write (TODO.md §20.6).
+                    // after this does not update it, and need not: a tail is
+                    // read-only, so the flag never reaches a write.
                     if tx.send(LoadMsg::CaughtUp { crlf }).is_err() {
                         return;
                     }
@@ -555,20 +414,16 @@ fn read_all(
             let enc = encoding::detect(&buf[..n], scope);
             if !enc.rows_split_on_byte_newlines() {
                 // UTF-16: no byte-level newline to split on, so this reader
-                // cannot do it. The owner decodes the file whole instead —
-                // which is what any file whose rows cannot be found without
-                // decoding needs, at any size.
+                // cannot do it. The owner decodes the file whole instead.
                 let _ = tx.send(LoadMsg::NeedsEager(enc));
                 return;
             }
             if tx.send(LoadMsg::Encoding(enc)).is_err() {
                 return; // the loop is gone; nothing to deliver to
             }
-            // **A binary is not text, and reading it as text is how it gets corrupted.**
-            // The probe is git's — a NUL in the first 8000 bytes — and it runs AFTER the
-            // encoding decision, because UTF-16 is text whose bytes are half NULs: the
-            // eager path above has already claimed it, and a file that reaches here is one
-            // whose rows would split on byte newlines, so a NUL in it is not text.
+            // A binary is not text, and reading it as text is how it gets
+            // corrupted. The probe runs AFTER the encoding decision because UTF-16
+            // is text whose bytes are half NULs, and the eager path above took it.
             if encoding::is_binary(&buf[..n]) {
                 let _ = tx.send(LoadMsg::Binary);
                 return;
@@ -581,10 +436,9 @@ fn read_all(
         }
         let chunk = &buf[..n];
         let mut start = if first_chunk_bom {
-            // The BOM is at the very start of the file and is not content: it
-            // is skipped here rather than decoded, or it would be U+FEFF as the
-            // buffer's first character — invisible, but a real column that
-            // Home, click positioning and `^`-anchored regexes all see.
+            // The BOM is at the very start of the file and is not content: skipped
+            // here rather than decoded, or it would be U+FEFF as the buffer's first
+            // character, an invisible but real column.
             first_chunk_bom = false;
             encoding.map(|e| e.bom().len()).unwrap_or(0).min(n)
         } else {
@@ -700,10 +554,9 @@ mod tail_tests {
         start as u64
     }
 
-    /// **The property: the backward scan agrees with reading the file forwards.**
+    /// The property: the backward scan agrees with reading the file forwards.
     /// Driven over the shapes where the off-by-ones live — trailing newline or
-    /// not, fewer rows than asked, exactly as many, a lone enormous row, CRLF —
-    /// and over a range of `rows`, against a reference that reads everything.
+    /// not, fewer rows than asked, a lone enormous row, CRLF — and a range of `rows`.
     #[test]
     fn the_tail_offset_matches_a_forward_read() {
         let bodies: Vec<(&str, Vec<u8>)> = vec![
@@ -776,10 +629,8 @@ mod tail_tests {
         }
     }
 
-    /// **The offset and the reader meet.** `spawn_from` at a tail offset gives
-    /// the file's last rows and NOT the whole file — which is the entire point
-    /// of the pair, and the thing a wrong seek or a wrong offset would hide as
-    /// a plausible-looking tail.
+    /// The offset and the reader meet: `spawn_from` at a tail offset gives the
+    /// file's last rows and NOT the whole file.
     #[test]
     fn spawn_from_reads_the_last_rows_and_not_the_file() {
         let body: Vec<u8> = (0..300)
@@ -810,9 +661,8 @@ mod tail_tests {
         assert_eq!(got[4], "line 299");
     }
 
-    /// **The cost is the tail, not the file.** A file far larger than the window
-    /// still answers immediately, because the scan goes backwards from the end
-    /// and never looks at the beginning.
+    /// The cost is the tail, not the file: a file far larger than the window still
+    /// answers immediately, because the scan goes backwards from the end.
     #[test]
     fn a_large_file_costs_the_window_not_the_file() {
         let body: Vec<u8> = (0..400_000)
@@ -836,9 +686,8 @@ mod tail_tests {
         );
         let want = reference(&body, 40);
         assert_eq!(off, want);
-        // Generous: this is a 12 MB file and the scan reads 64 KiB of it. The
-        // point is that it is not proportional to the file, so a bound well
-        // under a full read is the assertion.
+        // Generous: the scan reads 64 KiB of a 12 MB file. The point is that the
+        // bound is not proportional to the file.
         assert!(
             dt.as_millis() < 200,
             "tail_offset took {dt:?} on a {size}-byte file — that is not a tail scan"
@@ -921,7 +770,7 @@ mod tests {
 
     #[test]
     fn a_file_without_a_trailing_newline_has_a_final_row() {
-        // The case the lazy prototype got wrong (a phantom empty final row).
+        // A file whose last row has no newline still has that row.
         let t = Temp::new("notrail.txt", b"a\nb");
         let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
         let (rows, _, _) = drain(&mut job);
@@ -1068,12 +917,9 @@ mod tests {
         );
     }
 
-    /// **A follower appends what arrives and holds back a half-written row.**
-    ///
-    /// Driven against a real file that grows under it, because the two things
-    /// that can be wrong here are facts about a file rather than about types: a
-    /// partial row shown as if it were whole (§20.5's half a stack trace), and a
-    /// row lost between the first read and the first append.
+    /// A follower appends what arrives and holds back a half-written row. Driven
+    /// against a real file that grows under it, because the two things that can be
+    /// wrong here are facts about a file: a partial row shown as whole, and a lost row.
     #[test]
     fn a_follower_appends_growth_and_holds_back_a_partial_row() {
         use std::io::Write;
@@ -1092,9 +938,8 @@ mod tests {
         }
         assert_eq!(text(&rows), ["one", "two"]);
 
-        // **A row the file has not finished writing is not a row.** "thr" has
-        // no newline after it, so it must NOT appear — the whole point of
-        // holding `pending` back rather than flushing it at the end.
+        // A row the file has not finished writing is not a row: "thr" has no
+        // newline after it, so it must NOT appear.
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(t.path())
@@ -1134,9 +979,9 @@ mod tests {
         job.cancel();
     }
 
-    /// A follower that is caught up is not a read in flight: `loading` says so,
-    /// so the loop waits at its idle cadence and the status line stops saying
-    /// "Reading…" over everything else (§20.3 D).
+    /// A follower that is caught up is not a read in flight: `loading` says so, so
+    /// the loop waits at its idle cadence and the status line stops saying
+    /// "Reading…" over everything else.
     #[test]
     fn a_caught_up_follower_is_not_loading() {
         let t = Temp::new("caught_up.txt", b"a\nb\n");
@@ -1168,10 +1013,8 @@ mod tests {
 
     #[test]
     fn latin1_bytes_are_decoded_as_cp1252_not_refused() {
-        // What changed: a file that is not valid UTF-8 used to be refused
-        // outright — "stream did not contain valid UTF-8" and no way in. It is
-        // now the last rung of the ladder, so the file opens and its accented
-        // letters are right. The byte 0xE9 is 'e-acute', not an error.
+        // A file that is not valid UTF-8 is the last rung of the ladder rather
+        // than an error: 0xE9 is 'e-acute', not a refusal.
         let t = Temp::new("latin1.bin", b"caf\xe9 latin-1\n");
         let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
         let (rows, _, _) = drain(&mut job);
@@ -1179,12 +1022,9 @@ mod tests {
         assert_eq!(job.encoding, Some(crate::encoding::Encoding::Cp1252));
     }
 
-    /// **A byte-order mark in the middle of a file is content.** Only the
-    /// file's own first bytes can be a mark — a tail read starts wherever
-    /// `tail_offset` says, and if that happens to be a row beginning with
-    /// EF BB BF, those bytes are a character somebody wrote. Eating them would
-    /// silently corrupt one line out of the middle of a log, which is exactly
-    /// the kind of bug a tail is prone to.
+    /// A byte-order mark in the middle of a file is content: only the file's own
+    /// first bytes can be a mark, and eating one a tail read happens to land on
+    /// would silently corrupt a line out of the middle of a log.
     #[test]
     fn a_tail_read_does_not_eat_a_mid_file_byte_order_mark() {
         let mut body = b"first\n".to_vec();
@@ -1233,10 +1073,8 @@ mod tests {
 
     #[test]
     fn utf16_is_declined_for_the_eager_path() {
-        // Its rows cannot be found without decoding — U+000A is two bytes — so
-        // the streaming reader declines rather than emitting wrong rows. The
-        // owner reads it whole instead, which is what such a file needs at any
-        // size.
+        // Its rows cannot be found without decoding — U+000A is two bytes — so the
+        // streaming reader declines rather than emitting wrong rows.
         let text = "one\ntwo\n";
         let bytes = crate::encoding::encode(text, crate::encoding::Encoding::Utf16Le).unwrap();
         let t = Temp::new("u16.txt", &bytes);

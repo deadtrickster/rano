@@ -78,7 +78,10 @@ impl Render for Host {
                 let at = rano_plugin::alloc(cap as u32);
                 // SAFETY: `at` is an arena offset this module's allocator just handed out and
                 // `cap` is how much of it there is, which is all the host is told.
-                let n = unsafe { convert_page_text(page as i32, at, cap as u32) };
+                // **Zero-based here too**: the host counts pages from zero and the reader's
+                // state is what a person reads. The picture path converts at its own edge, and
+                // this one did not, so every text page asked for the one after it.
+                let n = unsafe { convert_page_text(page.saturating_sub(1) as i32, at, cap as u32) };
                 if n >= 0 {
                     // SAFETY: the host wrote `n` bytes at `at`, inside this module's memory.
                     let bytes = unsafe { core::slice::from_raw_parts(at as *const u8, n as usize) };

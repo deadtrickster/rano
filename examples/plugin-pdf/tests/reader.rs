@@ -283,7 +283,9 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     // A buffer under the ABI's cap, which is what makes the host answer "it needs this many
     // bytes" instead of refusing: the reader reads the page's area off that and asks again lower.
     let mut fake = Fake::paper(1, 8.27, 11.69);
-    let mut out = vec![0u8; 64 << 10];
+    // Room for the FLOOR dpi, which is the host's minimum (24): A4 at 24 dpi is ~166 KiB, so a
+    // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
+    let mut out = vec![0u8; 256 << 10];
     let len = reader::picture("huge.pdf", 80, 24, &mut fake, &mut out).expect("a smaller page");
     assert_eq!(fake.asked_picture.len(), 2, "{:?}", fake.asked_picture);
     assert_eq!(fake.asked_picture[0], (1, 96));

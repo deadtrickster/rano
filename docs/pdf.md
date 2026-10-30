@@ -1,8 +1,12 @@
 # A PDF reader, as a plugin
 
-`examples/plugin-pdf/` opens a `.pdf` as a **view** instead of as binary noise: a page, a zoom, a
-text mode, and keys. The host rasterizes a page when asked; everything that makes it *reading* -
-which page, at what dpi, what the screen says, what a key does - is the plugin's.
+`examples/plugin-pdf/` opens a `.pdf` as **markdown**: the document's text, page by page, in the
+renderer rano already has. That is what a terminal reads best - at the reader's own font size,
+searchable, scrollable - where a page drawn as a picture is a thumbnail, because kitty's placeholder
+scheme allows thirty rows and a whole A4 page needs a hundred.
+
+The host extracts the text a page at a time; everything that makes it *reading* - the headings, the
+fences that keep a page's layout, the picture mode for a scan - is the plugin's.
 
 It is an **example, not a builtin**. Shipping it inside the binary is `include_bytes!` plus the
 unpack-to-`scripts/built-in/` path of `plans/S10-wasm-hooks.md` §2.4, which is host work. Point a
@@ -63,6 +67,8 @@ called `a#b.pdf` opens as page 1, and `a.pdf#p=x` is a file name rather than a b
 
 ## What a view is
 
+- **The document is markdown**: `# <file name>`, then `## Page N` and that page's laid-out text in
+  a fenced block, which the host renders as prose and a page becomes a heading to search for.
 - **The page's text is the buffer** when the host can give it, in *both* modes. On a terminal with a
   picture protocol the host draws the page over it, and search, copy and `M-P` still work on the
   text. On a terminal without one, the same view is the page.

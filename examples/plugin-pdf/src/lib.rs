@@ -67,6 +67,11 @@ pub extern "C" fn provider_open(ptr: u32, len: u32, cols: u32, rows: u32) -> u32
     let Some(path) = (unsafe { rano::input(ptr, len) }) else {
         return rano::UNCHANGED;
     };
+    // **The document as markdown**, which the host renders as prose; a build without the text
+    // import falls back to the view that says so.
+    if let Some(md) = reader::markdown(path, &mut host::Host) {
+        return answer(md.as_bytes());
+    }
     match reader::view(path, cols as usize, rows as usize, &mut host::Host) {
         Some(text) => answer(text.as_bytes()),
         None => rano::UNCHANGED,

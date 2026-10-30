@@ -346,6 +346,54 @@ fn page_png_with(
     Err(last)
 }
 
+/// **The whole document as markdown**, in one converter call: `pdftotext -layout` prints every page
+/// separated by a form feed, so a fifty-page document is one process rather than fifty. Each page
+/// becomes a heading and its laid-out text a fenced block, which is what a terminal renders at the
+/// reader's own font size - the thing a page rendered as a picture cannot do.
+pub fn document_markdown(path: &Path, title: &str) -> Result<String, String> {
+    checked(path)?;
+    let pages = page_count(path)?;
+    let file = path.to_string_lossy().into_owned();
+    let cmd = Cmd {
+        program: "pdftotext".to_string(),
+        // `-layout` keeps columns and tables as the page has them; `-` writes to stdout, which
+        // `run` reads back as this call's answer.
+        args: vec!["-layout".to_string(), file, "-".to_string()],
+        prints: true,
+    };
+    if !on_path(&cmd.program) {
+        return Err("no text extractor: pdftotext is not on PATH".to_string());
+    }
+    let out = temp_file("doc", "txt");
+    let text = match run(&cmd, &out, Limits::text()) {
+        Run::Done => read_out(&out, TEXT_OUTPUT_CAP, "pdftotext")
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
+        Run::Refused(e) | Run::Stopped(e) => Err(e),
+    };
+    let _ = std::fs::remove_file(&out);
+    let text = text?;
+    Ok(markdown_of(title, &text, pages))
+}
+
+/// **The markdown a document becomes**: a title, then a heading a page and the page's own layout
+/// inside a fence, so the terminal's renderer keeps the spacing it took the extractor a call to
+/// preserve. A blank page is a heading with nothing under it, which is honest about the document.
+fn markdown_of(title: &str, text: &str, pages: u32) -> String {
+    let mut out = format!("# {title}\n");
+    let mut seen = 0u32;
+    for page in text.split('\u{c}') {
+        seen += 1;
+        // `pdftotext` ends the file with a form feed, which is not a page of its own.
+        if seen > pages || (page.trim().is_empty() && seen == pages) {
+            continue;
+        }
+        out.push_str(&format!("\n## Page {seen}\n\n```text\n"));
+        out.push_str(page.trim_end_matches(['\n', '\r']));
+        out.push_str("\n```\n");
+    }
+    out
+}
+
 /// [`page_rgb`] with the caps and the renderers a caller chooses: the file the renderer wrote,
 /// unparsed. Split out so a test can hand in a stand-in and read the bytes back.
 fn page_raster(

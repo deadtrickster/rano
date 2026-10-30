@@ -582,3 +582,27 @@ fn the_spread_key_is_in_the_fragment_and_the_hint() {
     // And a fragment that is not `s=1`/`s=2` is not state: it is part of the file name.
     assert!(reader::key("a.pdf#s=3\nn").is_none());
 }
+
+/// **The document is markdown**: a heading a page and the page's layout in a fence, which is what
+/// the host renders as prose at the reader's own font size. Pages are found by asking until the
+/// host refuses, so a document of any length costs one call a page and no page count.
+#[test]
+fn the_view_is_the_document_as_markdown() {
+    let _fresh = fresh();
+    let mut fake = Fake::pdf(3);
+    let md = reader::markdown("spec.pdf", &mut fake).expect("a document");
+    assert!(md.starts_with("# spec.pdf"), "{md}");
+    assert!(md.contains("## Page 1") && md.contains("## Page 3"), "{md}");
+    assert!(
+        !md.contains("## Page 4"),
+        "three pages, and the fourth is a refusal"
+    );
+    assert!(md.contains("page 1 of the document"), "{md}");
+    assert_eq!(
+        fake.asked_text,
+        vec![1, 2, 3, 4],
+        "and it stopped at the refusal"
+    );
+    // A file this plugin does not claim is not a document.
+    assert!(reader::markdown("notes.txt", &mut fake).is_none());
+}

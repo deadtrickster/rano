@@ -501,6 +501,41 @@ fn fit_dpi(dpi: u32, width: u32, target: usize) -> u32 {
     scaled.clamp(24, dpi)
 }
 
+/// **The whole document as markdown.** A PDF's text is what a terminal renders best - at the
+/// reader's own font size, searchable, scrollable - so the view is the document's text as *prose*
+/// the host already knows how to render, rather than a page squeezed into thirty placeholder rows.
+///
+/// The page count is discovered by asking: `convert_page_text` answers a page or nothing, so the
+/// loop stops at the first refusal. A document longer than [`MAX_PAGES`] is cut there rather than
+/// converting a thousand pages to show one buffer.
+pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
+    let request = Request::parse(path_text);
+    if !request.claim() || !render.can_text() {
+        return None;
+    }
+    let mut out = format!("# {}\n", request.name());
+    let mut pages = 0u32;
+    for page in 1..=MAX_PAGES {
+        let Some(text) = render.page_text(page) else {
+            break;
+        };
+        let text = text.trim_end_matches(['\n', '\r']);
+        // **The page's layout in a fence**: `pdftotext -layout` keeps columns and tables as the
+        // page has them, and a fenced block is what keeps them in a renderer that would otherwise
+        // re-wrap the prose.
+        out.push_str(&format!("\n## Page {page}\n\n```text\n{text}\n```\n"));
+        pages = page;
+    }
+    if pages == 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// The most pages one view converts: a thousand-page manual would take the host a while and show
+/// one buffer, and the reader can open it again.
+pub const MAX_PAGES: u32 = 500;
+
 /// **One key, answered as the path to open next.** The input is `"<path>\n<key>"`, which is the one
 /// shape a text hook has; the answer is a path, which the host opens (and `provider_open` then
 /// draws). `None` is "this key is not mine", which includes `q`: closing a view is the host's.

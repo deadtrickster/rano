@@ -24,6 +24,11 @@ pub struct Builtin {
     pub name: &'static str,
     /// The bytes, from the example crate's own build (`examples/plugin-manual/plugin.wasm`).
     pub wasm: &'static [u8],
+    /// **The capabilities it ships with.** A builtin comes from this binary, so what it needs is
+    /// known here rather than demanded of the reader's config: a PDF viewer that cannot convert a
+    /// page is not a viewer, and asking for three environment variables to see a document is not
+    /// an editor.
+    pub caps: &'static [&'static str],
 }
 
 /// **rano's manual**: `examples/plugin-manual`, answering `provider_open("rano:manual")` with
@@ -31,7 +36,18 @@ pub struct Builtin {
 pub const MANUAL: Builtin = Builtin {
     name: "manual.wasm",
     wasm: include_bytes!("../examples/plugin-manual/plugin.wasm"),
+    caps: &[],
 };
+
+/// **The PDF reader**, shipped: `rano paper.pdf` opens a page, and needs no environment at all.
+pub const PDF: Builtin = Builtin {
+    name: "pdf.wasm",
+    wasm: include_bytes!("../examples/plugin-pdf/plugin.wasm"),
+    caps: &["convert-page"],
+};
+
+/// Everything that ships, loaded at startup so it can claim a file nobody configured it for.
+pub const ALL: &[&Builtin] = &[&MANUAL, &PDF];
 
 /// The marker recording what was unpacked and from which release: one `name version` line each.
 pub const MARKER: &str = ".rano-version";

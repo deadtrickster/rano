@@ -358,6 +358,9 @@ fn run(
     // 0-based, once, here: `--line 1` is the first row, and the editor's own
     // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
     ed.bs_mut().goto = pos;
+    // **What ships is loaded before anything is opened**, so a builtin can claim the file the
+    // command line names: a PDF reader that had to be configured first is not a builtin.
+    ed.load_builtins();
     // **The viewport before the open**, because a provider is told the size it will be drawn
     // at: a plugin asked for 0 columns answers "not mine", and a view opened from the command
     // line would silently lose to the ordinary path.

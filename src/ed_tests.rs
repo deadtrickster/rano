@@ -5297,3 +5297,40 @@ fn a_binary_opens_read_only_and_unread() {
     ed.tick(Instant::now());
     assert_eq!(ed.mode_name(), "plain", "a binary was given a language");
 }
+
+/// **A builtin claims the file nobody configured it for.** `rano paper.pdf` is the whole command:
+/// the reader ships, unpacks to the reader's own folder, and runs with the grant it declares. The
+/// test asserts the door, not the rendering - a machine with no `pdftoppm` still opens the view,
+/// with a sentence saying what it lacks.
+#[test]
+fn a_shipped_builtin_claims_a_pdf_from_the_command_line() {
+    let d = temp_dir("builtin_pdf");
+    let scripts = d.0.join("scripts");
+    let pdf = d.0.join("paper.pdf");
+    // A minimal one-page PDF: enough for the provider to claim, and nothing for it to render.
+    fs::write(
+        &pdf,
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+          3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+    )
+    .unwrap();
+    let mut ed = test_ed("");
+    ed.load_builtins_from(&scripts);
+    assert!(
+        !ed.builtins.is_empty(),
+        "the shipped builtins did not load from {}",
+        scripts.display()
+    );
+    // The binary mark is what a PDF hits without a provider: NUL bytes in its first 8 KiB.
+    ed.open_file(&pdf.to_string_lossy());
+    assert_eq!(
+        ed.bs().buf.name.as_deref(),
+        Some(pdf.as_path()),
+        "the provider did not claim the pdf"
+    );
+    assert!(ed.bs().read_only, "a provider's view is read-only");
+    assert!(
+        !ed.bs().buf.binary,
+        "a claimed file is not the binary fallback"
+    );
+}

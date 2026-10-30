@@ -3450,6 +3450,38 @@ impl Editor {
         self.open_manual_from(&crate::builtin::scripts_dir());
     }
 
+    /// **Unpack and load everything that ships**, so a builtin can claim a file the reader never
+    /// configured: `rano paper.pdf` needs no `RANO_PLUGIN` and no `RANO_CAPABILITIES`, because the
+    /// grant a builtin runs with is the one it ships with. Idempotent, and a builtin that fails
+    /// to load is a note rather than a failure to start.
+    pub fn load_builtins_from(&mut self, scripts: &Path) {
+        for builtin in crate::builtin::ALL {
+            let Ok(at) = crate::builtin::unpack(scripts, builtin) else {
+                continue;
+            };
+            if self
+                .plugin
+                .iter()
+                .chain(self.builtins.iter())
+                .any(|p| p.path() == at)
+            {
+                continue;
+            }
+            let mut names: Vec<String> = builtin.caps.iter().map(|c| (*c).to_string()).collect();
+            names.extend(self.config.capabilities.iter().cloned());
+            let caps = crate::plugin::Capabilities::from_names(&names);
+            match crate::plugin::Plugin::load_with(&at, caps) {
+                Ok(p) => self.builtins.push(p),
+                Err(e) => self.plugin_note = Some(format!("{}: {e}", at.display())),
+            }
+        }
+    }
+
+    /// [`Self::load_builtins_from`] in the reader's own scripts folder.
+    pub fn load_builtins(&mut self) {
+        self.load_builtins_from(&crate::builtin::scripts_dir());
+    }
+
     /// [`Self::open_manual`] with the scripts folder given, the way `config::load_from` takes a
     /// path: a test unpacks into its own folder instead of writing to the reader's config.
     pub fn open_manual_from(&mut self, scripts: &Path) {

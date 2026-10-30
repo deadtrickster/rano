@@ -3428,7 +3428,7 @@ impl Editor {
     /// extension (`rano:manual`) and the language ladder has nothing to go by: the text is asked
     /// instead. A name that says what the document is still wins, and a folder listing is never
     /// markdown.
-    fn preview_answered(&mut self, text: &str) {
+    pub(crate) fn preview_answered(&mut self, text: &str) {
         let named = syntax::detect(self.bs().buf.name.as_deref(), None);
         let markdown = match named {
             Some(lang) => lang == syntax::Lang::Markdown,

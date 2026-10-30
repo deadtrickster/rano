@@ -519,17 +519,80 @@ pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
         let Some(text) = render.page_text(page) else {
             break;
         };
-        let text = text.trim_end_matches(['\n', '\r']);
-        // **The page's layout in a fence**: `pdftotext -layout` keeps columns and tables as the
-        // page has them, and a fenced block is what keeps them in a renderer that would otherwise
-        // re-wrap the prose.
-        out.push_str(&format!("\n## Page {page}\n\n```text\n{text}\n```\n"));
+        // **Prose, not a dump.** A fence around every page is a bordered box with a language
+        // label and the page's line breaks kept: read as a document it looks like a log. A page
+        // that is laid out in columns is the exception, because re-flowing it would scramble it.
+        out.push_str(&format!("\n## Page {page}\n\n"));
+        out.push_str(&page_markdown(text.as_str()));
         pages = page;
     }
     if pages == 0 {
         return None;
     }
     Some(out)
+}
+
+/// **One page's text as markdown**: paragraphs, with numbered lines as headings - the structure a
+/// document has and a text dump does not. A page that is laid out in columns keeps its layout in a
+/// fence, because re-flowing a table scrambles it.
+fn page_markdown(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let laid_out = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| l.contains("  ") || l.contains('\t'))
+        .count();
+    let filled = lines.iter().filter(|l| !l.trim().is_empty()).count().max(1);
+    // A fifth of the lines holding a run of spaces is a page with columns or a table.
+    if laid_out * 5 > filled {
+        return format!("```text\n{}\n```\n", text.trim_end_matches(['\n', '\r']));
+    }
+    let mut out = String::new();
+    let mut para: Vec<&str> = Vec::new();
+    let flush = |para: &mut Vec<&str>, out: &mut String| {
+        if !para.is_empty() {
+            out.push_str(&para.join(" "));
+            out.push('\n');
+            out.push('\n');
+            para.clear();
+        }
+    };
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            flush(&mut para, &mut out);
+            continue;
+        }
+        if is_heading(trimmed) {
+            flush(&mut para, &mut out);
+            out.push_str("### ");
+            out.push_str(trimmed);
+            out.push('\n');
+            out.push('\n');
+            continue;
+        }
+        para.push(trimmed);
+    }
+    flush(&mut para, &mut out);
+    out
+}
+
+/// **Whether a line is a section heading**: `1. Introduction`, `2.3.4 The rule`, `4.2.` - numbered,
+/// short enough to be a title, and not a sentence that happens to start with a number.
+fn is_heading(line: &str) -> bool {
+    if line.len() > 72 || line.ends_with('.') && !line.contains(". ") {
+        return false;
+    }
+    let mut parts = line.splitn(2, ' ');
+    let Some(number) = parts.next() else {
+        return false;
+    };
+    let number = number.trim_end_matches('.');
+    !number.is_empty()
+        && number.len() <= 12
+        && number.starts_with(|c: char| c.is_ascii_digit())
+        && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && parts.next().is_some()
 }
 
 /// The most pages one view converts: a thousand-page manual would take the host a while and show

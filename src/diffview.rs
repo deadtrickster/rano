@@ -552,7 +552,13 @@ impl Editor {
             || looks_like_a_patch(&text)
         {
             self.open_view(Source::Patch { name, text });
-        } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown) {
+        } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown)
+            // **A view is asked about its text, not just its name.** A provider's answer is named
+            // after the file it came from - `spec.pdf` - and its first line is a heading, which
+            // `detect` does not call markdown: so `M-P` on a rendered PDF said there was nothing
+            // to render, while the provider's own path had already decided there was.
+            || looks_like_markdown(&text)
+        {
             self.open_markdown_view(name, text);
         } else if !self.show_review() {
             self.flash(

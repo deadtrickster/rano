@@ -5334,3 +5334,34 @@ fn a_shipped_builtin_claims_a_pdf_from_the_command_line() {
         "a claimed file is not the binary fallback"
     );
 }
+
+/// **`M-P` on a provider's answer asks the text, not only the name.** A rendered PDF is named
+/// `spec.pdf` and opens with `# title`, which the name-based ladder calls nothing; toggling it
+/// back and forth said "nothing to render" while the provider's own path had decided otherwise.
+#[test]
+fn a_rendered_document_toggles_in_and_out_of_prose() {
+    let d = temp_dir("pdf_toggle");
+    let p = d.0.join("spec.pdf");
+    let md = "# spec.pdf\n\n## Page 1\n\nprose, and a fence:\n\n```text\nlaid out\n```\n";
+    // The provider's answer is what the buffer holds: the view is drawn over the text.
+    let mut ed = test_ed(md);
+    ed.text_w = 80;
+    ed.text_h = 24;
+    ed.bs_mut().buf.name = Some(p);
+    ed.preview_answered(md);
+    assert!(ed.diff_view.is_some(), "the prose view is up");
+    // Out through the view's own door (inside a view `M-P` is "back to the text", not the
+    // toggle), and back in through the command the buffer gets: the second one is the press that
+    // used to say there was nothing to render.
+    ed.close_view();
+    assert!(ed.diff_view.is_none(), "the view closed");
+    ed.toggle_rendered_view();
+    assert!(
+        ed.diff_view.is_some(),
+        "M-P did not come back: {}",
+        ed.status
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default()
+    );
+}

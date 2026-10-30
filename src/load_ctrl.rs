@@ -280,7 +280,13 @@ impl Editor {
                 // **Why it is not text may be that nobody claimed it.** A PDF, a binary STL, a
                 // `.pyc` are all binary and all things a provider could open, so a reader with a
                 // plugin configured is told to look at the grant rather than at the file.
-                if self.plugin.is_some() || !self.builtins.is_empty() {
+                // **Configured, not loaded**: a plugin whose imports were not granted fails to
+                // instantiate, so `self.plugin` is None exactly when this hint is most needed.
+                let configured = self.config.plugin.is_some()
+                    || std::env::var_os("RANO_PLUGIN").is_some()
+                    || self.plugin.is_some()
+                    || !self.builtins.is_empty();
+                if configured {
                     self.flash(
                         "Binary: no provider claimed it — a plugin's capabilities or its load \
                          may be what is missing",

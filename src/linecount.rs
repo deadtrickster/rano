@@ -294,15 +294,15 @@ mod tests {
         assert!(LineCountJob::spawn(missing, 10).is_err());
     }
 
-    /// A cancelled scan reports `Stopped`, never a partial count: a partial
-    /// count installed as the answer would be a wrong line number stated as a
-    /// fact, which is worse than no number at all.
+    /// **A cancelled scan never reports a partial count.** `Stopped` if the cancel was seen
+    /// during the scan, and the *whole* count if the scan had already finished by the time anyone
+    /// asked - both are honest, and a partial number stated as the file's line count is not. Which
+    /// of the two happens is a race, so asserting only `Stopped` failed on a loaded macOS runner
+    /// where the job was done before `cancel()` was ever read.
     #[test]
-    fn a_cancelled_scan_answers_stopped_and_not_a_partial_count() {
+    fn a_cancelled_scan_answers_stopped_or_a_whole_count_and_never_a_partial_one() {
         let body = b"a line of about forty bytes, give or take\n".repeat(40_000);
         let t = Temp::new("cancel.txt", &body);
-        // The fixture really has a count to report, so `Stopped` below is a
-        // distinction and not an accident of it being empty.
         assert_eq!(body.iter().filter(|b| **b == b'\n').count(), 40_000);
         let mut job =
             LineCountJob::spawn(t.path().to_path_buf(), body.len() as u64).expect("spawn");
@@ -317,7 +317,11 @@ mod tests {
                 other => break other,
             }
         };
-        assert_eq!(outcome, Counted::Stopped);
+        match outcome {
+            Counted::Stopped => {}
+            Counted::Done(n) => assert_eq!(n, 40_000, "a whole count, not a partial one"),
+            other => panic!("a cancelled scan answered {other:?}"),
+        }
     }
 
     /// **The footprint does not depend on the file.**

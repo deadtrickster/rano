@@ -93,12 +93,25 @@ impl Features {
     /// [`crate::term::proto`].
     pub fn detect() -> Features {
         let mut env = crate::term::proto::Env::now();
-        if !looks_like_kitty(&env) {
-            // Nothing else crosses tmux, so there is nothing worth a process.
-            return Features::of_env(&env, &words());
+        let mut f = Features::of_env(&env, &words());
+        if !f.images {
+            // **Ask when the name said nothing.** Over ssh `TERM` is conservative and
+            // `TERM_PROGRAM` does not travel, so a name is the one thing a remote session cannot
+            // promise; the terminal's own answer is. One query, at startup, before input.
+            f.proto = crate::term::Proto::detect(&env, true);
+            // tmux is asked only when it can change the answer: a terminal that said no is a
+            // picture that does not happen, and a process buys nothing.
+            if f.proto == crate::term::Proto::Kitty && env.tmux {
+                env.ask_passthrough();
+                f.proto = if env.passthrough == Some(true) {
+                    crate::term::Proto::KittyPassthrough
+                } else {
+                    crate::term::Proto::None
+                };
+            }
+            f.images = f.proto.speaks();
         }
-        env.ask_passthrough();
-        Features::of_env(&env, &words())
+        f
     }
 
     /// The decision, from the four inputs that make it — a function so it can be tested
@@ -223,18 +236,6 @@ fn words() -> String {
         std::env::var("RANO_TERM_FEATURES").ok(),
         std::env::var("LETIBOT_TERM_FEATURES").ok(),
     )
-}
-
-/// **Whether the terminal outside the multiplexer is one of the kitty family** — the question
-/// that decides whether tmux's passthrough setting is worth asking about. Deliberately narrower
-/// than [`crate::term::proto`]'s own detection: it is a reason to run a process, so a terminal
-/// this program cannot place is not one to ask tmux about.
-fn looks_like_kitty(env: &crate::term::proto::Env) -> bool {
-    env.kitty_window
-        || env.term.contains("kitty")
-        || ["ghostty", "wezterm", "kitty"]
-            .iter()
-            .any(|p| env.term_program.eq_ignore_ascii_case(p))
 }
 
 #[cfg(test)]

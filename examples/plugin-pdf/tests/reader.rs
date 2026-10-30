@@ -285,6 +285,30 @@ fn a_picture_is_width_height_then_rgb() {
     assert_eq!(fake.asked_picture, vec![(1, 96)]);
 }
 
+/// **A page opens at the size of the pane, not at a fixed dpi.** A4 at 96 dpi is 794 pixels wide;
+/// a 40-column box is 80, so the dpi that fills it is below the host's floor and 24 is asked for -
+/// the sharpest a page can be at a size the terminal would otherwise downscale.
+#[test]
+fn a_page_opens_at_the_size_of_the_pane() {
+    let _fresh = fresh();
+    let mut fake = Fake::paper(1, 8.27, 11.69);
+    let mut out = vec![0u8; 1 << 20];
+    let len = reader::picture("pane.pdf", 40, 24, &mut fake, &mut out).expect("a page");
+    let last = *fake.asked_picture.last().expect("an ask");
+    // 96 * 80 / 794 is 9 dpi, and the host's floor is 24: the floor is the sharpest a page can be
+    // at a size the terminal would downscale anyway, so it is what is asked for.
+    assert_eq!(last.1, 24, "{:?}", fake.asked_picture);
+    // And the page is a quarter of what 96 dpi gave: 199 pixels rather than 794, 16x fewer bytes.
+    let width = u32::from_le_bytes(out[0..4].try_into().unwrap());
+    assert!(width <= 210, "a {width}px page, not 794");
+    assert!(width >= 100, "and not a sliver: {width}px");
+    assert!(len >= 8 + (width as usize) * 3);
+    assert!(
+        len < (256 << 10),
+        "{len} bytes for a page drawn in a 40 column box"
+    );
+}
+
 #[test]
 fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     let _fresh = fresh();
@@ -295,9 +319,16 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
     let mut out = vec![0u8; 256 << 10];
     let len = reader::picture("huge.pdf", 80, 24, &mut fake, &mut out).expect("a smaller page");
-    assert_eq!(fake.asked_picture.len(), 2, "{:?}", fake.asked_picture);
+    // **The property, not a sequence**: the first ask is the reader's, and every ask after it is
+    // smaller. How many there are is the page's business - a page over the cap is fitted once,
+    // and a page wider than the pane is then fitted to that too.
     assert_eq!(fake.asked_picture[0], (1, 96));
-    assert!(fake.asked_picture[1].1 < 96, "{:?}", fake.asked_picture);
+    assert!(fake.asked_picture.len() >= 2, "{:?}", fake.asked_picture);
+    assert!(
+        fake.asked_picture[1..].iter().all(|(_, d)| *d < 96),
+        "{:?}",
+        fake.asked_picture
+    );
     // A4 at 96 dpi is 794 px wide, so anything narrower is the smaller render.
     let width = u32::from_le_bytes(out[0..4].try_into().unwrap());
     assert!(width < 794, "a {width}px page is not a smaller one");

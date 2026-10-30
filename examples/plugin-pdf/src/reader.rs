@@ -348,7 +348,7 @@ pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> O
 /// it is given. That is why the zoom is a **dpi** and not a size: `z` buys detail, not centimetres.
 pub fn picture(
     text: &str,
-    _cols: usize,
+    cols: usize,
     _rows: usize,
     render: &mut impl Render,
     out: &mut [u8],
@@ -358,7 +358,40 @@ pub fn picture(
         return None;
     }
     let len = page_bytes(request.state.page, request.state.dpi, render, out)?;
+    // **A page at the default dpi does not fit a pane.** A4 at 96 dpi is 794 pixels wide and a
+    // 100-column box is 200, so the terminal downscales it: bytes paid for detail nobody sees. The
+    // first render says how wide the page is at the dpi asked, and the dpi that fills `cols` cells
+    // (two pixels a cell) is arithmetic. Only at the default: a zoom is a reader asking for more
+    // detail than the box holds, which is what makes `z` sharp rather than merely bigger.
+    if request.state.dpi == DEFAULT_DPI
+        && let Some((width, _)) = header(out)
+        && width > 0
+    {
+        let want = fit_dpi(DEFAULT_DPI, width, cols.saturating_mul(2));
+        if want < DEFAULT_DPI
+            && let Some(len) = page_bytes(request.state.page, want, render, out)
+        {
+            return checked(len, out);
+        }
+    }
     checked(len, out)
+}
+
+/// The `[width][height]` a picture starts with, if the buffer holds one.
+fn header(out: &[u8]) -> Option<(u32, u32)> {
+    let w = u32::from_le_bytes(out.get(0..4)?.try_into().ok()?);
+    let h = u32::from_le_bytes(out.get(4..8)?.try_into().ok()?);
+    Some((w, h))
+}
+
+/// **The dpi at which a page `width` pixels wide fills `target` pixels**: linear in the dpi, and
+/// clamped to the host's floor of 24, because a reader cannot ask for less than that.
+fn fit_dpi(dpi: u32, width: u32, target: usize) -> u32 {
+    if target == 0 || width == 0 {
+        return dpi;
+    }
+    let scaled = (u64::from(dpi) * target as u64 / u64::from(width)) as u32;
+    scaled.clamp(24, dpi)
 }
 
 /// **One key, answered as the path to open next.** The input is `"<path>\n<key>"`, which is the one

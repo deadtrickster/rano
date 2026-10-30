@@ -369,6 +369,8 @@ fn read_all(
     let mut first = true;
     let mut first_chunk_bom = false;
     let mut said_caught_up = false;
+    let mut docker = false;
+    let mut unwrap = crate::dockerlog::Unwrap::default();
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -429,6 +431,9 @@ fn read_all(
                 return;
             }
             encoding = Some(enc);
+            // **A docker log is unwrapped as it is read**: the file is a log, so it keeps the
+            // tail, the search and the index, and what reaches a row is the container's text.
+            docker = crate::dockerlog::looks_like(&buf[..n]);
             // Only the file's own beginning can be a byte-order mark. A tail
             // read starts mid-file, where those same three bytes (EF BB BF) are
             // a character somebody wrote, so they must not be eaten.
@@ -454,11 +459,15 @@ fn read_all(
                 pending.pop();
                 crlf = true;
             }
-            match decode_row(&pending, encoding) {
-                Ok(row) => batch.push(row),
-                Err(e) => {
-                    let _ = tx.send(LoadMsg::Failed(e));
-                    return;
+            if docker {
+                docker_rows(&mut unwrap, &pending, &mut batch);
+            } else {
+                match decode_row(&pending, encoding) {
+                    Ok(row) => batch.push(row),
+                    Err(e) => {
+                        let _ = tx.send(LoadMsg::Failed(e));
+                        return;
+                    }
                 }
             }
             pending.clear();
@@ -476,18 +485,118 @@ fn read_all(
             pending.pop();
             crlf = true;
         }
-        match decode_row(&pending, encoding) {
-            Ok(row) => batch.push(row),
-            Err(e) => {
-                let _ = tx.send(LoadMsg::Failed(e));
-                return;
+        if docker {
+            docker_rows(&mut unwrap, &pending, &mut batch);
+        } else {
+            match decode_row(&pending, encoding) {
+                Ok(row) => batch.push(row),
+                Err(e) => {
+                    let _ = tx.send(LoadMsg::Failed(e));
+                    return;
+                }
             }
         }
+    }
+    // A docker line still open at the end is a line the container wrote without a newline.
+    if docker && let Some(line) = unwrap.flush() {
+        batch.push(line.chars().collect());
     }
     if !batch.is_empty() {
         let _ = tx.send(LoadMsg::Rows(batch));
     }
     let _ = tx.send(LoadMsg::Done { crlf });
+}
+
+/// **One record into rows.** A record's `log` is a chunk of a line, so it goes through the unwrap
+/// and only complete lines become rows; a line that is not a record at all is shown as it is,
+/// because a stray line in a file is not a reason to lose the file.
+fn docker_rows(unwrap: &mut crate::dockerlog::Unwrap, line: &[u8], batch: &mut Vec<Vec<char>>) {
+    let mut done: Vec<String> = Vec::new();
+    match crate::dockerlog::record(line) {
+        Some(rec) => unwrap.feed(&rec.text, &mut done),
+        None => done.push(String::from_utf8_lossy(line).into_owned()),
+    }
+    batch.extend(done.into_iter().map(|l| l.chars().collect()));
+}
+
+#[cfg(test)]
+mod docker_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A file of its own per test, named for the test so two cannot collide.
+    struct Temp(std::path::PathBuf);
+    impl Temp {
+        fn new(name: &str, body: &[u8]) -> Self {
+            let p = std::env::temp_dir().join(format!("rano_docker_{name}"));
+            std::fs::write(&p, body).expect("write");
+            Temp(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A docker log read through the loader, as a buffer would see it: the container's text, and a
+    /// line that spans three records back to one row.
+    #[test]
+    fn a_docker_log_reads_as_the_containers_text() {
+        let long = "x".repeat(16384);
+        let mut body = String::new();
+        // The measured shape: the newline arrives in the LAST chunk of the long line, which is
+        // what makes the next record a line of its own.
+        for part in [long.as_str(), long.as_str(), "tail\\n"] {
+            body.push_str(&format!(
+                "{{\"log\":\"{part}\",\"stream\":\"stdout\",\"time\":\"t\"}}\n"
+            ));
+        }
+        body.push_str("{\"log\":\"one\\n\",\"stream\":\"stdout\",\"time\":\"t\"}\n");
+        body.push_str("{\"log\":\"bad\\n\",\"stream\":\"stderr\",\"time\":\"t\"}\n");
+        let t = Temp::new("docker-json.log", body.as_bytes());
+        let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "the loader did not finish");
+            match job.poll(&mut rows) {
+                Adopted::Finished { .. } => break,
+                Adopted::Encoding(_) => {}
+                Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+        let text: Vec<String> = rows.iter().map(|r| r.iter().collect()).collect();
+        assert_eq!(text.len(), 3, "{text:?}");
+        assert_eq!(text[0].len(), 16384 * 2 + 4, "one line from three records");
+        assert_eq!(text[1], "one");
+        assert_eq!(text[2], "bad");
+    }
+
+    /// A file that only looks a bit like one: the detection is the first record, and a plain log is
+    /// untouched.
+    #[test]
+    fn an_ordinary_log_is_not_unwrapped() {
+        let t = Temp::new("plain.log", b"2026-10-30 INFO one\nINFO two\n");
+        let mut job = LoadJob::spawn(t.path().to_path_buf()).expect("spawn");
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "the loader did not finish");
+            match job.poll(&mut rows) {
+                Adopted::Finished { .. } => break,
+                Adopted::Encoding(_) => {}
+                Adopted::Nothing => std::thread::sleep(Duration::from_millis(1)),
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+        let text: Vec<String> = rows.iter().map(|r| r.iter().collect()).collect();
+        assert_eq!(text, vec!["2026-10-30 INFO one", "INFO two"]);
+    }
 }
 
 #[cfg(test)]

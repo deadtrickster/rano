@@ -95,6 +95,8 @@ pub mod conflict;
 // external-change diff reaches them as `rano::diff` / `rano::sidediff`.
 pub mod diff;
 pub mod dirview;
+/// Docker's `json-file` log driver, unwrapped into the container's own text.
+pub mod dockerlog;
 pub mod encoding;
 pub mod highlight;
 // A picture read off the disk (`image::read`): the PNG bytes the kitty graphics

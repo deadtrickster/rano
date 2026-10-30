@@ -3381,8 +3381,9 @@ impl Editor {
             if self.open_provider_picture(&at, &answer) {
                 return true;
             }
-            self.plugin_note =
-                Some("this terminal does not take inline pictures - showing the text".to_string());
+            // Nothing to say here: the view installs its own status line a moment later, and a
+            // flash written now is gone before the next frame. The reader's mode word is where a
+            // person reads what they are looking at.
         }
         let mut claim = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {

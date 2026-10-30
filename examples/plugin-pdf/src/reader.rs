@@ -429,7 +429,9 @@ fn body(request: &Request, cols: usize, render: &mut impl Render) -> Body {
 
 /// The state line: what this view is, in one line, above the hint.
 fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> String {
-    let mode = if picture { "picture" } else { "text" };
+    // **`auto`, not `picture`.** The build offers a picture and the terminal decides; claiming
+    // "picture" on a terminal with no protocol is a line that lies about what is on the glass.
+    let mode = if picture { "auto" } else { "text" };
     let mut line = format!(
         "{} · page {} · {} dpi · {}",
         request.name(),

@@ -235,7 +235,8 @@ fn auto_mode_still_carries_the_text_of_a_page_it_will_draw() {
     let _fresh = fresh();
     let mut fake = Fake::rasterized(2, 20, 20);
     let v = view("drawn.pdf", 80, 24, &mut fake).unwrap();
-    assert!(v.contains("· picture"), "{v}");
+    // `auto`, because the build offering a picture is not the terminal taking one.
+    assert!(v.contains("· auto"), "{v}");
     // A terminal with no picture protocol sees the page anyway, and a terminal with one gets the
     // picture over text that search and copy still reach.
     assert!(v.contains("page 1 of the document"), "{v}");

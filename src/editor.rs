@@ -3377,13 +3377,13 @@ impl Editor {
         // Drawn only if the terminal can carry it; a decline falls through to the text hook, and
         // **says so**, because the plugin cannot: it does not know what the terminal speaks, and
         // its own state line can only report what the build offers.
-        if let Some((at, answer)) = drawn {
-            if self.open_provider_picture(&at, &answer) {
-                return true;
-            }
-            // Nothing to say here: the view installs its own status line a moment later, and a
-            // flash written now is gone before the next frame. The reader's mode word is where a
-            // person reads what they are looking at.
+        // Drawn only if the terminal can carry it. Nothing is said here when it cannot: the view
+        // installs its own status line a moment later and a flash written now is gone before the
+        // next frame, so the provider's own mode word is where a person reads what they have.
+        if let Some((at, answer)) = drawn
+            && self.open_provider_picture(&at, &answer)
+        {
+            return true;
         }
         let mut claim = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {

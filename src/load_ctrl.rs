@@ -277,7 +277,17 @@ impl Editor {
                     // keystroke rather than at a save that would corrupt it.
                     bs.read_only = true;
                 }
-                self.flash("Binary file — not shown (read only)");
+                // **Why it is not text may be that nobody claimed it.** A PDF, a binary STL, a
+                // `.pyc` are all binary and all things a provider could open, so a reader with a
+                // plugin configured is told to look at the grant rather than at the file.
+                if self.plugin.is_some() || !self.builtins.is_empty() {
+                    self.flash(
+                        "Binary: no provider claimed it — a plugin's capabilities or its load \
+                         may be what is missing",
+                    );
+                } else {
+                    self.flash("Binary file — not shown (read only)");
+                }
                 dirty = true;
             }
             Adopted::Encoding(enc) => {

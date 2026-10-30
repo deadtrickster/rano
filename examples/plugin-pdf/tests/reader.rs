@@ -98,6 +98,13 @@ impl Render for Fake {
     /// is merely too small is `-needed`, and only then are the bytes written.
     fn page_picture(&mut self, page: u32, dpi: u32, out: &mut [u8]) -> Answer {
         self.asked_picture.push((page, dpi));
+        // **The host's dpi floor, which this fake lacked.** `pdf::checked_dpi` refuses below
+        // MIN_DPI = 24 and above MAX_DPI = 600, and a fake without the floor answers where the
+        // real host refuses - so the suite pinned a sequence the host cannot serve and the
+        // reader's fallback read as working when it was not.
+        if !(24..=600).contains(&dpi) {
+            return Answer::Nothing;
+        }
         let Some(shots) = self.shots.as_ref() else {
             return Answer::Nothing;
         };

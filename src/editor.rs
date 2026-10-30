@@ -3374,11 +3374,15 @@ impl Editor {
                 }
             }
         }
-        // Drawn only if the terminal can carry it; a decline falls through to the text hook.
-        if let Some((at, answer)) = drawn
-            && self.open_provider_picture(&at, &answer)
-        {
-            return true;
+        // Drawn only if the terminal can carry it; a decline falls through to the text hook, and
+        // **says so**, because the plugin cannot: it does not know what the terminal speaks, and
+        // its own state line can only report what the build offers.
+        if let Some((at, answer)) = drawn {
+            if self.open_provider_picture(&at, &answer) {
+                return true;
+            }
+            self.plugin_note =
+                Some("this terminal does not take inline pictures - showing the text".to_string());
         }
         let mut claim = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {

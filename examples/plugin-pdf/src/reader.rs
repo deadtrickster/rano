@@ -547,10 +547,13 @@ pub fn page_markdown(text: &str) -> String {
         text
     };
     let lines: Vec<&str> = text.lines().collect();
+    // **Not the leading indentation**: `-layout` indents lines by where they start on the page,
+    // which prose has too. What makes a page tabular is a run of spaces *inside* a line.
     let laid_out = lines
         .iter()
-        .filter(|l| !l.trim().is_empty())
-        .filter(|l| l.contains("  ") || l.contains('\t'))
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| l.split_whitespace().count() > 1 && l.split("  ").count() > 2)
         .count();
     let filled = lines.iter().filter(|l| !l.trim().is_empty()).count().max(1);
     // A fifth of the lines holding a run of spaces is a page with columns or a table.
@@ -591,15 +594,10 @@ pub fn page_markdown(text: &str) -> String {
             out.push_str("\n\n");
             continue;
         }
-        // **Join only across a line break that interrupted a sentence.** PDF text is wrapped at
-        // the page's width, so a line end is not a paragraph end - but a line ending in a full
-        // stop, or a line starting with a capital after one, usually is a new thought.
-        let continues = para.last().is_some_and(|prev: &&str| {
-            !prev.ends_with(['.', ':', '!', '?']) && !starts_block(trimmed)
-        });
-        if !continues {
-            flush_para(&mut para, &mut out);
-        }
+        // **A blank line is the only paragraph break**, because it is the only one the extractor
+        // actually saw. Punctuation guessed at it instead: "Design a data format …" and "Don't use
+        // any built-in …" are adjacent lines in the page and became two paragraphs with a blank
+        // between them, while the three before them really are separated by one.
         para.push(trimmed);
     }
     if !code.is_empty() {
@@ -650,13 +648,6 @@ fn is_code(t: &str) -> bool {
         || t.ends_with('{')
         || t.contains(":=")
         || (t.contains('{') && t.contains('}'))
-}
-
-/// A line that starts a block rather than continuing a sentence.
-fn starts_block(t: &str) -> bool {
-    t.starts_with(|c: char| c.is_ascii_digit())
-        || t.starts_with(['(', '[', '"', '“'])
-        || t.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// **Whether a line is a section heading**: `1. Introduction`, `2.3.4 The rule`, `4.2.` - numbered,

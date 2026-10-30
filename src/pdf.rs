@@ -524,6 +524,10 @@ fn page_text_with(
     let cmd = tool.unwrap_or_else(|| Cmd {
         program: "pdftotext".to_string(),
         args: vec![
+            // **`-layout`, because the paragraph breaks are in it.** Without it a page comes back
+            // with two blank lines where the document had nine, and a reader joining the rest
+            // gets one wall of prose.
+            "-layout".to_string(),
             "-f".to_string(),
             page.clone(),
             "-l".to_string(),

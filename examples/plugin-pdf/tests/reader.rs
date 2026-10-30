@@ -606,3 +606,32 @@ fn the_view_is_the_document_as_markdown() {
     // A file this plugin does not claim is not a document.
     assert!(reader::markdown("notes.txt", &mut fake).is_none());
 }
+
+/// **A document's shapes survive the trip.** A bullet stays a bullet, a Go line becomes a code
+/// block, and a paragraph is joined only where a line break interrupted a sentence - the
+/// difference between a document and a wall of text.
+#[test]
+fn a_page_keeps_its_bullets_its_code_and_its_paragraphs() {
+    let _fresh = fresh();
+    let page = "Duration: a couple of hours. The task is expected to be done in Golang.\n\
+                One of ClickHouse's competitive advantages is\n\
+                performance, so our integrations should not add\n\
+                ● toSend array max length: 1000\n\
+                ● max string length: 1.000.000\n\
+                Example:\n\
+                originalData := DataInput{\"foo\", DataInput{\"bar\", int32(42)}}\n\
+                1. Introduction\n";
+    let md = reader::page_markdown(page);
+    assert!(md.contains("\n- toSend array max length: 1000\n"), "{md}");
+    assert!(
+        !md.contains('●'),
+        "the glyph is gone, the bullet is not: {md}"
+    );
+    assert!(md.contains("```\noriginalData := DataInput"), "{md}");
+    assert!(md.contains("\n### 1. Introduction\n"), "{md}");
+    // The wrapped sentence is one paragraph, because its line break interrupted it.
+    assert!(
+        md.contains("One of ClickHouse's competitive advantages is performance, so"),
+        "{md}"
+    );
+}

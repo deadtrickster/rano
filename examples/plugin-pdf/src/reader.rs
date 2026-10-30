@@ -535,7 +535,17 @@ pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
 /// **One page's text as markdown**: paragraphs, with numbered lines as headings - the structure a
 /// document has and a text dump does not. A page that is laid out in columns keeps its layout in a
 /// fence, because re-flowing a table scrambles it.
-fn page_markdown(text: &str) -> String {
+pub fn page_markdown(text: &str) -> String {
+    // **The invisible characters an extractor leaves behind.** This document's every line is
+    // wrapped in U+200B, which `trim` does not remove because it is a format character rather
+    // than whitespace - and a renderer counting widths on it draws nothing at all.
+    let clean;
+    let text = if text.contains(INVISIBLE) {
+        clean = text.replace(INVISIBLE, "");
+        clean.as_str()
+    } else {
+        text
+    };
     let lines: Vec<&str> = text.lines().collect();
     let laid_out = lines
         .iter()
@@ -549,32 +559,104 @@ fn page_markdown(text: &str) -> String {
     }
     let mut out = String::new();
     let mut para: Vec<&str> = Vec::new();
-    let flush = |para: &mut Vec<&str>, out: &mut String| {
-        if !para.is_empty() {
-            out.push_str(&para.join(" "));
-            out.push('\n');
-            out.push('\n');
-            para.clear();
-        }
-    };
+    let mut code: Vec<&str> = Vec::new();
     for line in lines {
         let trimmed = line.trim();
+        // **Code is code.** `originalData := DataInput{…}` is a wall of prose unless it is put
+        // where a renderer will show it monospaced.
+        if is_code(trimmed) {
+            flush_para(&mut para, &mut out);
+            code.push(line.trim_end());
+            continue;
+        }
+        if !code.is_empty() {
+            flush_code(&mut code, &mut out);
+        }
         if trimmed.is_empty() {
-            flush(&mut para, &mut out);
+            flush_para(&mut para, &mut out);
+            continue;
+        }
+        // **A bullet is a bullet**, whatever glyph the document draws it with.
+        if let Some(item) = bullet(trimmed) {
+            flush_para(&mut para, &mut out);
+            out.push_str("- ");
+            out.push_str(item);
+            out.push('\n');
             continue;
         }
         if is_heading(trimmed) {
-            flush(&mut para, &mut out);
+            flush_para(&mut para, &mut out);
             out.push_str("### ");
             out.push_str(trimmed);
-            out.push('\n');
-            out.push('\n');
+            out.push_str("\n\n");
             continue;
+        }
+        // **Join only across a line break that interrupted a sentence.** PDF text is wrapped at
+        // the page's width, so a line end is not a paragraph end - but a line ending in a full
+        // stop, or a line starting with a capital after one, usually is a new thought.
+        let continues = para.last().is_some_and(|prev: &&str| {
+            !prev.ends_with(['.', ':', '!', '?']) && !starts_block(trimmed)
+        });
+        if !continues {
+            flush_para(&mut para, &mut out);
         }
         para.push(trimmed);
     }
-    flush(&mut para, &mut out);
+    if !code.is_empty() {
+        flush_code(&mut code, &mut out);
+    }
+    flush_para(&mut para, &mut out);
     out
+}
+
+fn flush_para(para: &mut Vec<&str>, out: &mut String) {
+    if para.is_empty() {
+        return;
+    }
+    out.push_str(&para.join(" "));
+    out.push_str("\n\n");
+    para.clear();
+}
+
+fn flush_code(code: &mut Vec<&str>, out: &mut String) {
+    if code.is_empty() {
+        return;
+    }
+    out.push_str("```\n");
+    out.push_str(&code.join("\n"));
+    out.push_str("\n```\n\n");
+    code.clear();
+}
+
+/// A line that is a bullet, and its text without the marker.
+fn bullet(t: &str) -> Option<&str> {
+    let rest = t
+        .strip_prefix('●')
+        .or_else(|| t.strip_prefix('•'))
+        .or_else(|| t.strip_prefix('·'))
+        .or_else(|| t.strip_prefix("- "))
+        .or_else(|| t.strip_prefix("* "))?;
+    Some(rest.trim_start())
+}
+
+/// A line that is code rather than prose: Go-shaped, or a brace, or an assignment.
+fn is_code(t: &str) -> bool {
+    t.starts_with("func ")
+        || t.starts_with("var ")
+        || t.starts_with("return ")
+        || t.starts_with("type ")
+        || t.starts_with('}')
+        || t == "{"
+        || t.ends_with('{')
+        || t.contains(":=")
+        || (t.contains('{') && t.contains('}'))
+}
+
+/// A line that starts a block rather than continuing a sentence.
+fn starts_block(t: &str) -> bool {
+    t.starts_with(|c: char| c.is_ascii_digit())
+        || t.starts_with(['(', '[', '"', '“'])
+        || t.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// **Whether a line is a section heading**: `1. Introduction`, `2.3.4 The rule`, `4.2.` - numbered,
@@ -594,6 +676,9 @@ fn is_heading(line: &str) -> bool {
         && number.chars().all(|c| c.is_ascii_digit() || c == '.')
         && parts.next().is_some()
 }
+
+/// The zero-width characters a PDF's text layer carries and a reader must not see.
+const INVISIBLE: [char; 5] = ['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}', '\u{00ad}'];
 
 /// The most pages one view converts: a thousand-page manual would take the host a while and show
 /// one buffer, and the reader can open it again.

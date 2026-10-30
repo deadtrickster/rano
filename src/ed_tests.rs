@@ -5365,3 +5365,26 @@ fn a_rendered_document_toggles_in_and_out_of_prose() {
             .unwrap_or_default()
     );
 }
+
+/// **A view is not a place with no way out.** `C-x` is the editor's own key and must work inside a
+/// preview: it did not, because the view's maps were `[own, diff]` with no global layer under them,
+/// so leaving a rendered PDF meant pressing Esc first.
+#[test]
+fn the_exit_key_reaches_inside_a_view() {
+    let md = "# title\n\n## Page 1\n\nprose\n";
+    let mut ed = test_ed(md);
+    ed.text_w = 80;
+    ed.text_h = 24;
+    ed.preview_answered(md);
+    assert!(ed.diff_view.is_some(), "a view is up");
+
+    press(&mut ed, KeyCode::Char('x'), Mods::CTRL);
+    assert!(
+        ed.wants_quit(),
+        "C-x does nothing inside a view: {}",
+        ed.status
+            .as_ref()
+            .map(|s| s.text.clone())
+            .unwrap_or_default()
+    );
+}

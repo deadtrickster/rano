@@ -1393,8 +1393,13 @@ mod tests {
         // a tool that gives up on its own write exits non-zero instead. Asserting only the first
         // spelling made this test fail about one full run in ten.
         let e = r.expect_err("a renderer that writes past the cap must not hand back a page");
+        // **No page comes back**, which is the guarantee. Which of three guards or exits says so
+        // is the OS's business, and all three have been observed on this machine: the kernel's
+        // file cap stops the tool (`was stopped`), a tool that gives up on its write exits
+        // non-zero (`could not read it`), and a tool killed mid-write leaves something that is
+        // not a PNG. Asserting one spelling made this fail about one full run in ten.
         assert!(
-            e.contains("was stopped") || e.contains("could not read it"),
+            e.contains("was stopped") || e.contains("could not read it") || e.contains("not a PNG"),
             "{e}"
         );
     }

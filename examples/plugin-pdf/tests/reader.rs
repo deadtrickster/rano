@@ -254,7 +254,7 @@ fn a_build_with_no_renderer_answers_with_the_message_instead_of_failing() {
     assert!(v.contains(HINT), "{v}");
     // Nothing to draw, and that is the sentinel rather than a trap.
     let mut out = vec![0u8; 4096];
-    assert!(reader::picture("no-renderer.pdf", 80, 24, &mut Nothing, &mut out).is_none());
+    assert!(reader::picture("no-renderer.pdf", 80, 24, &mut Nothing, &mut out, &mut []).is_none());
 }
 
 #[test]
@@ -275,8 +275,8 @@ fn a_picture_is_width_height_then_rgb() {
     let _fresh = fresh();
     let mut fake = Fake::rasterized(2, 3, 2);
     let mut out = vec![0u8; 4096];
-    let len =
-        reader::picture("picture.pdf", 80, 24, &mut fake, &mut out).expect("a page comes back");
+    let len = reader::picture("picture.pdf", 80, 24, &mut fake, &mut out, &mut [])
+        .expect("a page comes back");
     assert_eq!(len, 8 + 3 * 2 * 3);
     assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 3);
     assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 2);
@@ -293,7 +293,7 @@ fn a_page_opens_at_the_size_of_the_pane() {
     let _fresh = fresh();
     let mut fake = Fake::paper(1, 8.27, 11.69);
     let mut out = vec![0u8; 1 << 20];
-    let len = reader::picture("pane.pdf", 40, 24, &mut fake, &mut out).expect("a page");
+    let len = reader::picture("pane.pdf", 40, 24, &mut fake, &mut out, &mut []).expect("a page");
     let last = *fake.asked_picture.last().expect("an ask");
     // 96 * 80 / 794 is 9 dpi, and the host's floor is 24: the floor is the sharpest a page can be
     // at a size the terminal would downscale anyway, so it is what is asked for.
@@ -318,7 +318,8 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     // Room for the FLOOR dpi, which is the host's minimum (24): A4 at 24 dpi is ~166 KiB, so a
     // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
     let mut out = vec![0u8; 256 << 10];
-    let len = reader::picture("huge.pdf", 80, 24, &mut fake, &mut out).expect("a smaller page");
+    let len =
+        reader::picture("huge.pdf", 80, 24, &mut fake, &mut out, &mut []).expect("a smaller page");
     // **The property, not a sequence**: the first ask is the reader's, and every ask after it is
     // smaller. How many there are is the page's business - a page over the cap is fitted once,
     // and a page wider than the pane is then fitted to that too.
@@ -348,7 +349,7 @@ fn a_page_above_the_cap_is_rendered_at_the_dpi_that_fits() {
     // does fit: the page is sharp, not a thumbnail.
     let mut fake = Fake::paper(1, 8.27, 11.69);
     let mut out = vec![0u8; reader::PAGE_BYTES];
-    reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out).expect("a sharp page");
+    reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out, &mut []).expect("a sharp page");
     assert_eq!(fake.asked_picture[0], (1, 300));
     assert_eq!(fake.asked_picture[1], (1, reader::FIT_DPI));
     assert_eq!(fake.asked_picture.len(), 3, "{:?}", fake.asked_picture);
@@ -367,12 +368,12 @@ fn text_mode_answers_no_picture_and_a_page_the_host_misses_answers_none() {
     let _fresh = fresh();
     let mut fake = Fake::rasterized(1, 4, 4);
     let mut out = vec![0u8; 4096];
-    assert!(reader::picture("miss.pdf#m=text", 80, 24, &mut fake, &mut out).is_none());
-    assert!(reader::picture("miss.pdf#p=9", 80, 24, &mut fake, &mut out).is_none());
-    assert!(reader::picture("notes.txt", 80, 24, &mut fake, &mut out).is_none());
+    assert!(reader::picture("miss.pdf#m=text", 80, 24, &mut fake, &mut out, &mut []).is_none());
+    assert!(reader::picture("miss.pdf#p=9", 80, 24, &mut fake, &mut out, &mut []).is_none());
+    assert!(reader::picture("notes.txt", 80, 24, &mut fake, &mut out, &mut []).is_none());
     // A page with no pixels is not a picture either: the header has to describe a real one.
     let mut empty = Fake::rasterized(1, 0, 0);
-    assert!(reader::picture("empty.pdf", 80, 24, &mut empty, &mut out).is_none());
+    assert!(reader::picture("empty.pdf", 80, 24, &mut empty, &mut out, &mut []).is_none());
 }
 
 // ---------------------------------------------------------------- the keys
@@ -537,4 +538,45 @@ fn a_page_asked_for_twice_is_rendered_once() {
         vec![1],
         "the second view came from the cache"
     );
+}
+
+/// **A wide pane takes two pages.** They are composed into one picture - the host draws one
+/// picture, so a spread is one picture twice as wide - and a page shorter than the other leaves
+/// the background beside it rather than shifting.
+#[test]
+fn a_spread_is_two_pages_in_one_picture() {
+    let _fresh = fresh();
+    let mut fake = Fake::rasterized(2, 6, 4);
+    let mut out = vec![0u8; 1 << 16];
+    let mut scratch = vec![0u8; 1 << 16];
+    let len = reader::picture("two.pdf#s=2", 80, 24, &mut fake, &mut out, &mut scratch)
+        .expect("a spread");
+    let w = u32::from_le_bytes(out[0..4].try_into().unwrap());
+    let h = u32::from_le_bytes(out[4..8].try_into().unwrap());
+    assert_eq!((w, h), (12, 4), "two 6x4 pages side by side");
+    assert_eq!(len, 8 + 12 * 4 * 3);
+    // Both pages were asked for, in order, and the next page is the one after this one.
+    assert_eq!(fake.asked_picture, vec![(1, 96), (2, 96)]);
+    // The right half is the second page: with two identical pages the halves match, which is what
+    // makes this a layout test rather than a colour one.
+    let row = &out[8..8 + 12 * 3];
+    assert_eq!(
+        &row[..6 * 3],
+        &row[6 * 3..],
+        "left and right are a page each"
+    );
+}
+
+/// **`s` is the key, and the state carries it**: the toggle writes `s=2` into the fragment, and the
+/// next key press reads it back.
+#[test]
+fn the_spread_key_is_in_the_fragment_and_the_hint() {
+    let _fresh = fresh();
+    assert!(HINT.contains("s spread"), "{HINT}");
+    let next = reader::key("paper.pdf\ns").expect("a path");
+    assert!(next.ends_with("#s=2"), "{next}");
+    let back = reader::key(&format!("{next}\ns")).expect("a path");
+    assert!(!back.contains("s=2"), "{back}");
+    // And a fragment that is not `s=1`/`s=2` is not state: it is part of the file name.
+    assert!(reader::key("a.pdf#s=3\nn").is_none());
 }

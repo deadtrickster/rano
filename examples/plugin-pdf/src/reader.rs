@@ -74,7 +74,8 @@ pub const PAGE_BYTES: usize = 16 << 20;
 /// named here, which is the rule the plugin dired set: a plugin view that hides its keys is a
 /// plugin view nobody uses. `q` is the host's (it closes the view), and it is listed with the rest
 /// because the reader does not care which side of the ABI a key lives on.
-pub const HINT: &str = "n next · p prev · g<N> goto · z/Z zoom · 0 reset · t text · q close";
+pub const HINT: &str =
+    "n next · p prev · g<N> goto · s spread · z/Z zoom · 0 reset · t text · q close";
 
 /// What a build with neither import can say. A module that imported what the host cannot provide
 /// would not instantiate at all, so this sentence is the whole reason the imports are optional.
@@ -106,6 +107,8 @@ pub struct State {
     pub page: u32,
     pub dpi: u32,
     pub mode: Mode,
+    /// **Two pages side by side**, which is what a wide pane is for.
+    pub spread: bool,
 }
 
 impl Default for State {
@@ -114,6 +117,7 @@ impl Default for State {
             page: 1,
             dpi: DEFAULT_DPI,
             mode: Mode::Auto,
+            spread: false,
         }
     }
 }
@@ -178,6 +182,14 @@ impl State {
         }
     }
 
+    /// Two pages, or one.
+    pub fn toggle_spread(self) -> State {
+        State {
+            spread: !self.spread,
+            ..self
+        }
+    }
+
     /// **The fragment this state is written as**, with everything at its default left out so a
     /// path stays short: `""`, `#p=4`, `#p=4&z=144`, `#m=text`.
     pub fn fragment(self) -> String {
@@ -190,6 +202,9 @@ impl State {
         }
         if self.mode != Mode::Auto {
             parts.push("m=text".to_string());
+        }
+        if self.spread {
+            parts.push("s=2".to_string());
         }
         if parts.is_empty() {
             String::new()
@@ -239,6 +254,9 @@ impl Request {
                 },
                 "m" if value == "text" => state.mode = Mode::Text,
                 "m" if value == "auto" => state.mode = Mode::Auto,
+                // Only the two pages this reader can show. Any other count is not state.
+                "s" if value == "2" => state.spread = true,
+                "s" if value == "1" => state.spread = false,
                 _ => return plain(text),
             }
         }
@@ -352,10 +370,19 @@ pub fn picture(
     _rows: usize,
     render: &mut impl Render,
     out: &mut [u8],
+    scratch: &mut [u8],
 ) -> Option<usize> {
     let request = Request::parse(text);
     if !request.claim() || request.state.mode == Mode::Text || !render.can_picture() {
         return None;
+    }
+    // **Two pages side by side**, when there is room to hold both before composing them. A pane
+    // that cannot give the scratch is shown one page: a reader who pressed `s` on a narrow
+    // terminal gets a page, not a failure.
+    if request.state.spread
+        && let Some(len) = spread_bytes(&request, cols, render, out, scratch)
+    {
+        return Some(len);
     }
     let len = page_bytes(request.state.page, request.state.dpi, render, out)?;
     // **A page at the default dpi does not fit a pane.** A4 at 96 dpi is 794 pixels wide and a
@@ -375,6 +402,75 @@ pub fn picture(
         }
     }
     checked(len, out)
+}
+
+/// The dark the rasterizer is cleared with, so the gap beside a short page is the page's own.
+const BACKGROUND: u8 = 0x14;
+
+/// **Two pages composed into one picture**: each rendered into its own half of the scratch, then
+/// their rows interleaved into `out` — the reader shows one picture, so a spread is one picture
+/// twice as wide. A page shorter than the other leaves the background colour where it would have
+/// been, which is what a book's two pages look like.
+fn spread_bytes(
+    request: &Request,
+    cols: usize,
+    render: &mut impl Render,
+    out: &mut [u8],
+    scratch: &mut [u8],
+) -> Option<usize> {
+    if scratch.len() < 2 * (8 + 1024) {
+        return None;
+    }
+    let half = scratch.len() / 2;
+    let (left_at, right_at) = scratch.split_at_mut(half);
+    // Each page gets half the pane, so the pair fills it. The dpi is the reader's, and the page's
+    // own cap does the rest: a half that cannot hold its page is fitted down by `page_bytes`.
+    let dpi = request.state.dpi.max(MIN_DPI);
+    let n1 = page_bytes(request.state.page, dpi, render, left_at)?;
+    // **Each page fills its half of the pane**, and the first render is what says how big the page
+    // is: a spread that only fitted the cap drew 1018 pixels into a 320 pixel box, which the
+    // terminal then threw away. One render per page is the ordinary case; two when it does not fit.
+    let (w1_0, _) = header(left_at)?;
+    let want = fit_dpi(dpi, w1_0, cols);
+    let (n1, n2) = if want < dpi {
+        (
+            page_bytes(request.state.page, want, render, left_at)?,
+            page_bytes(request.state.page + 1, want, render, right_at)?,
+        )
+    } else {
+        (
+            n1,
+            page_bytes(request.state.page + 1, dpi, render, right_at)?,
+        )
+    };
+    let (w1, h1) = header(left_at)?;
+    let (w2, h2) = header(right_at)?;
+    let (w, h) = (w1 + w2, h1.max(h2));
+    let len = 8 + (w as usize) * (h as usize) * 3;
+    if len > out.len() || left_at.len() < n1 || right_at.len() < n2 {
+        return None;
+    }
+    out[0..4].copy_from_slice(&w.to_le_bytes());
+    out[4..8].copy_from_slice(&h.to_le_bytes());
+    let stride = (w as usize) * 3;
+    for row in 0..h as usize {
+        let at = 8 + row * stride;
+        copy_row(out, at, left_at, row, h1, w1);
+        copy_row(out, at + (w1 as usize) * 3, right_at, row, h2, w2);
+    }
+    Some(len)
+}
+
+/// One page's row into the composed picture, or the background where that page has no row.
+fn copy_row(out: &mut [u8], at: usize, page: &[u8], row: usize, rows: u32, width: u32) {
+    let w = (width as usize) * 3;
+    let dst = &mut out[at..at + w];
+    if row < rows as usize {
+        let src = 8 + row * w;
+        dst.copy_from_slice(&page[src..src + w]);
+    } else {
+        dst.fill(BACKGROUND);
+    }
 }
 
 /// The `[width][height]` a picture starts with, if the buffer holds one.
@@ -416,6 +512,7 @@ pub fn key(input: &str) -> Option<String> {
         "Z" => request.state.zoom_out(),
         "0" => request.state.reset_zoom(),
         "t" | "T" => request.state.toggle_text(),
+        "s" | "S" => request.state.toggle_spread(),
         _ => {
             // `g`, then a page number: `g12`, `g 12`, `g:12`, `g=12`. The prompt that asks for
             // the number is the host's; this is what it hands the plugin when it has one.
@@ -465,8 +562,9 @@ fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> Str
     // **`auto`, not `picture`.** The build offers a picture and the terminal decides; claiming
     // "picture" on a terminal with no protocol is a line that lies about what is on the glass.
     let mode = if picture { "auto" } else { "text" };
+    let spread = if request.state.spread { " · 2-up" } else { "" };
     let mut line = format!(
-        "{} · page {} · {} dpi · {}",
+        "{} · page {} · {} dpi · {}{spread}",
         request.name(),
         request.state.page,
         request.state.dpi,

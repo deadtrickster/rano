@@ -82,19 +82,41 @@ pub extern "C" fn provider_open(ptr: u32, len: u32, cols: u32, rows: u32) -> u32
 /// allocation, no copy, and a page as large as the ABI's cap ([`reader::PAGE_BYTES`]) fits an 18
 /// MiB arena with room to spare. A `Vec` in between would need a second and a third copy of the
 /// same megabyte, which is why there is not one.
+/// The room two half-pages are composed in before they become one picture: the arena has 18 MiB,
+/// a page may take 16, and a page at the reader's dpi in half a pane is a few hundred KiB.
+const SCRATCH_BYTES: u32 = 2 << 20;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn provider_picture(ptr: u32, len: u32, cols: u32, rows: u32) -> u32 {
     // SAFETY: the host's range, checked by `rano::input`.
     let Some(path) = (unsafe { rano::input(ptr, len) }) else {
         return rano::UNCHANGED;
     };
+    // The page's own bytes, and **the scratch a spread is composed in**: the arena has 18 MiB,
+    // the page may take 16, and the rest is what two half-pages need to be built before they
+    // become one picture.
     let at = rano::alloc(8 + reader::PAGE_BYTES as u32);
     // SAFETY: `at + 8 .. at + 8 + PAGE_BYTES` is the arena this module's allocator just handed
     // out — the SDK's 18 MiB, of which the page takes 16 MiB and the path above it a few bytes —
     // and the host writes into it only within the capacity it is given.
     let out = unsafe { core::slice::from_raw_parts_mut((at + 8) as *mut u8, reader::PAGE_BYTES) };
-    let Some(len) = reader::picture(path, cols as usize, rows as usize, &mut host::Host, out)
-    else {
+    let spare = rano::alloc(SCRATCH_BYTES);
+    // SAFETY: a second arena block this module's allocator just handed out, and the reader writes
+    // only inside it. An allocator that could not find room answers a sentinel, and a spread then
+    // falls back to one page rather than writing anywhere.
+    let scratch: &mut [u8] = if spare == u32::MAX {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(spare as *mut u8, SCRATCH_BYTES as usize) }
+    };
+    let Some(len) = reader::picture(
+        path,
+        cols as usize,
+        rows as usize,
+        &mut host::Host,
+        out,
+        scratch,
+    ) else {
         return rano::UNCHANGED;
     };
     // SAFETY: the block sits at `at`, inside the same allocation, and the host reads both after

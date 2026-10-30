@@ -33,8 +33,14 @@ n next · p prev · g<N> goto · z/Z zoom · 0 reset · t text · q close
 | `z` | sharper: the zoom ×1.5, re-rendered at the new dpi |
 | `Z` | smaller: ÷1.5 |
 | `0` | back to the zoom the document opened at |
+| `s` | two pages side by side, for a pane wide enough to hold them |
 | `t` | the page's text, or the picture: the one key that changes what the view is |
 | `q` | close the view (the host's key, listed because the reader does not care which side of the ABI a key lives on) |
+
+**`s` composes two pages into one picture**, because the host draws one picture: each page is
+rendered into half the scratch the plugin carves from its arena, then their rows are interleaved.
+The state line says `· 2-up`, the state lives in the fragment (`#s=2`), and a pane whose scratch
+cannot hold both pages shows one - a page, not a failure.
 
 The mode word is **`auto`**, not `picture`: the build offering a picture is not the terminal taking
 one, and a line that claims what is not on the glass is worse than a vague one.

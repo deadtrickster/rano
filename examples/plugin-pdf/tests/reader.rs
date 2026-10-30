@@ -314,7 +314,9 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     let _fresh = fresh();
     // A buffer under the ABI's cap, which is what makes the host answer "it needs this many
     // bytes" instead of refusing: the reader reads the page's area off that and asks again lower.
-    let mut fake = Fake::paper(1, 8.27, 11.69);
+    // Landscape, because a portrait page in this pane is a thumbnail and the reader shows its
+    // text instead - the rule that keeps a small picture off readable text.
+    let mut fake = Fake::paper(1, 11.69, 8.27);
     // Room for the FLOOR dpi, which is the host's minimum (24): A4 at 24 dpi is ~166 KiB, so a
     // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
     let mut out = vec![0u8; 256 << 10];
@@ -346,8 +348,8 @@ fn a_page_above_the_cap_is_rendered_at_the_dpi_that_fits() {
     // A4 at 300 dpi is 26 MiB of RGB, above what one answer may carry, and the host refuses it
     // exactly as it refuses a page that is not there. The floor dpi is where a page that exists
     // always fits, so asking there separates the two, and the floor's own area says which dpi
-    // does fit: the page is sharp, not a thumbnail.
-    let mut fake = Fake::paper(1, 8.27, 11.69);
+    // does fit: the page is sharp, not a thumbnail. Landscape for the same reason as above.
+    let mut fake = Fake::paper(1, 11.69, 8.27);
     let mut out = vec![0u8; reader::PAGE_BYTES];
     reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out, &mut []).expect("a sharp page");
     assert_eq!(fake.asked_picture[0], (1, 300));

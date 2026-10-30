@@ -367,7 +367,7 @@ pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> O
 pub fn picture(
     text: &str,
     cols: usize,
-    _rows: usize,
+    rows: usize,
     render: &mut impl Render,
     out: &mut [u8],
     scratch: &mut [u8],
@@ -385,6 +385,17 @@ pub fn picture(
         return Some(len);
     }
     let len = page_bytes(request.state.page, request.state.dpi, render, out)?;
+    // **A page too small to read is shown as its text instead.** The kitty placeholder scheme
+    // encodes a picture's row in one of thirty diacritics, so a whole A4 page can occupy at most
+    // ~42 cells - a thumbnail, painted over the page's own text, which is the reading experience
+    // at the terminal's font size. A picture is drawn only where it can be read: a wide pane, a
+    // landscape page, or a scan with no text layer at all (`m=text` forces the other way).
+    if let Some((w, h)) = header(out).filter(|(w, h)| *w > 0 && *h > 0) {
+        let box_cells = (2 * rows as u64 * w as u64 / h as u64) as usize;
+        if box_cells.min(cols) < cols / 2 && render.can_text() {
+            return None;
+        }
+    }
     // **A page at the default dpi does not fit a pane.** A4 at 96 dpi is 794 pixels wide and a
     // 100-column box is 200, so the terminal downscales it: bytes paid for detail nobody sees. The
     // first render says how wide the page is at the dpi asked, and the dpi that fills `cols` cells

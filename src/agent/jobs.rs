@@ -1,9 +1,7 @@
-//! **The jobs pane**: the background jobs a session started, and one job's output.
+//! The jobs pane: the background jobs a session started, and one job's output.
 //!
-//! Ported from letibot's `ui/panes/jobs.rs` (`jobs_lines`, `job_out_lines`, `jobs_line`)
-//! and `app/panes.rs` (`job_stops`). Every field here is the daemon's answer; the widget
-//! decides colour and layout and nothing else — no join against the current turn, because
-//! the process table is not a thing a head reconstructs.
+//! Every field is the daemon's answer; the widget decides colour and layout and nothing else — no join
+//! against the current turn, because the process table is not a thing a head reconstructs.
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::{bytes_human, clean, clean_line};
@@ -52,9 +50,9 @@ pub struct JobsPane {
 }
 
 impl JobsPane {
-    /// **The one enumeration** of what the cursor can rest on — running jobs, then one
-    /// `finished` group row, then (unfolded) the settled jobs. The arrows, Enter and the
-    /// drawn `▸` all read this, so the row the cursor is drawn on is the row Enter takes.
+    /// The one enumeration of what the cursor can rest on — running jobs, then one `finished` group
+    /// row, then (unfolded) the settled jobs. The arrows, Enter and the drawn `▸` all read it, so the
+    /// row the cursor is drawn on is the row Enter takes.
     pub fn stops(&self) -> Vec<JobStop> {
         let mut out = Vec::with_capacity(self.jobs.len() + 1);
         for (i, j) in self.jobs.iter().enumerate() {
@@ -75,21 +73,9 @@ impl JobsPane {
         out
     }
 
-    /// **How many jobs are running, for the composer's top edge** — R51 item 5.
-    ///
-    /// `None` when the answer is zero, and absent rather than `0 jobs`: a count that is
-    /// always there is furniture, and the edge it sits on is spent on facts that are true
-    /// only while they are.
-    ///
-    /// **And the redirected half.** A job whose output goes to a file has a window that will
-    /// be EMPTY however long it runs (R41), so *"3 jobs running"* and *"3 jobs running, one
-    /// of which you cannot watch"* are different answers:
-    ///
-    /// ```text
-    /// 3 jobs running · 1 to a file
-    /// ```
-    ///
-    /// A settled job's redirect is not counted: the row is about what is running now.
+    /// How many jobs are running, for the composer's top edge; `None` at zero, because a count that is
+    /// always there is furniture. A job whose output goes to a file is counted apart, since its window
+    /// will be empty however long it runs, and a settled job's redirect is not counted.
     pub fn running_line(&self) -> Option<String> {
         let running = self.jobs.iter().filter(|j| j.running).count();
         if running == 0 {
@@ -110,31 +96,25 @@ impl JobsPane {
         Some(out)
     }
 
-    /// **The daemon's job table, as rows** — running first, then one folded `finished (N)`
-    /// row. The operator's own ask: *"jobs panel - same as subagents - show list of running,
-    /// group finished"*. Each stop's row is recorded in the result, which is what the arrows
-    /// scroll to and a click hits.
+    /// The daemon's job table, as rows — running first, then one folded `finished (N)` row. Each stop's
+    /// row is recorded in the result, which is what the arrows scroll to and a click hits.
     pub fn content(&self, w: usize) -> PaneLines {
         self.tree().content(w)
     }
 
-    /// **The hint row [`JobsPane::content`] draws** — the selected row's own keys, then the
-    /// pane's — the sentence a host's own [`HintBar`](crate::agent::hint_bar) should carry
-    /// rather than a second copy of the same words.
+    /// The hint row [`JobsPane::content`] draws — the selected row's own keys, then the pane's — so a
+    /// host's own bar carries it rather than a second copy of the same words.
     pub fn hint_line(&self) -> Option<String> {
         self.tree().hint_line()
     }
 
-    /// The same sentence **without the pane's left margin**, which is what
-    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes.
+    /// The same sentence without the pane's left margin, which is what a bar takes.
     pub fn hint_text(&self) -> Option<String> {
         self.tree().hint_text()
     }
 
-    /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
-    ///
-    /// Its second line sits at 9 under a job and at 7 under the `finished` group — one list,
-    /// two columns, and the row is what says which, so the group row sets its own.
+    /// The pane, as data: the same enumeration the arrows read, one [`Row`] each. Its second line sits
+    /// at 9 under a job and at 7 under the group, so the row says which column it uses.
     fn tree(&self) -> TreeList {
         TreeList {
             title: "background jobs".into(),
@@ -147,8 +127,8 @@ impl JobsPane {
             detail_column: 9,
             margin: 4,
             hint: vec!["↑↓ moves".into(), "esc closes this".into()],
-            // **A job still shows running until the daemon says it settled**, which is a
-            // sentence about the table rather than about a row: it goes under the hint.
+            // A job still shows running until the daemon says it settled, which is a sentence about the
+            // table rather than about a row.
             notes: vec![
                 "a job still shows running until the daemon says it settled — between turns, \
                  that saying is the daemon's alone."
@@ -160,8 +140,8 @@ impl JobsPane {
     /// One stop, as a row: a job, or the `finished` group.
     fn row(&self, stop: JobStop) -> Row {
         let i = match stop {
-            // **The `finished` fold.** A group row and not a job: there is nothing to read, and
-            // Enter folds or unfolds the settled ones.
+            // The `finished` fold: a group row and not a job — there is nothing to read, and Enter
+            // folds or unfolds the settled ones.
             JobStop::Finished => {
                 let n = self.jobs.iter().filter(|j| !j.running).count();
                 let fold = if self.finished_open { "[-]" } else { "[+]" };
@@ -198,14 +178,9 @@ impl JobsPane {
         } else {
             ("[!]", Role::Failure)
         };
-        // **A job that never ran has no duration, and the row must not claim one**
-        // (A.2, §11.6). It read
-        //
-        //     not run (could not join its scope) · 0 B out · ran 0.0s
-        //
-        // — the state word denying *ran* two fields before the row said it. The byte
-        // count stays: it is a measurement that exists (nothing was produced), and the
-        // word beside it is what says why.
+        // A job that never ran has no duration, and the row must not claim one: the state word denies
+        // `ran` two fields before the row would say it. The byte count stays — nothing was produced, and
+        // that is a measurement.
         let state = clean_line(&j.state);
         let tail = if j.running {
             format!("running · {} out so far", bytes_human(j.produced))
@@ -220,11 +195,8 @@ impl JobsPane {
             )
         };
         let mut detail = vec![format!("{} · {tail}", clean_line(&j.how))];
-        // **And where the output actually went, when it did not come here** (R41), on a
-        // line of its own so the file is readable rather than another clause on a row
-        // that is already long. The operator's own question — *"im not sure it lets me to
-        // see that in the jobs details, when i 'enter' a job"* — answered in the list
-        // they are looking at, before they Enter and find an empty window.
+        // And where the output actually went, on a line of its own so the file is readable rather than
+        // another clause on a long row — before the reader Enters and finds an empty window.
         if let Some(path) = &j.redirect {
             detail.push(format!(
                 "→ {} (its output is there, not in the window)",
@@ -244,7 +216,7 @@ impl JobsPane {
     }
 }
 
-/// One job's output window, as the daemon sent it: **offsets** rather than a sentence.
+/// One job's output window, as the daemon sent it: offsets rather than a sentence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobOutput {
     pub job: String,
@@ -273,18 +245,15 @@ pub struct JobOutput {
 }
 
 impl JobOutput {
-    /// The view, exactly `room` rows or fewer, and the scroll actually used.
-    ///
-    /// The tail shows by default; the arrows walk back toward the beginning of the loaded
-    /// window; the footer, pinned to the bottom row, says how much further the reader can go.
+    /// The view, exactly `room` rows or fewer, and the scroll actually used. The tail shows by default,
+    /// the arrows walk back toward the beginning, and the footer says how much further the reader can go.
     pub fn lines(&self, room: usize) -> (Vec<Line>, usize) {
         let mut out = vec![pane::title(format!(
             "job output — {}",
             clean_line(&self.job)
         ))];
-        // A refusal is not a window: the daemon could not answer, so the pane says what it
-        // said rather than drawing an empty log the operator would read as "the job wrote
-        // nothing".
+        // A refusal is not a window: the daemon could not answer, so the pane says what it said rather
+        // than drawing an empty log the operator would read as "the job wrote nothing".
         if let Some(err) = &self.error {
             out.push(pane::faint("    the daemon refused this read:"));
             out.push(Line::default());
@@ -294,9 +263,8 @@ impl JobOutput {
             out.truncate(room);
             return (out, 0);
         }
-        // The state and the measurement on one line, because they are one fact: what the job
-        // is, and what window of how much is on screen. A `dropped` count is said here rather
-        // than in the footer — a window that begins mid-log must not be read as the job's
+        // The state and the measurement on one line, because they are one fact. A `dropped` count is
+        // said here rather than in the footer: a window that begins mid-log must not read as the job's
         // beginning.
         let state = clean_line(&self.state);
         if self.loading && self.state.is_empty() {
@@ -319,28 +287,12 @@ impl JobOutput {
         let footer = 1;
         let visible = room.saturating_sub(out.len() + footer).max(1);
         if self.lines.is_empty() && !self.loading {
-            // **§11.6 — an empty window is several cases, and one was an inversion of the
-            // operator's own rule.** A job whose scope could not be joined *never ran*, so its
-            // window is empty because there is no process behind it, and the card said
-            //
-            //     not run (could not join its scope)      ← the header
-            //     it wrote nothing at all.                ← and it never started
-            //
-            // which is R17 read backwards: *a row with no output must not look like a row
-            // whose output is empty*. The case is chosen by the **state** — the daemon's
-            // `never_ran` — and not by the window's emptiness alone.
-            //
-            // **A redirected job is another case.** Its window is empty BY CONSTRUCTION (R41):
-            // the daemon gave the bytes to a file, so `it wrote nothing at all` describes a job
-            // that wrote a build log. The operator: *"entering a job never shows me its output
-            // - whether it went to file or not"*. The name of the file is all this pane can
-            // honestly say, and it is said where the reader is looking.
-            //
-            // `running` is the daemon's own state word, tested literally: the widget renders
-            // the daemon's vocabulary and keeps no second copy of its enum.
+            // An empty window is several cases, chosen by the daemon's `never_ran` and not by the
+            // emptiness alone: a job whose scope could not be joined never ran, and a redirected job's
+            // window is empty by construction because the bytes went to a file. `running` is the
+            // daemon's own word, tested literally.
             let said = if self.never_ran {
-                // Written in full so two heads cannot hold two different sentences about one
-                // state: *A rules the words; both heads render the same string*.
+                // Written in full so two heads cannot hold two different sentences about one state.
                 "    it never ran, so there is nothing it could have written.".to_string()
             } else if let Some(path) = self.redirect.as_deref() {
                 let path = clean_line(path);
@@ -404,7 +356,6 @@ mod tests {
         plain(&p.content(w).lines).join("\n")
     }
 
-    /// letibot `app/tests/jobs.rs::the_jobs_pane_joins_the_command_and_marks_a_running_job`.
     #[test]
     fn the_jobs_pane_joins_the_command_and_marks_a_running_job() {
         let p = JobsPane {
@@ -412,8 +363,8 @@ mod tests {
                 job("j1", "cargo test --workspace", true),
                 job("j2", "sleep 30", false),
             ],
-            // **Both jobs, so the settled one is unfolded to be drawn** — it lives under the
-            // `finished` group by default, and this test is about the ROW.
+            // Both jobs, so the settled one is unfolded to be drawn: it lives under the `finished`
+            // group by default, and this test is about the row.
             finished_open: true,
             selected: 0,
         };
@@ -439,7 +390,6 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/jobs.rs::the_jobs_pane_names_the_file_a_redirected_job_writes_to`.
     #[test]
     fn the_jobs_pane_names_the_file_a_redirected_job_writes_to() {
         let mut j = job("j1", "cargo test > /tmp/build.log 2>&1", true);
@@ -462,8 +412,7 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/jobs.rs::the_top_edge_counts_running_jobs_and_says_which_cannot_be_watched`
-    /// (the count; where the edge puts it is the composer's).
+    /// The count of running jobs, and which of them cannot be watched.
     #[test]
     fn the_top_edge_counts_running_jobs_and_says_which_cannot_be_watched() {
         let pane = |jobs: Vec<JobRow>| JobsPane {
@@ -502,8 +451,8 @@ mod tests {
         );
     }
 
-    /// The `finished` group: folded by default, a stop of its own, and the cursor's row is
-    /// the one recorded — letibot's `jobs_row_of` reading `jobs_stop_rows`.
+    /// The `finished` group: folded by default, a stop of its own, and the cursor's row is the one
+    /// recorded.
     #[test]
     fn settled_jobs_fold_under_one_group_row_that_is_a_stop() {
         let mut p = JobsPane {
@@ -554,9 +503,8 @@ mod tests {
         assert!(!lines.contains("ran 0.0s"), "{lines}");
     }
 
-    /// **The hint under the list is the selected row's own keys** — the job row reads Enter
-    /// one way, the `finished` group another, and the sentence about the table sits under both
-    /// as a note of its own.
+    /// The hint under the list is the selected row's own keys, and the sentence about the table sits
+    /// under both as a note of its own.
     #[test]
     fn the_hint_is_the_selected_rows_own_keys_and_the_table_keeps_its_own_sentence() {
         let p = JobsPane {
@@ -591,7 +539,7 @@ mod tests {
         );
     }
 
-    /// **The pane's hint leaves as data**: a host's bar reads the sentence the pane draws.
+    /// The pane's hint leaves as data: a host's bar reads the sentence the pane draws.
     #[test]
     fn the_panes_hint_is_the_hint_it_draws() {
         let p = JobsPane {
@@ -618,8 +566,7 @@ mod tests {
         );
     }
 
-    /// The fixture the golden pin below draws: one job still running, and two that have
-    /// settled — one of them redirected to a file.
+    /// The fixture the golden pin below draws: one running job, and two settled — one redirected.
     fn golden_fixture() -> JobsPane {
         let mut redirected = job("j3", "cargo build > /tmp/build.log 2>&1", false);
         redirected.redirect = Some("/tmp/build.log".into());
@@ -633,10 +580,8 @@ mod tests {
         }
     }
 
-    /// **The body the jobs pane drew before the tree-list port** (R1a), pinned first:
-    /// everything above the frame's last blank row — the title, the running job with its
-    /// facts, and the `finished` group with its legend. The hint under it is expected to
-    /// change — it now follows the cursor.
+    /// The body the pane drew before the tree-list port, pinned first: the frame's rows up to the last
+    /// blank. The hint under it now follows the cursor.
     const GOLDEN_BODY: &[&str] = &[
         "background jobs",
         "",
@@ -719,8 +664,7 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/jobs.rs::the_job_output_event_fills_the_overlay_and_it_pages` (the
-    /// drawing half: the offsets as sent, and the footer naming the keys that work).
+    /// The drawing half: the offsets as sent, and the footer naming the keys that work.
     #[test]
     fn the_job_output_draws_the_offsets_it_was_sent() {
         let v = JobOutput {
@@ -761,7 +705,6 @@ mod tests {
         assert!(plain(&rows).iter().any(|l| l == "line 0"));
     }
 
-    /// letibot `app/tests/jobs.rs::a_refused_job_output_read_lands_in_the_pane`.
     #[test]
     fn a_refused_job_output_read_lands_in_the_pane() {
         let v = JobOutput {

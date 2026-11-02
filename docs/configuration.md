@@ -1,8 +1,8 @@
 # Configuration
 
 `$XDG_CONFIG_HOME/rano/config.toml`, falling back to `~/.config/rano/config.toml`. A flat
-`key = value` file. Unknown keys are ignored and an out-of-range value falls back to the
-default, so a bad line is never fatal. A value containing `#` needs double quotes.
+`key = value` file. Unknown keys and bad values are ignored and an out-of-range number is
+clamped, so a bad line is never fatal. A value containing `#` needs double quotes.
 
 ```toml
 tab_width = 4

@@ -1105,12 +1105,10 @@ impl Editor {
                 DiffKind::Conflict => &k.conflict,
                 DiffKind::Review => &k.review,
             };
-            // The keys that reach past a view — F8, M-W, M-x, M-< / M-> — are stacked
-            // under the view's own, so a preview is not a place with no way out. The
-            // save question is the exception: these keys would walk away from it.
-            // **The global layer is last**, so a view shadows what it likes and the editor's own
-            // keys still reach: without it `C-x` did nothing inside a view and leaving a PDF
-            // meant pressing Esc first, because a view was a place with no way out but its own.
+            // The keys that reach past a view sit under the view's own, except
+            // the save question, which these keys would walk away from. The
+            // global layer is last, so a view shadows what it likes and the
+            // editor's own keys still reach.
             return match kind {
                 DiffKind::Save => vec![own, &k.diff, &k.global],
                 _ => vec![own, &k.diff, &k.view, &k.global],

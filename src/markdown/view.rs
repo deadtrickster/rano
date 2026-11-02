@@ -1,18 +1,9 @@
-//! A growing document's rows, with the frozen prefix rendered once.
-//!
-//! Ported from letibot's `BlockCache`. The parse window buys nothing if the
-//! *renderer* rebuilds every row from every block on every delta — that is
-//! pi's mistake (rebuild the whole message per `message_update`) moved one layer
-//! down. So:
-//!
-//! - The frozen prefix of a document renders **once per width**. The view keeps
-//!   its rows and extends them as blocks freeze; a resize (or a change of the
-//!   options the rows were drawn under) is the only thing that invalidates it.
-//! - Only the live tail is re-rendered per frame, and the tail is bounded by
-//!   the window's frozen frontier.
-//!
-//! The view holds no palette: rows are role-tagged, so a palette change is the
-//! host drawing the same rows differently, not a reason to re-render.
+//! A growing document's rows, with the frozen prefix rendered once. The
+//! parse window buys nothing if the renderer rebuilds every row on every
+//! delta: the frozen prefix renders once per width (a resize or a change of
+//! options is the only invalidation) and only the live tail re-renders per
+//! frame, bounded by the window's frozen frontier. The view holds no
+//! palette — rows are role-tagged.
 
 use std::collections::HashMap;
 
@@ -20,14 +11,9 @@ use super::parse::{Block, IncrementalMarkdown};
 use super::render::{CodePaint, RenderOptions, blank, render_bounded_with};
 use crate::render::{Line, Span};
 
-/// A per-row decoration applied to everything a [`MarkdownView`] produces.
-///
-/// It exists so a pane can carry a rail (letibot's reasoning pane draws `┃`
-/// down its left) **without** copying its frozen prefix into every frame. The
-/// rail has to be on every row — that is the point of it, it is the signal that
-/// survives a copy-paste when the colour does not — and the only place it can be
-/// applied once per row rather than once per row per frame is at the moment the
-/// row enters the cache.
+/// A per-row decoration applied to everything a [`MarkdownView`] produces:
+/// a rail on every row, applied once when the row enters the cache rather
+/// than once per row per frame.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Decor {
     /// Prepended to every row. Its width must be subtracted from the width the
@@ -37,10 +23,8 @@ pub struct Decor {
 }
 
 impl Decor {
-    /// Decorate one row. Public because a host that draws a single row beside a
-    /// cached block — the live tail of a folded reasoning pane — has to decorate
-    /// it the same way, and the only way to guarantee that is for there to be
-    /// one function.
+    /// Decorate one row. Public so a host drawing a row beside a cached
+    /// block decorates it the same way.
     pub fn apply(&self, l: Line) -> Line {
         if self.prefix.is_empty() {
             return l;
@@ -76,14 +60,10 @@ pub struct MarkdownView {
     width: usize,
     opts: Option<RenderOptions>,
     decor: Decor,
-    /// One streaming highlighter per open code block, keyed by the block's
-    /// **absolute** index in the document.
-    ///
-    /// Absolute rather than tail-relative because the tail is re-parsed from the
-    /// frozen frontier on every push, so a tail block's position moves as blocks
-    /// freeze while `stable_count() + tail_index` does not. An entry is dropped
-    /// the moment its block freezes: the block is then in `stable_lines` and
-    /// will never be rendered again.
+    /// One streaming highlighter per open code block, keyed by its absolute
+    /// index — the tail is re-parsed from the frozen frontier, so a tail
+    /// block's position moves while `stable_count() + tail_index` does not.
+    /// Dropped the moment its block freezes.
     codes: HashMap<usize, CodePaint>,
     /// Rows for the blocks that were frozen when they were rendered.
     stable_lines: Vec<Line>,
@@ -123,11 +103,8 @@ impl MarkdownView {
     }
 
     /// Every row of the document: the cached prefix plus a freshly rendered
-    /// tail, with no trailing blank rows.
-    ///
-    /// Convenience over [`MarkdownView::split`], and it **copies the prefix**.
-    /// Fine for a one-shot render of a finished document; not for the per-frame
-    /// path, where the copy is O(accumulated output) and a frame must not be.
+    /// tail, with no trailing blank rows. Convenience over [`Self::split`],
+    /// and it copies the prefix — fine one-shot, not per frame.
     pub fn lines(
         &mut self,
         md: &IncrementalMarkdown,
@@ -143,15 +120,10 @@ impl MarkdownView {
         out
     }
 
-    /// The frozen prefix **by reference**, and the live tail freshly rendered.
-    ///
-    /// This is the per-frame form. The prefix is the part that grows without
-    /// bound over a long answer, and handing it back borrowed is what keeps the
-    /// cost of drawing a frame proportional to the tail and the window rather
-    /// than to everything said so far.
-    ///
-    /// The prefix ends with a blank row after its last block, so the two halves
-    /// concatenate into the document; the tail has no trailing blank.
+    /// The frozen prefix by reference, and the live tail freshly rendered —
+    /// the per-frame form: handing the prefix back borrowed is what keeps a
+    /// frame's cost proportional to the tail. The prefix ends with a blank
+    /// row so the halves concatenate; the tail has no trailing blank.
     pub fn split(
         &mut self,
         md: &IncrementalMarkdown,
@@ -159,11 +131,9 @@ impl MarkdownView {
         opts: &RenderOptions,
     ) -> (&[Line], Vec<Line>) {
         if self.width != width || self.opts != Some(*opts) {
-            // A resize is the only thing that invalidates the prefix — and a
-            // change of bound, which is a resize of a different axis: the same
-            // block renders to a different number of rows when the bound moves,
-            // so a prefix rendered under the old one is stale in exactly the
-            // same way. The register is in the key because every row carries it.
+            // A resize is the only invalidation — and a change of bound,
+            // which is a resize of a different axis; the register is in the
+            // key because every row carries it.
             self.width = width;
             self.opts = Some(*opts);
             self.invalidate();
@@ -300,9 +270,8 @@ mod tests {
         );
     }
 
-    /// One layer down: **a frame that draws a settled fence does not re-parse
-    /// it.** The reason the view keeps a highlighter rather than calling a
-    /// one-shot painter per frame.
+    /// One layer down: a frame that draws a settled fence does not re-parse
+    /// it — why the view keeps a highlighter rather than a one-shot painter.
     #[test]
     fn a_settled_code_block_is_not_parsed_again_per_frame() {
         let src: String = (0..300)
@@ -380,12 +349,9 @@ mod tests {
         assert_eq!(text(&top), text(&r));
     }
 
-    /// **The streaming property end to end**: a real reply pushed a few bytes at
-    /// a time, with a frame drawn after every push, costs work linear in its
-    /// length — in the window (bytes shown to a parser) and in the painter
-    /// (blocks rendered). Doubling the stream must roughly double both; a cache
-    /// that rebuilt its prefix, or a window that stopped settling, shows up as
-    /// a ratio heading for 4.
+    /// The streaming property end to end: a real reply pushed a few bytes
+    /// at a time costs work linear in its length — bytes shown a parser and
+    /// blocks rendered. Doubling the stream must roughly double both.
     #[test]
     fn streaming_a_real_reply_through_the_view_is_linear() {
         const REAL: &str = include_str!("../../tests/fixtures/markdown/streamed-message.md");

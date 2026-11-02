@@ -37,24 +37,19 @@ pub enum Block {
     },
     List {
         ordered: bool,
-        /// The number the first item was written with, so an ordered list
-        /// renders the numbers the model wrote: a blank line between items
-        /// splits a loose list into one-item blocks, and numbering from the
-        /// block index would restart every block at `1.`
+        /// The number the first item was written with: numbering from the
+        /// block index would restart every block of a loose list at `1.`
         start: usize,
         items: Vec<Vec<Run>>,
-        /// How far each item is indented, in columns, parallel to `items` —
-        /// the source says columns. Derived from the marker's own column,
-        /// rounded to even and capped at 8 so a deeply nested list stays in
-        /// the width it is rendered at.
+        /// How far each item is indented, in columns, parallel to `items`:
+        /// the marker's own column, rounded to even and capped at 8.
         indents: Vec<usize>,
     },
     Quote {
         lines: Vec<Vec<Run>>,
     },
-    /// A GFM pipe table. Held as cells, never as the lines it was written on:
-    /// the renderer decides the columns for the width it has (lexed as a
-    /// paragraph, a table would wrap as prose).
+    /// A GFM pipe table. Held as cells, never as lines: the renderer decides
+    /// the columns for the width it has.
     Table {
         head: Vec<Vec<Run>>,
         /// One per column of `head`, from the delimiter row.
@@ -65,9 +60,9 @@ pub enum Block {
     Rule,
 }
 
-/// A run of text with one inline style. The markers are gone: `**bold**` is
-/// one `Run` whose text is `bold`, so the renderer never scans for asterisks,
-/// and a `*` that is not emphasis stays literal because the grammar said so.
+/// A run of text with one inline style. The markers are gone: `**bold**`
+/// is one `Run` whose text is `bold`; a `*` that is not emphasis stays
+/// literal because the grammar said so.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     pub text: String,
@@ -76,9 +71,8 @@ pub struct Run {
     pub link: Option<String>,
 }
 
-/// The inline styles the conversation renderer knows. A link is drawn as its
-/// label, with its destination on [`Run::link`]; an autolink reads as its own
-/// URL because that is its text.
+/// The inline styles the conversation renderer knows. A link is drawn as
+/// its label, with its destination on [`Run::link`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineStyle {
     Plain,
@@ -92,8 +86,7 @@ pub enum InlineStyle {
 
 impl InlineStyle {
     /// The style of text inside a container of this style. Bold and italic
-    /// commute; beyond that the container being entered decides — a terminal
-    /// has no deeper attributes to spend.
+    /// commute; beyond that the container being entered decides.
     fn nest(self, inner: InlineStyle) -> InlineStyle {
         match (self, inner) {
             (InlineStyle::Bold, InlineStyle::Italic) | (InlineStyle::Italic, InlineStyle::Bold) => {
@@ -144,9 +137,8 @@ pub fn runs_text(runs: &[Run]) -> String {
 }
 
 /// How large the unsettled window may grow before it is cut at a text
-/// boundary. Four kilobytes is about a screen of prose: no ordinary block
-/// reaches it, and the worst single block costs under half a millisecond to
-/// parse.
+/// boundary — about a screen of prose, past which the worst single block
+/// costs under half a millisecond to parse.
 pub const DEFAULT_MAX_UNFROZEN: usize = 4 * 1024;
 
 /// How many times one `push` may cut the window before giving up and rendering what
@@ -219,9 +211,8 @@ impl IncrementalMarkdown {
         self.raw.is_empty()
     }
 
-    /// Bytes handed to a parser over this document's life: the deltas plus
-    /// every window re-parse. The number a regression test watches — if it
-    /// grows quadratically, so does the renderer.
+    /// Bytes handed to a parser over this document's life — the number a
+    /// regression test watches: if it grows quadratically, so does the renderer.
     pub fn bytes_lexed(&self) -> u64 {
         self.bytes_lexed
     }
@@ -236,11 +227,10 @@ impl IncrementalMarkdown {
     }
 
     /// Bring the parse up to date with `raw`, then settle what has completed.
-    /// Two signals, both needed: the text guards ([`cut_point`]) say which
-    /// `\n\n` boundaries are safe — the tree alone is not enough, because two
-    /// blocks can become one loose list — and the fences ([`fences_in`]) say
-    /// where a cut is not allowed at all. Settling re-parses the prefix on its
-    /// own, so the prefix's blocks are the right blocks by construction.
+    /// The text guards ([`cut_point`]) say which `\n\n` boundaries are safe
+    /// (two blocks can become one loose list), the fences ([`fences_in`])
+    /// where a cut is not allowed at all; settling re-parses the prefix on
+    /// its own, so its blocks are right by construction.
     fn refresh(&mut self) {
         for _ in 0..MAX_SETTLE_ROUNDS {
             let win = self.raw[self.window_start..].to_string();
@@ -325,8 +315,7 @@ fn slice(src: &str, a: usize, b: usize) -> Option<&str> {
 }
 
 /// Lex a self-contained span of markdown into blocks: the one-shot form of
-/// [`IncrementalMarkdown`], for text rendered once. Same engine, same model,
-/// so the two cannot drift.
+/// [`IncrementalMarkdown`], same engine and model.
 pub fn lex(s: &str) -> Vec<Block> {
     let mut bytes = 0;
     let mut calls = 0;
@@ -334,9 +323,8 @@ pub fn lex(s: &str) -> Vec<Block> {
 }
 
 /// The images a document names — `![alt](target)` — as `(alt, target)`, in
-/// order. The rendered rows carry only the alt text, so a renderer that wants
-/// to draw the picture reads the reference out of the source. Local targets
-/// only: neither renderer reaches the network.
+/// order; the rendered rows carry only the alt text. Local targets only:
+/// neither renderer reaches the network.
 pub fn images(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -365,10 +353,9 @@ pub fn images(text: &str) -> Vec<(String, String)> {
 // The inline pass
 // ---------------------------------------------------------------------------
 
-/// A style over a byte range, before it is cut into lines. `style: None` is a
-/// range that is deliberately not text — an emphasis marker, a link
-/// destination. The walk covers every byte of the inline range, so a consumer
-/// never has to guess what an uncovered stretch is.
+/// A style over a byte range, before it is cut into lines. `style: None` is
+/// deliberately not text — a marker, a link destination. The walk covers
+/// every byte, so no uncovered stretch is left to guess about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Span {
     start: usize,
@@ -379,10 +366,9 @@ struct Span {
 }
 
 /// Run the inline grammar over the parts of `root` that hold inline content,
-/// one parse per range, each over that range's text alone: tree-sitter
-/// concatenates included ranges, so one parse over all of them would let a
-/// delimiter in one range pair with a delimiter in another. A range holding
-/// nothing that can start a construct is skipped without parsing.
+/// one parse per range: tree-sitter concatenates included ranges, so one
+/// parse over all of them would let a delimiter pair across ranges. A range
+/// holding nothing that can start a construct is skipped.
 fn inline_spans(src: &str, root: &Node, bytes_lexed: &mut u64, lex_calls: &mut u64) -> Vec<Span> {
     let mut spans = Vec::new();
     for (a, b) in inline_ranges(root) {
@@ -415,10 +401,8 @@ fn inline_spans(src: &str, root: &Node, bytes_lexed: &mut u64, lex_calls: &mut u
 }
 
 /// Whether `text` holds anything the inline grammar could read as a
-/// construct. If it holds none, the range can be left alone. Escapes,
-/// autolinks and images are in the set; `&` is not — an entity reference
-/// shows as written either way. A hard line break slips through and is not
-/// worth a parse per paragraph.
+/// construct; if none, the range can be left alone. `&` is not in the set —
+/// an entity reference shows as written either way.
 fn has_inline_syntax(text: &str) -> bool {
     text.bytes()
         .any(|b| matches!(b, b'`' | b'*' | b'_' | b'~' | b'[' | b'<' | b'\\' | b'!'))
@@ -426,9 +410,8 @@ fn has_inline_syntax(text: &str) -> bool {
 
 /// The byte ranges that are inline content, with markdown's own block markers
 /// removed: every `inline` and `pipe_table_cell` node, split around its
-/// `block_continuation` children — a quote's second line keeps its `> `, which
-/// the inline grammar would render as a literal `>`. `inline` nodes never
-/// nest inside each other, so a plain walk is right.
+/// `block_continuation` children (a quote's second line keeps its `> `, which
+/// the inline grammar would render literally).
 fn inline_ranges(node: &Node) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     fn walk(n: &Node, out: &mut Vec<(usize, usize)>) {
@@ -461,12 +444,10 @@ fn push_around_continuations(n: &Node, out: &mut Vec<(usize, usize)>) {
     }
 }
 
-/// Walk an inline tree, emitting a [`Span`] per styled piece of text. The rule
-/// is gaps are text: a container's children are the things that *are*
-/// something, and the text between them belongs to the container's style — this
-/// grammar puts the content of `**bold**` in no node at all, so recursing over
-/// children alone would produce literal asterisks. Markers and link
-/// destinations are named nodes, dropped by kind.
+/// Walk an inline tree, emitting a [`Span`] per styled piece of text. The
+/// rule is gaps are text — this grammar puts the content of `**bold**` in no
+/// node at all, so recursing over children alone would produce literal
+/// asterisks. Markers and link destinations are named nodes, dropped by kind.
 fn collect_spans(node: &Node, src: &str, style: InlineStyle, out: &mut Vec<Span>) {
     match node.kind.as_str() {
         // Markers and link targets: covered, and not text.
@@ -702,13 +683,11 @@ struct Opening {
 
 /// Where on a line's content a fence opens. A run that starts the line's
 /// content is CommonMark's fence, open whether or not its closing delimiter
-/// has arrived — that is what a streaming reply looks like. A run after prose
-/// is not a fence to CommonMark, but reading it as prose lets the closing
-/// delimiter on a later line open a block that never closes, so a run that
-/// starts a word is a fence when the document closes it, and a run nothing
-/// closes is the prose it looks like. The label stops at the next run of the
-/// same character, so a title can never carry a backtick; a line carrying a
-/// second run after prose is an inline code span, not a fence.
+/// has arrived. A run after prose is not a fence to CommonMark, but reading
+/// it as prose lets the closing delimiter open a block that never closes, so
+/// such a run is a fence when the document closes it and prose otherwise.
+/// The label stops at the next run of the same character; a second run after
+/// prose is an inline code span, not a fence.
 fn opening_run(marker: &str, src: &str, body: usize) -> Option<Opening> {
     let bytes = marker.as_bytes();
     let mut i = 0;
@@ -737,12 +716,10 @@ fn opening_run(marker: &str, src: &str, body: usize) -> Option<Opening> {
                 trail,
             });
         }
-        // After prose: it must not be glued to a word, be the line's only
-        // run, and be paid off by a closing delimiter that belongs to it —
-        // otherwise it is a sentence that happens to end in backticks, and
-        // reading it as a fence is how a reply loses its second half. Not
-        // glued to a *word*, not "preceded by a space": `a```b` is inline
-        // code, and a fence would have to eat the sentence to read it.
+        // After prose: not glued to a word, the line's only run, and paid
+        // off by a closing delimiter that belongs to it — a sentence that
+        // happens to end in backticks read as a fence loses the reply's
+        // second half. `a```b` is inline code, not a fence.
         let word = i > 0 && !bytes[i - 1].is_ascii_alphanumeric();
         if word
             && trail.is_none()
@@ -783,12 +760,11 @@ fn swallows_a_fence(src: &str, body: usize, close: usize) -> bool {
 }
 
 /// Split a line into the container syntax it carries and what follows:
-/// `"> "` for a fence inside a quote, blanks of a list marker's width for
-/// one after a bullet, `""` for a plain line. The prefix is the content
-/// column — what every line of the block repeats — and a list marker comes
-/// back as blanks because `- ```rust` is continued by `  let a = 1;`, not by
-/// another marker. [`closing_fence`] strips it to recognise a close,
-/// [`fence_lines`] to get at the code.
+/// `"> "` for a fence inside a quote, blanks of a list marker's width for one
+/// after a bullet, `""` for a plain line. The prefix is the content column,
+/// what every line of the block repeats; a marker comes back as blanks
+/// because it does not repeat on continuations. [`closing_fence`] strips it
+/// to recognise a close, [`fence_lines`] to get at the code.
 fn split_container(line: &str) -> (String, &str) {
     let mut prefix = String::new();
     let mut cut = 0;
@@ -876,12 +852,10 @@ fn fence_lines(src: &str, f: &Fence) -> Vec<String> {
     lines
 }
 
-/// The byte ranges a cut may not land inside: one per fence, opening
-/// delimiter to closing one — or to the end of the window when it has none.
-/// Both ends are allowed and the middle is not: strictly between them splits
-/// one code block in two, and the half keeping neither delimiter parses as a
-/// paragraph. An unclosed fence reaching the window's end is what keeps a
-/// settle out of an open code block.
+/// The byte ranges a cut may not land inside: one per fence, opening to
+/// closing delimiter — or to the window's end when there is none. Both ends
+/// are allowed; the middle splits one code block in two. An unclosed fence
+/// reaching the window's end keeps a settle out of an open code block.
 fn fence_spans(src: &str) -> Vec<(usize, usize)> {
     fences_in(src).iter().map(|f| (f.open, f.end)).collect()
 }
@@ -892,10 +866,9 @@ fn inside_a_fence(fences: &[(usize, usize)], at: usize) -> bool {
 }
 
 /// Map the parsed tree's block children to blocks, with the fences in their
-/// place. The grammar wraps the document in `document`/`section` containers,
-/// so blocks are the leaves of that chain, not the root's direct children.
-/// The fences are not in that tree at all — [`mask`] blanked them before the
-/// parse — so the two lists are merged by offset.
+/// place: the grammar wraps the document in `document`/`section` containers,
+/// and the fences are not in the tree at all ([`mask`] blanked them), so the
+/// two lists are merged by offset.
 fn blocks_of(root: &Node, src: &str, spans: &[Span], fences: &[Fence]) -> Vec<Block> {
     let mut tree: Vec<(usize, Block)> = Vec::new();
     collect_blocks(root, src, spans, fences, &mut tree);
@@ -1015,9 +988,8 @@ fn content_ranges(node: &Node) -> Vec<(usize, usize)> {
 
 /// Every line of a block's inline content. One inline node covers several
 /// source lines, so the text is cut at `\n` into the lines the renderer
-/// wraps. The ranges are walked into one shared line accumulator: a quote's
-/// content arrives as two ranges with the `> ` cut out, and appending per
-/// range would put an empty line between them.
+/// wraps; a shared accumulator, because a quote's content arrives as two
+/// ranges with the `> ` cut out.
 fn lines_of_node(node: &Node, src: &str, spans: &[Span]) -> Vec<Vec<Run>> {
     let mut out = Vec::new();
     lines_of_ranges(src, spans, &content_ranges(node), &mut out);
@@ -1027,13 +999,10 @@ fn lines_of_node(node: &Node, src: &str, spans: &[Span]) -> Vec<Vec<Run>> {
     out
 }
 
-/// A block's reader-facing lines, whatever kind of blocks it holds.
-/// [`lines_of_node`] only sees inline content, which is right for a paragraph
-/// and wrong for containers that can hold *blocks* — a quote with a fenced
-/// block in it would come out empty. The flat model is filled by walking the
-/// subtree for everything a reader would see; a quoted fence is therefore
-/// quote prose, since the flat model has no room for a coloured code box in
-/// a quote.
+/// A block's reader-facing lines, whatever kind of blocks it holds:
+/// [`lines_of_node`] sees only inline content, so a quote holding a fenced
+/// block would come out empty. A quoted fence is therefore quote prose —
+/// the flat model has no room for a code box in a quote.
 fn subtree_lines(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<Run>>) {
     for c in &node.children {
         match c.kind.as_str() {
@@ -1141,10 +1110,9 @@ fn subtree_lines_one(node: &Node, src: &str, spans: &[Span], out: &mut Vec<Vec<R
     }
 }
 
-/// A code block from the tree: an indented one, four spaces and no fence, so
-/// there are no markers to strip and no language to name. The only kind that
-/// reaches the tree at all — a fenced block is masked away before the parse
-/// and emitted by `collect_blocks` from the scan.
+/// A code block from the tree: an indented one, four spaces and no fence.
+/// The only kind that reaches the tree — a fenced block is masked away and
+/// emitted by `collect_blocks` from the scan.
 fn code_block(node: &Node, src: &str) -> Block {
     let mut lines: Vec<String> = text_without_continuations(node, src)
         .trim_end_matches('\n')
@@ -1210,10 +1178,8 @@ fn list_block(node: &Node, src: &str, spans: &[Span]) -> Block {
     }
 }
 
-/// Flatten a list's items, nested lists included, each with the column it was
-/// written at. The indent comes from the source — the marker node's byte
-/// offset — rounded down to an even number and capped at 8, so `1. ` and
-/// `- ` sub-items land on the same step.
+/// Flatten a list's items, nested lists included, each with the column it
+/// was written at, rounded to even and capped at 8.
 // A recursive walk that fills five accumulators at once (the items, their
 // indents and the list's ordered/start/first facts); bundling them into a
 // struct would be a rewrite of the walk rather than a fix, so the argument
@@ -1285,12 +1251,9 @@ fn collect_items(
     }
 }
 
-/// The column an item's marker was written at, rounded down to an even number
-/// and capped at 8. Even, so a `- ` sub-list and a `1. ` sub-list land on the
-/// same step instead of a column apart; capped, so a deeply nested list does
-/// not walk off the right of the width it is rendered at. Two columns per
-/// step is the same step the reasoning rail and frame gutter use. `None` — no
-/// marker node — is column 0.
+/// The column an item's marker was written at, rounded down to even and
+/// capped at 8 — even, so `- ` and `1. ` sub-lists land on the same step;
+/// capped, so a deep list stays in width. `None` is column 0.
 fn marker_indent(src: &str, marker: Option<&Node>) -> usize {
     let Some(m) = marker else { return 0 };
     let Some(head) = slice(src, 0, m.start) else {
@@ -1365,10 +1328,9 @@ fn trim_range(src: &str, a: usize, b: usize) -> (usize, usize) {
 // Spans to runs
 // ---------------------------------------------------------------------------
 
-/// The styled runs of `src[a..b]`, with markers already gone. A span with no
-/// style contributes no text — a marker or a link destination. A stretch no
-/// span covers is text; it should not happen, and is shown rather than
-/// dropped.
+/// The styled runs of `src[a..b]`, with markers already gone. A span with
+/// no style is a marker or link destination; a stretch no span covers is
+/// text, shown rather than dropped.
 fn runs_of(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
     let mut out: Vec<Run> = Vec::new();
     if a >= b {
@@ -1399,11 +1361,10 @@ fn runs_of(src: &str, spans: &[Span], a: usize, b: usize) -> Vec<Run> {
 }
 
 /// Add a run, undoing any `\`-escape in it, and coalescing it into the
-/// previous run when the style is the same. The coalescing is not cosmetic:
-/// a `\|` is its own node, so without it `a\|b` arrives as three runs where
-/// the model wrote one word. Not inside a code span: CommonMark does not
-/// read escapes in code, and the grammar already decided which backslashes
-/// are escapes, so a `\d` in a regex keeps its backslash.
+/// previous run when the style is the same — a `\|` is its own node, so
+/// without it `a\|b` arrives as three runs where the model wrote one word.
+/// Not in a code span: the grammar already decided which backslashes are
+/// escapes, so a `\d` in a regex keeps its backslash.
 fn push_text(out: &mut Vec<Run>, text: &str, style: InlineStyle, link: Option<&str>) {
     if text.is_empty() {
         return;
@@ -1463,15 +1424,13 @@ fn run(text: String, style: InlineStyle) -> Run {
     }
 }
 
-/// Where to settle an over-long window. `None` means nothing may settle yet.
-/// [`stable_boundary_with`] first: a blank line the guards agree about; a
-/// candidate inside a fence is refused whatever the guards say. Under the
-/// cap a refusal means nothing settles, which is correct. Past the cap the
-/// guards are relaxed — failing a blank line at all, the last line break, or
-/// failing that the last space; never inside a fence, so one long code block
-/// stays whole. The relaxed cuts are wrong in a bounded way (two paragraphs
-/// where the model wrote one); the alternative is quadratic on exactly the
-/// shapes that have no other boundary.
+/// Where to settle an over-long window; `None` means nothing may settle yet.
+/// [`stable_boundary_with`] first, then never inside a fence. Under the cap a
+/// refusal means nothing settles; past it the guards are relaxed — the last
+/// line break, or failing that the last space, never inside a fence. The
+/// relaxed cuts are wrong in a bounded way (two paragraphs where the model
+/// wrote one); the alternative is quadratic on the shapes with no other
+/// boundary.
 fn cut_point(win: &str, max: usize, fences: &[(usize, usize)]) -> Option<usize> {
     if let Some(b) = stable_boundary_with(win, max)
         && !inside_a_fence(fences, b)
@@ -1514,21 +1473,15 @@ impl std::fmt::Debug for IncrementalMarkdown {
 // ---------------------------------------------------------------------------
 
 /// A byte offset near the end of `src` from which the tail parses
-/// standalone, with at least `min_bytes` of text after it. Not
-/// [`stable_boundary_with`], which answers how much of the front may freeze:
-/// this answers the question a head asks when it attaches — the document is
-/// finished and the head wants its tail, and the cost being avoided is
-/// lexing megabytes to draw the bottom of a small window.
-///
-/// `lex(&src[cut..])` gives blocks whose second and later entries are the
-/// same blocks the whole document ends with; the first may be ragged (a
-/// paragraph cut mid-way; a list starting mid-way, which renders
-/// identically, because the renderer numbers from the marker the model
-/// wrote). A caller asks for more than it draws and the ragged block goes
-/// off the top. Fences are consulted first — parity is the one thing a
-/// backward scan cannot decide alone — then candidates backward from the
-/// floor, smallest sufficient tail first. `None` means lex the whole thing:
-/// correct and slow rather than fast and wrong.
+/// standalone, with at least `min_bytes` after it — the question a head asks
+/// when it attaches, where the cost being avoided is lexing megabytes to
+/// draw the bottom of a small window. `lex(&src[cut..])` gives blocks whose
+/// second and later entries are the document's own; the first may be ragged
+/// (a list starting mid-way still renders identically — the renderer numbers
+/// from the marker), so a caller asks for more than it draws. Fences are
+/// consulted first, parity being the one thing a backward scan cannot decide
+/// alone; then candidates backward from the floor. `None` means lex the
+/// whole thing: correct and slow rather than fast and wrong.
 pub fn tail_cut(src: &str, min_bytes: usize) -> Option<usize> {
     if src.len() <= min_bytes {
         return Some(0);
@@ -1584,17 +1537,14 @@ pub fn tail_cut(src: &str, min_bytes: usize) -> Option<usize> {
 }
 
 /// The offset past the last `\n\n` that is safe to freeze, if any — the
-/// escape hatch, reached only when the window has grown past `max_unfrozen`
-/// with nothing settled (one long paragraph, or one long loose list). The
-/// four guards, each a case where cutting here changes the parse: strictly
-/// inside (the next delta should join the last block); balanced fences (a
-/// blank line in a code block is content); the next character starts real
-/// content (indentation joins backwards); and a preceding list is provably
-/// closed, looking forward — CommonMark continues a list across a blank line
-/// as one loose list. Every guard reads only the two lines either side, so
-/// this stays O(window). `relax_at` drops guard 4 past that many unfrozen
-/// bytes: it is unfalsifiable while the list is open, and the cost of being
-/// wrong is two tight lists where the model wrote one loose list.
+/// escape hatch, reached only when nothing has settled past `max_unfrozen`.
+/// The four guards, each a case where cutting changes the parse: strictly
+/// inside; balanced fences; the next character starts real content; and a
+/// preceding list is provably closed, looking forward (CommonMark continues
+/// a list across a blank line as one loose list). Every guard reads only
+/// the two lines either side, so this stays O(window). `relax_at` drops the
+/// last guard: it is unfalsifiable while the list is open, and being wrong
+/// costs two tight lists where the model wrote one loose one.
 pub fn stable_boundary(s: &str) -> Option<usize> {
     stable_boundary_with(s, usize::MAX)
 }
@@ -1665,11 +1615,9 @@ pub fn stable_boundary_with(s: &str, relax_at: usize) -> Option<usize> {
     best
 }
 
-/// The kind of list item this line opens: `Some(true)` for ordered,
-/// `Some(false)` for a bullet, `None` if not one. Guard 4 asks about the
-/// marker's *kind* — `1. a\n\n2. b` is one loose list, `- a\n\n1. b` is two
-/// lists. A marker still being typed counts as one: a bare `2.` is an item
-/// whose content has not arrived.
+/// The kind of list item this line opens: `Some(true)` ordered,
+/// `Some(false)` bullet, `None` not one. Guard 4 compares the marker's
+/// *kind*: `1. a\n\n2. b` is one loose list, `- a\n\n1. b` is two.
 fn list_kind(t: &str) -> Option<bool> {
     let t = t.trim_start();
     if t == "-"

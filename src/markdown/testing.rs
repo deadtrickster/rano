@@ -1,12 +1,9 @@
 //! Test fixtures shared by the markdown module's test suites.
 
-/// A short assistant answer with one of every common block: a heading, inline
-/// code, a tight ordered list with bold, a fenced Rust block, a quote and a
-/// closing paragraph.
-///
-/// Copied verbatim from letibot's `sessionlog::testing::MARKDOWN`, which is the
-/// message its replay fixtures stream; the tests here were written against these
-/// exact bytes, so they are kept byte for byte rather than paraphrased.
+/// A short assistant answer with one of every common block: a heading,
+/// inline code, a tight ordered list with bold, a fenced Rust block, a quote
+/// and a closing paragraph. Kept byte for byte: the tests were written
+/// against these exact bytes.
 pub const MARKDOWN: &str = "\
 ## Why the cache missed
 

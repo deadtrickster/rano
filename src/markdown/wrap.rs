@@ -1,13 +1,8 @@
-//! Wrapping and truncating role-tagged text by display columns.
-//!
-//! Ported from letibot's `crates/ui/src/width.rs` (`wrap`, `truncate` and the
-//! breakpoint finder they share), which walked ANSI strings and had to carry the
-//! open SGR state across each break so every row stayed independently paintable.
-//! Spans carry their meaning with them, so that half has no counterpart here: a
-//! piece of a span cut onto the next row is still the same role. What remains is
-//! the measuring — clusters by [`crate::width`], so a wide character is two
-//! columns and a combining mark never lands alone on a row — and the three break
-//! rules below.
+//! Wrapping and truncating role-tagged text by display columns. Spans
+//! carry their meaning with them, so a piece of a span cut onto the next
+//! row is still the same role — only the measuring remains: clusters by
+//! [`crate::width`], so a wide character is two columns and a combining
+//! mark never lands alone on a row, plus the three break rules in [`wrap`].
 
 use super::line::push_span;
 use crate::render::Span;
@@ -30,12 +25,9 @@ fn cells(spans: &[Span]) -> Vec<Cell<'_>> {
         // becomes a slice of the span's own text.
         let mut at: Vec<usize> = s.content.char_indices().map(|(b, _)| b).collect();
         at.push(s.content.len());
-        // A **control character is not a combining mark**: it measures zero
-        // columns for the same reason one does, and that is the whole of the
-        // resemblance. The editor's cluster walk lets it join the cluster before
-        // it (a `\n` can never reach an editor row), so it is cut out here and
-        // stands as its own cell — otherwise `a\nb` is one cluster and the hard
-        // break below never sees its newline.
+        // A control character is not a combining mark: it measures zero
+        // columns but must stand as its own cell, or `a\nb` is one cluster
+        // and the hard break below never sees its newline.
         let mut from = 0;
         while from < chars.len() {
             let to = (from..chars.len())
@@ -90,10 +82,9 @@ pub fn wrap(spans: &[Span], cols: usize) -> Vec<Vec<Span>> {
     out
 }
 
-/// The cells back as spans: each run of adjacent cells from one span is cut out of
-/// that span's text as **one** slice. Per cell would be a `String` per grapheme — a
-/// three-row paragraph cost some 350 allocations that way, every frame it was the
-/// live tail, which is the cost letibot's `frame_allocations` test exists to catch.
+/// The cells back as spans: each run of adjacent cells from one span is cut
+/// out of that span's text as one slice — per cell would be a `String` per
+/// grapheme, hundreds of allocations per frame.
 fn collect(spans: &[Span], cs: &[Cell]) -> Vec<Span> {
     let mut row: Vec<Span> = Vec::new();
     let mut i = 0;
@@ -142,12 +133,9 @@ pub fn truncate(spans: &[Span], cols: usize) -> Vec<Span> {
     row
 }
 
-/// The single breakpoint finder, letibot's `break_cells` unchanged but for the
-/// cell type.
-///
-/// Returns half-open **cell index** ranges that tile the input. A trailing space
-/// belongs to the row it ended, so a row's slice may be one column over `cols`
-/// *in trailing whitespace only* — the usual line-breaking contract.
+/// The single breakpoint finder: half-open cell index ranges that tile the
+/// input. A trailing space belongs to the row it ended, so a row's slice
+/// may be one column over `cols` in trailing whitespace only.
 fn break_cells(cs: &[Cell], cols: usize) -> Vec<(usize, usize)> {
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let mut row_start = 0usize;
@@ -159,12 +147,10 @@ fn break_cells(cs: &[Cell], cols: usize) -> Vec<(usize, usize)> {
         if c.text.is_empty() {
             continue;
         }
-        // A newline is a **hard break**, and it has to be one here rather than in
-        // a caller: it measures zero columns, so without this a two-line run
-        // wraps to a single row with a literal `\n` inside it — which the
-        // terminal then obeys, putting a row on the screen the host did not
-        // count. The break belongs to the row it *ends*, so the ranges still
-        // tile the input; [`wrap`] strips it.
+        // A newline is a hard break, and here rather than in a caller: it
+        // measures zero columns, so without this a two-line run wraps to one
+        // row with a literal `\n` the terminal then obeys. The break belongs
+        // to the row it ends; [`wrap`] strips it.
         if c.text == "\n" {
             if let Some(ws) = word_start.take() {
                 if used > 0 && used + word_cols > cols {

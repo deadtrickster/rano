@@ -23,11 +23,10 @@ use super::wrap::{truncate, wrap};
 /// host decides something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
-    /// The register the whole reply is drawn in: every row's own style, under
-    /// its spans (see [`super::line::base`]). `None` is the top level;
-    /// `Some(Role::Reasoning)` is a model's working-out. The register sits
-    /// under every span rather than being re-opened after each, so a themed
-    /// block cannot fall back to the terminal default mid-way.
+    /// The register the whole reply is drawn in, under every span (see
+    /// [`super::line::base`]); `None` is the top level. Sits under every
+    /// span rather than being re-opened after each, so a themed block
+    /// cannot fall back to the terminal default mid-way.
     pub base: Option<Role>,
     /// Rows one block may occupy before it is summarised as a title, an elision
     /// count and its tail. `usize::MAX` disables the bound, and is the default:
@@ -54,11 +53,9 @@ const MIN_WIDTH: usize = 20;
 const TAB_STOP: usize = crate::diff::TAB_STOP;
 
 /// A code block's highlighter: a tree-sitter parse of the fence, painted
-/// with [`crate::highlight`]'s syntax roles. A fence grows at its end a few
-/// characters at a time, so this is a [`Stream`] fed the delta rather than a
-/// fresh parse — the parse is incremental even though the capture walk is
-/// not. A fence long enough for the walk to matter would need the window
-/// discipline [`super::parse`] uses for the conversation.
+/// with [`crate::highlight`]'s syntax roles. A fence grows at its end, so
+/// this is a [`Stream`] fed the delta — the parse is incremental even
+/// though the capture walk is not.
 pub(crate) struct CodePaint {
     /// `None` when the fence named no language, or one there is no grammar for.
     /// The block is then drawn plain — a wrong colour is worse than none,
@@ -130,15 +127,13 @@ impl CodePaint {
 
     /// Hand over whatever is new.
     ///
-    /// Tabs become spaces here, before anything parses or measures: a raw
-    /// tab handed to the terminal is expanded at that terminal's stop while
-    /// the width layer counts one column. The stop is the diff renderers';
-    /// per line, so the first tab of line 2 does not depend on how wide
-    /// line 1 was; and here rather than in `lines()`, so every branch — the
+    /// Tabs become spaces here, before anything parses or measures (a raw
+    /// tab is expanded at the terminal's stop while the width layer counts
+    /// one column), per line, and in this one place so every branch — the
     /// no-grammar fallback included — gets expanded text. The text only
     /// grows at its end while the fence is open, so the delta `pushed`
-    /// tracks stays a prefix: expansion is a left-to-right fold, so the
-    /// expansion of a prefix is a prefix of the expansion.
+    /// tracks stays a prefix: expansion of a prefix is a prefix of the
+    /// expansion.
     fn feed(&mut self, lines: &[String], closed: bool) {
         let mut src = lines
             .iter()
@@ -174,12 +169,8 @@ impl CodePaint {
         self.info == info
     }
 
-    /// The fence's rows, as spans.
-    ///
-    /// The captures are character ranges, so a row is cut by character and each
-    /// run is tagged with the role its capture name maps to. A run with no
-    /// capture is plain: what is not drawn is the reader's own foreground, which
-    /// is right for punctuation.
+    /// The fence's rows, as spans: cut by character, each run tagged with
+    /// the role its capture name maps to. A run with no capture is plain.
     fn lines(&mut self) -> Vec<Vec<Span>> {
         // A closed fence's text ends with the newline `feed` appended, and a
         // `split` on that gives a phantom empty row in the box. The rows a
@@ -374,14 +365,10 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
             let painted = paint.lines();
             let mut out = Vec::with_capacity(painted.len() + 2);
             // The fence's own info string when there is no grammar for it:
-            // naming a language we are not colouring is honest, and
-            // inventing one is not. A recognised one is named by the grammar
-            // that actually ran. A fence the model did not label gets no
-            // label at all — the frame is still drawn, so a bare block is
-            // visibly a block.
-            // A citation names its file and range, and its lines carry the
-            // file's own numbers, so `pgdump_schema.go:242-248` reads as
-            // lines 242 to 248 of that file.
+            // naming a language we are not colouring is honest, inventing
+            // one is not, and a recognised one is named by the grammar that
+            // ran. An unlabelled fence gets no label; a citation names its
+            // file and range, and its lines carry the file's own numbers.
             let cited = citation(lang);
             let head = match (cited, paint.lang) {
                 (Some(_), _) => format!("┌─ {}", lang.trim()),
@@ -481,13 +468,10 @@ fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
     v.into_iter().map(Line::new).collect()
 }
 
-/// A pipe table, at the width the terminal actually has. What a table owes
-/// its reader is the column: columns are as wide as their content wants
-/// until they do not fit, then the wide ones give way first (water-filling);
-/// a cell too narrow wraps rather than getting cut, a row being as tall as
-/// its tallest cell; and there is no outer box — one faint rule under the
-/// header and a faint `│` between columns, the same weight as the quote
-/// rail and the code fence.
+/// A pipe table, at the width the terminal actually has. Columns are as
+/// wide as their content wants until they do not fit, then the wide ones
+/// give way first; a cell too narrow wraps rather than getting cut; and
+/// there is no outer box — one faint rule and a faint `│` between columns.
 fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to

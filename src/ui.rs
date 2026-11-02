@@ -6,11 +6,8 @@ use crate::render::{Buffer, Line, Paragraph, Rect, Span, Style, Widget};
 use crate::style::Role;
 use crate::width;
 
-/// Nano decorates the title bar, prompt bar and the key combos of the
-/// function bar with plain reverse video (ncurses A_REVERSE, SGR 7). That is
-/// what nano itself emits and it renders fine in tmux; the gray-on-gray bug
-/// came from an explicit white-on-darkgray pair, not from reverse video.
-/// [`Role::Bar`] is that reverse, named.
+/// Nano decorates its bars with plain reverse video (ncurses A_REVERSE,
+/// SGR 7), which renders fine in tmux; [`Role::Bar`] is that reverse, named.
 fn rev() -> Style {
     Style::of(Role::Bar)
 }
@@ -51,18 +48,12 @@ fn prompt_text(p: &Prompt, width: usize) -> (String, usize) {
     (format!("{}{}", label, shown), label_len + (cur - start))
 }
 
-/// The title bar's left label — `nano`'s corner banner.
-///
-/// Composed rather than a literal, because the literal it replaced said
-/// `"rano 0.1.0"` and stayed saying it through two releases: the title bar was
-/// advertising a version the binary was not. Anything a user reads has to come
-/// from the one place the version is written down.
+/// The title bar's left label — `nano`'s corner banner, composed from the
+/// one place the version is written down.
 fn title_left() -> String {
     format!("  rano {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Gutter columns for a buffer of `rows` lines: right-aligned number plus one
-/// trailing space, minimum two digits.
 /// Short type tag for a completion row, from the LSP CompletionItemKind.
 pub(crate) fn kind_tag(kind: u64) -> &'static str {
     match kind {
@@ -79,6 +70,8 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
     }
 }
 
+/// Gutter columns for a buffer of `rows` lines: right-aligned number plus
+/// one trailing space, minimum two digits.
 pub(crate) fn gutter_width(rows: usize) -> usize {
     std::cmp::max(2, rows.to_string().len()) + 1
 }
@@ -122,8 +115,8 @@ pub(crate) fn display_col(line: &[char], col: usize, tab_width: usize) -> usize 
     width::width(&line[..col], tab_width)
 }
 
-/// The window of a KNOWN-simple row — every character one column and no tab,
-/// so display col == char index and the window is a plain slice.
+/// The window of a known-simple row — every character one column and no
+/// tab, so display col == char index and the window is a plain slice.
 fn simple_window<'a>(
     line: &'a [char],
     lo: usize,
@@ -138,14 +131,9 @@ fn simple_window<'a>(
         .map(move |(i, c)| (start + i, c))
 }
 
-/// Visible window of `line` as display cols `[d0, d1)`: `(absolute char col,
-/// rendered char)` pairs with tabs expanded to spaces and wide characters
-/// kept whole. A tab straddling `d0` is clipped into leading spaces.
-///
-/// This is the HORIZONTAL-SCROLL window (E3/F2), where the edges are display
-/// columns the operator scrolled to and can therefore land mid-cluster. A
-/// wrapped row instead asks [`seg_window`] for the characters of one of its
-/// segments, which the wrap table already delimits.
+/// Visible window of `line` as display cols `[d0, d1)`: `(char col, char)`
+/// pairs with tabs expanded and wide characters kept whole. The edges can
+/// land mid-cluster (horizontal scroll); a wrapped row asks [`seg_window`].
 fn text_window(line: &[char], d0: usize, d1: usize, tab_width: usize) -> Vec<(usize, char)> {
     let mut out = Vec::new();
     // Lazy, and it stops at `d1`: a window near the end of a long line must
@@ -177,15 +165,10 @@ fn text_window(line: &[char], d0: usize, d1: usize, tab_width: usize) -> Vec<(us
     out
 }
 
-/// The characters of ONE wrap segment: `line[lo..hi)` (both cluster
-/// boundaries, straight out of the wrap table), rendered as if painting began
-/// at display column `d0` — which is where that segment starts, so a tab
-/// inside it expands to its true remaining advance and a wide character is
-/// emitted whole.
-///
-/// This is the wrapped-row window, and it costs one pass over the segment
-/// rather than a walk from the start of the line: a 500k-character row at a
-/// deep visual row must not re-scan its own head every frame.
+/// The characters of one wrap segment — `line[lo..hi]`, both cluster
+/// boundaries from the wrap table — painted from display column `d0`, where
+/// that segment starts. One pass over the segment, not a walk from the
+/// start of the line.
 fn seg_window(
     line: &[char],
     lo: usize,
@@ -214,17 +197,10 @@ fn seg_window(
     out
 }
 
-/// One rendered text line from an already-chosen window of `(char col,
-/// rendered char)` pairs. Styles are resolved at ABSOLUTE positions (abs_row,
-/// char col) via `char_style`, so search/selection/diagnostic lookups never
-/// see window-relative coords. `diags` is THIS row's slice of the frame's
-/// merged list — draw walks the sorted list once per frame (see
-/// `diag_range`) — so no per-row filter. Consecutive equal styles coalesce
-/// into a single span.
-///
-/// The window comes from [`seg_window`] for a wrapped row and from
-/// [`text_window`] for a horizontally-scrolled one; both hand back whole
-/// clusters, so a base is never painted without its combining marks.
+/// One rendered line from an already-chosen window of `(char col, char)`
+/// pairs. Styles resolve at absolute positions (abs_row, char col) via
+/// `char_style`, so lookups never see window-relative coords; `diags` is this
+/// row's slice of the frame's merged list. Consecutive equal styles coalesce.
 fn line_to_spans(
     abs_row: usize,
     window: impl Iterator<Item = (usize, char)>,
@@ -235,10 +211,9 @@ fn line_to_spans(
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
     for (col, ch) in window {
-        // A control character in the file is not drawn (the width layer counts
-        // it as no column), and it must not reach a span as text: an ESC there
-        // would start what the render core reads as an escape sequence and
-        // drops whole, taking the visible characters after it with it.
+        // A control character is not drawn and must not reach a span as text:
+        // an ESC there would start what the render core reads as an escape
+        // sequence and drops whole.
         if ch.is_control() {
             continue;
         }
@@ -327,32 +302,17 @@ pub fn draw(buf: &mut Buffer, ed: &Editor) -> Option<(u16, u16)> {
     draw_in(buf, area, ed)
 }
 
-/// Draw the editor inside `area` only, for a host that gives it a pane.
-///
-/// Every row the editor paints — title, text, status, function bar, and the
-/// overlays drawn over them (completion, lists, diffs, help, M-x, which-key) —
-/// is laid out from `area`'s own origin and clipped to it, so cells outside
-/// are left as the host drew them. The terminal cursor is placed inside
-/// `area` too, or not at all.
-///
-/// Every cell of `area` is painted — what the editor does not draw is blanked
-/// first — so a host can reuse one buffer across frames.
-///
-/// Returns the terminal cursor's cell as **`(column, row)`**, absolute (in the
-/// buffer's coordinates, like `area`), or `None` when the cursor should be
-/// hidden: over a list, a diff or a help page, or when the edit point is
-/// scrolled out of view. Note the order: `term::Terminal::draw_buffer` takes
-/// `(row, column)`.
-///
-/// Mouse events are mapped through the area last given to
-/// [`Editor::set_area`], not this one: drawing takes `&Editor` and cannot
-/// record it. A host passes the same rectangle to both.
+/// Draw the editor inside `area` only, for a host that gives it a pane:
+/// every row is laid out from `area`'s origin and clipped to it, and every
+/// cell of `area` is painted (what the editor does not draw is blanked), so
+/// a host can reuse one buffer across frames. Returns the terminal cursor's
+/// cell as `(column, row)` — note the order, `draw_buffer` takes `(row,
+/// column)` — absolute, or `None` to hide it. Mouse events map through the
+/// area last given to [`Editor::set_area`], not this one.
 pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
     // Pane-relative rectangles: the layout below was written for a frame at
-    // (0, 0), and this keeps it that way rather than threading `area.x` and
-    // `area.y` through every row. The intersection is what makes "outside
-    // the area is untouched" true even where a computed width runs over
-    // (a popup clamped to `width`, a status message wider than the pane).
+    // (0, 0). The intersection keeps "outside the area is untouched" true
+    // even where a computed width runs over.
     let at = |x: u16, y: u16, w: u16, h: u16| {
         Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
     };
@@ -374,8 +334,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     let text_h = area.height as usize - chrome.rows();
     // The pane row the text starts on: under the title, or at the top without one.
     let t0 = chrome.top();
-    // **A view's header band**: reverse video like nano's bars — or, bare, the same words in
-    // bold, for the same reason the status row loses its strip (see `strip` below).
+    // A view's header band: reverse video like nano's bars — or, bare, the
+    // same words in bold (see `strip` below).
     let head = || {
         if chrome == crate::editor::Chrome::BARE {
             Style::of(Role::Strong)
@@ -385,18 +345,16 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     };
     let bs = ed.bs();
 
-    // F4: line-number gutter shrinks the text viewport; E3: scroll_x is the
-    // left edge of the text window in display cols. Both widths come from the
-    // editor, so the draw, the click mapping and the wrap width cannot disagree
-    // — and for a tail the width follows the FILE's last line, once the
-    // background count has said what it is (TODO.md §20.1's idea 3).
+    // The gutter shrinks the text viewport; scroll_x is the left edge in
+    // display cols. Both widths come from the editor, so the draw, the
+    // click mapping and the wrap width cannot disagree; for a tail the
+    // width follows the file's last line once the count has said it.
     let g = ed.gutter_w();
     let view_w = (width as usize).saturating_sub(g);
 
-    // Merged diagnostics, computed ONCE per frame: the per-character style
-    // lookup and the gutter both read it. `all_diags` clones and sorts, so
-    // running it per cell made scrolling cost scale with the diagnostic
-    // count (measured: ~65 ms/frame at 500 diags, ~26 µs at zero).
+    // Merged diagnostics, computed once per frame: the style lookup and the
+    // gutter both read it, and running it per cell made scrolling cost scale
+    // with the diagnostic count.
     let diags = ed.all_diags();
 
     // (buffer row, wrap segment) of each visible VISUAL row. With wrap off,
@@ -407,16 +365,12 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
         let mut first = true;
         while out.len() < text_h && r < bs.buf.row_count() {
-            // Segment count from the cached wrap table (rebuilt once per
-            // edit/resize by ensure_wrap_prefix) instead of re-scanning the
-            // whole line every frame — a 500k-char line must not cost 500k
-            // steps per frame. The fallback covers a missing table (tests
-            // that draw without the run loop's adjust_scroll).
+            // Segment count from the cached wrap table rather than
+            // re-scanning the line every frame; the fallback covers a missing
+            // table (tests that draw without the run loop).
             let count = ed.seg_count(r);
-            // The top line may start MID-way (seg > 0): emit only its
-            // remaining segments. Emitting all `count` would add `seg`
-            // phantom rows past the line's end — blank gaps that collapse
-            // when the line scrolls off.
+            // The top line may start mid-way (seg > 0): emit only its
+            // remaining segments, or the line's end gains phantom rows.
             let emit = if first {
                 count.saturating_sub(seg)
             } else {
@@ -443,10 +397,9 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         (bs.scroll..bs.scroll + text_h).map(|r| (r, 0)).collect()
     };
 
-    // Per visible row: the row's slice of `diags` (sorted by line) and its
-    // most severe severity for the gutter. One O(diags + rows) walk instead
-    // of filtering the whole list per row (O(rows × diags) per frame).
-    // `vis` rows are non-decreasing, so a single forward cursor suffices.
+    // Per visible row: its slice of `diags` and its most severe severity,
+    // one forward walk (`vis` rows are non-decreasing) instead of filtering
+    // per row.
     let mut diag_range: Vec<(usize, usize)> = Vec::with_capacity(text_h);
     let mut diag_sev: Vec<Option<u64>> = Vec::with_capacity(text_h);
     {
@@ -468,11 +421,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
 
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
-    // **`VIEW` says the buffer cannot be written**, which is the one thing about
-    // it a reader must know before typing: a tailed log is being written by
-    // something else, and an edit that cannot be saved is work they will lose
-    // (TODO.md §20.6). Beside the mark, which is the other piece of state worth
-    // seeing at a glance.
+    // `VIEW` says the buffer cannot be written — the one thing a reader must
+    // know before typing — beside the mark.
     let flags = match (bs.read_only, bs.mark.is_some()) {
         (true, true) => "VIEW M",
         (true, false) => "VIEW",
@@ -491,14 +441,10 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     if g > 0 {
         let mut nums: Vec<Line> = Vec::with_capacity(text_h);
         for (i, (r, seg)) in vis.iter().enumerate() {
-            // The number sits on the first wrap segment of a row only;
-            // continuation rows stay blank (nano).
-            //
-            // The number is the FILE's, which for an ordinary buffer is the
-            // row plus one, and for a tail is `lines_before + row + 1` — and
-            // for a tail nobody has counted yet it is **nothing**: a blank cell
-            // rather than `r + 1`, because the tail's row 1 is somewhere in the
-            // middle of a file whose length is not known (§20.3 C).
+            // The number sits on the first wrap segment only; continuation
+            // rows stay blank (nano). It is the file's — and for a tail
+            // nobody has counted yet it is nothing, a blank cell rather than
+            // a guess.
             let s = if *r < bs.buf.row_count() && *seg == 0 {
                 match bs.line_number(*r) {
                     Some(n) => format!("{:>w$} ", n, w = g - 1),
@@ -507,9 +453,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             } else {
                 " ".repeat(g)
             };
-            // D6: rows with diagnostics carry their severity's color (the
-            // most severe wins; the list merges tree-sitter + LSP diags).
-            // Every wrap segment of such a row is colored.
+            // Rows with diagnostics carry their severity's colour (most
+            // severe wins), on every wrap segment of the row.
             let role = match diag_sev[i] {
                 Some(sev) => crate::editor::diag_role(sev),
                 None => Role::Faint,
@@ -532,9 +477,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             Some(chars) => {
                 let line = match ed.row_is_simple(*r) {
                     // A simple row: display col == char index, so the
-                    // segment's display range IS its char range and the
-                    // window is a slice. This is the common case (ASCII
-                    // source) and the one the per-frame cost is measured on.
+                    // window is a slice — the common case.
                     Some(true) => {
                         let (lo, hi) = if ed.wrap {
                             ed.seg_chars(*r, *seg)
@@ -688,10 +631,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // the label and answer left-aligned at column 0; a plain message sits
     // centered with only the bracketed text reversed.
     let status_row = area.height - 1 - if chrome.keys { 2 } else { 0 };
-    // **Bare, the status row is not a reversed strip either.** nano's bars are reverse video
-    // and so are its prompt and its messages; a host that took the bars off is drawing the
-    // pane in its own look, and a lone white strip at the bottom of it is the one piece of
-    // nano left. So the prompt and the message are plain text there.
+    // Bare, the status row is not a reversed strip either: a host that took
+    // the bars off is drawing the pane in its own look.
     let strip = if chrome == crate::editor::Chrome::BARE {
         Style::new()
     } else {
@@ -731,17 +672,13 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
         );
     } else {
-        // Outside prompts the cursor position sits at the right edge of the
-        // status row (1-based); transient messages and the LSP summary are
-        // centered in the space left of it. nano centers the message and
-        // wraps it in "[ ... ]" when it fits with room to spare (start_col
-        // > 1); only the text is reversed.
+        // The cursor position sits at the right edge (1-based); transient
+        // messages and the LSP summary center in the space left of it,
+        // reversed only when they fit with room to spare.
         let cur = &ed.bs().cursor;
         // `?` and not `1`: a tail's row is not the file's line until the
-        // background count has said which line it is, and claiming the first
-        // one is the lie §20.3 C exists to stop (TODO.md §20.1's idea 3).
-        // **A view's position is a row of the rendering**, not a line of a file: `Row 7` rather
-        // than `Ln 7`, so nobody reads a listing's entry number as a file line.
+        // count has said which line it is. A view's position is a row of the
+        // rendering, not a line of a file.
         let pos_txt = if ed.bs().synthetic {
             format!("Row {}", cur.row + 1)
         } else {
@@ -779,13 +716,9 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
 
     // ---- function bar (last two rows, reversed) ----
     // nano's layout (global.c:shown_entries_for + winio.c:bottombars):
-    //   total     = min(items, ((COLS + 40) / 20) * 2)
-    //   per_row   = (total + 1) / 2
-    //   itemwidth = COLS / per_row
-    // filled column-major: item i -> row (i % 2), col (i / 2) * itemwidth.
-    // The last column absorbs the leftover (COLS % itemwidth) slack.
-    // What is in effect decides the bar (`Editor::bar_items`): the global
-    // keys, a mode's own, or what can follow a pending prefix.
+    // total = min(items, ((COLS + 40) / 20) * 2), per_row = (total + 1) / 2,
+    // itemwidth = COLS / per_row, filled column-major, last column absorbs
+    // the slack. What is in effect decides the bar (`Editor::bar_items`).
     let items = if chrome.keys {
         ed.bar_items()
     } else {
@@ -808,9 +741,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                     if i < total {
                         let (k, l) = (&items[i].0, &items[i].1);
                         // nano post_one_key: the key combo is reversed, the
-                        // separator space and the tag stay in the terminal's
-                        // default colors; the tag is skipped when fewer than
-                        // 2 columns remain for it.
+                        // separator and tag stay default; the tag is skipped
+                        // when fewer than 2 columns remain for it.
                         let kw = k.chars().count();
                         let key: String = k.chars().take(w).collect();
                         spans.push(Span::styled(key, rev()));
@@ -973,9 +905,8 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
     if !name.is_empty() {
         let nl = name.chars().count();
         let region_end = s.len().saturating_sub(8);
-        // Saturating: a name longer than the region would underflow here (a
-        // debug-build panic, a release-build name that vanished) — it is
-        // placed at the left edge and cut instead.
+        // Saturating: a name longer than the region is placed at the left
+        // edge and cut, not underflowed.
         let mut pos = (left.len() + region_end).saturating_sub(nl) / 2;
         if pos < left.len() {
             pos = left.len();
@@ -1093,8 +1024,8 @@ mod tests {
 
     // ---------- gutter_width ----------
 
-    /// **A view's status reads `Row N`, not `Ln N`**: the number is a row of a rendering, and a
-    /// line claim about a directory is a claim about a file that does not exist.
+    /// A view's status reads `Row N`, not `Ln N`: the number is a row of a
+    /// rendering, not a line of a file.
     #[test]
     fn a_view_says_row_not_line() {
         let mut e = ed("x");
@@ -1281,9 +1212,8 @@ mod tests {
 
     #[test]
     fn title_line_left_center_right() {
-        // Against the COMPILED version, not a literal. The assertion used to say
-        // `"  rano 0.1.0"`, which is what made the drift invisible: the test and
-        // the constant agreed with each other and with no release.
+        // Against the compiled version, not a literal, so the banner and
+        // this test cannot agree with each other and no release.
         let banner = format!("  rano {}", env!("CARGO_PKG_VERSION"));
         let t = title_line(80, "foo.rs", true, "auto");
         assert!(t.starts_with(&banner), "{t:?}");
@@ -1494,10 +1424,8 @@ mod tests {
     #[test]
     fn draw_no_gap_when_top_line_partially_scrolled() {
         // Line 0 is 847 chars = 11 segments at view_w 77. Scrolled to
-        // segment 3, the top of the viewport is MID-line. The next line must
-        // sit directly below the line's last segment — the old code emitted
-        // all 11 segments (3 phantom rows past the end), leaving blank gaps
-        // that collapsed when the line scrolled off.
+        // segment 3, the next line must sit directly below the line's last
+        // segment, with no phantom blank rows past the end.
         let mut e = ed(&format!("{}\nshort", "a".repeat(847)));
         e.show_line_numbers = true;
         e.text_w = 80;
@@ -1527,9 +1455,8 @@ mod tests {
         // "has tabs"); the tab must still expand to the next multiple of
         // tab_width and the row must wrap at the segment boundary.
         let mut e = ed(&format!("\t{}", "a".repeat(40)));
-        // Eight columns, named rather than inherited: the default is four now, and this
-        // test's arithmetic (and its comments) are about an eight-column tab. The default
-        // is pinned in `config`'s own tests.
+        // Eight columns, named rather than inherited: this test's arithmetic
+        // is about an eight-column tab.
         e.tab_width = 8;
         e.show_line_numbers = true;
         e.text_w = 40;
@@ -1606,10 +1533,9 @@ mod tests {
 
     #[test]
     fn char_at_display_never_lands_inside_a_cluster() {
-        // "e◌́" is one column holding two code points. No display column maps
-        // to the combining mark, so a click can never put the cursor between
-        // the base and its accent; and col 1 (just after `e`) and col 2 (at
-        // `x`) both report column 1, because there is only one cell there.
+        // "e◌́" is one column holding two code points: no display column
+        // maps inside the cluster, so a click can never split a base from
+        // its accent.
         let line = chars("e\u{301}x");
         assert_eq!(char_at_display(&line, 0, 8), 0);
         assert_eq!(
@@ -1647,10 +1573,8 @@ mod tests {
 
     #[test]
     fn draw_never_splits_a_combining_mark_from_its_base() {
-        // Four one-column clusters in a ONE-column view: every row holds
-        // exactly one cluster. If the wrap cut by character index instead of
-        // by cluster — the old rule — a row would hold a bare accent and the
-        // next would start with the base it belongs to.
+        // Four one-column clusters in a one-column view: every row holds
+        // exactly one whole cluster, never a bare accent.
         let mut e = ed(&format!("{}x", "e\u{301}".repeat(3)));
         e.show_line_numbers = false;
         e.text_w = 1;
@@ -1715,9 +1639,9 @@ mod tests {
         }
     }
 
-    /// **Bare chrome: no title row, no function bar, no reverse video** — the text from the
-    /// pane's first row, the status row its last, the cursor and a click on the same rows the
-    /// text is drawn on, and the bar's facts handed to the host instead.
+    /// Bare chrome: no title row, no function bar, no reverse video — the
+    /// text from the pane's first row, the status row its last, and the
+    /// bar's facts handed to the host.
     #[test]
     fn a_bare_pane_is_text_and_a_status_row_and_nothing_reversed() {
         let mut e = ed("aa\nbb\ncc\ndd");

@@ -15,10 +15,9 @@ fn main() {
     }
     build.compile("tree_sitter_dockerfile");
 
-    // `cargo:rustc-link-lib` from this script reaches the library's own links
-    // but not the binary's. Hand the archive to every link explicitly by full
-    // path: rustc appends `-C link-arg` values after all objects, so
-    // resolution does not depend on flag propagation.
+    // `cargo:rustc-link-lib` from this script reaches the library's own links but not
+    // the binary's, so the archive is handed to every link by full path: rustc appends
+    // `-C link-arg` after all objects, so resolution does not depend on propagation.
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");
     let lib = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         format!("{out}/tree_sitter_dockerfile.lib")

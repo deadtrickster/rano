@@ -1,10 +1,8 @@
-//! A buffer as terminal rows: one `String` per row, independently paintable,
-//! under a [`Palette`]. Transitions say only what changed between two cells,
-//! or a reset and the whole pen when that is shorter. Never an escape inside
-//! a cluster: transitions sit between cells, and a cell is a whole cluster.
-//! Every row ends closed — links closed, attributes reset — because the
-//! painter erases rows in the current pen. Trailing blanks are not written.
-//! `Palette::None` emits plain text: no SGR, no link, no raw colour.
+//! A buffer as terminal rows: one `String` per row, independently paintable, under a
+//! [`Palette`]. A transition says only what changed between two cells, or a reset and the
+//! whole pen when that is shorter, and it sits between cells so never inside a cluster. Every
+//! row ends closed — links closed, attributes reset — because the painter erases rows in the
+//! current pen.
 
 use super::buffer::{Buffer, Cell, Rect};
 use super::style::Style;
@@ -90,8 +88,8 @@ fn transition(from: Pen, to: Pen) -> String {
     }
     let mut inc: Vec<String> = Vec::new();
     let mut have = from.attrs;
-    // Bold and dim share their off (`22`): dropping either drops both, and whichever
-    // the new pen keeps is turned back on below.
+    // Bold and dim share their off (`22`): dropping either drops both, and whichever the new
+    // pen keeps is turned back on below.
     let lost = |a| have.contains(a) && !to.attrs.contains(a);
     if lost(Attrs::BOLD) || lost(Attrs::DIM) {
         inc.push("22".into());
@@ -206,8 +204,8 @@ pub fn emit_row(cells: &[Cell], palette: Palette) -> String {
     out
 }
 
-/// A buffer for tests: what a reader sees ([`TestBuffer::plain`]) or the rows
-/// a palette emits ([`TestBuffer::rows`]).
+/// A buffer for tests: what a reader sees ([`TestBuffer::plain`]) or the rows a palette emits
+/// ([`TestBuffer::rows`]).
 pub struct TestBuffer {
     pub buf: Buffer,
 }
@@ -361,8 +359,8 @@ mod tests {
         );
     }
 
-    /// Placeholders pass through as cells: the cluster whole, the ids in the
-    /// colours the protocol reads.
+    /// Placeholders pass through as cells: the cluster whole, the ids in the colours the
+    /// protocol reads.
     #[test]
     fn a_graphics_placeholder_row_survives_intact() {
         let raw = Raw {

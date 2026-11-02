@@ -1,11 +1,7 @@
-//! Styled text, a cell buffer, widgets, and the emitter that turns a buffer
-//! into terminal rows. Styles name what text *means* (a `Role`); the `Palette`
-//! decides the look only when a buffer is emitted. Width is clusters: wide
-//! characters span two cells, and every row a buffer emits measures exactly
-//! its width, which `crate::term`'s row-diffing painter relies on.
-//!
-//! Build [`Line`]s of [`Span`]s → render into a [`Buffer`] → [`Buffer::emit`]
-//! the rows → `crate::term::Terminal::draw` writes the rows that changed.
+//! Styled text, a cell buffer, widgets, and the emitter that turns a buffer into terminal
+//! rows. Styles name what text means (a `Role`); the `Palette` decides the look only when a
+//! buffer is emitted. Build [`Line`]s of [`Span`]s → render into a [`Buffer`] →
+//! [`Buffer::emit`] → `Terminal::draw` writes the rows that changed.
 
 pub mod buffer;
 pub mod emit;

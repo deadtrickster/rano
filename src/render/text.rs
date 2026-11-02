@@ -1,17 +1,13 @@
-//! Styled text: [`Span`], [`Line`], [`Text`], and [`wrap`], [`truncate`],
-//! [`ellipsise_left`], [`fit`] — `crate::width::text`'s string functions over
-//! styled spans, sharing its breakpoint finder, not a second one. A style is
-//! an attribute of the cells, not bytes in the text: every returned line is
-//! independently paintable, and a link cut by [`truncate`] is closed by the
-//! emitter where the linked cells end.
+//! Styled text: [`Span`], [`Line`], [`Text`], and [`wrap`], [`truncate`], [`ellipsise_left`],
+//! [`fit`] — `crate::width::text`'s string functions over styled spans, sharing its breakpoint
+//! finder. A style is an attribute of the cells, not bytes in the text.
 
 use super::style::Style;
 use crate::style::{Look, Palette, Role};
 use crate::width::text::{Cell, break_cells, for_each_cell};
 
-/// A run of text in one style. The content is text: an escape sequence in it
-/// is dropped when measured or drawn, never passed through — foreign text
-/// lands in spans, and a terminal would execute its escapes.
+/// A run of text in one style. The content is text: an escape sequence in it is dropped when
+/// measured or drawn — foreign text lands in spans, and a terminal would execute its escapes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Span {
     pub content: String,
@@ -57,8 +53,8 @@ impl From<String> for Span {
     }
 }
 
-/// One row's worth of spans. `style` lies under every span (a span's own style is
-/// patched over it), so a line can say "this is an added diff row" once.
+/// One row's worth of spans. `style` lies under every span (a span's own style is patched
+/// over it), so a line can say "this is an added diff row" once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Line {
     pub spans: Vec<Span>,
@@ -109,17 +105,15 @@ impl Line {
         self.spans.iter().all(|s| s.content.is_empty())
     }
 
-    /// Room for a row's ANSI form in one allocation — a sequence and a reset
-    /// per span — instead of reallocating per row per frame.
+    /// Room for a row's ANSI form in one allocation — a sequence and a reset per span —
+    /// instead of reallocating per row per frame.
     fn ansi_capacity(&self) -> usize {
         self.spans.iter().map(|s| s.content.len() + 16).sum()
     }
 
-    /// The line as one ANSI string, for a host that prints strings rather than
-    /// drawing a [`super::Buffer`]: each span opens its own look and closes
-    /// with a reset, so a string pasted into others cannot leave its
-    /// attributes open. A link and the raw placeholder colours are written
-    /// under every palette.
+    /// The line as one ANSI string, for a host that prints strings rather than drawing a
+    /// [`super::Buffer`]: each span opens its own look and closes with a reset, so a string
+    /// pasted into others cannot leave its attributes open.
     pub fn to_ansi(&self, palette: Palette) -> String {
         let mut out = String::with_capacity(self.ansi_capacity());
         for sp in &self.spans {
@@ -129,10 +123,9 @@ impl Line {
         out
     }
 
-    /// [`Line::to_ansi`] for a host that keeps the row's own style open around
-    /// the row (a register). A span with no style of its own is its text and
-    /// nothing else; a styled span closes with a reset and the row's style
-    /// again — a reset alone restores the terminal default.
+    /// [`Line::to_ansi`] for a host that keeps the row's own style open around the row. A
+    /// span with no style of its own is its text and nothing else; a styled span closes with
+    /// a reset and the row's style again, since a reset alone restores the terminal default.
     pub fn to_ansi_inside(&self, palette: Palette) -> String {
         let restore = self.style.look(palette);
         let mut out = String::with_capacity(self.ansi_capacity() + 8 * self.spans.len());
@@ -143,8 +136,8 @@ impl Line {
     }
 }
 
-/// One span as ANSI: link opened, raw colours set, look, text, then a reset
-/// (and `restore`), the raw colours unset, the link closed.
+/// One span as ANSI: link opened, raw colours set, look, text, then a reset (and `restore`),
+/// the raw colours unset, the link closed.
 fn push_span_ansi(out: &mut String, sp: &Span, look: Look, restore: Option<Look>) {
     use std::fmt::Write;
     if let Some(url) = &sp.style.link {
@@ -282,10 +275,8 @@ fn rebuild(line: &Line, cells: &[Cell], owner: &[usize]) -> Line {
     out
 }
 
-/// Wrap to `cols` columns by `width::text::wrap`'s three break rules (a space;
-/// between two wide clusters, which is what makes CJK wrap at all; anywhere,
-/// when one run is longer than a row), styles kept on their cells. Trailing
-/// spaces and the newline at a break are dropped.
+/// Wrap to `cols` columns by `width::text::wrap`'s three break rules, styles kept on their
+/// cells. Trailing spaces and the newline at a break are dropped.
 pub fn wrap(line: &Line, cols: usize) -> Vec<Line> {
     let (cells, owner) = flatten(line);
     let rows = break_cells(&cells, cols.max(4));
@@ -299,9 +290,9 @@ pub fn wrap(line: &Line, cols: usize) -> Vec<Line> {
         .collect()
 }
 
-/// Truncate to `cols` columns, never splitting a cluster. When something is
-/// dropped the last column becomes `…`, in the style of the first cell it
-/// stands for — a cut through a link leaves the `…` linked.
+/// Truncate to `cols` columns, never splitting a cluster. When something is dropped the last
+/// column becomes `…`, in the style of the first cell it stands for — a cut through a link
+/// leaves the `…` linked.
 pub fn truncate(line: &Line, cols: usize) -> Line {
     if line.width() <= cols {
         return line.clone();
@@ -322,8 +313,7 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     let mut out = rebuild(line, &cells[..k], &owner[..k]);
     let at = owner.get(k).copied().unwrap_or(line.spans.len() - 1);
     let style = &line.spans[at].style;
-    // Into the run it ends, when it is the same run — the shape a string
-    // truncate writes.
+    // Into the run it ends, when it is the same run — the shape a string truncate writes.
     match out.spans.last_mut() {
         Some(last) if &last.style == style => last.content.push('…'),
         _ => out.spans.push(Span::styled("…", style.clone())),
@@ -331,8 +321,8 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     out
 }
 
-/// [`truncate`] for a line the caller is done with: handed back as it is when
-/// it fits, so a widget's last step costs no copy.
+/// [`truncate`] for a line the caller is done with: handed back as it is when it fits, so a
+/// widget's last step costs no copy.
 pub fn truncate_owned(line: Line, cols: usize) -> Line {
     if line.width() <= cols {
         line
@@ -341,9 +331,9 @@ pub fn truncate_owned(line: Line, cols: usize) -> Line {
     }
 }
 
-/// Shorten to `cols` columns by eating the left, keeping the end — the one to
-/// reach for on a path: `…/src/protocol.rs` names the file, `crates/…/protoco…`
-/// does not. The cut lands at a separator when one is within six columns.
+/// Shorten to `cols` columns by eating the left, keeping the end — the one to reach for on a
+/// path: `…/src/protocol.rs` names the file, `crates/…/protoco…` does not. The cut lands at a
+/// separator when one is within six columns.
 pub fn ellipsise_left(line: &Line, cols: usize) -> Line {
     if line.width() <= cols {
         return line.clone();
@@ -409,8 +399,8 @@ mod tests {
         ])
     }
 
-    /// A link and a picture's placeholder colours are not colours: they are
-    /// written under every palette.
+    /// A link and a picture's placeholder colours are not colours: they are written under
+    /// every palette.
     #[test]
     fn to_ansi_writes_links_and_placeholder_colours_under_every_palette() {
         let l = Line::new(vec![Span::styled(
@@ -431,8 +421,8 @@ mod tests {
         }
     }
 
-    /// Inside a register a plain span is bare text and a styled one closes
-    /// back to the register; with no register it is `to_ansi`.
+    /// Inside a register a plain span is bare text and a styled one closes back to the
+    /// register; with no register it is `to_ansi`.
     #[test]
     fn to_ansi_inside_restores_the_rows_style_after_every_span() {
         let p = Palette::Colour;

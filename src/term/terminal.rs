@@ -16,21 +16,19 @@ use crate::render::{Buffer, Palette};
 pub enum Mouse {
     /// None: the terminal's own selection works without Shift.
     Off,
-    /// Presses, releases, drags and the wheel (`?1002`); the wheel scrolls, and selecting
-    /// text stays the terminal's own Shift+drag.
+    /// Presses, releases, drags and the wheel (`?1002`); selecting text stays the terminal's.
     #[default]
     Buttons,
     /// Every motion too (`?1003`), for hover.
     Any,
 }
 
-/// The modes [`Terminal::enter_with`] turns on beyond what every full-screen program needs
-/// (alternate screen, bracketed paste, the title stack).
+/// The modes [`Terminal::enter_with`] turns on beyond what every full-screen program needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub mouse: Mouse,
-    /// A steady block cursor (`CSI 2 SP q`), given back as the terminal's own on exit: a
-    /// composer whose whole affordance is the caret cannot use a one-pixel bar.
+    /// A steady block cursor (`CSI 2 SP q`), given back on exit: a composer's whole affordance
+    /// is the caret, and a one-pixel bar is not one.
     pub block_cursor: bool,
 }
 
@@ -47,49 +45,41 @@ pub struct Terminal {
     original: libc::termios,
     fd: i32,
     entered: bool,
-    /// The window title last written (see [`Terminal::set_title`]), so a frame that does
-    /// not change it writes nothing.
+    /// The window title last written, so a frame that does not change it writes nothing.
     title: std::cell::RefCell<String>,
-    /// The frame currently on the glass. [`Terminal::draw`] writes the difference
-    /// against it and nothing else; see the note on flicker.
+    /// The frame currently on the glass: [`Terminal::draw`] writes the difference against it.
     shown: std::cell::RefCell<Vec<String>>,
-    /// The glass state being built, kept between frames so its rows keep their buffers.
-    /// A second buffer rather than in-place editing of `shown`, because a write can fail
-    /// partway and `shown` must only ever record what actually reached the glass.
+    /// The glass state being built, kept between frames so its rows keep their buffers. A
+    /// second buffer rather than editing `shown`, which may only record what reached the glass.
     next: std::cell::RefCell<Vec<String>>,
     /// Where the cursor was left, so an unchanged frame does not even move it.
     cursor: std::cell::Cell<Option<(usize, usize)>>,
-    /// Frames drawn, and frames that needed no bytes at all. Kept in the shipping type
-    /// because "is it repainting when nothing changed" is unanswerable after the fact.
+    /// Frames drawn, and frames that needed no bytes at all.
     frames: std::cell::Cell<u64>,
     silent: std::cell::Cell<u64>,
-    /// The rest of the encoder: bytes, row rewrites, repeated payloads, screen
-    /// erases. See [`WriteStats`].
+    /// The rest of the encoder: bytes, row rewrites, repeated payloads, screen erases.
     stats: std::cell::Cell<WriteStats>,
-    /// The previous frame's payload, kept only while `stats_to` is set — a clone
-    /// per frame is not something an uninstrumented head should pay for.
+    /// The previous frame's payload, kept only while `stats_to` is set: a clone per frame is
+    /// not something an uninstrumented head should pay for.
     prev_payload: std::cell::RefCell<String>,
-    /// `RANO_WRITE_STATS`: a path to write the line to on restore, or `-`
-    /// for stderr. `None` switches the whole encoder off.
+    /// `RANO_WRITE_STATS`: a path to write the line to on restore, or `-` for stderr.
     stats_to: Option<String>,
-    /// Bytes read but not yet decodable: a partial UTF-8 sequence, an escape
-    /// that arrived in halves, or a bracketed paste whose terminator has not
-    /// come. Carried to the next read rather than dropped.
+    /// Bytes read but not yet decodable — a partial UTF-8 sequence, half an escape, an open
+    /// bracketed paste — carried to the next read rather than dropped.
     pending: std::cell::RefCell<Vec<u8>>,
-    /// The bytes the last [`Terminal::events`] call consumed, verbatim; see
-    /// [`Terminal::raw_input`] for who reads this and why an [`Event`] cannot be re-encoded.
+    /// The bytes the last [`Terminal::events`] call consumed, verbatim. See
+    /// [`Terminal::raw_input`].
     last_raw: std::cell::RefCell<Vec<u8>>,
-    /// The terminal size the last frame was painted at, and whether the next
-    /// frame must erase everything before it paints.
+    /// The terminal size the last frame was painted at, and whether the next frame must erase
+    /// everything first.
     last_size: std::cell::Cell<(usize, usize)>,
     full: std::cell::Cell<bool>,
     /// What this terminal speaks beyond cells — see [`super::features`]. Decided once at
-    /// [`Terminal::enter`], and every mode it turns on there is turned off by [`restore`].
+    /// [`Terminal::enter`].
     features: Features,
     /// The modes `enter` turned on, so `restore` turns off exactly those.
     options: Options,
-    /// The progress state last written (OSC 9;4), so a tick that does not change it writes
-    /// nothing.
+    /// The progress state last written (OSC 9;4), so an unchanged tick writes nothing.
     progress: std::cell::Cell<Progress>,
 }
 
@@ -101,8 +91,8 @@ pub enum Progress {
     Idle,
     /// The model is working. No percentage exists, so the bar is the indeterminate one.
     Busy,
-    /// Something waits on the person. Drawn in the paused colour, so a tab that wants you
-    /// looks different from a tab that is working.
+    /// Something waits on the person: drawn in the paused colour, so a tab that wants you looks
+    /// different from one that is working.
     Waiting,
     /// The last turn ended in an error.
     Failed,
@@ -120,17 +110,14 @@ impl Progress {
     }
 }
 
-/// How much is read at once: large enough that a paste is one or two reads, and a
-/// ceiling rather than a promise, since [`Terminal::events`] loops while bytes keep coming.
+/// How much is read at once: large enough that a paste is one or two reads.
 const READ_CHUNK: usize = 8192;
 
-/// A hard ceiling on the carry, so a paste that never closes cannot grow it without
-/// bound. Past it the carry is decoded as-is — visibly wrong beats invisibly unbounded.
+/// A hard ceiling on the carry, so a paste that never closes cannot grow it without bound.
 const MAX_PENDING: usize = 4 * 1024 * 1024;
 
-/// What one run wrote to the terminal. `rows` is the quantity that destroys a
-/// selection, which is over drawn cells, so it counts the `ESC[K` that begins each row
-/// rewrite — [`paint_full`] emits exactly one per row repainted and nothing else does.
+/// What one run wrote to the terminal. `rows` counts the `ESC[K` that begins each row rewrite
+/// — the quantity that destroys a selection, which is over drawn cells.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriteStats {
     /// Calls to [`Terminal::draw_with_cursor`].
@@ -171,9 +158,8 @@ impl WriteStats {
 }
 
 impl Terminal {
-    /// Put the terminal in raw mode on the alternate screen, with letibot's modes
-    /// ([`Options::default`]). `Err` when stdin is not a tty — the `--replay` and CI case —
-    /// so the caller renders once to stdout instead of failing.
+    /// Put the terminal in raw mode on the alternate screen. `Err` when stdin is not a tty —
+    /// the `--replay` and CI case — so the caller renders once to stdout.
     pub fn enter() -> std::io::Result<Terminal> {
         Terminal::enter_with(Options::default())
     }
@@ -274,8 +260,8 @@ impl Terminal {
         self.features
     }
 
-    /// The tab's progress bar, written only when it changed and only where [`Features::progress`]
-    /// says it is spoken: a terminal that does not know OSC 9;4 may read OSC 9 as a notification.
+    /// The tab's progress bar, written only when it changed and only where it is spoken: a
+    /// terminal that does not know OSC 9;4 may read OSC 9 as a notification.
     pub fn set_progress(&self, p: Progress) {
         if !self.features.progress || self.progress.get() == p {
             return;
@@ -286,9 +272,8 @@ impl Terminal {
         self.progress.set(p);
     }
 
-    /// A desktop notification (OSC 9), where spoken. The text is stripped of control
-    /// characters — it carries a session's words, and an escape in it would be one the
-    /// terminal executes.
+    /// A desktop notification (OSC 9), where spoken. Control characters are stripped: it
+    /// carries a session's words, and an escape in it would be executed.
     pub fn notify(&self, text: &str) {
         if !self.features.notify {
             return;
@@ -302,8 +287,7 @@ impl Terminal {
         let _ = out.flush();
     }
 
-    /// Put text on the system clipboard (OSC 52), where spoken. Base64 of the bytes as they
-    /// are: the clipboard is the operator's, and what they asked to copy is what lands.
+    /// Put text on the system clipboard (OSC 52), where spoken.
     pub fn copy(&self, text: &str) -> bool {
         if !self.features.clipboard {
             return false;
@@ -314,8 +298,7 @@ impl Terminal {
         true
     }
 
-    /// Write bytes that are not part of the frame — an inline image's upload — outside the
-    /// diffing encoder, which only knows rows of text.
+    /// Write bytes that are not part of the frame — an inline image's upload.
     pub fn write_raw(&self, bytes: &[u8]) {
         let mut out = std::io::stdout();
         let _ = out.write_all(bytes);
@@ -335,10 +318,8 @@ impl Terminal {
         }
     }
 
-    /// Wait up to `timeout` for input, and say whether any is there to read.
-    ///
-    /// [`Terminal::events`] waits ~100 ms when nothing comes, which any host with a shorter
-    /// deadline cannot afford, so such a host polls here and reads only when this says so.
+    /// Wait up to `timeout` for input, and say whether any is there to read: a host with a
+    /// deadline shorter than [`Terminal::events`]'s ~100 ms polls here instead.
     pub fn poll(&self, timeout: std::time::Duration) -> bool {
         let mut fds = libc::pollfd {
             fd: self.fd,
@@ -352,9 +333,8 @@ impl Terminal {
 
     /// Read whatever input is available, as events. Returns after at most ~100 ms of quiet.
     ///
-    /// The loop continues while the last read filled the buffer — the only signal there is
-    /// under `VMIN=0 VTIME=1` — or while a bracketed paste is open. Whatever is left
-    /// undecodable is carried, not dropped.
+    /// The loop continues while the last read filled the buffer or a paste is open; whatever
+    /// is left undecodable is carried, not dropped.
     pub fn events(&self) -> Vec<Event> {
         let mut buf = [0u8; READ_CHUNK];
         let mut pending = self.pending.borrow_mut();
@@ -384,10 +364,8 @@ impl Terminal {
         keys
     }
 
-    /// The bytes the last [`Terminal::events`] call consumed, verbatim.
-    ///
-    /// A pane needs them because an [`Event`] is a lossy reading: `ESC [ A` and `ESC O A`
-    /// are both Up and different byte strings, and a paste has lost its markers.
+    /// The bytes the last [`Terminal::events`] call consumed, verbatim: an [`Event`] is a lossy
+    /// reading, so `ESC [ A` and `ESC O A` would arrive as one key.
     pub fn raw_input(&self) -> Vec<u8> {
         // Under the kitty keyboard the raw stream is in a spelling the pane's program never
         // asked for (Ctrl-C arrives as `CSI 99;5u`), so it is put back into legacy bytes.
@@ -398,11 +376,9 @@ impl Terminal {
         }
     }
 
-    /// The window title — the session's name, so a tab says which conversation it is rather
-    /// than the name of the program, which every tab shares.
+    /// The window title — the session's name, so a tab says which conversation it is.
     ///
-    /// Control characters are dropped first: anyone with the socket can set a session title,
-    /// and an escape inside one would be executed by the terminal.
+    /// Control characters are dropped: anyone with the socket can set a session title.
     pub fn set_title(&self, title: &str) {
         let clean: String = window_title_text(title);
         if *self.title.borrow() == clean {
@@ -416,16 +392,14 @@ impl Terminal {
 
     /// Paint the difference between this frame and the one on the glass.
     ///
-    /// Only rows whose text changed are written, and a frame equal to the last one writes
-    /// zero bytes: a full repaint ten times a second flicks, destroys a selection and pins
-    /// a core. A resize forces one full repaint, because every row moved.
+    /// Only changed rows are written, and an unchanged frame writes zero bytes; a full repaint
+    /// ten times a second flicks, destroys a selection and pins a core.
     pub fn draw(&self, lines: &[String]) {
         self.draw_with_cursor(lines, None)
     }
 
-    /// A cell buffer, painted: its rows emitted under `palette` (see `crate::render::emit`)
-    /// and handed to [`Terminal::draw_with_cursor`]. The buffer's rows are the screen's from
-    /// the top.
+    /// A cell buffer, painted: its rows emitted under `palette` and handed to
+    /// [`Terminal::draw_with_cursor`].
     pub fn draw_buffer(&self, buf: &Buffer, palette: Palette, cursor: Option<(usize, usize)>) {
         let rows = buf.emit(palette);
         self.draw_with_cursor(&rows, cursor)
@@ -442,13 +416,9 @@ impl Terminal {
         let _ = self.paint_to(&mut out, lines, cursor);
     }
 
-    /// One pass: build the bytes, write them, and adopt the glass state they leave — or
-    /// adopt nothing at all.
-    ///
-    /// A `write_all` that fails may have written any prefix, so the head cannot know which
-    /// rows landed: a failed write clears the memory and forces a full repaint. `writers` are
-    /// split out so the decision is testable without a pty. Returns whether the glass was
-    /// invalidated.
+    /// One pass: build the bytes, write them, and adopt the glass state they leave — or adopt
+    /// nothing at all. A failed write clears the memory and forces a full repaint, because any
+    /// prefix may have landed. Returns whether the glass was invalidated.
     fn paint_to(
         &self,
         out: &mut dyn std::io::Write,
@@ -522,10 +492,8 @@ impl Terminal {
         false
     }
 
-    /// The built state becomes the memory of the glass, in one exchange.
-    ///
-    /// A swap rather than a fresh `Vec`: the buffer `shown` gives up is the scratch the next
-    /// frame rebuilds into, so its rows keep their allocations.
+    /// The built state becomes the memory of the glass, in one exchange: the buffer `shown`
+    /// gives up is the scratch the next frame rebuilds into.
     fn adopt_next(&self) {
         self.shown.swap(&self.next);
     }
@@ -569,11 +537,8 @@ impl Drop for Terminal {
     }
 }
 
-/// The bytes that turn `shown` into `lines`, and the memory of the glass those bytes would
-/// leave behind.
-///
-/// Two values rather than one, so a caller that dies before writing holds the old memory:
-/// there is no window in which the head believes a byte it has not sent.
+/// The bytes that turn `shown` into `lines`, and the memory of the glass they would leave.
+/// Two values, so a caller that dies before writing holds the old memory.
 pub fn paint(
     shown: &[String],
     lines: &[String],
@@ -592,10 +557,8 @@ pub fn paint(
     (s, next)
 }
 
-/// As [`paint`], with `full` forcing a whole-screen erase first.
-///
-/// A frame that grew a row is not a resize: the composer grows every time a prompt wraps,
-/// and erasing for that is a flash per wrap. Rows are addressed absolutely anyway.
+/// As [`paint`], with `full` forcing a whole-screen erase first. A frame that grew a row is not
+/// a resize: the composer grows every time a prompt wraps.
 pub fn paint_full(
     shown: &[String],
     lines: &[String],
@@ -647,9 +610,8 @@ pub fn paint_full(
     s
 }
 
-/// A terminal that writes where it is told, for the tests that are about the encoder
-/// rather than about the pty: `enter` needs a real terminal, the diff and the failure
-/// policy do not.
+/// A terminal that writes where it is told, for the tests about the encoder rather than the
+/// pty.
 #[cfg(test)]
 impl Terminal {
     fn headless() -> Terminal {
@@ -677,8 +639,7 @@ impl Terminal {
     }
 }
 
-/// A title's text with every control character removed and its length capped — what
-/// [`Terminal::set_title`] writes. Separate so it can be tested without a terminal.
+/// A title's text with every control character removed and its length capped.
 pub fn window_title_text(title: &str) -> String {
     title
         .chars()
@@ -725,7 +686,7 @@ fn restore(fd: i32, original: &libc::termios, features: Features, options: Optio
 }
 
 /// Standard base64, padded, for OSC 52. A copy rather than a dependency: rano depends on no
-/// letibot crate, and the alphabet is RFC 4648's, so the two cannot mean different things.
+/// letibot crate, and the alphabet is RFC 4648's.
 pub fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -780,8 +741,7 @@ mod tests {
     }
 
     /// [`WriteStats::rows`] counts row rewrites by counting `ESC[K`, which holds only while
-    /// [`paint_full`] emits exactly one per repainted row — a fact that can rot, so it is
-    /// asserted: two rows changed of five is two.
+    /// [`paint_full`] emits exactly one per repainted row — asserted, since that can rot.
     #[test]
     fn the_write_counter_counts_rows_and_not_frames() {
         let a: Vec<String> = ["one", "two", "three", "four", "five"]
@@ -812,10 +772,8 @@ mod tests {
         assert_eq!(second.matches("\x1b[2J").count(), 0, "and no erase");
     }
 
-    /// A frame that parks the cursor hides it before writing the rows.
-    ///
-    /// Asserted as an order — hide, rows, park, show — because a `?25l` in the wrong place
-    /// is a cursor hidden after the flash.
+    /// A frame that parks the cursor hides it before writing the rows: asserted as an order,
+    /// because a `?25l` in the wrong place is a cursor hidden after the flash.
     #[test]
     fn a_frame_that_parks_the_cursor_hides_it_first() {
         let a: Vec<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
@@ -868,12 +826,8 @@ mod tests {
         assert_eq!(paint_full(&shown, &a, &mut scratch, None, None, false), "");
     }
 
-    /// A paint that dies part way writes no record of the frame it did not finish: a
-    /// `write_all` that fails may have written any prefix, so the head cannot know which rows
-    /// landed, and a wrong memory would make the missing row permanent.
-    ///
-    /// The writer fails on its second call, so the first write really does reach the glass
-    /// and "commit nothing" and "commit everything" are both wrong.
+    /// A paint that dies part way writes no record of the frame it did not finish: the writer
+    /// fails on its second call, so the first really does reach the glass.
     #[test]
     fn a_paint_that_dies_part_way_leaves_no_record() {
         /// Writes `left` times, then fails for ever.
@@ -987,8 +941,7 @@ mod tests {
         assert!(bytes.contains("\x1b[2;1H"), "{bytes:?}");
     }
 
-    /// The render core's rows go through the painter like any rows: emitted twice unchanged
-    /// writes nothing the second time, and one changed cell rewrites only its own row.
+    /// The render core's rows go through the painter like any rows.
     #[test]
     fn a_buffer_frame_rewrites_only_the_row_a_cell_changed_in() {
         use crate::render::{Buffer, Line, Palette, Rect, Role};

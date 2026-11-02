@@ -38,8 +38,8 @@ impl Widget for Text {
     }
 }
 
-/// Text in an area: wrapped or clipped, scrolled by whole rows, on an optional
-/// background style that tints past the end of the text.
+/// Text in an area: wrapped or clipped, scrolled by whole rows, on an optional background
+/// style that tints past the end of the text.
 #[derive(Debug, Clone, Default)]
 pub struct Paragraph {
     pub text: Text,
@@ -72,8 +72,8 @@ impl Paragraph {
         self
     }
 
-    /// The rows this paragraph is at `width` columns, before scrolling — what a
-    /// caller sizing an area needs.
+    /// The rows this paragraph is at `width` columns, before scrolling — what a caller sizing
+    /// an area needs.
     pub fn rows(&self, width: u16) -> Vec<Line> {
         let mut out = Vec::new();
         for l in &self.text.lines {
@@ -119,8 +119,8 @@ impl Widget for Paragraph {
 }
 
 /// A box drawn with the light box-drawing set, an optional title in its top edge.
-/// Box-drawing characters are one column in both width tables in this tree, so
-/// a frame can be measured by counting them.
+/// Box-drawing characters are one column in both width tables in this tree, so a frame can be
+/// measured by counting them.
 #[derive(Debug, Clone, Default)]
 pub struct Bordered {
     pub title: Option<Line>,

@@ -78,13 +78,12 @@ impl Rect {
     }
 }
 
-/// One cell: a grapheme cluster and its style. A wide cluster occupies a
-/// lead (`width == 2`) and a continuation after it (`width == 0`, empty); the
-/// emitter writes the lead only, and a write onto half of a pair blanks the other half.
+/// One cell: a grapheme cluster and its style. A wide cluster occupies a lead (`width == 2`)
+/// and a continuation after it (`width == 0`, empty); the emitter writes the lead only, and a
+/// write onto half of a pair blanks the other half.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
-    /// The whole cluster — base and marks together, so no escape can be written
-    /// inside one.
+    /// The whole cluster — base and marks together, so no escape can be written inside one.
     pub symbol: String,
     /// Columns: 1 or 2 for a lead, 0 for a continuation.
     pub width: u8,
@@ -202,11 +201,10 @@ impl Buffer {
         }
     }
 
-    /// Write `s` at `(x, y)` in `style`, at most `max` columns and never past the
-    /// buffer's right edge; returns the column after the last written. Escapes
-    /// and controls get no cell; a zero-width mark with no base joins the cell
-    /// to its left; a wide cluster that does not fit whole is not halved — the
-    /// column becomes a space. Tabs advance to the next stop from `origin`.
+    /// Write `s` at `(x, y)` in `style`, at most `max` columns and never past the buffer's
+    /// right edge; returns the column after the last written. Escapes and controls get no
+    /// cell; a zero-width mark with no base joins the cell to its left; a wide cluster that
+    /// does not fit whole is not halved — the column becomes a space.
     pub fn set_str(&mut self, x: u16, y: u16, s: &str, style: &Style, max: usize) -> u16 {
         self.set_str_from(x, x, y, s, style, max)
     }
@@ -273,8 +271,8 @@ impl Buffer {
         self.set_str(x, y, &span.content, &span.style, max)
     }
 
-    /// Write a line at `(x, y)`, at most `max` columns, each span's style
-    /// patched over the line's.
+    /// Write a line at `(x, y)`, at most `max` columns, each span's style patched over the
+    /// line's.
     pub fn set_line(&mut self, x: u16, y: u16, line: &Line, max: usize) -> u16 {
         let mut cx = x;
         let end = x as usize + max;
@@ -318,8 +316,8 @@ impl Buffer {
         }
     }
 
-    /// The text of every row, full width, styles dropped — each string measures
-    /// exactly the buffer's width.
+    /// The text of every row, full width, styles dropped — each string measures exactly the
+    /// buffer's width.
     pub fn to_plain_lines(&self) -> Vec<String> {
         (self.area.y..self.area.bottom())
             .map(|y| {

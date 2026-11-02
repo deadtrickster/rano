@@ -1,11 +1,8 @@
-//! What the terminal on the other end can do beyond drawing cells: seven
-//! switches decided once here, each on only for a terminal known to speak it —
-//! one that does not may print the sequence as garbage. `TERM=xterm-ghostty`
-//! or `TERM_PROGRAM=ghostty` gets six of the seven ([`Features::GHOSTTY`]);
-//! `RANO_TERM_FEATURES` overrides either way — `all`, `none`, or a comma list
-//! where `-name` removes one (the old `LETIBOT_TERM_FEATURES` still works).
-//! Inside tmux nothing is on unless the override says so: tmux mangles the
-//! sequences, and `TERM` names tmux.
+//! What the terminal on the other end can do beyond drawing cells: seven switches decided once
+//! here, each on only for a terminal known to speak it, since one that does not may print the
+//! sequence as garbage. `RANO_TERM_FEATURES` overrides either way — `all`, `none`, or a comma
+//! list where `-name` removes one. Inside tmux nothing is on unless the override says so, since
+//! tmux mangles the sequences.
 
 /// The seven, as switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,8 +21,8 @@ pub struct Features {
     pub images: bool,
     /// Asking the terminal its background colour (OSC 11), to choose a light or dark palette.
     pub background: bool,
-    /// How a picture is delivered when [`Features::images`] is on. A field of
-    /// this value, not a second detection, so the two cannot disagree.
+    /// How a picture is delivered when [`Features::images`] is on. A field of this value, not
+    /// a second detection, so the two cannot disagree.
     pub proto: crate::term::Proto,
 }
 
@@ -51,21 +48,21 @@ impl Features {
         proto: crate::term::Proto::Kitty,
     };
 
-    /// What Ghostty gets with no override: everything but `progress` — Ghostty
-    /// animates an indeterminate bar for the whole of a turn.
+    /// What Ghostty gets with no override: everything but `progress` — Ghostty animates an
+    /// indeterminate bar for the whole of a turn.
     pub const GHOSTTY: Features = Features {
         progress: false,
         ..Features::ALL
     };
 
-    /// From this process's environment. Asks tmux's `allow-passthrough` only
-    /// where it can change the answer (see [`crate::term::proto`]).
+    /// From this process's environment. Asks tmux's `allow-passthrough` only where it can
+    /// change the answer (see [`crate::term::proto`]).
     pub fn detect() -> Features {
         let mut env = crate::term::proto::Env::now();
         let mut f = Features::of_env(&env, &words());
         if !f.images {
-            // A name promises nothing over ssh; the terminal's own answer does.
-            // One query, at startup, before input.
+            // A name promises nothing over ssh; the terminal's own answer does. One query, at
+            // startup, before input.
             f.proto = crate::term::Proto::detect(&env, true);
             // tmux is asked only when it can change the answer.
             if f.proto == crate::term::Proto::Kitty && env.tmux {
@@ -81,9 +78,9 @@ impl Features {
         f
     }
 
-    /// The decision from its four inputs — a function so it can be tested
-    /// without the environment. `images` is the protocol's answer, not a
-    /// switch; with no `Env`, tmux is assumed off.
+    /// The decision from its four inputs — a function so it can be tested without the
+    /// environment. `images` is the protocol's answer, not a switch; with no `Env`, tmux is
+    /// assumed off.
     pub fn from_env(term: &str, term_program: &str, in_tmux: bool, wanted: &str) -> Features {
         let env = crate::term::proto::Env {
             term: term.to_string(),
@@ -131,8 +128,8 @@ impl Features {
                 }
             }
         }
-        // Protocol last, after the override: naming `images` where nothing was
-        // detected asserts kitty, the one placeholder protocol.
+        // Protocol last, after the override: naming `images` where nothing was detected
+        // asserts kitty, the one placeholder protocol.
         f.proto = if !f.images {
             crate::term::Proto::None
         } else if crate::term::proto::Proto::of(env, true).speaks() {

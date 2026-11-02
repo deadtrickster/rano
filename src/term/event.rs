@@ -1,6 +1,5 @@
-//! What the terminal said: a key and its mods, a paste, a mouse report, a focus
-//! change, the background answer. An event says what was pressed, not what an
-//! app binds it to; the modifier bits are the wire's, untranslated.
+//! What the terminal said: a key and its mods, a paste, a mouse report, a focus change, the
+//! background answer. An event says what was pressed, not what an app binds it to.
 
 /// Shift, Alt, Ctrl and Super, as the wire numbers them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]

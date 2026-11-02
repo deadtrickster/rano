@@ -1,6 +1,5 @@
-//! Async command execution, backing ^T / F6 Execute. The command runs
-//! under `sh -c` with piped stdout/stderr and a reader thread per pipe, so
-//! the editor's event loop only ever polls — never blocks on the child.
+//! Async command execution, backing ^T / F6 Execute: `sh -c` with piped stdout
+//! and stderr and a reader thread per pipe, so the loop only ever polls.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -17,9 +16,8 @@ pub struct ExecJob {
     pub insert_row: usize,
 }
 
-/// Spawn `sh -c cmd`. Stdin is null; stdout and stderr are piped and drained
-/// to completion by one thread each, which then sends the whole text (even
-/// when empty) — exactly one message per channel, always.
+/// Spawn `sh -c cmd`. Stdin is null; stdout and stderr each get a thread that
+/// drains to completion and sends the whole text — one message per channel.
 pub fn spawn_job(cmd: &str, insert_row: usize) -> std::io::Result<ExecJob> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -54,9 +52,8 @@ fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<String> {
 }
 
 impl ExecJob {
-    /// Poll the job. None while the child runs; once it has exited, (exit
-    /// code, stdout, stderr). The `recv`s cannot block: the child's exit
-    /// closes the pipes and each reader sends exactly once.
+    /// Poll the job: None while the child runs, else (exit code, stdout, stderr).
+    /// The `recv`s cannot block: the child's exit closes the pipes.
     pub fn try_finish(&mut self) -> Option<(Option<i32>, String, String)> {
         let status = self.child.try_wait().ok().flatten()?;
         let out = self.rx.recv().unwrap_or_default();

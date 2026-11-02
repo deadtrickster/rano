@@ -1,6 +1,5 @@
-//! The list overlay: one modal list over the text area, used by the buffer
-//! list (M-L) and find-usages (M-?), which share keys, drawing and the
-//! jump-to-definition path (`goto_location`) so M-, returns the same way.
+//! The list overlay: one modal list over the text area, used by the buffer list
+//! (M-L) and find-usages (M-?), which share keys, drawing and `goto_location`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,8 +42,8 @@ pub struct Picker {
     pub title: String,
     pub items: Vec<PickItem>,
     pub sel: usize,
-    /// The cursor when the list was opened: where M-, returns to after a
-    /// usage is chosen.
+    /// The cursor when the list was opened: where M-, returns to after a usage is
+    /// chosen.
     pub from: Pos,
 }
 
@@ -61,8 +60,7 @@ pub(crate) fn list_rows(text_h: usize) -> usize {
     text_h.saturating_sub(1).max(1)
 }
 
-/// `path` relative to the working directory when it is under it — the form a
-/// person reads a grep hit in — else as given.
+/// `path` relative to the working directory when it is under it, else as given.
 fn display_path(path: &Path) -> String {
     if let Ok(cwd) = std::env::current_dir()
         && let Ok(rel) = path.strip_prefix(&cwd)
@@ -108,8 +106,8 @@ impl Editor {
 
     // ---------- M-?: find usages ----------
 
-    /// Ask the language server for every reference to the symbol under the
-    /// cursor and list them; Enter jumps to one (M-, comes back).
+    /// Ask the language server for every reference to the symbol under the cursor
+    /// and list them; Enter jumps to one (M-, comes back).
     pub(crate) fn find_usages(&mut self) {
         self.completion_close();
         let cur = self.bs().cursor;
@@ -141,16 +139,15 @@ impl Editor {
         self.show_usages(locs, cur);
     }
 
-    /// Build the usages list from a server answer. Separate from the request
-    /// so it can be tested without a language server.
+    /// Build the usages list from a server answer; separate from the request so it
+    /// can be tested without a language server.
     pub(crate) fn show_usages(&mut self, mut locs: Vec<lsp::DefLocation>, from: Pos) {
         if locs.is_empty() {
             self.flash("No usages found");
             return;
         }
-        // Grouped by file, in reading order, with any duplicates gone: a
-        // list a person scans should not depend on which server it came
-        // from.
+        // Grouped by file, in reading order, with duplicates gone: a list a person
+        // scans should not depend on which server it came from.
         locs.sort_by(|a, b| (&a.uri, a.line, a.character).cmp(&(&b.uri, b.line, b.character)));
         locs.dedup();
         let here = self.bs().buf.name.as_deref().map(lsp::path_to_uri);
@@ -162,8 +159,7 @@ impl Editor {
             let row = loc.line as usize;
             let text = self.line_of(&path, &loc.uri, row, &mut files);
             let col = lsp::utf16_to_char(&text.chars().collect::<Vec<_>>(), loc.character as usize);
-            // Start on the usage the cursor is on, so Down/Up read as "next /
-            // previous usage".
+            // Start on the usage the cursor is on, so Down/Up read as next/previous.
             if here.as_deref() == Some(loc.uri.as_str()) && row == from.row {
                 sel = items.len();
             }
@@ -191,8 +187,8 @@ impl Editor {
         });
     }
 
-    /// The text of `row` in `path`: from its open buffer when that has it
-    /// (so unsaved edits show), otherwise from disk, read once per file.
+    /// The text of `row` in `path`: from its open buffer when that has it, else
+    /// from disk, read once per file.
     fn line_of(
         &self,
         path: &Path,
@@ -247,8 +243,8 @@ impl Editor {
 
     // ---------- keys ----------
 
-    /// One action in the list overlay, from a command (`commands.rs`);
-    /// returns with the list closed (Enter, Esc) or still open (motion).
+    /// One action in the list overlay; returns with the list closed (Enter, Esc) or
+    /// still open (motion).
     pub(crate) fn picker_act(&mut self, act: PickAct) {
         let Some(mut p) = self.picker.take() else {
             return;
@@ -277,8 +273,8 @@ impl Editor {
                 self.cur = i;
                 self.highlight_dirty = true;
                 self.close_buffer();
-                // A modified buffer is now asking whether to save: that
-                // prompt replaces the list.
+                // A modified buffer is now asking whether to save: that prompt
+                // replaces the list.
                 if self.prompt.is_some() || self.buffers.len() == n {
                     return;
                 }

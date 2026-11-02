@@ -1,5 +1,5 @@
-//! Execute (^T) and filter (M-|, F6): run external commands and splice
-//! their output back as undoable edits, on top of exec::ExecJob.
+//! Execute (^T) and filter (M-|, F6): run external commands and splice their
+//! output back as undoable edits, on top of exec::ExecJob.
 
 use crate::buffer::Pos;
 use crate::editor::{ActionKind, Editor, normalize, plural};
@@ -34,10 +34,8 @@ impl Editor {
         }
     }
 
-    /// Poll the active exec job. On completion, insert the stdout below the
-    /// spawn row as one undo step, or flash the failure (no undo step, no
-    /// edit invalidation). Returns whether state changed, for a later
-    /// dirty-draw pass.
+    /// Poll the active exec job. On completion, insert stdout below the spawn row as
+    /// one undo step, or flash the failure (no step, no invalidation).
     pub(crate) fn exec_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().exec_job.as_mut() else {
             return false;
@@ -90,8 +88,8 @@ impl Editor {
         });
     }
 
-    /// M-|: pipe the selected whole rows through `sh -c cmd` and splice the
-    /// output back. Failure (spawn or non-zero exit) touches nothing.
+    /// M-|: pipe the selected whole rows through `sh -c cmd` and splice the output
+    /// back. A failure (spawn or non-zero exit) touches nothing.
     pub(crate) fn do_filter(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         if cmd.is_empty() {
@@ -108,8 +106,8 @@ impl Editor {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        // Writing inline before reading stdout deadlocks past the 64K pipe
-        // buffer, so the stdin writer runs on its own thread.
+        // Writing inline before reading stdout deadlocks past the 64K pipe buffer,
+        // so the stdin writer runs on its own thread.
         let child = Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -167,10 +165,9 @@ impl Editor {
     }
 }
 
-/// Run a program over text with a wall-clock bound; used on the save path
-/// (gofmt on a Go buffer), where a child that never answers is an editor
-/// that never saves. Pipes are drained by their own threads — writing
-/// before reading deadlocks on a full pipe.
+/// Run a program over text with a wall-clock bound, for the save path: a child that
+/// never answers is an editor that never saves. Pipes are drained by their own
+/// threads, since writing before reading deadlocks on a full pipe.
 pub(crate) fn run_filter(
     program: &str,
     args: &[&str],

@@ -1,6 +1,5 @@
-//! Finding a command: `M-x` (the palette), the help pages (`C-g ?`, `C-g b`)
-//! and `describe-key` (`C-g k`). Everything here reads the command table and
-//! the keymaps (`commands.rs`); none of it lists a key of its own.
+//! Finding a command: `M-x` (the palette), the help pages and `describe-key`.
+//! Everything here reads the command table and the keymaps in `commands.rs`.
 
 use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
 use crate::render::{Line, Span, Style};
@@ -24,8 +23,7 @@ pub struct Palette {
 }
 
 /// How well `terms` match a command, or `None` when one of them does not: a
-/// title starting with the term counts most, then a word of the title or name
-/// starting with it, then containing it anywhere, and the doc least.
+/// title starting with the term counts most, the doc least.
 fn score(name: &str, title: &str, doc: &str, terms: &[String]) -> Option<u32> {
     let title = title.to_lowercase();
     let doc = doc.to_lowercase();
@@ -118,8 +116,7 @@ impl Editor {
         }
     }
 
-    /// The keys that reach `name` in the global layer, written for the reader;
-    /// empty when none do (it is `M-x` only).
+    /// The keys that reach `name` in the global layer; empty when none do.
     pub(crate) fn keys_for(&self, name: &str) -> String {
         where_is(&[&self.keymaps.global], name)
             .iter()
@@ -261,8 +258,7 @@ impl Editor {
         self.info_scroll(d * page);
     }
 
-    /// Every key in effect as cards: the global commands by group, then each
-    /// mode's own keys.
+    /// Every key in effect as cards: the global commands by group, then each mode's.
     fn binding_cards(&self, width: usize) -> Vec<Line> {
         let nano = self.config.nano_keys;
         let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
@@ -348,8 +344,8 @@ fn overview_intro(ed: &Editor) -> Vec<Line> {
     l
 }
 
-/// Sections of `(key, title)` entries as cards: a bold heading per section,
-/// then its entries in as many columns as fit, keys coloured.
+/// Sections of `(key, title)` entries as cards: a heading per section, then its
+/// entries in as many columns as fit.
 pub fn cards(sections: &[(String, Vec<(String, String)>)], width: usize) -> Vec<Line> {
     let key_style = Style::of(Role::Key);
     let mut out = Vec::new();

@@ -1,6 +1,5 @@
-//! Search matcher core (F5): literal and regex matching over the buffer's
-//! char rows, returning (Pos, match length in chars). Lengths are stored so
-//! variable-width regex matches can be highlighted correctly.
+//! Search matcher core (F5): literal and regex matching over the buffer's char
+//! rows, returning (Pos, match length in chars).
 
 use crate::buffer::Pos;
 
@@ -29,8 +28,8 @@ impl Matcher {
         }
     }
 
-    /// All matches in row-major order. Literal matches overlap (mirroring
-    /// `Buffer::find_all`); regex matches follow `find_iter` (non-overlapping).
+    /// All matches in row-major order. Literal matches overlap; regex matches
+    /// follow `find_iter` (non-overlapping).
     pub fn find_all(&self, lines: &[Vec<char>]) -> Vec<(Pos, usize)> {
         match self {
             Matcher::Literal {
@@ -41,11 +40,8 @@ impl Matcher {
                 if needle.is_empty() {
                     return out;
                 }
-                // Case-insensitivity folds each char with
-                // `to_lowercase().next()`: chars whose lowercase expands to
-                // more than one char (e.g. 'İ' → "i̇") fold to the first char
-                // only. ASCII and Latin-1 (é/É) are correct; full-Unicode
-                // casing is out of scope.
+                // Case-insensitivity folds with `to_lowercase().next()`, so a char
+                // whose lowercase is longer ('İ') folds to its first char only.
                 let fold = |c: char| {
                     if *case_sensitive {
                         c
@@ -140,8 +136,7 @@ mod tests {
 
     #[test]
     fn regex_multibyte_char_cols() {
-        // 'é' sits before the match: its 2-byte encoding must remap to char
-        // col 1, not leave the highlight at byte offset 2.
+        // 'é' sits before the match: its 2-byte encoding must remap to char col 1.
         let ls = lines("éa");
         let m = Matcher::regex("a", true).expect("valid pattern");
         assert_eq!(m.find_all(&ls), vec![(Pos { row: 0, col: 1 }, 1)]);

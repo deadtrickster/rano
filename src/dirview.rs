@@ -1,7 +1,5 @@
 //! A directory, listed as text: the dired half of `open-dir`. `name/` marks a
-//! directory (`/` cannot occur in a name), `.` and `..` are absent (the
-//! parent is the `-` key), and rows sort directories first, then files,
-//! case-insensitively by name.
+//! directory, and rows sort directories first, then files, case-insensitively.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct Entry {
     /// The name alone — no path, and no marker.
     pub name: String,
-    /// A directory (after following a symlink), which is what decides the trailing `/`.
+    /// A directory (after following a symlink), which decides the trailing `/`.
     pub dir: bool,
 }
 
@@ -25,21 +23,21 @@ impl Entry {
     }
 }
 
-/// The entries of `dir`, in listing order; an unreadable directory is an
-/// error, because an empty listing would read as "this folder is empty".
+/// The entries of `dir`, in listing order; an unreadable directory is an error,
+/// because an empty listing would read as "this folder is empty".
 pub fn entries(dir: &Path) -> Result<Vec<Entry>, String> {
     let read = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
     let mut out: Vec<Entry> = Vec::new();
     for e in read.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        // `.` and `..` never appear in `read_dir` output; a name that is
-        // exactly those still could not be entered.
+        // `.` and `..` never appear in `read_dir` output, but a name that is exactly
+        // those could not be entered anyway.
         let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false) || e.path().is_dir();
         out.push(Entry { name, dir });
     }
     out.sort_by(|a, b| {
-        // Case-sensitive last so the order is total: two names differing
-        // only in case would otherwise compare equal.
+        // Case-sensitive last so the order is total: two names differing only in
+        // case would otherwise compare equal.
         b.dir
             .cmp(&a.dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
@@ -53,9 +51,8 @@ pub fn rows(dir: &Path) -> Result<Vec<String>, String> {
     Ok(entries(dir)?.iter().map(Entry::row).collect())
 }
 
-/// The path the row `row` names under `dir`, or `None` when the row is empty
-/// or not an entry. A directory row's trailing `/` is the marker, not part
-/// of the name.
+/// The path the row names under `dir`, or `None` when the row is empty or not an
+/// entry. A directory row's trailing `/` is the marker, not part of the name.
 pub fn path_at(dir: &Path, row: &str) -> Option<PathBuf> {
     let name = row.strip_suffix('/').unwrap_or(row);
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
@@ -64,8 +61,8 @@ pub fn path_at(dir: &Path, row: &str) -> Option<PathBuf> {
     Some(dir.join(name))
 }
 
-/// The row whose entry is `name`, for keeping the cursor on the same entry
-/// across a refresh; `None` when it is gone.
+/// The row whose entry is `name`, for keeping the cursor on the same entry across
+/// a refresh; `None` when it is gone.
 pub fn row_of(dir: &Path, name: &str) -> Option<usize> {
     let want = format!("{name}/");
     rows(dir).ok()?.iter().position(|r| r == &want || r == name)
@@ -83,8 +80,8 @@ mod tests {
     }
 
     fn tree(tag: &str) -> Temp {
-        // A tag per test: tests share the pid, and a name without one had
-        // them deleting each other's tree in parallel runs.
+        // A tag per test: tests share the pid, and a name without one had them
+        // deleting each other's tree in parallel runs.
         let d = std::env::temp_dir().join(format!("rano_dir_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src/deep")).unwrap();
@@ -139,8 +136,7 @@ mod tests {
         assert_eq!(row_of(&d.0, "gone.txt"), None);
         // A new file lands in its sorted place, and the old rows keep their names.
         std::fs::write(d.0.join("beta.txt"), "x").unwrap();
-        // beta.txt sorts between the folder and README.md, so zeta moves
-        // down one and beta takes row 1.
+        // beta.txt sorts between the folder and README.md, so zeta moves down one.
         assert_eq!(row_of(&d.0, "beta.txt"), Some(1));
         assert_eq!(row_of(&d.0, "zeta.txt"), Some(3));
     }

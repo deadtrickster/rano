@@ -1,16 +1,14 @@
 //! A change a host hands the editor to review: what one edit did to a file.
-//! [`Editor::open_review`] opens the file on the first changed line and draws
-//! the change over it as a diff view — a snapshot, not a re-diff against the
-//! buffer.
+//! [`Editor::open_review`] opens the file on the first changed line and draws the
+//! change over it — a snapshot, not a re-diff against the buffer.
 
 use std::path::Path;
 
 use crate::diffview::Source;
 use crate::editor::Editor;
 
-/// One change to one file: an excerpt of the file before and after the edit,
-/// each side's lines joined by `\n`, with the 1-based line each side starts
-/// at. May carry unchanged context lines around the change.
+/// One change to one file: an excerpt before and after the edit, each side's
+/// lines joined by `\n`, with the 1-based line each side starts at.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Change {
     pub before: String,
@@ -23,8 +21,7 @@ pub struct Change {
 
 impl Change {
     /// The line of the new file the change begins at, 1-based: past the shared
-    /// context, capped at the excerpt's last line, because a pure removal at
-    /// the end has no later line to land on.
+    /// context, capped at the excerpt's last line. A pure removal has no later line.
     pub fn first_changed_line(&self) -> usize {
         let start = self.after_start.max(1);
         let after: Vec<&str> = self.after.lines().collect();
@@ -39,9 +36,8 @@ impl Change {
 }
 
 impl Editor {
-    /// Open `path` to review `change`: the file with the cursor on the first
-    /// changed line ([`Change::first_changed_line`]), the change drawn over the
-    /// text as a diff view. An error is [`Editor::open_at`]'s; nothing changed.
+    /// Open `path` to review `change`: the file with the cursor on the first changed
+    /// line, the change drawn over it. An error is [`Editor::open_at`]'s.
     pub fn open_review(&mut self, path: &Path, change: Change) -> Result<(), String> {
         self.open_at(path, change.first_changed_line(), None)?;
         self.bs_mut().review = Some(change);

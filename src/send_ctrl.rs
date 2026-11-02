@@ -1,8 +1,5 @@
-//! Talking to a host: being told where to go ([`Editor::open_at`]), and
-//! telling it where the reader is ([`Editor::send_position`], M-S). Both are
-//! in-process calls; the standalone binary is its own host — `file:line:col`
-//! on the command line goes through the same positioning, and `on_send` runs
-//! the configured `send_command`.
+//! Talking to a host: being told where to go ([`Editor::open_at`]), and telling it
+//! where the reader is ([`Editor::send_position`], M-S). Both are in-process calls.
 
 use std::io::Write;
 use std::path::Path;
@@ -13,16 +10,13 @@ use crate::send::{Point, Selection, SendEvent};
 use crate::buffer::Pos;
 use crate::editor::{Editor, canonical, normalize};
 
-/// What a host does with a [`SendEvent`]: `Ok` carries what to tell the reader
-/// (shown in the status line), `Err` why it did not work.
+/// What a host does with a [`SendEvent`]: `Ok` carries what to tell the reader.
 pub type OnSend = Box<dyn FnMut(&SendEvent) -> Result<String, String>>;
 
 impl Editor {
-    /// Open `path` — or switch to it when a buffer already shows it — and put
-    /// the cursor on `line` (1-based), at `column` (1-based, the line's start
-    /// when `None`), centred. A file still arriving is positioned when that
-    /// row lands. Without `multibuffer` a new file replaces the current
-    /// buffer unless it has unsaved edits.
+    /// Open `path` — or switch to it when a buffer already shows it — and put the
+    /// cursor on `line` (1-based), at `column`, centred. A file still arriving is
+    /// positioned when that row lands.
     pub fn open_at(
         &mut self,
         path: &Path,
@@ -48,11 +42,8 @@ impl Editor {
         Ok(())
     }
 
-    /// The reader's place: the file (absolute), the cursor, and the marked
-    /// region with its text. Every buffer is sendable; a view does not send a
-    /// line of text (its rows are a rendering) — a listing sends the entry
-    /// under the cursor as an absolute path, any other view its own path,
-    /// both with line 1.
+    /// The reader's place: the file (absolute), the cursor, and the marked region
+    /// with its text. A view does not send a line of text — its rows are a rendering.
     pub fn send_event(&self) -> SendEvent {
         let bs = self.bs();
         let point = |p: Pos| Point {
@@ -66,8 +57,8 @@ impl Editor {
                     .map(|r| r.iter().collect::<String>())
                     .unwrap_or_default()
             };
-            // A listing's row names an entry; a provider's row names
-            // nothing, so the view's own path is the target.
+            // A listing's row names an entry; a provider's row names nothing, so the
+            // view's own path is the target.
             let entry = bs
                 .dir
                 .as_ref()
@@ -89,8 +80,8 @@ impl Editor {
             });
             return SendEvent {
                 path: entry.or_else(|| bs.buf.name.as_deref().map(canonical)),
-                // A view has no line of the target in it: line 1 is where a
-                // host opening the target lands.
+                // A view has no line of the target in it: line 1 is where a host
+                // opening the target lands.
                 cursor: Point { line: 1, column: 1 },
                 selection,
                 modified: bs.buf.modified,
@@ -132,9 +123,8 @@ impl Editor {
     }
 }
 
-/// `on_send` for the standalone binary: run `cmd` with `sh -c`, the event
-/// as JSON on stdin and `RANO_FILE`/`RANO_LINE`/`RANO_COLUMN` in its
-/// environment. Not waited for; its output goes nowhere.
+/// `on_send` for the standalone binary: run `cmd` with `sh -c`, the event as JSON
+/// on stdin and `RANO_FILE`/`RANO_LINE`/`RANO_COLUMN` in its environment.
 pub fn command_sender(cmd: String) -> OnSend {
     Box::new(move |e: &SendEvent| {
         let mut child = Command::new("sh")
@@ -156,8 +146,8 @@ pub fn command_sender(cmd: String) -> OnSend {
             .map_err(|err| format!("{cmd}: {err}"))?;
         let json = e.to_json();
         let mut stdin = child.stdin.take().expect("piped");
-        // Off the main thread, and reaped there: a command that reads slowly
-        // (or not at all) must not hold up a keystroke.
+        // Off the main thread, and reaped there: a command that reads slowly must
+        // not hold up a keystroke.
         std::thread::spawn(move || {
             let _ = stdin.write_all(json.as_bytes());
             let _ = stdin.write_all(b"\n");
@@ -175,9 +165,8 @@ pub fn command_sender(cmd: String) -> OnSend {
     })
 }
 
-/// `name:line` or `name:line:col`, when `arg` is not itself an existing path
-/// (a file really named `a:3` opens as named). Splits from the right, so a
-/// name with colons of its own keeps them.
+/// `name:line` or `name:line:col`, when `arg` is not itself an existing path.
+/// Splits from the right, so a name with colons of its own keeps them.
 pub fn split_position(arg: &str) -> Option<(String, usize, Option<usize>)> {
     if Path::new(arg).exists() {
         return None;

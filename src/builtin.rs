@@ -1,6 +1,5 @@
 //! Builtins: `.wasm` scripts inside the binary, unpacked on first use into
-//! `scripts/built-in/` in the reader's config folder and loaded from there
-//! like any hand-installed plugin. Files are never overwritten.
+//! `scripts/built-in/` and loaded from there like any hand-installed plugin.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,8 +10,8 @@ pub struct Builtin {
     pub name: &'static str,
     /// The bytes, embedded from the example crate's build.
     pub wasm: &'static [u8],
-    /// The capabilities it ships with: a builtin comes from this binary, so
-    /// what it needs is decided here, not demanded of the reader's config.
+    /// The capabilities it ships with: a builtin comes from this binary, so what
+    /// it needs is decided here, not demanded of the reader's config.
     pub caps: &'static [&'static str],
 }
 
@@ -31,17 +30,16 @@ pub const PDF: Builtin = Builtin {
     caps: &["convert-page"],
 };
 
-/// Everything that ships, loaded at startup so it can claim a file nobody configured it for.
+/// Everything that ships, loaded at startup so one can claim a file nobody configured.
 pub const ALL: &[&Builtin] = &[&MANUAL, &PDF];
 
-/// The marker recording what was unpacked and from which release: one `name version` line each.
+/// The marker recording what was unpacked and from which release.
 pub const MARKER: &str = ".rano-version";
 
 /// The release the shipped builtins come from.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// `$XDG_CONFIG_HOME/rano/scripts`, else `~/.config/rano/scripts` — beside
-/// the config file.
+/// `$XDG_CONFIG_HOME/rano/scripts`, beside the config file.
 pub fn scripts_dir() -> PathBuf {
     let config = crate::config::config_path();
     match config.parent() {
@@ -50,19 +48,19 @@ pub fn scripts_dir() -> PathBuf {
     }
 }
 
-/// Where the builtins are unpacked: `scripts/built-in/`. The rest of `scripts/` is the reader's.
+/// Where the builtins are unpacked: `scripts/built-in/`.
 pub fn builtin_dir(scripts: &Path) -> PathBuf {
     scripts.join("built-in")
 }
 
-/// Unpack `b` under `scripts/built-in/`, never over an existing file.
-/// `Ok(path)` is where it is, written or found.
+/// Unpack `b` under `scripts/built-in/`, never over an existing file; `Ok(path)`
+/// is where it is, written or found.
 pub fn unpack(scripts: &Path, b: &Builtin) -> Result<PathBuf, String> {
     let dir = builtin_dir(scripts);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let at = dir.join(b.name);
-    // `create_new` is the "never overwrite" rule and the race with another
-    // rano at once: whoever creates the file owns it.
+    // `create_new` is the "never overwrite" rule and the race with another rano at
+    // once: whoever creates the file owns it.
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -79,8 +77,8 @@ pub fn unpack(scripts: &Path, b: &Builtin) -> Result<PathBuf, String> {
     }
 }
 
-/// The release the marker says `b.name` was unpacked from, or `None` when
-/// rano did not put the file there.
+/// The release the marker says `b.name` was unpacked from, or `None` when rano did
+/// not put the file there.
 pub fn recorded(scripts: &Path, b: &Builtin) -> Option<(String, Option<u64>)> {
     let text = std::fs::read_to_string(builtin_dir(scripts).join(MARKER)).ok()?;
     text.lines().find_map(|line| {
@@ -92,14 +90,14 @@ pub fn recorded(scripts: &Path, b: &Builtin) -> Option<(String, Option<u64>)> {
     })
 }
 
-/// The note an upgrade owes the reader: the shipped copy is newer and the
-/// unpacked file was left alone. `None` when rano never wrote that file, the
-/// releases agree, or the binary is older.
+/// The note an upgrade owes the reader: the shipped copy is newer and the unpacked
+/// file was left alone. `None` when rano never wrote it, the releases agree, or the
+/// binary is older.
 pub fn newer_note(scripts: &Path, b: &Builtin) -> Option<String> {
     let (was, was_sum) = recorded(scripts, b)?;
     let newer = crate::update::is_newer(&was, VERSION);
-    // A rebuild at the same version is a different plugin: the marker records
-    // the bytes, so a stale unpacked copy is still caught.
+    // A rebuild at the same version is a different plugin: the marker records the
+    // bytes, so a stale unpacked copy is still caught.
     let changed = was_sum.is_some_and(|sum| sum != sum_of(b.wasm));
     (newer || changed).then(|| {
         let why = if newer {
@@ -125,8 +123,8 @@ fn sum_of(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Add or replace `name`'s line in the marker; a marker that cannot be
-/// written is not a failure to unpack — only the upgrade note is lost.
+/// Add or replace `name`'s line in the marker; a marker that cannot be written is
+/// not a failure to unpack — only the upgrade note is lost.
 fn record(scripts: &Path, b: &Builtin) {
     let name = b.name;
     let sum = sum_of(b.wasm);

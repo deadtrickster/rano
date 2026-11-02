@@ -1,15 +1,6 @@
-//! **The reader**: which page, at what zoom, as a picture or as text — and the
-//! keys that move it. A fresh instance per call implies no guest state between
-//! calls, so the reader's whole state lives **in the path**, as a fragment:
-//! `/home/me/paper.pdf#p=4&z=144&m=text` (`p` 1-based, `z` dpi, `m` mode).
-//! Everything here is a pure function of that string; a key ([`key`]) answers
-//! the next path, two panes cannot disagree because neither remembers, and a
-//! path that is not a fragment is a file (`a#b.pdf` opens as page 1: the
-//! suffix only counts as state if every `k=v` is one this reader wrote).
-//! The number of pages is discovered by asking past the end and being refused,
-//! so [`missing_page`] is a sentence in the view, not an error. A page arrives
-//! as pixels — `[width u32 LE][height u32 LE][rgb…]` — never decoded or copied
-//! through, so the bound on a page is the ABI's own ([`PAGE_BYTES`]).
+//! The reader: which page, at what zoom, as a picture or as text, and the keys
+//! that move it. A fresh instance per call means no guest state, so the state lives
+//! in the path's fragment (`#p=4&z=144&m=text`) and every function is pure of it.
 
 use crate::cache;
 
@@ -21,39 +12,32 @@ pub const DEFAULT_DPI: u32 = 96;
 pub const MIN_DPI: u32 = 48;
 pub const MAX_DPI: u32 = 300;
 
-/// **The dpi a too-big page is asked at first**: low enough that anything which
-/// exists fits the answer's cap, and **not below the host's floor** — a page
-/// asked at 12 dpi is refused for the dpi, which reads as "no such page" and
-/// sends the reader down the wrong branch. It is also what tells a page that is
-/// too big from a page that is not there.
+/// The dpi a too-big page is asked at first: low enough that anything real fits
+/// the answer's cap, and above the host's floor — a page asked below the floor is
+/// refused for the dpi, which reads as "no such page".
 pub const FIT_DPI: u32 = 24;
 
-/// **The most one picture answer may carry**: the ABI's own cap,
-/// `MAX_HOOK_BYTES` in `src/plugin.rs`, header included. A4 is
-/// `8.27 × 11.69 × 3 × dpi²` bytes — 6.2 MiB at 150 dpi, the cap reached at
-/// 240 dpi; a page asked for above that is re-rendered at the dpi that fits
-/// rather than refused.
+/// The most one picture answer may carry, header included — the ABI's own cap,
+/// `MAX_HOOK_BYTES`. A page whose zoom needs more is re-rendered at the dpi that
+/// fits rather than refused.
 pub const PAGE_BYTES: usize = 16 << 20;
 
-/// **The hint line**. Every key the reader has is named here: a plugin view
-/// that hides its keys is a plugin view nobody uses. `q` is the host's and is
-/// listed with the rest.
+/// The hint line: every key the reader has is named here, because a view that
+/// hides its keys is a view nobody uses. `q` is the host's and is listed too.
 pub const HINT: &str =
     "n next · p prev · g<N> goto · s spread · z/Z zoom · 0 reset · t text · q close";
 
 /// What a build with neither import can say — the whole reason the imports are
-/// optional (a module importing what the host cannot provide would not
-/// instantiate at all).
+/// optional: a module importing what the host cannot provide would not
+/// instantiate.
 const NO_RENDERER: &str = "this build of the plugin has no page renderer. It needs two host \
 imports, rano.convert_page (a page as a picture) and rano.convert_page_text (a page as text), and \
 this build was compiled without them. The file was still claimed, so a PDF does not open as binary \
 noise: the page is simply not there.";
 
-/// A page that exists but carries no text: a scan, or a page of pictures.
 const NO_TEXT_LAYER: &str = "this page has no text layer (a scan, or a page of pictures): the \
 picture is the page. Press t for the picture.";
 
-/// A page the host drew and the plugin has no text for.
 const DRAWN_BY_HOST: &str = "the page is drawn by the host. This build has no text renderer, so \
 there is nothing here to search or copy.";
 
@@ -66,13 +50,12 @@ pub enum Mode {
     Text,
 }
 
-/// Which page, at what zoom, in which mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
     pub page: u32,
     pub dpi: u32,
     pub mode: Mode,
-    /// **Two pages side by side**, which is what a wide pane is for.
+    /// Two pages side by side, which is what a wide pane is for.
     pub spread: bool,
 }
 
@@ -96,7 +79,6 @@ impl State {
         }
     }
 
-    /// One page back, and never to page 0: the first page is the wall.
     pub fn prev(self) -> State {
         State {
             page: self.page.saturating_sub(1).max(1),
@@ -104,7 +86,6 @@ impl State {
         }
     }
 
-    /// The page number a reader asked for. `0` is not a page, and the caller refuses it.
     pub fn goto(self, page: u32) -> State {
         State {
             page: page.max(1),
@@ -120,7 +101,6 @@ impl State {
         }
     }
 
-    /// Smaller: ÷1.5 a step, down to [`MIN_DPI`].
     pub fn zoom_out(self) -> State {
         State {
             dpi: (self.dpi.saturating_mul(2) / 3).max(MIN_DPI),
@@ -128,7 +108,6 @@ impl State {
         }
     }
 
-    /// Back to the zoom the document opened at.
     pub fn reset_zoom(self) -> State {
         State {
             dpi: DEFAULT_DPI,
@@ -136,7 +115,6 @@ impl State {
         }
     }
 
-    /// The page's text, or the picture: the one key that changes what the view *is*.
     pub fn toggle_text(self) -> State {
         State {
             mode: match self.mode {
@@ -147,7 +125,6 @@ impl State {
         }
     }
 
-    /// Two pages, or one.
     pub fn toggle_spread(self) -> State {
         State {
             spread: !self.spread,
@@ -155,8 +132,7 @@ impl State {
         }
     }
 
-    /// **The fragment this state is written as**, defaults left out: `""`,
-    /// `#p=4`, `#p=4&z=144`, `#m=text`.
+    /// The fragment this state is written as, defaults left out.
     pub fn fragment(self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.page != 1 {
@@ -179,10 +155,8 @@ impl State {
     }
 }
 
-/// **A path, and the state its fragment asks for.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
-    /// The path with the fragment taken off: what the file is.
     pub path: String,
     pub state: State,
 }
@@ -231,16 +205,14 @@ impl Request {
         }
     }
 
-    /// **Whether this is a document this plugin opens.** The extension is the
-    /// whole test: guessing from the first bytes would mean reading the file,
-    /// which a plugin may not do.
+    /// The extension is the whole test: guessing from the first bytes would mean
+    /// reading the file, which a plugin may not do.
     pub fn claim(&self) -> bool {
         std::path::Path::new(&self.path)
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
     }
 
-    /// The name to show: the file's own, not the whole path.
     pub fn name(&self) -> String {
         std::path::Path::new(&self.path)
             .file_name()
@@ -253,12 +225,10 @@ impl Request {
 /// not a pure function, which is what lets the reader be tested on the host
 /// with no wasm, no PDF and no converter.
 pub trait Render {
-    /// Whether a page can come back as a picture.
     fn can_picture(&self) -> bool {
         false
     }
 
-    /// Whether a page can come back as text.
     fn can_text(&self) -> bool {
         false
     }
@@ -269,36 +239,30 @@ pub trait Render {
         Answer::Nothing
     }
 
-    /// One page's text, as the host's converter answers it.
     fn page_text(&mut self, page: u32) -> Option<String> {
         let _ = page;
         None
     }
 }
 
-/// **What one call for a page came back as**: the bytes written, the bytes it
-/// would need, or a refusal — a refusal being both "past the end" and "above
-/// [`PAGE_BYTES`]", told apart only by asking again at the floor dpi.
+/// What one call for a page came back as: the bytes written, the bytes it would
+/// need, or a refusal — which is both "past the end" and "above the cap", told
+/// apart only by asking again at the floor dpi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
-    /// `n` bytes, written into the buffer the reader offered.
     Page(usize),
     /// The page needs `n` bytes and the buffer had fewer; nothing was written.
     TooBig(usize),
-    /// No page: past the end, a file the converter will not read, or a page above the cap.
     Nothing,
 }
 
-/// What a view's body turned out to be.
 enum Body {
-    /// The page's text, laid out at the viewport's width.
     Rows(Vec<String>),
-    /// A sentence: why there is no page here, or where the page went.
     Note(String),
 }
 
-/// **The reader's first view of a path**: the state line, the hint line, and
-/// the page. `None` means "not mine".
+/// The reader's first view of a path: state line, hint line, page. `None` is "not
+/// mine".
 pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> Option<String> {
     let request = Request::parse(text);
     if !request.claim() {
@@ -317,12 +281,9 @@ pub fn view(text: &str, cols: usize, rows: usize, render: &mut impl Render) -> O
     Some(out.join("\n"))
 }
 
-/// **The picture of the page the path names**, written into `out` as
-/// `[width u32 LE][height u32 LE][rgb…]` and its length — or `None` for "not
-/// mine". `out` is the answer, not a scratch buffer: the host writes the page
-/// where `provider_picture` is going to point, so a page as large as the cap is
-/// never copied. The cell box is the host's business, which is why the zoom is
-/// a **dpi** and not a size: `z` buys detail, not centimetres.
+/// The picture of the page the path names, written into `out` as
+/// `[width][height][rgb…]` — the answer itself, so a page at the cap is never
+/// copied. The zoom is a dpi because the cell box is the host's business.
 pub fn picture(
     text: &str,
     cols: usize,
@@ -335,29 +296,26 @@ pub fn picture(
     if !request.claim() || request.state.mode == Mode::Text || !render.can_picture() {
         return None;
     }
-    // **Two pages side by side**, when there is room to hold both. A pane that
-    // cannot give the scratch is shown one page, not a failure.
+    // Two pages side by side, when there is room to hold both. A pane that cannot
+    // give the scratch is shown one page, not a failure.
     if request.state.spread
         && let Some(len) = spread_bytes(&request, cols, render, out, scratch)
     {
         return Some(len);
     }
     let len = page_bytes(request.state.page, request.state.dpi, render, out)?;
-    // **A page too small to read is shown as its text instead**: the kitty
-    // placeholder scheme paints at most ~42 cells, a thumbnail over the page's
-    // own text. A picture is drawn only where it can be read (`m=text` forces
-    // the other way).
+    // A page too small to read is shown as its text instead: the kitty placeholder
+    // scheme paints at most ~42 cells, a thumbnail over the page's own text. `m=text`
+    // forces the other way.
     if let Some((w, h)) = header(out).filter(|(w, h)| *w > 0 && *h > 0) {
         let box_cells = (2 * rows as u64 * w as u64 / h as u64) as usize;
         if box_cells.min(cols) < cols / 2 && render.can_text() {
             return None;
         }
     }
-    // **A page at the default dpi does not fit a pane**: A4 at 96 dpi is 794
-    // pixels wide and a 100-column box is 200, so the terminal downscales it —
-    // bytes paid for detail nobody sees. The first render says the page's width;
-    // the dpi that fills `cols` cells (two pixels a cell) is arithmetic. Only at
-    // the default: a zoom is a reader asking for more detail than the box holds.
+    // At the default dpi a page can be wider than the pane: A4 at 96 dpi is 794
+    // pixels where a 100-column box is 200, so the terminal downscales bytes nobody
+    // sees. Only at the default — a zoom asks for more detail than the box holds.
     if request.state.dpi == DEFAULT_DPI
         && let Some((width, _)) = header(out)
         && width > 0
@@ -372,12 +330,13 @@ pub fn picture(
     checked(len, out)
 }
 
-/// The dark the rasterizer is cleared with, so the gap beside a short page is the page's own.
+/// The dark the rasterizer is cleared with, so the gap beside a short page is the
+/// page's own.
 const BACKGROUND: u8 = 0x14;
 
-/// **Two pages composed into one picture**: each rendered into its own half of
-/// the scratch, then their rows interleaved into `out`. A page shorter than the
-/// other leaves the background colour where it would have been.
+/// Two pages composed into one picture: each rendered into its own half of the
+/// scratch, then their rows interleaved into `out`. A shorter page leaves the
+/// background colour where it would have been.
 fn spread_bytes(
     request: &Request,
     cols: usize,
@@ -428,7 +387,8 @@ fn spread_bytes(
     Some(len)
 }
 
-/// One page's row into the composed picture, or the background where that page has no row.
+/// One page's row into the composed picture, or the background where that page
+/// has no row.
 fn copy_row(out: &mut [u8], at: usize, page: &[u8], row: usize, rows: u32, width: u32) {
     let w = (width as usize) * 3;
     let dst = &mut out[at..at + w];
@@ -440,15 +400,14 @@ fn copy_row(out: &mut [u8], at: usize, page: &[u8], row: usize, rows: u32, width
     }
 }
 
-/// The `[width][height]` a picture starts with, if the buffer holds one.
 fn header(out: &[u8]) -> Option<(u32, u32)> {
     let w = u32::from_le_bytes(out.get(0..4)?.try_into().ok()?);
     let h = u32::from_le_bytes(out.get(4..8)?.try_into().ok()?);
     Some((w, h))
 }
 
-/// **The dpi at which a page `width` pixels wide fills `target` pixels**:
-/// linear in the dpi, clamped to the host's floor of 24.
+/// The dpi at which a page `width` pixels wide fills `target` pixels: linear in the
+/// dpi, clamped to the host's floor of 24.
 fn fit_dpi(dpi: u32, width: u32, target: usize) -> u32 {
     if target == 0 || width == 0 {
         return dpi;
@@ -457,9 +416,9 @@ fn fit_dpi(dpi: u32, width: u32, target: usize) -> u32 {
     scaled.clamp(24, dpi)
 }
 
-/// **The whole document as markdown** — a PDF's text is what a terminal renders
-/// best. The page count is discovered by asking: the loop stops at the first
-/// refusal, and a document longer than [`MAX_PAGES`] is cut there.
+/// The whole document as markdown — a PDF's text is what a terminal renders best.
+/// The page count is discovered by asking, and a document longer than [`MAX_PAGES`]
+/// is cut there.
 pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
     let request = Request::parse(path_text);
     if !request.claim() || !render.can_text() {
@@ -471,9 +430,8 @@ pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
         let Some(text) = render.page_text(page) else {
             break;
         };
-        // **Prose, not a dump**: a fence around every page would read as a log.
-        // A page laid out in columns keeps its layout, because re-flowing it
-        // would scramble it.
+        // Prose, not a dump: a fence around every page would read as a log. A page
+        // laid out in columns keeps its layout, because re-flowing scrambles it.
         out.push_str(&format!("\n## Page {page}\n\n"));
         out.push_str(&page_markdown(text.as_str()));
         pages = page;
@@ -484,11 +442,11 @@ pub fn markdown(path_text: &str, render: &mut impl Render) -> Option<String> {
     Some(out)
 }
 
-/// **One page's text as markdown**: paragraphs, with numbered lines as
-/// headings - the structure a document has and a text dump does not.
+/// One page's text as markdown: paragraphs, with numbered lines as headings — the
+/// structure a document has and a text dump does not.
 pub fn page_markdown(text: &str) -> String {
-    // **The invisible characters an extractor leaves behind** — U+200B etc,
-    // which `trim` does not remove and a renderer draws nothing on.
+    // The invisible characters an extractor leaves behind, which `trim` does not
+    // remove and a renderer draws nothing on.
     let clean;
     let text = if text.contains(INVISIBLE) {
         clean = text.replace(INVISIBLE, "");
@@ -497,8 +455,8 @@ pub fn page_markdown(text: &str) -> String {
         text
     };
     let lines: Vec<&str> = text.lines().collect();
-    // **Not the leading indentation**: `-layout` indents prose too. What makes
-    // a page tabular is a run of spaces *inside* a line.
+    // A run of spaces inside a line, not leading indentation: `-layout` indents
+    // prose too, so only an inner run makes a page tabular.
     let laid_out = lines
         .iter()
         .map(|l| l.trim())
@@ -515,7 +473,7 @@ pub fn page_markdown(text: &str) -> String {
     let mut code: Vec<&str> = Vec::new();
     for line in lines {
         let trimmed = line.trim();
-        // **Code is code**: put it where a renderer shows it monospaced.
+        // Code is code: put it where a renderer shows it monospaced.
         if is_code(trimmed) {
             flush_para(&mut para, &mut out);
             code.push(line.trim_end());
@@ -543,8 +501,8 @@ pub fn page_markdown(text: &str) -> String {
             out.push_str("\n\n");
             continue;
         }
-        // **A blank line is the only paragraph break**, because it is the only
-        // one the extractor actually saw.
+    // A blank line is the only paragraph break, because it is the only one the
+    // extractor actually saw.
         para.push(trimmed);
     }
     if !code.is_empty() {
@@ -573,7 +531,6 @@ fn flush_code(code: &mut Vec<&str>, out: &mut String) {
     code.clear();
 }
 
-/// A line that is a bullet, and its text without the marker.
 fn bullet(t: &str) -> Option<&str> {
     let rest = t
         .strip_prefix('●')
@@ -584,7 +541,6 @@ fn bullet(t: &str) -> Option<&str> {
     Some(rest.trim_start())
 }
 
-/// A line that is code rather than prose: Go-shaped, or a brace, or an assignment.
 fn is_code(t: &str) -> bool {
     t.starts_with("func ")
         || t.starts_with("var ")
@@ -597,8 +553,8 @@ fn is_code(t: &str) -> bool {
         || (t.contains('{') && t.contains('}'))
 }
 
-/// **Whether a line is a section heading**: `1. Introduction`, `2.3.4 The
-/// rule` - numbered, short enough to be a title.
+/// Whether a line is a section heading: `1. Introduction`, `2.3.4 The rule` —
+/// numbered, and short enough to be a title.
 fn is_heading(line: &str) -> bool {
     if line.len() > 72 || line.ends_with('.') && !line.contains(". ") {
         return false;
@@ -615,17 +571,15 @@ fn is_heading(line: &str) -> bool {
         && parts.next().is_some()
 }
 
-/// The zero-width characters a PDF's text layer carries and a reader must not see.
 const INVISIBLE: [char; 5] = ['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}', '\u{00ad}'];
 
 /// The most pages one view converts: a thousand-page manual would take the host
 /// a while and show one buffer, and the reader can open it again.
 pub const MAX_PAGES: u32 = 500;
 
-/// **One key, answered as the path to open next.** The input is
-/// `"<path>\n<key>"`; `None` is "this key is not mine", which includes `q`:
-/// closing a view is the host's. The key map is [`HINT`] and the transitions
-/// are [`State`]'s methods, so the hint line cannot drift from the keys.
+/// One key, answered as the path to open next; `None` is "not mine", `q`
+/// included, because closing a view is the host's. The key map is [`HINT`] and the
+/// transitions are [`State`]'s methods, so the hint line cannot drift.
 pub fn key(input: &str) -> Option<String> {
     // The separator is the last newline: a key is one short line, and a path is
     // far more likely to hold a newline than to end with one.
@@ -659,8 +613,8 @@ pub fn key(input: &str) -> Option<String> {
     Some(format!("{}{}", request.path, state.fragment()))
 }
 
-/// The body of the view: the page's text if there is any, and otherwise the most useful sentence
-/// about why there is not.
+/// The body of the view: the page's text, else the most useful sentence about why
+/// there is none.
 fn body(request: &Request, cols: usize, render: &mut impl Render) -> Body {
     let doc = cache::id(&request.path);
     if render.can_text() {
@@ -686,10 +640,9 @@ fn body(request: &Request, cols: usize, render: &mut impl Render) -> Body {
     Body::Note(NO_RENDERER.to_string())
 }
 
-/// The state line: what this view is, in one line, above the hint.
 fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> String {
-    // **`auto`, not `picture`**: the build offers a picture and the terminal
-    // decides; claiming "picture" where there is no protocol is a lie.
+    // `auto`, not `picture`: the build offers a picture and the terminal decides;
+    // claiming "picture" where there is no protocol is a lie.
     let mode = if picture { "auto" } else { "text" };
     let spread = if request.state.spread { " · 2-up" } else { "" };
     let mut line = format!(
@@ -699,8 +652,7 @@ fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> Str
         request.state.dpi,
         mode
     );
-    // A page taller than the pane says so, so the reader knows it is not
-    // broken. Two lines are the state line and the hint.
+    // A page taller than the pane says so, so the reader knows it is not broken.
     if let Body::Rows(lines) = body
         && lines.len() > rows.saturating_sub(2)
     {
@@ -709,9 +661,9 @@ fn state_line(request: &Request, body: &Body, rows: usize, picture: bool) -> Str
     line
 }
 
-/// **A page's text, through the cache.** Only text is kept: a picture is up to
-/// 16 MiB written by the host, and the ladder asks for a different dpi every
-/// time it climbs, so a picture entry could save nothing.
+/// A page's text through the cache. Only text is kept: a picture is up to 16 MiB
+/// written by the host, and the ladder asks for a different dpi every time it
+/// climbs.
 fn page_text(doc: u64, page: u32, render: &mut impl Render) -> Option<String> {
     let key = cache::Key::new(doc, page);
     if let Some(text) = cache::with(|c| c.get(key).cloned()) {
@@ -722,12 +674,9 @@ fn page_text(doc: u64, page: u32, render: &mut impl Render) -> Option<String> {
     Some(text)
 }
 
-/// **The page at the dpi the reader asked for, or at the largest one that fits**,
-/// written into `out`. A buffer too small comes with the size the page needs,
-/// which is the dpi that fits. A refusal is "no such page" and "above one
-/// answer's cap" at once, which is why it is asked again at [`FIT_DPI`], where
-/// a page that exists always fits. Only a page whose zoom is the problem costs
-/// more than one render.
+/// The page at the dpi asked for, or the largest that fits, written into `out`. A
+/// refusal is "no such page" and "above the cap" at once, so it is asked again at
+/// [`FIT_DPI`]; only a page whose zoom is the problem costs more than one render.
 fn page_bytes(page: u32, dpi: u32, render: &mut impl Render, out: &mut [u8]) -> Option<usize> {
     match render.page_picture(page, dpi, out) {
         Answer::Page(len) => return Some(len),
@@ -767,18 +716,17 @@ fn page_bytes(page: u32, dpi: u32, render: &mut impl Render, out: &mut [u8]) -> 
     }
 }
 
-/// **The dpi at which a page needing `need` bytes at `dpi` fits `cap`**: RGB
-/// grows with the square of the dpi, so the scale is a square root. Answers in
-/// either direction, a shade conservative (rasterizers round up).
+/// The dpi at which a page needing `need` bytes at `dpi` fits `cap`: RGB grows
+/// with the square of the dpi, so the scale is a square root, a shade
+/// conservative because rasterizers round up.
 fn fit(dpi: u32, need: usize, cap: usize) -> u32 {
     let scale = (cap as f64 / need as f64).sqrt() * 0.98;
     let fitted = (dpi as f64 * scale).floor() as u32;
     fitted.clamp(FIT_DPI, MAX_DPI)
 }
 
-/// **The answer, checked**: a header that describes exactly the bytes that came
-/// with it — refused rather than cropped, since this is what a picture is drawn
-/// from.
+/// The answer, checked: a header that describes exactly the bytes that came with
+/// it — refused rather than cropped, since a picture is drawn from it.
 fn checked(len: usize, out: &[u8]) -> Option<usize> {
     let head = out.get(..8)?;
     let width = u32::from_le_bytes(head[..4].try_into().ok()?);
@@ -792,10 +740,9 @@ fn checked(len: usize, out: &[u8]) -> Option<usize> {
     (rgb.checked_add(8)? == len).then_some(len)
 }
 
-/// Why a page is not here. It covers every reason on purpose: the ABI answers a
-/// page or nothing, so "past the end", "not a file the converter can read" and
-/// "too big for one answer at this zoom" are the same silence, and `Z` rules
-/// the last one out.
+/// Why a page is not here, covering every reason on purpose: the ABI answers a
+/// page or nothing, so "past the end", "unreadable file" and "too big at this
+/// zoom" are the same silence, and `Z` rules the last one out.
 fn missing_page(page: u32) -> String {
     format!(
         "no page {page} from the renderer. It answered nothing for it, which means the page is \
@@ -804,22 +751,20 @@ fn missing_page(page: u32) -> String {
     )
 }
 
-/// **A page's text as buffer rows**: right-trimmed (a converter pads) and
-/// wrapped where too wide.
 pub fn page_rows(text: &str, cols: usize) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.split('\n') {
         out.extend(wrap(line, cols));
     }
-    // A trailing newline is not a row: the buffer's last row would otherwise be empty.
+    // A trailing newline is not a row: the buffer's last row would be empty.
     while out.last().is_some_and(|line| line.is_empty()) {
         out.pop();
     }
     out
 }
 
-/// **Wrap at `cols`**, at a space where there is one and mid-word where there
-/// is not. Inner runs of spaces are kept (a PDF's columns are spaces).
+/// Wrap at `cols`, at a space where there is one and mid-word where there is not.
+/// Inner runs of spaces are kept, because a PDF's columns are spaces.
 pub fn wrap(text: &str, cols: usize) -> Vec<String> {
     let cols = cols.max(1);
     let mut out = Vec::new();
@@ -839,8 +784,8 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
     out
 }
 
-/// Where to break a line wider than `cols`: the last space within the width, else the character at
-/// the width. Both are character boundaries, which is what makes the slice safe.
+/// Where to break a line wider than `cols`: the last space within the width, else
+/// the character at it. Both are char boundaries, which is what makes the slice safe.
 fn break_at(line: &str, cols: usize) -> usize {
     let mut last_space = None;
     for (width, (at, ch)) in line.char_indices().enumerate() {

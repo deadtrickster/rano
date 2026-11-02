@@ -1,20 +1,6 @@
-//! **A PDF reader as a rano plugin.** The host rasterizes pages; this plugin
-//! owns the reading: `provider_open` answers a view with its page, zoom and
-//! keys, `provider_picture` answers the page as `[width u32 LE][height u32
-//! LE][rgb…]`, and `on_key` answers the next path. Everything a reader does is
-//! in [`reader`], a pure function of the path, tested on the host.
-//!
-//! ```sh
-//! rustup target add wasm32-unknown-unknown          # once
-//! cargo build --release --target wasm32-unknown-unknown --features page-picture,page-text
-//! cp target/wasm32-unknown-unknown/release/rano_plugin_pdf.wasm plugin.wasm
-//! ```
-//!
-//! The features stay because a host that does not grant `convert-page`
-//! refuses a module that imports them: a build without them still claims a PDF
-//! and answers a sentence naming what the host lacks. `rano-plugin` owns the
-//! arena and pointers; this crate adds the one thing it does not have, an
-//! answer that is bytes rather than text.
+//! A PDF reader as a rano plugin: the host rasterizes pages, this plugin owns the
+//! reading. Everything a reader does is in [`reader`], a pure function of the path,
+//! tested on the host; a build with neither import still claims a PDF and says why.
 
 use rano_plugin as rano;
 
@@ -29,9 +15,9 @@ rano::abi!();
 /// answer. A picture is bounded by [`reader::PAGE_BYTES`] and answers in place.
 const ARENA: usize = 17 << 20;
 
-/// **A result block plus a payload** — `rano::answer` for bytes. `0xFFFFFFFF`
-/// for an answer too big to fit, which the host reads as "not mine" rather
-/// than a truncated view.
+/// A result block plus a payload, which is `rano::answer` for bytes. `0xFFFFFFFF`
+/// for an answer too big to fit, which the host reads as "not mine" rather than a
+/// truncated view.
 fn answer(bytes: &[u8]) -> u32 {
     let len = bytes.len();
     if len == 0 || len + 8 > ARENA {
@@ -48,17 +34,17 @@ fn answer(bytes: &[u8]) -> u32 {
     at
 }
 
-/// **What should this path open as?** The reader's first view of a PDF, or
-/// `0xFFFFFFFF` for anything else. The viewport is passed through because a
-/// view is laid out at the width it will be drawn at.
+/// What this path should open as: the reader's first view of a PDF, or
+/// `0xFFFFFFFF`. The viewport is passed through because a view is laid out at the
+/// width it will be drawn at.
 #[unsafe(no_mangle)]
 pub extern "C" fn provider_open(ptr: u32, len: u32, cols: u32, rows: u32) -> u32 {
     // SAFETY: the host's range, checked by `rano::input`.
     let Some(path) = (unsafe { rano::input(ptr, len) }) else {
         return rano::UNCHANGED;
     };
-    // **The document as markdown**, which the host renders as prose; a build
-    // without the text import falls back to the view that says so.
+    // The document as markdown, which the host renders as prose; a build without the
+    // text import falls back to the view that says so.
     if let Some(md) = reader::markdown(path, &mut host::Host) {
         return answer(md.as_bytes());
     }
@@ -68,14 +54,9 @@ pub extern "C" fn provider_open(ptr: u32, len: u32, cols: u32, rows: u32) -> u32
     }
 }
 
-/// **The page the path names, as pixels**, or `0xFFFFFFFF` when there is no
-/// picture to draw.
-///
-/// **The page is written where this answers it**: the block goes in the arena,
-/// the buffer the host fills starts eight bytes past it, and the block points
-/// at those very bytes — one allocation, no copy, and a page as large as
-/// [`reader::PAGE_BYTES`] fits an 18 MiB arena with room to spare.
-/// The room two half-pages are composed in before they become one picture.
+/// The room two half-pages are composed in before they become one picture. The page
+/// itself is written eight bytes past the block that points at it, so a page at
+/// [`reader::PAGE_BYTES`] is one allocation with room to spare.
 const SCRATCH_BYTES: u32 = 2 << 20;
 
 #[unsafe(no_mangle)]
@@ -118,11 +99,9 @@ pub extern "C" fn provider_picture(ptr: u32, len: u32, cols: u32, rows: u32) -> 
     at
 }
 
-/// **A key, answered as the path to open next** — the input is `"<path>\n<key>"`,
-/// the answer the same path with the state fragment the key moves it to.
-/// `0xFFFFFFFF` when the key is not this plugin's (which includes `q`:
-/// closing a view is the host's). One host call site turns the seven keys
-/// into a reader, with no new ABI.
+/// A key, answered as the path to open next: the same path with the state fragment
+/// the key moves it to, or `0xFFFFFFFF` when the key is not this plugin's (`q`
+/// included, because closing a view is the host's).
 #[unsafe(no_mangle)]
 pub extern "C" fn on_key(ptr: u32, len: u32) -> u32 {
     // SAFETY: the host's range, checked by `rano::input`.

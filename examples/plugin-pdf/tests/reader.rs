@@ -1,17 +1,13 @@
-//! **The reader, tested natively.** `reader::view`, `reader::picture` and
-//! `reader::key` are what the three exports call one line after reading the
-//! host's pointer, so testing them is testing the plugin. The fake renderer is
-//! the point of the [`Render`] seam: a document with a known number of pages,
-//! text layer and rasterizer, so "a page past the end" is a case a test can
-//! *make*. It writes `[width][height][rgb]` into the buffer it is handed,
-//! because that is what the host does.
+//! The reader, tested natively: the three exports are one line of glue over
+//! `reader::view`, `reader::picture` and `reader::key`. The fake renderer is the point
+//! of the [`Render`] seam — a document of a known page count, so "a page past the
+//! end" is a case a test can make.
 
 use rano_plugin_pdf::cache;
 use rano_plugin_pdf::reader::{self, Answer, HINT, Mode, Render, State, view};
 
-/// **The page cache is one static in the plugin, so the tests that read it
-/// take turns and start clean** — or a page one test rendered is another
-/// test's cache hit.
+/// The page cache is one static in the plugin, so tests that read it take turns and
+/// start clean, or a page one test rendered is another test's cache hit.
 fn fresh() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -21,18 +17,17 @@ fn fresh() -> std::sync::MutexGuard<'static, ()> {
 
 // ---------------------------------------------------------------- a fake host
 
-/// The geometry a rasterizer answers for one page at one dpi, or `None` for a page the document
-/// does not have.
+/// The geometry a rasterizer answers for one page at one dpi, or `None` for a page
+/// the document does not have.
 type ShotFn = Box<dyn Fn(u32, u32) -> Option<(u32, u32)>>;
 
 struct Fake {
     /// One entry a page, page 1 first. `None` is a page the converter does not answer.
     texts: Vec<Option<String>>,
     shots: Option<ShotFn>,
-    /// The most one answer may carry: the host's own cap, which it refuses a
-    /// page above before it looks at the buffer the guest offered.
+    /// The most one answer may carry: the host's own cap, which it applies before
+    /// it looks at the buffer the guest offered.
     cap: usize,
-    /// The colour every page of this document is.
     rgb: [u8; 3],
     can_picture: bool,
     can_text: bool,
@@ -41,7 +36,6 @@ struct Fake {
 }
 
 impl Fake {
-    /// A document of `pages` pages, each with a text layer.
     fn pdf(pages: u32) -> Fake {
         Fake {
             texts: (1..=pages)
@@ -57,8 +51,7 @@ impl Fake {
         }
     }
 
-    /// The same, with a rasterizer that answers a `w`×`h` page at any dpi, and
-    /// nothing for a page the document does not have.
+    /// The same, with a rasterizer that answers a `w`×`h` page at any dpi.
     fn rasterized(pages: u32, w: u32, h: u32) -> Fake {
         let mut fake = Fake::pdf(pages);
         fake.can_picture = true;
@@ -68,8 +61,8 @@ impl Fake {
         fake
     }
 
-    /// **A page of paper**: the raster grows with the dpi, so a page too big at
-    /// one zoom is a different size at another.
+    /// A page of paper: the raster grows with the dpi, so a page too big at one zoom
+    /// is a different size at another.
     fn paper(pages: u32, w: f64, h: f64) -> Fake {
         let mut fake = Fake::pdf(pages);
         fake.can_picture = true;
@@ -92,14 +85,12 @@ impl Render for Fake {
         self.can_text
     }
 
-    /// **The host's answer, in the host's order**: a page above the cap is a
-    /// refusal, a merely small buffer is `-needed`, and only then are the bytes
-    /// written.
+    /// The host's answer, in the host's order: a page above the cap is a refusal, a
+    /// merely small buffer is `-needed`, and only then are the bytes written.
     fn page_picture(&mut self, page: u32, dpi: u32, out: &mut [u8]) -> Answer {
         self.asked_picture.push((page, dpi));
-        // **The host's dpi floor**: `pdf::checked_dpi` refuses below 24 and
-        // above 600, and a fake without the floor answers where the real host
-        // refuses.
+        // The host's dpi floor: `pdf::checked_dpi` refuses below 24 and above 600,
+        // and a fake without the floor answers where the real host refuses.
         if !(24..=600).contains(&dpi) {
             return Answer::Nothing;
         }
@@ -132,8 +123,7 @@ impl Render for Fake {
     }
 }
 
-/// A host with no page renderer at all: what a build without the two imports
-/// looks like.
+/// A host with no page renderer at all: a build without the two imports.
 struct Nothing;
 
 impl Render for Nothing {}
@@ -170,9 +160,8 @@ fn a_page_past_the_end_is_a_message_in_the_view_and_not_a_panic() {
     let v = view("past-the-end.pdf#p=13", 80, 24, &mut fake).unwrap();
     assert!(v.contains("page 13"), "{v}");
     assert!(v.contains("past the end"), "{v}");
-    // Still a view with keys, so the reader can press `p` and be somewhere.
-    // The sentence is wrapped to the viewport, so read it with the wrapping
-    // taken out.
+    // Still a view with keys, so `p` gets the reader somewhere. The sentence is
+    // wrapped to the viewport, so read it with the wrapping taken out.
     let flat = v.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(v.contains("p prev"), "{v}");
     assert!(flat.contains("Press p to go back"), "{v}");
@@ -284,9 +273,8 @@ fn a_picture_is_width_height_then_rgb() {
     assert_eq!(fake.asked_picture, vec![(1, 96)]);
 }
 
-/// **A page opens at the size of the pane, not at a fixed dpi**: A4 at 96 dpi
-/// is 794 px wide and a 40-column box is 80, so the dpi that fills it is below
-/// the host's floor and 24 is asked for.
+/// A page opens at the size of the pane, not at a fixed dpi: A4 at 96 dpi is 794
+/// px wide where a 40-column box is 80, so the floor of 24 is what is asked.
 #[test]
 fn a_page_opens_at_the_size_of_the_pane() {
     let _fresh = fresh();
@@ -311,19 +299,18 @@ fn a_page_opens_at_the_size_of_the_pane() {
 #[test]
 fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     let _fresh = fresh();
-    // A buffer under the ABI's cap makes the host answer "it needs this many
-    // bytes" instead of refusing; the reader reads the page's area off that
-    // and asks again lower. Landscape, because a portrait page in this pane is
-    // a thumbnail the reader shows as text instead.
+    // A buffer under the cap makes the host answer "it needs this many bytes"
+    // instead of refusing; the reader reads the page's area off that and asks again
+    // lower. Landscape, because a portrait page in this pane is a thumbnail shown as
+    // text instead.
     let mut fake = Fake::paper(1, 11.69, 8.27);
     // Room for the FLOOR dpi, which is the host's minimum (24): A4 at 24 dpi is ~166 KiB, so a
     // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
     let mut out = vec![0u8; 256 << 10];
     let len =
         reader::picture("huge.pdf", 80, 24, &mut fake, &mut out, &mut []).expect("a smaller page");
-    // **The property, not a sequence**: the first ask is the reader's, and
-    // every ask after it is smaller. How many there are is the page's
-    // business.
+    // The property, not a sequence: the first ask is the reader's and every ask
+    // after it is smaller. How many there are is the page's business.
     assert_eq!(fake.asked_picture[0], (1, 96));
     assert!(fake.asked_picture.len() >= 2, "{:?}", fake.asked_picture);
     assert!(
@@ -344,11 +331,10 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
 #[test]
 fn a_page_above_the_cap_is_rendered_at_the_dpi_that_fits() {
     let _fresh = fresh();
-    // A4 at 300 dpi is 26 MiB of RGB, above one answer's cap, and the host
-    // refuses it exactly as it refuses a page that is not there. The floor dpi
-    // is where a page that exists always fits, so asking there separates the
-    // two, and the floor's own area says which dpi does fit. Landscape for the
-    // same reason as above.
+    // A4 at 300 dpi is 26 MiB of RGB, above the cap, and the host refuses it exactly
+    // as it refuses a page that is not there; the floor dpi is where an existing
+    // page always fits, so asking there separates the two. Landscape for the same
+    // reason as above.
     let mut fake = Fake::paper(1, 11.69, 8.27);
     let mut out = vec![0u8; reader::PAGE_BYTES];
     reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out, &mut []).expect("a sharp page");
@@ -415,9 +401,8 @@ fn every_key_moves_the_state_and_answers_the_next_path() {
 
 #[test]
 fn the_hint_line_names_every_key_the_plugin_answers() {
-    // One row a key: a key added to `reader::key` without a row here is a key
-    // the hint line does not name, which is the one way this plugin's UI can
-    // lie to the reader.
+    // One row a key: a key added to `reader::key` without a row here is a key the
+    // hint line does not name, which is the one way this UI can lie to the reader.
     let keys: &[(&str, &str)] = &[
         ("n", "n next"),
         ("p", "p prev"),
@@ -543,9 +528,8 @@ fn a_page_asked_for_twice_is_rendered_once() {
     );
 }
 
-/// **A wide pane takes two pages**: composed into one picture (the host draws
-/// one picture, so a spread is one picture twice as wide), a page shorter than
-/// the other leaving the background beside it rather than shifting.
+/// A wide pane takes two pages: the host draws one picture, so a spread is one
+/// picture twice as wide, a shorter page leaving the background beside it.
 #[test]
 fn a_spread_is_two_pages_in_one_picture() {
     let _fresh = fresh();
@@ -560,8 +544,8 @@ fn a_spread_is_two_pages_in_one_picture() {
     assert_eq!(len, 8 + 12 * 4 * 3);
     // Both pages were asked for, in order, and the next page is the one after this one.
     assert_eq!(fake.asked_picture, vec![(1, 96), (2, 96)]);
-    // The right half is the second page: with two identical pages the halves
-    // match, which is what makes this a layout test rather than a colour one.
+    // The right half is the second page: with two identical pages the halves match,
+    // which makes this a layout test rather than a colour one.
     let row = &out[8..8 + 12 * 3];
     assert_eq!(
         &row[..6 * 3],
@@ -570,8 +554,8 @@ fn a_spread_is_two_pages_in_one_picture() {
     );
 }
 
-/// **`s` is the key, and the state carries it**: the toggle writes `s=2` into
-/// the fragment, and the next key press reads it back.
+/// `s` is the key and the state carries it: the toggle writes `s=2` into the
+/// fragment and the next key press reads it back.
 #[test]
 fn the_spread_key_is_in_the_fragment_and_the_hint() {
     let _fresh = fresh();
@@ -584,9 +568,8 @@ fn the_spread_key_is_in_the_fragment_and_the_hint() {
     assert!(reader::key("a.pdf#s=3\nn").is_none());
 }
 
-/// **The document is markdown**: a heading a page and the page's layout in a
-/// fence. Pages are found by asking until the host refuses, so a document of
-/// any length costs one call a page and no page count.
+/// The document is markdown: a heading a page, a page's layout in a fence. Pages
+/// are found by asking until the host refuses, so no page count is needed.
 #[test]
 fn the_view_is_the_document_as_markdown() {
     let _fresh = fresh();
@@ -608,10 +591,9 @@ fn the_view_is_the_document_as_markdown() {
     assert!(reader::markdown("notes.txt", &mut fake).is_none());
 }
 
-/// **A document's shapes survive the trip**: a bullet stays a bullet, a Go line
-/// becomes a code block, and a paragraph is joined only where a line break
-/// interrupted a sentence — the difference between a document and a wall of
-/// text.
+/// A document's shapes survive: a bullet stays a bullet, a Go line becomes a code
+/// block, and a paragraph is joined only where a line break interrupted a sentence
+/// — the difference between a document and a wall of text.
 #[test]
 fn a_page_keeps_its_bullets_its_code_and_its_paragraphs() {
     let _fresh = fresh();

@@ -1,10 +1,6 @@
-//! **The frame's one-line sentences and its two empty screens**: what the head draws while
-//! it is still asking the daemon, what a session that has said nothing looks like, the
-//! held-view and pane-behind sentences, the notices, and the system and segment rows.
-//!
-//! Ported from the painting left in letibot's `ui/screen.rs`, `ui/transcript/window.rs` and
-//! `ui/transcript/item.rs`. Each is small, and each is here so that every row on the screen
-//! comes out of one renderer: the head says what is true and this says how it looks.
+//! The frame's one-line sentences and its two empty screens: what the head draws while it is
+//! still asking the daemon, what a session that has said nothing looks like, the held-view and
+//! pane-behind sentences, the notices, and the system and segment rows.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -15,15 +11,9 @@ use super::text::{clean, duration, one, trim_to, wrap};
 /// How long an attach may go unanswered before the screen says how to get out.
 pub const ATTACH_IMPATIENT: u64 = 2_000;
 
-/// **The wait, as a walking cat at the centre of the conversation** — drawn while the head
-/// is still asking the daemon for the session, rather than the empty-session banner, which is
-/// a claim about the session a head that has not been answered is in no position to make.
-///
-/// Dead centre: `room / 2` blank rows above, each row centred. **The cat is padded to the
-/// widest frame**, so it is a fixed thing whose expression changes rather than one that slides
-/// left and right; it is **alone** on its row, so "centred" is about the cat. A pawprint trail
-/// under it, so a still frame still reads as going somewhere. Past [`ATTACH_IMPATIENT`] it
-/// says how to get out: under that it is noise on a wait usually over before it is read.
+/// The wait, as a walking cat at the centre of the conversation — drawn while the head is still
+/// asking the daemon for the session, rather than the empty-session banner, which is a claim it
+/// is in no position to make. Past [`ATTACH_IMPATIENT`] it says how to get out.
 pub fn attaching(elapsed_ms: u64, room: usize, w: usize) -> Vec<Line> {
     let cat = format!("{cat:<CAT_SLOT$}", cat = cat_frame(elapsed_ms));
     let mut rows: Vec<Line> = vec![Line::default(); room / 2];
@@ -44,9 +34,8 @@ pub fn attaching(elapsed_ms: u64, room: usize, w: usize) -> Vec<Line> {
     rows
 }
 
-/// **A session that has said nothing yet**: the name, and the three sentences that say what
-/// to do and what closing the window does. An empty screen with a status line under it is
-/// indistinguishable from a head that attached to the wrong socket.
+/// A session that has said nothing yet: the name and three sentences — an empty screen with a
+/// status line under it is indistinguishable from a head on the wrong socket.
 pub fn opening() -> Vec<Line> {
     vec![
         one("letibot", Role::Strong),
@@ -65,9 +54,8 @@ pub fn opening() -> Vec<Line> {
     ]
 }
 
-/// **The disclosure of a held view** (R36): the state, and the act that undoes it — the
-/// reader who cannot tell pinned from following scrolls to find out, which is the affordance
-/// failing.
+/// The disclosure of a held view: the state and the act that undoes it, since a reader who
+/// cannot tell pinned from following scrolls to find out.
 pub fn holding(behind: usize) -> Line {
     one(
         format!(
@@ -99,7 +87,7 @@ pub fn notice(text: &str, w: usize) -> Line {
 }
 
 /// A sentence that owns the keyboard while it is up (the mode card's confirmation): wrapped,
-/// not trimmed — it is read, not glanced at — in the attention register.
+/// not trimmed, in the attention register.
 pub fn asking(text: &str, w: usize) -> Vec<Line> {
     wrap(text, w)
         .into_iter()
@@ -123,9 +111,8 @@ pub fn segment_mark(label: &str) -> Line {
     one(format!("─── {label} ───"), Role::Faint)
 }
 
-/// **A call the model asked for that nothing came back for** — `→ Read foo.rs · no result`,
-/// stepped in with the working, in the attention register: `→` means exactly "asked for,
-/// nothing came back", which is a fact worth a row.
+/// A call the model asked for that nothing came back for — `→ Read foo.rs · no result`, in the
+/// attention register.
 pub fn unanswered_call(verb: &str, subject: &str, step: usize) -> Line {
     Line::new(vec![
         Span::raw(" ".repeat(step)),

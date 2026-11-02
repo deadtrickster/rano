@@ -6,16 +6,16 @@
 
 use std::time::Duration;
 
-/// The kitty protocol's own capability question: a 1×1 RGB image, transferred but not displayed
-/// (`a=q`, `t=d`), under the id [`QUERY_ID`]. A terminal that speaks it answers
-/// `\x1b_Gi=107;OK\x1b\\`; one that does not consumes the bytes silently.
+/// The kitty protocol's own capability question: a 1×1 RGB image, transferred but not
+/// displayed, under [`QUERY_ID`]. A terminal that speaks it answers `OK`; one that does not
+/// consumes the bytes silently.
 pub const KITTY_QUERY: &[u8] = b"\x1b_Gi=107,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
 
 /// The id [`KITTY_QUERY`] asks under, so a reply can be told from anything else on the wire.
 pub const QUERY_ID: u32 = 107;
 
-/// How long a capability query waits. A terminal on the far side of an `ssh` session answers in
-/// single-digit milliseconds; a fifth of a second is enough, and longer is a stall at startup.
+/// How long a capability query waits: a fifth of a second is enough, and longer is a stall at
+/// startup.
 pub const QUERY_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// How a picture can be put on the glass.
@@ -26,15 +26,14 @@ pub enum Proto {
     None,
     /// The kitty graphics protocol, written straight to the terminal.
     Kitty,
-    /// The kitty graphics protocol, DCS-wrapped for tmux (`allow-passthrough` is on) — see
-    /// [`Proto::wrap`].
+    /// The kitty graphics protocol, DCS-wrapped for tmux (`allow-passthrough` is on).
     KittyPassthrough,
     /// iTerm2's `OSC 1337;File=`: drawn at the cursor, into cells, with no id to place it by.
     Iterm,
 }
 
-/// The environment detection reads, as facts rather than a `std::env` call per question — so the
-/// decision can be tested for every terminal on a box that is none of them.
+/// The environment detection reads, as facts rather than a `std::env` call per question, so the
+/// decision can be tested for every terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Env {
     /// `TERM`, verbatim.
@@ -47,14 +46,13 @@ pub struct Env {
     pub kitty_window: bool,
     /// `TMUX` is set: there is a multiplexer between this program and the terminal.
     pub tmux: bool,
-    /// What tmux said about `allow-passthrough`, when it was asked — `None` when nobody asked
-    /// (no tmux, or a caller that would rather not spawn one).
+    /// What tmux said about `allow-passthrough`, when it was asked — `None` when nobody asked.
     pub passthrough: Option<bool>,
 }
 
 impl Env {
-    /// This process's environment. Reads four variables and sets two flags; asks no questions of
-    /// anything outside the process (see [`Env::ask_passthrough`] for the one that does).
+    /// This process's environment: four variables and two flags, and no question to anything
+    /// outside the process.
     pub fn now() -> Env {
         let var = |k: &str| std::env::var(k).unwrap_or_default();
         Env {
@@ -67,12 +65,9 @@ impl Env {
         }
     }
 
-    /// Ask tmux whether it will pass a DCS sequence through, and record the answer. Only
-    /// meaningful inside tmux, and only worth asking then: it costs a process and a round trip to
-    /// a server that is usually busy.
-    ///
-    /// `on` and `all` both forward a wrapped sequence; anything else — `off`, or an option this
-    /// tmux is too old to have — is a no.
+    /// Ask tmux whether it will pass a DCS sequence through, and record the answer. Worth only
+    /// inside tmux: it costs a process and a round trip to a busy server. `on` and `all` both
+    /// forward a wrapped sequence; anything else is a no.
     pub fn ask_passthrough(&mut self) {
         if !self.tmux {
             return;
@@ -90,8 +85,8 @@ impl Env {
     }
 }
 
-/// The terminal's family, by the names it goes by — the first rung, and a pure function of two
-/// strings so a test can walk the whole list.
+/// The terminal's family, by the names it goes by: a pure function of two strings so a test can
+/// walk the whole list.
 fn kitty_family(env: &Env) -> bool {
     let prog = env.term_program.to_ascii_lowercase();
     env.kitty_window
@@ -117,11 +112,9 @@ impl Proto {
         self != Proto::None
     }
 
-    /// The decision, from the environment and the operator's `images` override — no query, no
-    /// process: everything here is a fact already in hand.
+    /// The decision, from the environment and the operator's `images` override.
     ///
-    /// `images` false is the override saying no, and it is answered first: a terminal that speaks
-    /// a protocol beautifully is still not to be sent one.
+    /// `images` false is the override saying no, and it is answered first.
     pub fn of(env: &Env, images: bool) -> Proto {
         if !images {
             return Proto::None;
@@ -143,11 +136,8 @@ impl Proto {
         Proto::None
     }
 
-    /// [`Proto::of`], and then the capability query where the names said nothing — the third
-    /// rung. A terminal that answered `OK` is asked to draw; one that did not is not.
-    ///
-    /// Asked only when it can change the answer: a named terminal needs no question, and a
-    /// caller that said no pictures must not have one written into its terminal either.
+    /// [`Proto::of`], and then the capability query where the names said nothing. Asked only
+    /// when it can change the answer.
     pub fn detect(env: &Env, images: bool) -> Proto {
         let named = Proto::of(env, images);
         if named.speaks() || !images {
@@ -168,11 +158,10 @@ impl Proto {
     }
 
     /// A sequence as this terminal must receive it: unchanged for a direct kitty or iTerm2
-    /// terminal, DCS-wrapped for tmux, and dropped for [`Proto::None`] — a byte written to a
-    /// terminal that cannot read it is text typed at the operator's prompt.
+    /// terminal, DCS-wrapped for tmux, dropped for [`Proto::None`] — a byte written to a terminal
+    /// that cannot read it is text at the prompt.
     ///
-    /// The wrapper is tmux's: `ESC Ptmux;`, the sequence with every `ESC` doubled, `ESC \`.
-    /// Doubling is what keeps the sequence's own `ESC` from ending the wrapper early.
+    /// The wrapper doubles every `ESC`, which keeps the sequence's own from ending it early.
     pub fn wrap(self, seq: &[u8]) -> Vec<u8> {
         match self {
             Proto::None => Vec::new(),
@@ -193,20 +182,17 @@ impl Proto {
     }
 }
 
-/// What a capability query came back with: `answered` is the protocol's own verdict, and
-/// `other` is every byte read that was not the reply — the caller's input, which must reach its
-/// decoder rather than be dropped because a picture was being negotiated.
+/// What a capability query came back with: `answered` is the verdict, and `other` is every byte
+/// read that was not the reply — the caller's input, which must reach its decoder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Reply {
     pub answered: Option<bool>,
     pub other: Vec<u8>,
 }
 
-/// Ask the terminal whether it speaks the kitty graphics protocol, for at most `timeout`.
-///
-/// The question goes to stdout and the answer comes back on stdin, so this is only useful before
-/// a host starts reading input and in raw mode — a terminal in canonical mode does not deliver
-/// the reply until a newline it will never send. That is why it is the last rung.
+/// Ask the terminal whether it speaks the kitty graphics protocol, for at most `timeout`. The
+/// question goes to stdout and the answer comes back on stdin, so this only works in raw mode
+/// before a host starts reading — which is why it is the last rung.
 pub fn ask_kitty(timeout: Duration) -> Reply {
     let mut reply = Reply::default();
     if !write_out(KITTY_QUERY) {
@@ -241,8 +227,7 @@ pub fn ask_kitty(timeout: Duration) -> Reply {
 }
 
 /// What the terminal said, out of the bytes read so far: `Some(true)` for `OK`, `Some(false)` for
-/// a refusal the protocol names, `None` while the answer has not arrived — or when what arrived
-/// was something else, which is not an answer.
+/// a named refusal, `None` while the answer has not arrived.
 pub fn kitty_answered(bytes: &[u8]) -> Option<bool> {
     let (what, _) = kitty_reply_span(bytes)?;
     Some(what)
@@ -273,8 +258,8 @@ fn write_out(bytes: &[u8]) -> bool {
     out.write_all(bytes).is_ok() && out.flush().is_ok()
 }
 
-/// One read from stdin, waiting at most `budget` for a byte — `None` on a timeout or an error,
-/// which the caller treats the same way: nothing more is coming.
+/// One read from stdin, waiting at most `budget`: `None` on a timeout or an error, and in either
+/// case nothing more is coming.
 fn read_in(budget: Duration) -> Option<Vec<u8>> {
     let mut poll = libc::pollfd {
         fd: libc::STDIN_FILENO,
@@ -308,8 +293,7 @@ mod tests {
         }
     }
 
-    /// The names, on every terminal worth knowing — and the ones this file declines to guess
-    /// about, which is the half that keeps a picture out of somebody's prompt.
+    /// The names, on every terminal worth knowing, and the ones this file declines to guess about.
     #[test]
     fn the_families_are_the_names_they_go_by() {
         for (term, prog) in [
@@ -361,8 +345,7 @@ mod tests {
         }
     }
 
-    /// Inside tmux one protocol crosses, and only with `allow-passthrough` — the setting whose
-    /// absence is a picture missing with no error anywhere.
+    /// Inside tmux one protocol crosses, and only with `allow-passthrough`.
     #[test]
     fn tmux_takes_kitty_only_with_passthrough_and_iterm_never() {
         let mut e = env("xterm-ghostty", "ghostty");
@@ -384,8 +367,7 @@ mod tests {
         assert_eq!(Proto::of(&d, true), Proto::Kitty);
     }
 
-    /// The wrapper is tmux's, byte for byte: `ESC Ptmux;`, the sequence with every `ESC` doubled,
-    /// `ESC \`. An un-doubled inner `ESC` would end the wrapper at its first sequence byte.
+    /// The wrapper is tmux's, byte for byte: an un-doubled inner `ESC` would end it early.
     #[test]
     fn a_wrapped_sequence_doubles_every_escape_inside_it() {
         let seq = b"\x1b_Ga=t,i=9;AAAA\x1b\\";
@@ -412,8 +394,7 @@ mod tests {
         assert_eq!(unwrapped, seq);
     }
 
-    /// The reply parser, on the shapes a terminal really sends: an `OK`, a refusal, a reply for
-    /// somebody else's id, and a keystroke that is not a reply at all.
+    /// The reply parser, on the shapes a terminal really sends.
     #[test]
     fn a_reply_is_ok_or_a_named_refusal_and_anything_else_is_not_an_answer() {
         assert_eq!(kitty_answered(b"\x1b_Gi=107;OK\x1b\\"), Some(true));

@@ -179,20 +179,16 @@ impl Terminal {
         }
         let mut raw = original;
         unsafe { libc::cfmakeraw(&mut raw) };
-        // A 100 ms read timeout so the render loop can also service the network
-        // without a second thread poking at stdin.
+        // A 100 ms read timeout so the render loop can also service the network.
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 1;
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         let mut out = std::io::stdout();
-        // Alternate screen, cursor hidden until a frame says where it goes, bracketed paste
-        // so a paste is one key, and the title stack (`CSI 22;0 t`) because the head sets its
-        // own title and gives the terminal back the one it had.
-        //
-        // `let _ =` on every write: there is nowhere to report to, and a lost mode sequence
-        // at startup is not worth aborting an editor over.
+        // Alternate screen, cursor hidden until a frame says where, bracketed paste, and the
+        // title stack (`CSI 22;0 t`). `let _ =` on every write: a lost mode sequence at startup
+        // is not worth aborting an editor over.
         let _ = out.write_all(b"\x1b[22;0t\x1b[?1049h\x1b[?25l\x1b[?2004h");
         match options.mouse {
             Mouse::Off => {}
@@ -206,9 +202,7 @@ impl Terminal {
         if options.block_cursor {
             let _ = out.write_all(b"\x1b[2 q");
         }
-        // The terminal's extras, each only where it is spoken (see `super::features`):
-        // `CSI > 1 u` disambiguates the kitty keyboard (Shift+Enter becomes a key),
-        // `?1004h` asks for focus reports, and `OSC 11 ; ?` asks the background colour once.
+        // The terminal's extras, each only where it is spoken (see `super::features`).
         let features = Features::detect();
         if features.keys {
             let _ = out.write_all(b"\x1b[>1u");
@@ -338,8 +332,7 @@ impl Terminal {
     pub fn events(&self) -> Vec<Event> {
         let mut buf = [0u8; READ_CHUNK];
         let mut pending = self.pending.borrow_mut();
-        // Cleared first, and that is not tidiness: a stale carry would be re-forwarded to
-        // the pane on the next read, so this is the one place it is allowed to be stale.
+        // Cleared first: a stale carry would be re-forwarded to the pane on the next read.
         self.last_raw.borrow_mut().clear();
         while let Ok(n) = std::io::stdin().read(&mut buf) {
             if n == 0 {
@@ -367,8 +360,8 @@ impl Terminal {
     /// The bytes the last [`Terminal::events`] call consumed, verbatim: an [`Event`] is a lossy
     /// reading, so `ESC [ A` and `ESC O A` would arrive as one key.
     pub fn raw_input(&self) -> Vec<u8> {
-        // Under the kitty keyboard the raw stream is in a spelling the pane's program never
-        // asked for (Ctrl-C arrives as `CSI 99;5u`), so it is put back into legacy bytes.
+        // Under the kitty keyboard the raw stream is in a spelling the pane never asked for,
+        // so it is put back into legacy bytes.
         if self.features.keys {
             legacy_bytes(&self.last_raw.borrow())
         } else {
@@ -408,9 +401,7 @@ impl Terminal {
     /// As [`Terminal::draw`], with the terminal's own cursor parked at `(row, col)`, zero-based,
     /// and made visible there: a text field with no caret reads as "not listening".
     pub fn draw_with_cursor(&self, lines: &[String], cursor: Option<(usize, usize)>) {
-        // Counted per attempt, which is what "frames drawn" means: the caller asked for a
-        // frame and one was composed. Whether its bytes reached the glass is `paint_to`'s
-        // question, and a different number.
+        // Counted per attempt: whether the bytes reached the glass is `paint_to`'s question.
         self.frames.set(self.frames.get() + 1);
         let mut out = std::io::stdout();
         let _ = self.paint_to(&mut out, lines, cursor);
@@ -427,16 +418,14 @@ impl Terminal {
     ) -> bool {
         let mut st = self.stats.get();
         st.frames += 1;
-        // A resize really does move every row: the terminal reflowed the glass and this
-        // head's memory of it is fiction. A frame that merely changed height — the composer
-        // wrapping — is not that, and erasing the screen for it is a flash per wrap.
+        // A resize really does move every row, so the screen is erased once. A frame that only
+        // changed height — the composer wrapping — is not that, and is a flash per wrap.
         let size = self.size();
         if size != self.last_size.get() {
             self.last_size.set(size);
             self.full.set(true);
         }
-        // The two buffers are EXCHANGED, not copied: the scratch is filled from the frame and
-        // then becomes the memory of the glass, so both keep the rows they have allocated.
+        // The two buffers are EXCHANGED, not copied, so both keep their allocations.
         let s = {
             let mut next = self.next.borrow_mut();
             paint_full(
@@ -452,29 +441,25 @@ impl Terminal {
             self.silent.set(self.silent.get() + 1);
             st.silent += 1;
             self.stats.set(st);
-            // Adopted, and nothing was written: the frame needed no bytes, so the memory it
-            // describes is already true — and taking it keeps `shown` the frame's length.
+            // Adopted, and nothing was written: the memory it describes is already true.
             self.adopt_next();
             return false;
         }
-        // The encoder. `?2026h` and `?2026l` are bytes the terminal really is sent, so they
-        // are counted rather than discounted as chrome.
+        // The encoder. The `?2026` wrappers are bytes the terminal is really sent, so counted.
         let wrote = out
             .write_all(b"\x1b[?2026h")
             .and_then(|()| out.write_all(s.as_bytes()))
             .and_then(|()| out.write_all(b"\x1b[?2026l"))
             .and_then(|()| out.flush());
         if wrote.is_err() {
-            // No record of a frame that may not be on the glass: cleared and marked unknown,
-            // so the next frame is a full repaint.
+            // No record of a frame that may not be on the glass: the next frame repaints all.
             self.shown.borrow_mut().clear();
             self.full.set(true);
             self.stats.set(st);
             return true;
         }
-        // The bytes are out, so now the memory is true: the adoption is one statement later
-        // than it was, and that statement is the difference between a diff against the glass
-        // and a diff against an intention.
+        // The bytes are out, so now the memory is true: a diff against the glass, not against
+        // an intention.
         st.bytes += s.len() as u64 + 16;
         st.rows += s.matches("\x1b[K").count() as u64;
         st.clears += s.matches("\x1b[2J").count() as u64;
@@ -521,8 +506,7 @@ impl Drop for Terminal {
         if self.entered {
             restore(self.fd, &self.original, self.features, self.options);
         }
-        // After the restore, so the line lands on a terminal out of raw mode and off the
-        // alternate screen: a report printed before it scrolls away with the screen.
+        // After the restore, so the line lands on a terminal out of raw mode.
         if let Some(to) = self.stats_to.clone() {
             let line = format!("write stats: {}\n", self.stats.get().line());
             if to == "-" || to == "1" {
@@ -571,15 +555,12 @@ pub fn paint_full(
     if full {
         s.push_str("\x1b[2J");
     }
-    // Rows the frame no longer has: erase them, rather than the whole screen. Over `shown`,
-    // because what is on the glass is what must be erased; `next` is a scratch.
+    // Rows the frame no longer has: erase them, over `shown` — `next` is a scratch.
     for i in lines.len()..shown.len() {
         s.push_str(&format!("\x1b[{};1H\x1b[0m\x1b[K", i + 1));
     }
-    // `next` becomes this frame, and a row it already holds costs nothing: two frames of
-    // identical text leave every row untouched, and a changed row gets `clear()` + `push_str`
-    // into the buffer it already had. The comparison is against the buffer, not `shown`, since
-    // `next` decides whether a copy is needed; `shown` decides what goes on the wire.
+    // `next` becomes this frame, and a row it already holds costs nothing — the comparison is
+    // against the buffer, which decides whether a copy is needed; `shown` decides the wire.
     next.resize(lines.len(), String::new());
     for (i, l) in lines.iter().enumerate() {
         let on_the_glass = !full && shown.get(i) == Some(l);
@@ -595,11 +576,8 @@ pub fn paint_full(
     if s.is_empty() && cursor == prev_cursor {
         return String::new();
     }
-    // The cursor is hidden for the write and shown at its destination, and the hide is the
-    // half that matters: without it the cursor stays live between one frame's park and the
-    // next frame's writes, so a terminal that paints as bytes arrive shows it wherever the
-    // last row-write left it. `?25l` does not rely on DEC 2026 compositing, which some
-    // terminals do not pass through.
+    // The cursor is hidden for the write and shown at its destination: without the hide it
+    // stays live between frames and a terminal painting as bytes arrive shows it mid-frame.
     match cursor {
         Some((r, c)) => {
             s.insert_str(0, "\x1b[?25l");
@@ -653,8 +631,7 @@ pub fn window_title_text(title: &str) -> String {
 fn restore(fd: i32, original: &libc::termios, features: Features, options: Options) {
     unsafe { libc::tcsetattr(fd, libc::TCSANOW, original) };
     let mut out = std::io::stdout();
-    // The extras first, each only where `enter` turned it on: the kitty keyboard popped,
-    // focus reports off, the progress bar removed.
+    // The extras first, each only where `enter` turned it on.
     if features.keys {
         let _ = out.write_all(b"\x1b[<u");
     }
@@ -664,9 +641,8 @@ fn restore(fd: i32, original: &libc::termios, features: Features, options: Optio
     if features.progress {
         let _ = out.write_all(Progress::Idle.osc());
     }
-    // Every mode `enter` turned on, off again in reverse: end any open synchronised update,
-    // mouse tracking off, bracketed paste off, the cursor shape back, then show the cursor,
-    // leave the alternate screen and pop the title `enter` saved (`CSI 23;0 t`).
+    // Every mode `enter` turned on, off again in reverse: synchronised update, mouse, paste,
+    // cursor shape, then show the cursor, leave the alternate screen and pop the title.
     let _ = out.write_all(b"\x1b[?2026l");
     match options.mouse {
         Mouse::Off => {}
@@ -719,8 +695,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_frame_writes_nothing_at_all() {
-        // The flicker, as an assertion: an idle loop wakes ten times a second with nothing
-        // new, and repainting the screen for that is what flicker is.
+        // The flicker, as an assertion: repainting an idle screen is what flicker is.
         let frame: Vec<String> = ["one", "two", "three"]
             .iter()
             .map(|s| s.to_string())
@@ -733,8 +708,7 @@ mod tests {
         for _ in 0..100 {
             let (bytes, next) = paint(&shown, &frame, cur, cur);
             assert_eq!(bytes, "");
-            // And the memory is still adopted: a frame needing no bytes is one whose memory
-            // is already true, and a `paint` that returned the old memory would never learn.
+            // And the memory is still adopted: a frame needing no bytes is one already true.
             shown = next;
         }
         assert_eq!(shown, frame);
@@ -797,8 +771,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_changed_height_does_not_erase_the_screen() {
-        // The composer grows a row every time a prompt wraps; erasing for that is a flash
-        // per wrap.
+        // The composer grows a row every time a prompt wraps; erasing for that is a flash.
         let a: Vec<String> = ["one", "two", "three"]
             .iter()
             .map(|s| s.to_string())
@@ -867,8 +840,7 @@ mod tests {
         assert_eq!(*t.shown.borrow(), frame, "the frame is on the glass");
         assert!(!ok.wrote.is_empty(), "the premise: bytes really went out");
 
-        // A frame whose write dies after one call: `paint_to` writes the synchronised-output
-        // opener first, so the glass got that and nothing of the row itself.
+        // A frame whose write dies after one call: the glass got the opener, no row.
         let mut dead = Dies {
             left: 1,
             wrote: Vec::new(),
@@ -879,8 +851,7 @@ mod tests {
             t.paint_to(&mut dead, &changed, None),
             "a failed write must report that the glass is unknown"
         );
-        // Nothing is claimed: not the old frame and not the new one, because the head cannot
-        // know which rows landed.
+        // Nothing is claimed: the head cannot know which rows landed.
         assert!(
             t.shown.borrow().is_empty(),
             "a frame that died part-way was recorded: {:?}",
@@ -904,8 +875,7 @@ mod tests {
             );
         }
 
-        // The counters do not claim bytes that never reached the glass, but the attempt is
-        // still a frame.
+        // The counters do not claim bytes that never reached the glass, but the attempt counts.
         let t = Terminal::headless();
         let mut dead = Dies {
             left: 1,

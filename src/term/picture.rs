@@ -10,28 +10,27 @@ use crate::term::graphics;
 use crate::term::proto::Proto;
 use crate::term::terminal::base64;
 
-/// A picture, ready to be drawn in a box: the id the terminal knows it by, the payload's bytes
-/// as base64 when it is a PNG or as raw RGB when it is a plugin's pixels, and the box in cells.
+/// A picture, ready to be drawn in a box: the id, the payload as base64 for a PNG or raw RGB
+/// for a plugin's pixels, and the box in cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picture {
-    /// The image id, stable per picture — hashed from whatever names it upstream — because an
-    /// id that changes every frame is a terminal filling with copies of one picture.
+    /// The image id, stable per picture: an id that changes every frame is a terminal filling
+    /// with copies of one picture.
     pub id: u32,
-    /// The PNG, base64: what kitty's upload carries, and what iTerm2's `File=` carries. Empty
-    /// for a picture that is raw pixels ([`Picture::rgb`]).
+    /// The PNG, base64: what kitty's upload and iTerm2's `File=` carry. Empty for raw pixels
+    /// ([`Picture::rgb`]).
     pub png_base64: String,
-    /// The picture's own size in bytes — iTerm2's `size=` argument: a terminal told a size that
-    /// disagrees with the base64 refuses the picture.
+    /// The picture's own size in bytes — iTerm2's `size=`: a terminal told a wrong size refuses
+    /// the picture.
     pub bytes: usize,
-    /// The pixels, when the picture is not a PNG — a plugin's `provider_picture` answer, sent as
-    /// raw RGB instead of a file.
+    /// The pixels, when the picture is not a PNG: a plugin's answer, sent as raw RGB.
     pub rgb: Option<Rgb>,
     /// The box, in cells: what the frame draws and what the terminal fills.
     pub cells: (u32, u32),
 }
 
-/// A picture as pixels: what a plugin draws, in the one form the terminal takes without an
-/// image format in between — 8 bits a channel, row-major, `width × height × 3` bytes.
+/// A picture as pixels: what a plugin draws, in the form the terminal takes — 8 bits a channel,
+/// row-major, `width × height × 3` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rgb {
     pub width: u32,
@@ -55,8 +54,7 @@ impl Picture {
         }
     }
 
-    /// The same, from base64 already in hand: the size is the base64's own arithmetic — four
-    /// characters are three bytes, less the padding.
+    /// The same, from base64 already in hand: four characters are three bytes, less the padding.
     pub fn from_base64(id: u32, png_base64: &str, cells: (u32, u32)) -> Picture {
         let padded = png_base64.ends_with('=') as usize + png_base64.ends_with("==") as usize;
         let bytes = (png_base64.len() / 4) * 3 - padded.min(2);
@@ -69,12 +67,10 @@ impl Picture {
         }
     }
 
-    /// A picture from a plugin's payload, cut to the box a frame `frame_width` columns wide
-    /// gives it.
+    /// A picture from a plugin's payload, cut to the box a frame `frame_width` wide gives it.
     ///
-    /// A payload whose length disagrees with the size it states is refused, and so is a
-    /// zero-sized one: a bad header draws pixels of the wrong shape, held by the terminal until
-    /// the id is deleted.
+    /// A payload whose length disagrees with the size it states is refused: a bad header draws
+    /// pixels of the wrong shape, held by the terminal until the id is deleted.
     pub fn of_rgb(
         id: u32,
         width: u32,
@@ -112,8 +108,7 @@ impl Picture {
         self.rgb.as_ref().map(|r| (r.width, r.height))
     }
 
-    /// Re-cut the box for a frame `width` columns wide, returning whether it moved — what a
-    /// resize asks a picture whose rows and placement both follow the frame.
+    /// Re-cut the box for a frame `width` wide, returning whether it moved.
     pub fn refit(&mut self, frame_width: usize) -> bool {
         let Some((w, h)) = self.intrinsic() else {
             return false;
@@ -126,9 +121,8 @@ impl Picture {
         true
     }
 
-    /// Why this picture cannot be drawn on this terminal, or `None` when it can. Asked before
-    /// anything is written: a picture the terminal cannot carry is not a missing picture, it is
-    /// cells of garbage or bytes typed at the prompt.
+    /// Why this picture cannot be drawn here, or `None` when it can: a picture the terminal
+    /// cannot carry is not missing, it is cells of garbage or bytes typed at the prompt.
     pub fn refusal(&self, proto: Proto) -> Option<String> {
         match proto {
             Proto::None => Some(
@@ -154,9 +148,8 @@ impl Picture {
         }
     }
 
-    /// The rows a frame draws where the picture is: the box's placeholders under kitty, the
-    /// box's blank rows under iTerm2, nothing under a terminal that takes no picture — where the
-    /// caller draws its own fallback.
+    /// The rows a frame draws where the picture is: placeholders under kitty, blanks under
+    /// iTerm2, nothing under a terminal that takes no picture.
     pub fn lines(&self, proto: Proto) -> Vec<Line> {
         let (cols, rows) = self.cells;
         match proto {
@@ -169,9 +162,8 @@ impl Picture {
     /// The bytes the terminal must be told about this picture, in order, wrapped for the
     /// multiplexer ([`Proto::wrap`]).
     ///
-    /// Kitty: the upload, then the placement, and a resize repeats only the placement. iTerm2:
-    /// one escape the terminal draws at the cursor into cells, so it must be written after the
-    /// frame with the cursor at the box's corner — and again whenever those cells are repainted.
+    /// Kitty: the upload then the placement, and a resize repeats only the placement. iTerm2:
+    /// one escape drawn at the cursor, so it is written again whenever those cells are.
     pub fn bytes(&self, proto: Proto) -> Vec<Vec<u8>> {
         let (cols, rows) = self.cells;
         match proto {
@@ -187,9 +179,8 @@ impl Picture {
         }
     }
 
-    /// The iTerm2 escape, whole: `ESC ] 1337 ; File=…:… BEL`. `width` and `height` are in
-    /// cells, and `size` is the PNG's byte length rather than the base64's — the mistake a
-    /// terminal answers by refusing the file.
+    /// The iTerm2 escape, whole. `width` and `height` are in cells, and `size` is the PNG's byte
+    /// length rather than the base64's, which a terminal answers by refusing the file.
     pub fn iterm_escape(&self) -> String {
         let (cols, rows) = self.cells;
         format!(
@@ -198,8 +189,8 @@ impl Picture {
         )
     }
 
-    /// The bytes that free this picture in the terminal — kitty deletes the image and its data;
-    /// iTerm2 has nothing to free, since its picture is the cells it was drawn into.
+    /// The bytes that free this picture: kitty deletes the image and its data, and iTerm2 has
+    /// nothing to free.
     pub fn delete(&self, proto: Proto) -> Vec<u8> {
         delete_cmd(proto, self.id)
     }
@@ -213,8 +204,7 @@ fn delete_cmd(proto: Proto, id: u32) -> Vec<u8> {
     }
 }
 
-/// The pictures a frame draws, kept between frames — what each id was last sent at, so a redraw
-/// that changes nothing sends nothing.
+/// The pictures a frame draws, kept between frames: what each id was last sent at.
 #[derive(Debug, Clone, Default)]
 pub struct Pictures {
     proto: Proto,
@@ -229,9 +219,8 @@ impl Pictures {
         }
     }
 
-    /// The protocol changed — a resize, a re-attach through a pane. Everything the terminal holds
-    /// is forgotten (returned, so the caller can delete it), because ids cannot be trusted to
-    /// mean the same thing across protocols.
+    /// The protocol changed. Everything the terminal holds is forgotten — and returned, so the
+    /// caller can delete it — because ids mean different things across protocols.
     pub fn set_proto(&mut self, proto: Proto) -> Vec<Vec<u8>> {
         if proto == self.proto {
             return Vec::new();
@@ -245,17 +234,14 @@ impl Pictures {
         self.proto
     }
 
-    /// The bytes are already in the terminal: a host that sent this picture itself, under this
-    /// id, before the widget was handed it. The next [`Pictures::sync`] places it instead of
-    /// re-sending megabytes, and [`Pictures::forget`] still deletes — one id is one image,
-    /// whichever layer sent it.
+    /// The bytes are already in the terminal: a host sent this picture itself, under this id, so
+    /// [`Pictures::sync`] places it instead of re-sending megabytes.
     pub fn adopt(&mut self, id: u32, cells: (u32, u32)) {
         self.held.insert(id, cells);
     }
 
     /// What the terminal must be told to make this frame whole: a picture it does not hold is
-    /// uploaded and placed, one whose box moved is placed again, one the frame no longer draws
-    /// is deleted. Nothing at all for a frame that changed nothing.
+    /// uploaded and placed, a moved box is placed again, a vanished picture is deleted.
     pub fn sync(&mut self, want: &[Picture]) -> Vec<Vec<u8>> {
         // A picture nothing draws goes first, and takes its data with it: the terminal's memory
         // is not this process's to leave lying about, and the rows that named it have gone.
@@ -332,8 +318,7 @@ mod tests {
     use super::*;
     use crate::render::Palette;
 
-    /// A picture in a 4×2 box, from a few bytes: the escapes are what is under test and no
-    /// decoder is asked anything.
+    /// A picture in a 4×2 box, from a few bytes: the escapes are what is under test.
     fn pic(id: u32, cells: (u32, u32)) -> Picture {
         Picture::of(id, b"png-bytes", cells)
     }
@@ -376,8 +361,7 @@ mod tests {
         assert!(p.delete(Proto::None).is_empty());
     }
 
-    /// iTerm2's protocol has no placeholders and no id: the frame draws the box's blank rows and
-    /// the escape draws the picture into them.
+    /// iTerm2 has no placeholders and no id: the frame draws blank rows and the escape fills them.
     #[test]
     fn iterm2_gets_blank_rows_and_one_escape_carrying_the_whole_picture() {
         let p = Picture::of(3, b"12345678", (10, 3));
@@ -406,8 +390,7 @@ mod tests {
         assert_eq!(Picture::from_base64(1, "Zm9v", (1, 1)).bytes, 3);
     }
 
-    /// An unchanged frame sends nothing, a moved box sends only the placement, and a picture
-    /// whose bytes another layer already sent is placed rather than sent again (`adopt`).
+    /// An unchanged frame sends nothing; a moved box sends only the placement.
     #[test]
     fn an_unchanged_frame_sends_nothing_and_a_moved_box_sends_only_the_placement() {
         let mut held = Pictures::new(Proto::Kitty);
@@ -433,8 +416,7 @@ mod tests {
         assert!(held.sync(&[]).is_empty(), "nothing left to delete");
     }
 
-    /// A picture whose bytes another layer sent is placed, not sent again: a thumbnail and the
-    /// enlarged view of it are one image in the terminal.
+    /// A picture whose bytes another layer sent is placed, not sent again.
     #[test]
     fn an_adopted_picture_is_placed_and_never_uploaded_twice() {
         let mut held = Pictures::new(Proto::Kitty);
@@ -449,8 +431,7 @@ mod tests {
         assert_eq!(held.sync(&[]), vec![graphics::image_delete(1)]);
     }
 
-    /// Under iTerm2 a picture whose box moved is a picture to send again: it has no placement,
-    /// and the cells it was drawn in are not the cells it is drawn in now.
+    /// Under iTerm2 a picture whose box moved is a picture to send again: it has no placement.
     #[test]
     fn iterm2_re_sends_the_bytes_when_the_box_moves_and_never_deletes() {
         let mut held = Pictures::new(Proto::Iterm);
@@ -470,8 +451,7 @@ mod tests {
         pic(id, cells).iterm_escape()
     }
 
-    /// A plugin's answer is a picture: the pixels it named, cut to the box a PNG would be cut to
-    /// at the same width — and a size that disagrees with the bytes is refused by name.
+    /// A plugin's answer is a picture, and a size that disagrees with the bytes is refused.
     #[test]
     fn a_plugin_picture_is_a_picture_and_a_lying_size_is_refused() {
         // 64×48: 9216 bytes of RGB, which is three chunks of upload (see `graphics`).
@@ -503,8 +483,7 @@ mod tests {
         assert!(Picture::of_rgb(5, 0, 48, &[], 120).is_err());
     }
 
-    /// A resize re-cuts the box, not the pixels: the rows and the placement follow the frame,
-    /// and the upload is the terminal's already.
+    /// A resize re-cuts the box, not the pixels, and the upload stays the terminal's.
     #[test]
     fn a_resize_moves_a_providers_picture_and_the_bytes_stay() {
         let rgb = vec![1u8; 200 * 100 * 3];
@@ -520,8 +499,7 @@ mod tests {
         assert_eq!(png.cells, (4, 2));
     }
 
-    /// A picture is refused by name where the terminal cannot carry it — never drawn as
-    /// placeholders nothing fills, and never as an iTerm2 escape with no file in it.
+    /// A picture is refused by name where the terminal cannot carry it.
     #[test]
     fn a_picture_that_is_pixels_is_refused_by_a_terminal_that_cannot_take_it() {
         let p = Picture::of_rgb(6, 2, 2, &[9u8; 12], 80).expect("a picture");
@@ -540,8 +518,8 @@ mod tests {
         assert_eq!(pic(3, (4, 2)).bytes(Proto::Iterm).len(), 1);
     }
 
-    /// **A terminal that takes no picture is sent no bytes at all** — not "some bytes it will
-    /// ignore", which in a terminal is text typed at the prompt.
+    /// A terminal that takes no picture is sent no bytes at all, which would be text at the
+    /// prompt.
     #[test]
     fn a_terminal_without_pictures_is_written_nothing() {
         let mut held = Pictures::new(Proto::None);

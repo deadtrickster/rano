@@ -1,35 +1,13 @@
-//! **A pane: a list the person moves through**, drawn in place of the conversation —
-//! the shape letibot's todos, subagents, jobs, queue and picker panes share.
+//! A pane: a list the person moves through, drawn in place of the conversation — the shape the todos,
+//! subagents, jobs, queue and picker panes share.
 //!
-//! Ported from letibot's `ui/panes/*.rs` and `app/panes.rs` (`pane_window`,
-//! `scroll_into_view`, the `*_stop_rows` records and `*_stop_at_row`). The shape is:
+//! Content is every row the pane has plus the row each stop was drawn on; a window is the slice that
+//! fits the room, with the scroll clamped to the last screenful. The host owns the scroll and the
+//! cursor, because both outlive a frame and are moved by keys; this clamps them and hands them back.
 //!
-//! - **Content** ([`PaneLines`]): every row the pane has, top to bottom, and **the row
-//!   each stop was drawn on** — a stop is a row the cursor can rest on (a job, a todo, a
-//!   `finished (N)` group), among rows it cannot (a title, a job's detail line, a footer).
-//! - **A window** ([`window`]): the slice of the content that fits the room, with the
-//!   scroll clamped to the last screenful.
-//! - **The host owns the scroll and the cursor.** Both are state that outlives a frame
-//!   and is moved by keys, so they live with the host; this module takes them in, clamps
-//!   them against what it actually drew, and hands the clamped values back
-//!   ([`PaneLayout::scroll`]) for the host to store.
-//!
-//! # Why the stop rows are a record and not arithmetic
-//!
-//! letibot's own words, from the todos pane: *"mouse doesnt click"* — a click on the add
-//! row computing a negative index, because the click handler did arithmetic over the list
-//! (`line - header`) while the pane drew something else. **The pane records where each stop
-//! landed while drawing**, and both the arrows (scroll the cursor's row into view) and a
-//! click (which stop is on screen row `y`) read that record, so the drawing and the hit
-//! test cannot disagree about where a row is. See [`PaneLines::row_of`] and
-//! [`PaneLayout::stop_at`].
-//!
-//! # No seam
-//!
-//! letibot's panes draw no "N more below" seam: a pane is a whole screen of its own, its
-//! footer names the keys (`up/down scrolls`), and the window is a plain slice. That is
-//! kept. The cards that do say what is out of view (the decision card, a tool row's
-//! payload window) carry their own seams.
+//! The stop rows are a record and not arithmetic: a click handler doing arithmetic over the list
+//! (`line - header`) while the pane drew something else is exactly the bug that made the arrows and
+//! the mouse disagree, so the drawing writes the record both of them read.
 
 use crate::render::{Buffer, Line, Rect, Span, Widget};
 use crate::style::Role;
@@ -63,12 +41,9 @@ impl PaneLines {
         self.lines.push(Line::default());
     }
 
-    /// **The pane row the stop at the cursor was DRAWN on**, read out of the record the
-    /// pane wrote while drawing, never arithmetic over the table it drew from.
-    ///
-    /// The cursor is clamped first: the table can move under it (a job settling, a queue
-    /// entry arriving), and an arrow pressed against a shorter list must land on a row
-    /// rather than on an index that no longer exists. `0` when there are no stops.
+    /// The pane row the stop at the cursor was drawn on, read out of the record the pane wrote while
+    /// drawing. The cursor is clamped first: the table can move under it, and an arrow pressed against a
+    /// shorter list must land on a row rather than on an index that no longer exists.
     pub fn row_of(&self, cursor: usize) -> usize {
         let at = cursor.min(self.stop_rows.len().saturating_sub(1));
         self.stop_rows.get(at).copied().unwrap_or(0)
@@ -106,14 +81,9 @@ pub struct PaneLayout {
 }
 
 impl PaneLayout {
-    /// **The stop drawn on row `y` of the pane's area, or nothing** — letibot's
-    /// `todo_stop_at_row` / `queue_stop_at_row`.
-    ///
-    /// `y` is relative to the pane's first drawn row: a host measures a click's screen row
-    /// against where it put the pane (letibot's `todos_pane_top` — the session header sits
-    /// above the pane when the frame is tall enough for one, and it is not a row of this
-    /// pane). Guarded on the WINDOW: a row below the last drawn row is not a row anybody is
-    /// looking at, and a click into the blank space under a short list moves nothing.
+    /// The stop drawn on row `y` of the pane's area, or nothing. `y` is relative to the pane's first
+    /// drawn row, and it is guarded on the window: a row below the last drawn one is not a row anybody
+    /// is looking at.
     pub fn stop_at(&self, y: usize) -> Option<usize> {
         if y >= self.room.min(self.lines.len()) {
             return None;
@@ -129,20 +99,15 @@ impl Widget for PaneLayout {
     }
 }
 
-/// **The visible slice of a pane**, and the numbers the scroll keys need.
+/// The visible slice of a pane, and the numbers the scroll keys need.
 ///
-/// Clamped here rather than at the keypress: the key handler does not know how tall the
-/// terminal is or how many rows the pane has, and a scroll clamped against a stale height
-/// scrolls past the end and shows a blank screen the operator has to page back from.
-///
-/// `scroll` counts rows hidden **above the top** — this is literally `skip(scroll)` — so
-/// Up DECREASES it. letibot had the sign inverted once on a listing whose footer said
-/// `up/down scrolls`, and leticl the same: *"called with the top-origin sign, ↑ walked
-/// toward the END while the hint bar said otherwise."*
+/// Clamped here rather than at the keypress, since the key handler knows neither the terminal's height
+/// nor the pane's row count, and a scroll clamped against a stale height scrolls past the end. `scroll`
+/// counts rows hidden above the top — literally `skip(scroll)` — so Up decreases it.
 pub fn window(content: PaneLines, scroll: usize, room: usize) -> PaneLayout {
     let len = content.lines.len();
-    // The last screenful is the furthest anything scrolls: past that is blank rows, which
-    // is not a place to be.
+    // The last screenful is the furthest anything scrolls: past that is blank rows, which is not a place
+    // to be.
     let max = len.saturating_sub(room);
     let scroll = scroll.min(max);
     PaneLayout {
@@ -154,12 +119,9 @@ pub fn window(content: PaneLines, scroll: usize, room: usize) -> PaneLayout {
     }
 }
 
-/// **Keep the cursor on screen after an arrow moved it**: the scroll that shows content
-/// row `row` in a window of `room` rows, moving as little as it can.
-///
-/// An arrow that walks the selection out of the window otherwise looks like a key that
-/// does nothing — the operator's *"subagents panel doesnt scroll"*: a child below the fold
-/// looked unreachable. `room == 0` (never drawn yet) leaves the scroll alone.
+/// Keep the cursor on screen after an arrow moved it: the scroll that shows content row `row` in a
+/// window of `room` rows, moving as little as it can. Without it an arrow that walks the selection out
+/// of the window looks like a key that does nothing; `room == 0` leaves the scroll alone.
 pub fn scroll_into_view(scroll: usize, room: usize, row: usize) -> usize {
     if room == 0 {
         scroll
@@ -172,15 +134,14 @@ pub fn scroll_into_view(scroll: usize, room: usize, row: usize) -> usize {
     }
 }
 
-/// The cursor's mark: `▸` on the row Enter takes, a space elsewhere — the same ladder the
-/// decision card draws, so *the mark IS the thing Enter takes*.
+/// The cursor's mark: `▸` on the row Enter takes, a space elsewhere, so the mark is the thing Enter
+/// takes.
 pub fn mark(picked: bool) -> &'static str {
     if picked { "▸" } else { " " }
 }
 
-/// The picked row's highlight: inverse video rather than another colour, because a
-/// highlight that is a second hue reads as a second kind of thing rather than as "this
-/// one". Nothing under `Palette::None`, where the `▸` is what survives.
+/// The picked row's highlight: inverse video rather than another colour, since a second hue reads as a
+/// second kind of thing. Nothing under `Palette::None`, where the `▸` is what survives.
 pub fn picked(l: Line, on: bool) -> Line {
     if on {
         let st = l.style.clone().reverse();
@@ -190,8 +151,8 @@ pub fn picked(l: Line, on: bool) -> Line {
     }
 }
 
-/// `left`, then `right` pushed to the right edge — or `left` alone, cut to `w`, when the
-/// two do not fit with two columns between them.
+/// `left`, then `right` pushed to the right edge — or `left` alone, cut to `w`, when the two do not fit
+/// with two columns between them.
 pub fn split_row(left: Line, right: Line, w: usize) -> Line {
     let (lw, rw) = (left.width(), right.width());
     if lw + rw + 2 <= w {
@@ -242,9 +203,8 @@ mod tests {
         p
     }
 
-    /// letibot `app/tests/scroll.rs::a_pane_taller_than_the_screen_scrolls_to_its_end`, at
-    /// the window: PageDown past the end is clamped to the last screenful, and the final row
-    /// is still drawn.
+    /// A pane taller than the screen scrolls to its end: PageDown past the end is clamped to the last
+    /// screenful, and the final row is still drawn.
     #[test]
     fn a_pane_taller_than_the_screen_scrolls_to_its_end() {
         let top = window(content(30), 0, 10);
@@ -261,9 +221,8 @@ mod tests {
         assert_eq!(window(content(2), 5, 40).scroll, 0);
     }
 
-    /// letibot `app/tests/scroll.rs::the_cursor_scrolls_itself_into_view` and
-    /// `the_arrows_scroll_the_subagent_cursor_into_view`: thirty Downs walk the cursor off
-    /// the bottom, and the window follows it — reading the row the stop was DRAWN on.
+    /// Thirty Downs walk the cursor off the bottom and the window follows it, reading the row the stop
+    /// was drawn on.
     #[test]
     fn the_cursor_scrolls_itself_into_view() {
         let c = content(40);
@@ -282,9 +241,8 @@ mod tests {
         assert_eq!(PaneLines::new().row_of(3), 0);
     }
 
-    /// letibot `app/todos.rs::todo_stop_at_row`'s rule, which answered *"mouse doesnt
-    /// click"*: a click is read against the rows the last draw recorded, through the scroll,
-    /// and a click under a short list or on a detail row is nothing.
+    /// A click is read against the rows the last draw recorded, through the scroll, and a click under a
+    /// short list or on a detail row is nothing.
     #[test]
     fn a_click_lands_on_the_stop_drawn_on_that_row_and_nowhere_else() {
         let l = window(content(40), 5, 10);

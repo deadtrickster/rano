@@ -1,42 +1,14 @@
-//! **Blocks with a header, a state and a bounded body**: a tool call's card, and the
-//! model's reasoning.
+//! Blocks with a header, a state and a bounded body: a tool call's card, and the model's
+//! reasoning.
 //!
-//! Ported from letibot's `crates/ui/src/card.rs`, which was a string renderer; this one
-//! builds [`Line`]s of roles. The header below is letibot's, kept because each point is
-//! a defect it paid for.
+//! A one-line call — `● edit(call_7) — ok · 214 B` — is the wrong shape: it drops the argument (the
+//! one part a reader scans for) and the elapsed time (which answers "is it stuck"), and leaves a
+//! progress note nowhere to go. The body folds in three states, and the middle one earns its place:
+//! a finished `bash` call shows its last lines without being asked, because those say whether it
+//! worked.
 //!
-//! # What is wrong with a one-line call
-//!
-//! letibot rendered a settled tool call as `● edit(call_7) — ok · 214 B`. That is the
-//! wrong shape for a person:
-//!
-//! - **The argument is missing.** `edit` is not the interesting word; the path
-//!   is. Every tool has exactly one argument that identifies *what it did to
-//!   what*, and it is the only part a reader scans for.
-//! - **`running` does not say for how long.** The single most common question
-//!   during a turn is "is this stuck", and an elapsed time answers it while a
-//!   spinner does not.
-//! - **A progress note has nowhere to go** in a one-line renderer.
-//!
-//! # Three fold states, not two
-//!
-//! From grok-build. Collapsed / Truncated / Expanded. The middle state is the one that
-//! earns its place: a finished `bash` call should show its last three lines without
-//! being asked, because those are the lines that say whether it worked.
-//!
-//! # Provenance
-//!
-//! **Adapted from grok-build** (xAI, Apache-2.0),
-//! `crates/codegen/xai-grok-pager/src/scrollback/`: `DisplayMode` (`types.rs:52`), the
-//! tense-flipping verb (`blocks/tool/mod.rs:107`), the head/tail budgets
-//! (`read.rs:16`, `use_tool.rs:15`, `appearance/config.rs:613`), the `… +{n} lines`
-//! separator row (`execute.rs:549`), and the thinking block's rail, attribute-based
-//! de-emphasis and `Replayed` rule (`blocks/thinking.rs`).
-//!
-//! Their `execute.rs` gives the head and tail chunks **different selection range ids**
-//! so a drag-copy across the ellipsis cannot silently splice non-adjacent text. There is
-//! no mouse selection here, so there is nothing to port — but the hazard is real the
-//! moment one is added, and it is recorded here rather than rediscovered.
+//! Adapted from grok-build (xAI, Apache-2.0): `DisplayMode`, the tense-flipping verb, the head/tail
+//! budgets and the reasoning rail.
 
 use crate::render::text::{truncate, truncate_owned};
 use crate::render::{Line, Span, Style};
@@ -61,9 +33,8 @@ pub enum DisplayMode {
 }
 
 impl DisplayMode {
-    /// The cycle a fold key walks. Running blocks skip `Expanded`: a body that
-    /// is still growing pushes the prompt off the screen a line at a time,
-    /// which is the thing that reads as flicker.
+    /// The cycle a fold key walks. Running blocks skip `Expanded`: a body still growing pushes the
+    /// prompt off the screen a line at a time, which reads as flicker.
     pub fn next(self, running: bool) -> DisplayMode {
         match (self, running) {
             (DisplayMode::Collapsed, _) => DisplayMode::Truncated,
@@ -74,12 +45,8 @@ impl DisplayMode {
     }
 }
 
-/// How the card is titled, and in which tense.
-///
-/// The tense is not decoration. `Reading src/main.rs` and `Read src/main.rs` are
-/// the difference between "wait" and "done", read at a glance from the first
-/// word, without a colour or a glyph — which matters because the glyph is the
-/// part a screen reader or a `--replay` transcript loses.
+/// How the card is titled, and in which tense: `Reading src/main.rs` against `Read src/main.rs` is
+/// the difference between wait and done, read from the first word — no colour or glyph needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verb {
     Read,
@@ -94,9 +61,8 @@ pub enum Verb {
 }
 
 impl Verb {
-    /// Map a tool name to a verb. Unknown names keep their own name, which is
-    /// right: inventing a verb for a tool we do not know is a guess presented as
-    /// a fact.
+    /// Map a tool name to a verb. Unknown names keep their own name, which is right: inventing a
+    /// verb for a tool we do not know is a guess presented as a fact.
     pub fn of(tool: &str) -> Verb {
         match tool {
             "read" | "read_file" | "cat" | "view" => Verb::Read,
@@ -141,25 +107,15 @@ impl Verb {
     }
 }
 
-/// **The fewest columns a running call's subject may keep**, while the tail keeps its own.
-///
-/// leticl's `(max 8 (- cols fixed …))` — *"a subject squeezed below a few columns says nothing"* —
-/// and a floor rather than a fair share on purpose: the row is allowed to run long and be trimmed
-/// by the frame, because the trim takes the tail's END (a note, a reason) and the clock sits at
-/// the tail's HEAD. If the subject ate into the tail instead, the number that says the call is
-/// alive would be what disappeared.
+/// The fewest columns a running call's subject may keep, while the tail keeps its own: a subject
+/// squeezed below a few columns says nothing, and the tail's head is the clock that says it lives.
 const MIN_SUBJECT: usize = 8;
 
 /// Where a block is in its life.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
-    /// The model asked for it; nothing has run.
-    ///
-    /// `note` is what is happening WHILE nothing runs — the guard being asked whether
-    /// the call follows from what the operator wanted. That wait is seconds long and used
-    /// to render as the bare word "proposed", so a turn sat still with no reason given:
-    /// *"the tool call latency grew, i almost thought something stalled and looked at
-    /// htop"*.
+    /// The model asked for it; nothing has run. `note` says what is happening meanwhile — the guard
+    /// deciding whether the call follows from what the operator wanted — so a wait says why.
     Proposed { note: Option<String> },
     /// In flight. `elapsed_ms` is supplied by the caller, never read from a clock here.
     Running {
@@ -171,11 +127,8 @@ pub enum Phase {
         outcome: Outcome,
         elapsed_ms: Option<u64>,
     },
-    /// Reconstructed from a log rather than watched live.
-    ///
-    /// The distinction exists because a replay has no honest elapsed time, and
-    /// printing `0.0s` is worse than printing nothing — it is a measurement that
-    /// was never taken, rendered as one that was.
+    /// Reconstructed from a log rather than watched live: a replay has no honest elapsed time, and
+    /// `0.0s` is a measurement never taken, rendered as one that was.
     Replayed { outcome: Outcome },
 }
 
@@ -185,14 +138,12 @@ impl Phase {
     }
 }
 
-/// Head and tail line counts per fold state. The defaults are grok-build's shipped
-/// numbers: somebody else's calibration rather than our guess.
+/// Head and tail line counts per fold state; the defaults are grok-build's shipped numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub first_lines: usize,
     pub last_lines: usize,
-    /// Cap even in [`DisplayMode::Expanded`]. A 40,000-line tool result
-    /// expanded into a terminal is not "expanded", it is the conversation gone.
+    /// Cap even in [`DisplayMode::Expanded`]: 40,000 lines expanded is the conversation gone.
     pub expanded_max: usize,
 }
 
@@ -237,9 +188,7 @@ pub struct CardConfig {
     pub width: usize,
     pub mode: DisplayMode,
     pub budget: Budget,
-    /// Show the call id. Off by default: it is a correlation key for a log, not
-    /// something a person reads, and it costs a dozen columns of a header that
-    /// has a path to show.
+    /// Show the call id: a correlation key for a log, not something a person reads.
     pub show_id: bool,
 }
 
@@ -254,24 +203,21 @@ impl Default for CardConfig {
     }
 }
 
-/// One tool call, ready to draw: the generic card. [`ToolCall`] is the view model a host
-/// fills; it builds one of these.
+/// One tool call, ready to draw: the generic card. [`ToolCall`] is the view model a host fills.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub verb: Verb,
     /// The tool's own name, for the cases where the verb hides it.
     pub tool: String,
     pub call_id: String,
-    /// The one argument that says what was acted on: a path, a pattern, a
-    /// command line. Empty when the tool has none.
+    /// The one argument that says what was acted on: a path, a pattern, a command line.
     pub target: String,
-    /// The body: already-built lines. A diff, a file excerpt, stdout. This type does
-    /// not know which, on purpose — it lays them out.
+    /// The body, already-built lines — a diff, an excerpt, stdout. This type lays them out, whatever
+    /// they are.
     pub body: Vec<Line>,
     pub phase: Phase,
-    /// §8.3's disclosure: bytes shown inline, and bytes that exist. Rendered
-    /// only when they differ, because `8 KB` beside a 480 KB output is a number
-    /// that misleads.
+    /// Bytes shown inline and bytes that exist, rendered only when they differ: `8 KB` beside a
+    /// 480 KB output is a number that misleads.
     pub bytes: Option<(u64, u64)>,
     /// Content hash of the spilled full output, when there is one.
     pub spill: Option<String>,
@@ -318,15 +264,8 @@ impl Card {
             Phase::Running { .. } => ('◐', Role::Pending),
             Phase::Finished { outcome, .. } | Phase::Replayed { outcome } => ('●', outcome.role()),
         };
-        // **The head is built first and the SUBJECT is filled in last** — R53 §1.5, and it is
-        // leticl's own rule: *"the tail is measured first and the subject is given what is left…
-        // the tail does not shrink — it is the fact, and half of `· 12.4s` is not a duration."*
-        //
-        // The order used to be the other way round: the subject was written into the row at full
-        // length and the tail appended, so when the two did not fit the WHOLE row was truncated —
-        // and the clock, which is the one number that says this call is alive, went with it. The
-        // operator's own report: a running call rendered as
-        // `◐ Running "cd /tmp && (sleep 6; …) & …"` with no `· 12.4s` anywhere on it.
+        // The head is built first and the subject filled in last: the tail does not shrink, since
+        // half of `· 12.4s` is not a duration, and the clock is what says the call is alive.
         let mut s = Line::default();
         push(&mut s, mark.to_string(), mark_role);
         push(&mut s, " ", Role::Plain);
@@ -344,9 +283,8 @@ impl Card {
         };
         match &self.phase {
             Phase::Proposed { note } => match note {
-                // The reason beats the state: "proposed" says what it is, and the
-                // note says why nothing is happening yet, which is the question the
-                // operator actually has while looking at it.
+                // The note beats the state: "proposed" says what it is, the note says why nothing
+                // is happening yet, which is the question the reader has.
                 Some(n) => tail.push(clean_line(n)),
                 None => tail.push("proposed".into()),
             },
@@ -387,33 +325,28 @@ impl Card {
             _ => Role::Faint,
         };
         let joined = format!(" · {}", tail.join(" · "));
-        // The call id, kept beside the subject because it is the same kind of fact — and measured
-        // before the subject, for the same reason the tail is.
+        // The call id sits beside the subject, and is measured before it for the same reason the
+        // tail is.
         let id_str = if cfg.show_id {
             format!(" ({})", clean_line(&self.call_id))
         } else {
             String::new()
         };
 
-        // **What the subject may have: everything the tail and the id have not claimed.** The floor
-        // is leticl's `(max 8 …)`: a subject squeezed below a few columns says nothing, and letting
-        // the row run long instead means the frame's own trim takes the tail's END — the note —
-        // while the clock at its head survives. What must never give way is the tail's beginning.
+        // What the subject may have: everything the tail and the id have not claimed, with a floor
+        // so that a few columns still say what it is and the frame's trim takes the tail's end.
         if !self.target.is_empty() {
-            // **§3.1: a card is text this head did not author.** Target, call id, note and
-            // outcome reason all come from a tool call or from the daemon.
+            // A card is text this head did not author: target, call id, note and outcome reason all
+            // come from a tool call or from the daemon.
             let target = clean_line(&self.target);
             let spare = cfg
                 .width
                 .saturating_sub(s.width() + wt::width(&joined) + wt::width(&id_str) + 1);
-            // A subject that fits whole keeps its own length; one that does not is cut with an
-            // ellipsis.
             let room = spare.max(MIN_SUBJECT);
-            // **A path is cut from the left and anything else from the right** — the rule
-            // the transcript row's `shorten_subject` applies too, so one call does not read two
-            // ways on two rows. A glob or a quoted sentence is not a path however many
-            // separators it contains: cutting `**/*.{md,json,toml,yaml,yml} 40` from the left
-            // loses the fact that it is a glob.
+            // A path is cut from the left and anything else from the right — the transcript row's
+            // `shorten_subject` does the same, so one call does not read two ways. A glob or a quoted
+            // sentence is not a path however many separators it has: cutting `**/*.{md,json}` from the
+            // left loses the fact that it is a glob.
             let not_a_path = target.contains(['*', '?', '{', '[', '"']);
             let shown = if target.contains('/') && !not_a_path {
                 wt::ellipsise_left(&target, room)
@@ -427,8 +360,7 @@ impl Card {
             push(&mut s, id_str, Role::Faint);
         }
         push(&mut s, joined, role);
-        // One last guard for the case the floor above creates — a tail longer than any subject
-        // could leave room for — and it takes the END, so the clock survives it.
+        // One last guard for the case the floor above creates, taking the END so the clock survives.
         truncate_owned(s, cfg.width)
     }
 
@@ -458,12 +390,9 @@ pub(crate) fn indent(mut l: Line, n: usize) -> Line {
     l
 }
 
-/// Keep `first` lines, then `last` lines, and say how many went.
-///
-/// The marker is grok-build's `… +{n} lines` (`execute.rs:549`) and it is a
-/// **separator row**, not a line of the content — the distinction matters
-/// because a reader must never mistake the elision for output. It is never a
-/// silent cut: the count is the disclosure.
+/// Keep `first` lines, then `last`, and say how many went: the marker is a separator row and not
+/// a line of content, since a reader must never mistake the elision for output — and the count is
+/// the disclosure.
 pub fn head_tail(lines: &[Line], first: usize, last: usize) -> Vec<Line> {
     if lines.len() <= first + last + 1 {
         return lines.to_vec();
@@ -477,23 +406,13 @@ pub fn head_tail(lines: &[Line], first: usize, last: usize) -> Vec<Line> {
     out
 }
 
-/// Columns a caller must subtract from the width before wrapping a reasoning
-/// body, so that the wrap and the rail agree.
+/// Columns a caller must subtract from the width before wrapping a reasoning body, so the wrap and
+/// the rail agree.
 pub const REASONING_RAIL_WIDTH: usize = 2;
 
-/// The model's reasoning, rendered so it can never be mistaken for its answer.
-///
-/// Three separate signals, because any one of them is lost somewhere: the word
-/// (`Thinking…` / `Thought for 4.2s`), the rail (`┃`), and the [`Role::Reasoning`]
-/// register (dim and italic — an attribute, because de-emphasis by **colour** is a
-/// no-op under a terminal-native palette).
-///
-/// `elapsed_ms` is `None` for a replayed session. It renders as `Thought` with
-/// no duration rather than `Thought for 0.0s`.
-///
-/// The body is laid **inside** the reasoning role: each line's own spans stack over it,
-/// so a code span in the model's working-out keeps its look and closes back to the
-/// block rather than to the terminal's default.
+/// The model's reasoning, rendered so it can never be mistaken for its answer: the word, the rail
+/// and the [`Role::Reasoning`] attribute — three signals, because any one is lost somewhere.
+/// `elapsed_ms` is `None` for a replay, which renders as `Thought` rather than `Thought for 0.0s`.
 pub fn reasoning(
     body: &[Line],
     running: bool,
@@ -518,10 +437,8 @@ pub fn reasoning(
         }
         return out;
     }
-    // The rail is two columns, so the body was wrapped two columns narrower.
-    // Getting this wrong is how a "reasoning" block ends up one row taller than
-    // the space reserved for it, which pushes everything below it by a line
-    // every frame.
+    // The body was wrapped two columns narrower than the rail: otherwise the block is one row
+    // taller than the space reserved for it and pushes everything below it down every frame.
     let shown = match cfg.mode {
         DisplayMode::Expanded => head_tail(body, cfg.budget.expanded_max, 0),
         _ => head_tail(body, cfg.budget.first_lines, cfg.budget.last_lines),
@@ -538,14 +455,11 @@ pub fn reasoning(
     out
 }
 
-/// **A file edit's before/after, as the host rendered it** — rano's `sidediff` edit view
-/// (split or unified, the operator's `/diff` toggle), already laid out at
-/// [`ToolCall::diff_width`] / the tool row's diff width.
+/// A file edit's before/after, as the host rendered it — rano's `sidediff` edit view, split or
+/// unified by the operator's toggle, already laid out at the width its row will have.
 ///
-/// `rows[0]` is the edit view's **name line** (the file's path); a widget drops it when its
-/// own header already names the file. Sanitise the two sides *before* diffing them — §3.1:
-/// a diff's sides are a file's bytes, and the two sides compared must be the two sides
-/// shown.
+/// `rows[0]` is the edit view's name line (the file's path); a widget drops it when its own header
+/// already names the file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditDiff {
     /// The path the excerpt is of.
@@ -557,8 +471,8 @@ pub struct EditDiff {
 }
 
 impl EditDiff {
-    /// The rows to draw under a header that says `target`: the name line dropped when
-    /// the header names the file, and the cap's disclosure appended.
+    /// The rows to draw under a header that says `target`: the name line dropped when the header
+    /// names the file, and the cap's disclosure appended.
     pub fn rows_under(&self, target: &str) -> Vec<Line> {
         let mut rows = self.rows.clone();
         if header_names_the_file(target, &self.path) && !rows.is_empty() {
@@ -598,30 +512,21 @@ pub enum CallState {
     },
 }
 
-/// **One live tool call, as a card** — the view model of letibot's `call_card`.
+/// One live tool call, as a card.
 ///
-/// It replaced `call_line`, which produced `● edit(call_7) — ok · 214 B` and could
-/// produce nothing else. A card keeps the disclosure and adds the three things a
-/// person watching a call is actually looking for: how long it has been running,
-/// what it last said, and — for a spill — what happened to the rest of the output.
+/// The body is empty while a call is in flight, and that is deliberate: a finished event carries
+/// digests and byte counts, never a payload, which reaches a head as a transcript row.
 ///
-/// **The body is empty while a call is in flight, and that is deliberate.** A finished
-/// event carries digests and byte counts, never a payload; the payload reaches a head
-/// only as a transcript row ([`super::tool_row::ToolRow`]).
-///
-/// **One clock** (letibot R13): `Running::elapsed_ms` must be computed from a start and a
-/// now on the same clock — the head's when the call has a head-side anchor, the log's when
-/// it does not. Mixing the log's start with the head's now reports the time since the
-/// started event rather than since the call started, which is a *smaller* number and so
+/// `Running::elapsed_ms` must be computed from a start and a now on the same clock. Mixing the
+/// log's start with the head's now reports the time since the started event, a smaller number that
 /// reads like progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
     /// The tool's name: `bash`, `read`, `edit`.
     pub name: String,
     pub call_id: String,
-    /// The bounded display target — the path, the pattern, the command line. Empty is
-    /// rendered as nothing: a digest is not a display string and a guess is worse than a
-    /// blank.
+    /// The bounded display target — a path, a pattern, a command line. Empty draws nothing: a
+    /// guess is worse than a blank.
     pub target: String,
     pub state: CallState,
     /// The before/after view, for an edit or a write the host holds both sides of.
@@ -633,10 +538,8 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    /// The width a host renders [`EditDiff::rows`] at for this card: the card indents its
-    /// body by two, and a transcript steps the whole card in by the activity indent after
-    /// it has rendered, so the panels are built for the width the row will actually have —
-    /// or the frame trims the right panel's tail off and the diff lies by omission.
+    /// The width to render [`EditDiff::rows`] at: the card indents its body by two and a transcript
+    /// steps the card in, so the panels are built for the width the row will actually have.
     pub fn diff_width(width: usize) -> usize {
         width.saturating_sub(2 + activity_indent(width))
     }
@@ -659,10 +562,8 @@ impl ToolCall {
                 full_bytes,
                 spill,
             } => {
-                // §8.3's disclosure, as prose and in units a person reads. It goes in
-                // the body rather than the header tail because the header tail is
-                // dropped whole when it does not fit, and "there is more, and here is
-                // how to get it" is not a line that may vanish on a narrow terminal.
+                // The disclosure goes in the body, not the header tail: the tail is dropped whole
+                // when it does not fit, and "there is more, here is how to get it" may not vanish.
                 if let Some(hash) = spill {
                     body.push(Line::raw(format!(
                         "{} of {} went to the model, the rest is kept — read_spill hash={}",
@@ -675,8 +576,7 @@ impl ToolCall {
                     body.push(Line::raw(bytes_human(*inline_bytes)));
                 }
                 match elapsed_ms {
-                    // A snapshot has no timestamps, and `0.0s` is a measurement that
-                    // was never taken rendered as one that was.
+                    // A snapshot has no timestamps: `0.0s` would be a measurement never taken.
                     None => Phase::Replayed {
                         outcome: outcome.clone(),
                     },
@@ -687,18 +587,16 @@ impl ToolCall {
                 }
             }
         };
-        // The before/after view. Split or unified is the operator's toggle and nothing
-        // else — no width gate, because the two answers a width gate ever gave were a
-        // cramped diff or no diff at all.
+        // Split or unified is the operator's toggle and nothing else — a width gate ever gave only
+        // a cramped diff or no diff at all.
         if card.verb.is_an_edit()
             && matches!(self.state, CallState::Finished { .. })
             && let Some(d) = &self.diff
         {
             body = d.rows_under(&card.target);
         }
-        // The decision this call was gated by, in the dim register: the approval is a
-        // fact about the call, not a stray note. Folded it is one line — who decided
-        // and how; open it adds what the oracle was shown and what it said back.
+        // The decision it was gated by, in the dim register. Folded it is one line — who decided and
+        // how; open it adds what the oracle was shown and what it said back.
         if let Some(d) = &self.decision {
             body.push(one(d.headline(), Role::Faint));
             if self.fold.is_open() {
@@ -715,8 +613,8 @@ impl ToolCall {
         let card = self.card(width);
         card.render(&CardConfig {
             width,
-            // Never `Collapsed`: the spill disclosure lives in the body and a fold is
-            // not a licence to hide it.
+            // Never `Collapsed`: the spill disclosure lives in the body and a fold is not a licence
+            // to hide it.
             mode: match self.fold {
                 Fold::Open => DisplayMode::Expanded,
                 Fold::Folded => DisplayMode::Truncated,
@@ -729,26 +627,19 @@ impl ToolCall {
 
 lines_widget!(ToolCall);
 
-/// **The indent a turn's working is stepped in by** — thinking and acting sit one step
-/// under the conversation (the operator's question and the model's answer), which gives a
-/// turn readable levels out of the vocabulary already on the screen, at no cost in colour.
+/// The indent a turn's working is stepped in by: thinking and acting sit one step under the
+/// conversation, which gives a turn readable levels from the vocabulary already on the screen.
 ///
-/// **Two columns, matching the reasoning rail's width**, so the page reads as one
-/// repeated step. Given up below sixty columns, where two columns out of every line is a
-/// bigger fraction than the hierarchy is worth.
+/// Two columns, matching the reasoning rail, so the page reads as one repeated step — given up
+/// below sixty columns, where it is a bigger fraction than the hierarchy is worth.
 pub fn activity_indent(w: usize) -> usize {
     if w >= 60 { REASONING_RAIL_WIDTH } else { 0 }
 }
 
-/// **The affordance that stands in for a tool call while the model is writing it.**
-///
-/// The defect this replaced: *"tool calls — i see `<function…` like strings first,
-/// then closing tag arrives and it becomes a toolcall."* What is left is the question
-/// that markup was accidentally answering — *is something happening?* — and this
-/// answers it without showing anybody a half-written `<parameter=`.
-///
-/// `now_ms` drives the spinner off a clock the host chose (the log's own, so a replay
-/// animates the way the live session did).
+/// The affordance that stands in for a tool call while the model is writing it: the question a
+/// half-written `<parameter=` accidentally answered — is something happening — without showing the
+/// markup. `now_ms` drives the spinner off the host's clock, so a replay animates as the live
+/// session did.
 pub struct WritingCall {
     pub now_ms: u64,
 }
@@ -759,8 +650,8 @@ impl WritingCall {
         truncate(
             &Line::new(vec![
                 Span::role(spin, Role::Pending),
-                // The space between the spinner and the words is unpainted, as letibot's
-                // row has always had it: two pending runs either side of a plain space.
+                // The space between the spinner and the words is unpainted: two pending runs either
+                // side of a plain space.
                 Span::raw(" "),
                 Span::role("writing a tool call", Role::Pending),
                 Span::role(" · ctrl-x for the raw form", Role::Faint),
@@ -776,12 +667,9 @@ impl WritingCall {
 
 lines_widget!(WritingCall);
 
-/// **The raw, unparsed text of a tool call, behind `ctrl-x`.**
-///
-/// Rendered as a labelled block rather than inline, because the whole point is that this
-/// is *not* the assistant speaking. Faint and fenced: it is evidence, and evidence that
-/// looks like prose is how the defect started. The text is the model's own markup, so it
-/// is foreign and is cleaned before it is wrapped.
+/// The raw, unparsed text of a tool call, behind `ctrl-x`: a labelled block rather than inline,
+/// because the whole point is that this is not the assistant speaking. It is foreign markup, so it
+/// is cleaned before it is wrapped.
 pub struct RawCall {
     pub raw: String,
 }
@@ -825,8 +713,6 @@ mod tests {
         c.header(cfg).plain()
     }
 
-    // ---- letibot `crates/ui/src/card.rs` tests ----
-
     #[test]
     fn the_header_names_what_was_acted_on_not_just_the_tool() {
         let c = Card::new("read", "call_7")
@@ -856,8 +742,7 @@ mod tests {
             });
         assert!(h(&running, &cfg()).contains("Running cargo test"));
         assert!(h(&done, &cfg()).contains("Ran cargo test"));
-        // And the elapsed time is there while it runs, which is the answer to
-        // "is it stuck".
+        // And the elapsed time is there while it runs, which is the answer to "is it stuck".
         assert!(h(&running, &cfg()).contains("4.3s"));
         // The mark and the verb carry their roles.
         let l = running.header(&cfg());
@@ -997,10 +882,8 @@ mod tests {
             assert!(c.header(&cfg).width() <= w, "{w}: {:?}", h(&c, &cfg));
         }
         let narrow = h(&c, &CardConfig { width: 44, ..cfg() });
-        // **The path keeps the half that identifies it, and the tail keeps its place.** A tail
-        // dropped whole takes the CLOCK with it, and the clock is the one number that says a
-        // running call is alive. What gives way is the SUBJECT, from the LEFT, because a path
-        // is recognised by where it ends.
+        // The path keeps the half that identifies it, and the tail keeps its place: a tail dropped
+        // whole takes the clock with it, so what gives way is the subject, from the left.
         assert!(narrow.contains("protocol.rs"), "{narrow}");
         assert!(
             narrow.contains("1.2s"),
@@ -1012,9 +895,8 @@ mod tests {
         );
     }
 
-    /// **R25: the head cuts the target to ITS OWN viewport, and 227 shows more than 80.**
-    /// More than one head may be attached to one session at different widths at the same
-    /// time, so this is the only layer that can decide what a reader sees.
+    /// The head cuts the target to its own viewport: more than one head may be attached at
+    /// different widths, so this is the only layer that can decide what a reader sees.
     #[test]
     fn the_head_cuts_a_long_target_to_its_own_viewport_and_says_so() {
         let target = format!(
@@ -1042,7 +924,7 @@ mod tests {
             assert!(s.contains('…'), "the cut is not disclosed: {s:?}");
             assert!(s.contains("900ms"), "the row lost its clock: {s:?}");
         }
-        // **And a target that fits is shown whole and marked not at all.**
+        // And a target that fits is shown whole and marked not at all.
         let short = Card::new("bash", "c1")
             .target("cargo test --workspace")
             .phase(Phase::Finished {
@@ -1110,8 +992,6 @@ mod tests {
         );
     }
 
-    // ---- letibot `app/tests/tools.rs`, at the card ----
-
     fn call(state: CallState) -> ToolCall {
         ToolCall {
             name: "bash".into(),
@@ -1124,8 +1004,7 @@ mod tests {
         }
     }
 
-    /// `a_running_tool_call_shows_how_long_it_has_been_running_and_what_it_last_said`:
-    /// started at 2.0s, progress at 6.2s, finished at 9.5s.
+    /// A running call says how long it has been going and what it last said.
     #[test]
     fn a_running_tool_call_shows_how_long_it_has_been_running_and_what_it_last_said() {
         let running = call(CallState::Running {
@@ -1152,7 +1031,7 @@ mod tests {
         assert!(screen.contains("214 B"), "{screen}");
     }
 
-    /// `a_running_tool_call_says_what_it_is_running_on`.
+    /// A running call renders its argument, not just its verb.
     #[test]
     fn a_running_tool_call_says_what_it_is_running_on() {
         let mut c = call(CallState::Running {
@@ -1167,7 +1046,7 @@ mod tests {
         );
     }
 
-    /// `a_spilled_result_reads_as_the_harness_working_not_as_damage`.
+    /// A spilled result reads as the harness working, not as damage.
     #[test]
     fn a_spilled_result_reads_as_the_harness_working_not_as_damage() {
         let mut c = call(CallState::Finished {
@@ -1184,7 +1063,7 @@ mod tests {
         assert!(screen.contains("the rest is kept"), "{screen}");
     }
 
-    /// `a_call_from_a_snapshot_has_no_duration_rather_than_a_zero_one`.
+    /// A call from a snapshot has no duration rather than a zero one.
     #[test]
     fn a_call_from_a_snapshot_has_no_duration_rather_than_a_zero_one() {
         let c = call(CallState::Finished {
@@ -1224,7 +1103,7 @@ mod tests {
         }
     }
 
-    /// `an_edit_card_names_its_file_once`.
+    /// An edit card names its file once.
     #[test]
     fn an_edit_card_names_its_file_once() {
         let count = |rows: &[String]| rows.iter().filter(|l| l.contains("a.rs")).count();
@@ -1241,7 +1120,7 @@ mod tests {
         assert!(!named.iter().any(|l| l.contains("64 B")), "{named:?}");
     }
 
-    /// `a_created_file_renders_as_all_right_panel_and_a_cap_says_so` (its cap half).
+    /// A capped excerpt says how long the file is now.
     #[test]
     fn a_capped_excerpt_says_how_long_the_file_is_now() {
         let mut c = edit_call("a.rs");
@@ -1253,7 +1132,7 @@ mod tests {
         );
     }
 
-    /// `a_non_edit_call_never_grows_a_second_panel`.
+    /// A non-edit call never grows a second panel.
     #[test]
     fn a_non_edit_call_never_grows_a_second_panel() {
         let mut c = edit_call("a.rs");

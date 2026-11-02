@@ -1,14 +1,9 @@
-//! **The cards that ask the person for something typed**: a provider key, a terminal's
-//! answer, a prompt, a secret (masked).
+//! The cards that ask the person for something typed: a provider key, a terminal's answer, a prompt,
+//! a secret (masked).
 //!
-//! Ported from letibot's `crates/tui/src/ui/cards/asks.rs`. Each card is the question; the
-//! text is typed into the composer's field below it (masked for a key and a secret — see
-//! [`super::composer::masked`] — in the open for a prompt), so none of these draws what is
-//! being typed.
-//!
-//! Registers: letibot painted the headlines `sgr::YELLOW` and the rest `sgr::DIM`. Here the
-//! headline is [`Role::Attention`] (yellow, bold: it exists to interrupt — it needs a person)
-//! and the rest [`Role::Faint`].
+//! Each card is the question; the text is typed into the composer's field below it, so none of these
+//! draws what is being typed. The headline is [`Role::Attention`]-adjacent yellow because it exists to
+//! interrupt — it needs a person — and the rest is [`Role::Faint`].
 
 use crate::render::Line;
 use crate::style::Role;
@@ -20,13 +15,11 @@ fn faint(s: &str, w: usize) -> Line {
 }
 
 fn headline(s: &str, w: usize) -> Line {
-    // Yellow, the register letibot's ask cards are drawn in — not the bold attention one.
+    // Yellow, the register the ask cards are drawn in — not the bold attention one.
     one(trim_to(s, w), Role::Pending)
 }
 
-/// **The key-ask card**: what is asking, and where the key goes.
-///
-/// letibot fills it from `App::key_ask` (`provider`).
+/// The key-ask card: what is asking, and where the key goes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyAsk {
     pub provider: String,
@@ -53,19 +46,12 @@ impl KeyAsk {
     }
 }
 
-/// **The card that asks before a pane is ended** — the daemon's own question about killing
-/// something, and never the program's question about itself.
+/// The card that asks before a pane is ended — the daemon's own question about killing something, and
+/// never the program's question about itself.
 ///
-/// # The words are the whole of the separation
-///
-/// The prompt card and this one can never be on the screen together, but a person has to know
-/// which one they are looking at *by reading it*, so the registers are as different as two
-/// cards can be: **this one names the program** and says what ending it does; **it quotes
-/// nothing the program wrote** (a confirmation that showed that text would look like the
-/// program's question); and **it spells both keys and says which is the default**, because a
-/// destructive confirmation that leaves the reader to guess is a trap.
-///
-/// letibot fills it from `TermAsk::line` (the program's command line).
+/// The words are the whole of the separation: this one names the program and says what ending it does,
+/// quotes nothing the program wrote, and spells both keys with which is the default — a destructive
+/// confirmation that leaves the reader to guess is a trap.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TermAsk {
     pub line: String,
@@ -79,8 +65,8 @@ impl TermAsk {
                 w,
             ),
             faint("  ending it kills the program and everything it started", w),
-            // Not Enter: that key is the prompt card's and the composer's, and a stray one must
-            // not be able to kill a program.
+            // Not Enter: that key is the prompt card's and the composer's, and a stray one must not be
+            // able to kill a program.
             faint(
                 "  y ends it  ·  any other key (esc) leaves it running — that is the default",
                 w,
@@ -89,24 +75,17 @@ impl TermAsk {
     }
 }
 
-/// **The prompt card: a command of the operator's own is waiting for a line.**
+/// The prompt card: a command of the operator's own is waiting for a line.
 ///
-/// The headline names the thing that is certain — **the command the operator typed** — because
-/// the daemon cannot know which process in a pipeline asked: `sudo apt install mc` is three
-/// programs and the question is the third one's. The program's own last line goes under it,
-/// quoted and never parsed.
-///
-/// **No deadline, and that is not an omission**: a command blocked on its stdin is blocked
-/// until somebody answers it, and a countdown invented here would be a number nobody measured.
-/// **Not masked, and not a secret**: the composer draws the line in the open. **And it says the
-/// manual way in** (`!send`), which needs no reading of the pipe at all.
-///
-/// letibot fills it from `PromptAsk { command, question, job }`.
+/// The headline names what is certain — the command the operator typed — because the daemon cannot
+/// know which process in a pipeline asked. The program's own last line goes under it, quoted and never
+/// parsed; there is no deadline, since a command blocked on its stdin is blocked until somebody
+/// answers. The card also says the manual way in (`!send`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptAsk {
     pub command: String,
-    /// The program's own last line. `None`: it has written nothing yet — a `read` blocked
-    /// before its first byte — and the card says so rather than showing an empty line.
+    /// The program's own last line. `None`: it has written nothing yet — a `read` blocked before its
+    /// first byte — and the card says so rather than showing an empty line.
     pub question: Option<String>,
     /// The job handle, so the row can be found in `/jobs`.
     pub job: String,
@@ -146,15 +125,10 @@ impl PromptAsk {
     }
 }
 
-/// **The password card**: what is asking, for which command, and the two keys.
+/// The password card: what is asking, for which command, and the two keys.
 ///
-/// **Two askers share this card**: sudo, through the askpass helper, and the daemon asking for
-/// a provider's API key, which sends no command. The headline says which; the masking, the keys
-/// and the countdown are the same.
-///
-/// letibot fills it from `SecretAsk { prompt, command, deadline }`, with
-/// `remaining_ms = deadline.saturating_sub(now_ms)` — saturating, so an expired one reads `0s
-/// left` rather than counting backwards.
+/// Two askers share it: sudo through the askpass helper, and the daemon asking for a provider's API
+/// key, which sends no command. The headline says which; masking, keys and countdown are the same.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SecretAsk {
     /// The asker's own words (`[sudo] password for dead:`).
@@ -166,13 +140,12 @@ pub struct SecretAsk {
 
 impl SecretAsk {
     pub fn lines(&self, w: usize) -> Vec<Line> {
-        // **The same countdown the gate card draws** (§1.6): one function, so the two cards
-        // cannot disagree about how long there is.
+        // The same countdown the gate card draws: one function, so the two cards cannot disagree about
+        // how long there is.
         let left = countdown(self.remaining_ms);
         let key = self.command.is_empty();
-        // **And it says the thing ONCE.** The operator, having just answered one: *"the ask is
-        // ugly as hell"*. The old first line read `sudo wants a password — [sudo] password for
-        // dead:` — the same fact twice, in the same weight, trailing off a colon.
+        // And it says it once: the headline names the asker, so the first line does not repeat the fact
+        // in the same weight, trailing off a colon.
         let mut out = vec![headline(
             if key {
                 "? an API key is needed"
@@ -181,12 +154,12 @@ impl SecretAsk {
             },
             w,
         )];
-        // **sudo's own words**, which name the account — faint and indented.
+        // sudo's own words, which name the account — faint and indented.
         for l in wrap(clean(&self.prompt).trim(), w.saturating_sub(2)) {
             out.push(one(format!("  {l}"), Role::Faint));
         }
-        // The command keeps its own rows — the thing being authorised. `run:` names it, where
-        // the old `for:` named nothing. A key ask has no command, so no row.
+        // The command keeps its own rows: `run:` names the thing being authorised. A key ask has no
+        // command, so no row.
         if !key {
             for l in wrap(
                 &format!("run: {}", clean_line(&self.command)),
@@ -195,9 +168,8 @@ impl SecretAsk {
                 out.push(one(format!("  {l}"), Role::Faint));
             }
         }
-        // **Short enough to survive a narrow terminal whole, keys first.** The old sentence ran
-        // past a hundred columns and a trim cuts from the end — which is where the countdown
-        // lives. Forty-two columns, so the countdown survives even a 44-column frame.
+        // Short enough to survive a narrow terminal whole, keys first: a trim cuts from the end, which
+        // is where the countdown lives.
         out.push(faint(
             &format!("  enter sends it · esc refuses · {left}"),
             w,
@@ -216,7 +188,6 @@ mod tests {
     use super::*;
     use crate::agent::testing::{drawn, plain, role_of};
 
-    /// letibot `app/tests/asks.rs::the_key_ask_is_the_secret_card_worded_for_a_key` (the card).
     #[test]
     fn the_key_ask_is_the_secret_card_worded_for_a_key() {
         let card = SecretAsk {
@@ -235,7 +206,7 @@ mod tests {
         assert!(!s.contains("run:"), "there is no command to name: {s}");
     }
 
-    /// letibot `app/tests/asks.rs::the_password_card_is_a_card_and_says_it_once`.
+    /// The same fact is said once, and never as sudo's when it is a key ask.
     #[test]
     fn the_password_card_is_a_card_and_says_it_once() {
         let card = SecretAsk {
@@ -250,7 +221,7 @@ mod tests {
         assert_eq!(s.matches("sudo wants a password").count(), 1, "{s}");
         assert!(s.contains("[sudo] password for dead:"), "{s}");
         assert!(s.contains("run: sudo apt install x"), "{s}");
-        // **The keys survive a narrow terminal along with the countdown.**
+        // The keys survive a narrow terminal along with the countdown.
         for w in [44usize, 60, 80, 200] {
             let rows = card.lines(w);
             let last = rows.last().unwrap();
@@ -264,7 +235,6 @@ mod tests {
         }
     }
 
-    /// letibot `app/tests/asks.rs::the_password_cards_countdown_is_seconds_and_not_a_second_epoch`.
     #[test]
     fn the_password_cards_countdown_is_the_ladder() {
         let at = |ms| {
@@ -285,8 +255,7 @@ mod tests {
         assert!(at(0).contains("0s left"));
     }
 
-    /// letibot `app/tests/asks.rs::a_prompt_card_owns_the_keys_shows_what_is_typed_and_never_becomes_a_secret`
-    /// (the card).
+    /// A prompt card names the command, quotes the program, and offers `!send`.
     #[test]
     fn a_prompt_card_names_the_command_quotes_the_program_and_offers_send() {
         let card = PromptAsk {
@@ -311,8 +280,7 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/asks.rs::a_question_from_the_run_takes_the_screen_back_from_the_confirmation`
-    /// (the card's words): the confirmation names the program, quotes nothing, spells the keys.
+    /// The confirmation names the program, quotes nothing, spells the keys.
     #[test]
     fn the_pane_confirmation_names_the_program_and_both_keys() {
         let rows = drawn(

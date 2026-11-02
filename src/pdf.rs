@@ -1,77 +1,35 @@
-//! **A PDF page, read off the disk**: how many pages the document has, one page as the
-//! PNG the kitty graphics protocol carries, and one page as text for a terminal that
-//! cannot draw pictures.
-//!
-//! # The rasterizer is the machine's, not ours
-//!
-//! A PDF is a program for a rasterizer, and carrying one is what `TODO.md` §19.2 ruled
-//! out for SVG: `pdfium` is tens of megabytes and a C++ toolchain. So the work is a
-//! tool's — `pdftoppm` from poppler first, `gs` second, `pdftotext` for text — and a
-//! machine with none of them gets a sentence naming what is missing, which is a better
-//! answer than a blank page.
-//!
-//! # One page per call, and that is the whole point
-//!
-//! [`page_png`] asks for **one page** (`-f n -l n`, `-dFirstPage -dLastPage`) and never
-//! the document: a fifty-page PDF must not cost fifty rasters because someone looked at
-//! page three. The index is zero-based here and one-based to the tools, and an index
-//! past the last page is refused by a sentence naming the count rather than by whatever
-//! a tool happens to say.
-//!
-//! # The bounds are the reason this file exists
-//!
-//! `image.rs` converts a picture in under two seconds with a few tens of MiB. A page is
-//! bigger work — a 600 dpi A4 page is 35 megapixels — so the numbers below are a page's
-//! and not a picture's, and **every one of them produces an error rather than a
-//! truncated page**: a half-written PNG drawn in a terminal is a lie about the document.
-//! [`run`] is `image.rs`'s shape (a bounded child, no pipe to block on, a sampled memory
-//! cap, a deadline, a file-size cap), repeated here because that file's helpers are
-//! private to it and it was not this change's to open up.
+//! A PDF page: the page count, one page as a PNG, and one page as text.
+//! The rasterizing is the tools' (`pdftoppm`, `gs`, `pdftotext`), not ours.
+//! Every call asks for one page, and every cap errors rather than truncating.
 
 use std::path::{Path, PathBuf};
 
-/// **How long one page may take**, render or text. `pdftoppm` measures ~70 ms on a text
-/// page at 150 dpi and ~80 ms at 600 dpi on this machine, and a scanned page is a second
-/// or two: ten seconds is past anything a page costs and short enough that a tool which
-/// is wedged rather than slow is a pause, not a freeze — the caller may be the frame's
-/// own thread.
+/// How long one page may take: past anything a page costs, short enough that a
+/// wedged tool is a pause — the caller may be the frame's own thread.
 pub const RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// **How much memory a renderer may hold**, sampled as it runs. A 600 dpi A4 page is 35
-/// megapixels, 140 MiB as RGBA, with the page's images and the interpreter's heap beside
-/// it; a gigabyte is past any single page and still short of swapping a small machine.
+/// Sampled memory cap: past any single page, short of swapping a small machine.
 const RENDER_RSS_CAP: u64 = 1024 * 1024 * 1024;
 
-/// The kernel's half of that cap, set **twice** the sampler's budget: a rasterizer maps
-/// more than it holds (fonts, the file, the page's images), so an address-space refusal
-/// at the sampler's number would refuse pages that fit.
+/// The kernel's half, twice the sampler's budget: a rasterizer maps more than it holds.
 const RENDER_ADDRESS_SPACE: u64 = 2 * 1024 * 1024 * 1024;
 
-/// The most one page may be as a PNG. A 600 dpi A4 page of photographs is the worst case
-/// at a few tens of MiB; 64 MiB is past what a terminal can hold as a picture and short
-/// of filling a disk with one.
+/// The most one page may be as a PNG; past what a terminal can hold as a picture.
 const RENDER_OUTPUT_CAP: u64 = 64 * 1024 * 1024;
 
-/// The most one page may be as text. A page of prose is a few kilobytes, so four
-/// megabytes is a thousand of them — anything past it is a page count that lied.
+/// The most one page may be as text; past it, the page count lied.
 const TEXT_OUTPUT_CAP: u64 = 4 * 1024 * 1024;
 
-/// The most this file will read itself. The page tree is parsed out of the bytes when
-/// `pdfinfo` is not there, and 64 MiB is a large scanned book and far more than a page
-/// tree needs; a renderer reads the file on its own account, under its own cap.
+/// The most this file reads itself, for the parse path when `pdfinfo` is absent.
 const MAX_PARSE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The dpi a page may be rendered at, low end: a thumbnail, below which the page is not
-/// legible and the render is not worth a subprocess.
+/// The low end of renderable dpi: below it a page is not legible.
 pub const MIN_DPI: u32 = 24;
 
-/// The dpi a page may be rendered at, high end: past the sharpest terminal, and where the
-/// raster gets slower than a reader's patience without showing anything more.
+/// The high end: past the sharpest terminal, slower without showing more.
 pub const MAX_DPI: u32 = 600;
 
-/// **Which route answered a page count.** [`page_count`] takes `pdfinfo` when the machine
-/// has it and parses the page tree's `/Count` out of the bytes when it does not, and a
-/// caller that wants to know which of those it got reads [`last_count`].
+/// Which route answered a page count; read back through [`last_count`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Counted {
     /// `pdfinfo` on PATH, asked, and it answered.
@@ -89,16 +47,13 @@ impl Counted {
     }
 }
 
-// The route the last `page_count` took: 0 for none, then `Counted::code`. **Per thread, not per
-// process**, so two callers counting at once cannot read each other's route. A macro cannot carry
-// a doc comment, which is why this is not one.
+// The route the last `page_count` took, per thread. A macro cannot carry a doc
+// comment, which is why this is not one.
 std::thread_local! {
     static LAST_COUNT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
-/// **Which route the last [`page_count`] took**, or `None` if it has not answered yet: the
-/// count is a `u32` and its signature says nothing more, so this is where a caller that
-/// wants to say which one answered finds it.
+/// Which route the last [`page_count`] took, or `None` before one answered.
 pub fn last_count() -> Option<Counted> {
     match LAST_COUNT.with(std::cell::Cell::get) {
         1 => Some(Counted::PdfInfo),
@@ -111,39 +66,27 @@ fn record(which: Counted) {
     LAST_COUNT.with(|c| c.set(which.code()));
 }
 
-/// **How many pages `path` has**, by `pdfinfo` when it is on PATH and by the page tree's
-/// `/Count` in the bytes when it is not (or when `pdfinfo` will not read the file). Which
-/// one answered is recorded for [`last_count`].
-///
-/// A file that is not a PDF is refused before either is asked, by a sentence naming it.
+/// How many pages `path` has: `pdfinfo` when it is on PATH, the page tree's `/Count`
+/// in the bytes otherwise. Which one answered is recorded for [`last_count`].
 pub fn page_count(path: &Path) -> Result<u32, String> {
     let (pages, which) = count_with(path, None, Limits::text())?;
     record(which);
     Ok(pages)
 }
 
-/// **One page as the PNG the terminal takes**: `page_index` is **zero-based**, `dpi` is
-/// how many pixels per inch of paper it is drawn at, and the bytes are the file the
-/// renderer wrote — never a document's worth of pages, and never a truncated one.
-///
-/// `pdftoppm` is asked first and `gs` when it refuses; an index past the last page, a dpi
-/// outside [`MIN_DPI`]..=[`MAX_DPI`] and a machine with neither tool are all errors that
-/// name what is wrong.
+/// One page as a PNG; `page_index` is zero-based. `pdftoppm` first, `gs` second; a
+/// past-the-end index, a dpi outside [`MIN_DPI`]..=[`MAX_DPI`] and a machine with
+/// neither tool are all errors naming what is wrong.
 pub fn page_png(path: &Path, page_index: u32, dpi: u32) -> Result<Vec<u8>, String> {
     page_png_with(path, page_index, dpi, Limits::page(), None)
 }
 
-/// **One page as text**, for a terminal that cannot draw pictures: `pdftotext -f n -l n`,
-/// one page and not the document. `page_index` is zero-based, as for [`page_png`].
+/// One page as text; `page_index` is zero-based, as for [`page_png`].
 pub fn page_text(path: &Path, page_index: u32) -> Result<String, String> {
     page_text_with(path, page_index, Limits::text(), None)
 }
 
-/// **The caps one call runs under**, as a value rather than constants read where they are
-/// used: the defaults are the page's, and a test tightens one to watch a guard fire
-/// without a real render being slow, fat or enormous. `rss` and `address_space` are
-/// separate because the sampler and the kernel are separate guards, whichever answers
-/// first.
+/// The caps one call runs under, as a value so a test can tighten one.
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     timeout: std::time::Duration,
@@ -164,8 +107,7 @@ impl Limits {
         }
     }
 
-    /// A page of text, and the tools that only read and print: the same deadline and the
-    /// same memory, and a cap that suits a page of prose.
+    /// A page of text: the same deadline and memory, a smaller output cap.
     fn text() -> Limits {
         Limits {
             output: TEXT_OUTPUT_CAP,
@@ -174,21 +116,18 @@ impl Limits {
     }
 }
 
-/// **One way to answer**, spelled but not yet run. `{out}` in an argument is the file the
-/// tool may write, and `{stem}` is that name without its extension (`pdftoppm
-/// -singlefile` appends `.png` to the prefix it is given, so it is handed the stem).
+/// One way to answer, spelled but not run. `{out}` is the file the tool may write;
+/// `{stem}` is that name without its extension (`pdftoppm -singlefile` appends `.png`).
 #[derive(Debug, Clone)]
 struct Cmd {
     program: String,
     args: Vec<String>,
-    /// The answer is the tool's **stdout** (`pdfinfo` prints) rather than a file it was
-    /// told to write (`pdftoppm` draws).
+    /// The answer is the tool's stdout (`pdfinfo`) rather than a file (`pdftoppm`).
     prints: bool,
 }
 
-/// **The renderers for one page, in the order they are tried** — both of them, whether or
-/// not this machine has them, so the argv can be read and tested without either being
-/// installed. `page_index` is zero-based here and one-based to the tools.
+/// The renderers for one page, in the order tried — both listed whether or not the
+/// machine has them, so the argv can be tested without either installed.
 fn renderers(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
     let page = (page_index + 1).to_string();
     let file = input.to_string_lossy().into_owned();
@@ -231,9 +170,8 @@ fn renderers(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
     ]
 }
 
-/// **The renderers, told to write PPM** — which is `pdftoppm`'s own default output and a
-/// fifteen-byte header in front of raw RGB. A plugin that wants pixels should not be handed a
-/// compressed file and a decoder: the host had the pixels one step earlier.
+/// The renderers, told to write PPM: a fifteen-byte header in front of raw RGB, so a
+/// plugin wanting pixels needs no decoder.
 fn renderers_rgb(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
     let page = (page_index + 1).to_string();
     let file = input.to_string_lossy().into_owned();
@@ -273,17 +211,13 @@ fn renderers_rgb(input: &Path, page_index: u32, dpi: u32) -> Vec<Cmd> {
     ]
 }
 
-/// **One page as raw RGB**: `(width, height, rgb)`, ready to be a picture without a decoder
-/// between. The same bounds as [`page_png`] — one page, its own deadline, its own caps —
-/// because the only difference is what the renderer is asked to write.
+/// One page as raw RGB `(width, height, rgb)`, under the same bounds as [`page_png`].
 pub fn page_rgb(path: &Path, page_index: u32, dpi: u32) -> Result<(u32, u32, Vec<u8>), String> {
     let ppm = page_raster(path, page_index, dpi, Limits::page(), None)?;
     ppm_to_rgb(&ppm)
 }
 
-/// [`page_png`] with the caps and the renderers a caller chooses. `None` asks the
-/// machine; a test hands in its own stand-in so the guards are exercised without a
-/// converter being installed.
+/// [`page_png`] with caller-chosen caps and renderers; `None` asks the machine.
 fn page_png_with(
     path: &Path,
     page_index: u32,
@@ -293,9 +227,8 @@ fn page_png_with(
 ) -> Result<Vec<u8>, String> {
     checked(path)?;
     checked_dpi(dpi)?;
-    // The index is checked against the document, not left to the tool: `pdftoppm` says
-    // "wrong page range" and exits 99, which is a sentence about a range and not about
-    // this file.
+    // Checked here, not left to the tool: pdftoppm's "wrong page range" is about a
+    // range, not this file.
     let pages = page_count(path)?;
     if page_index >= pages {
         return Err(page_refused(page_index, pages));
@@ -328,14 +261,12 @@ fn page_png_with(
                 }
                 return Ok(bytes);
             }
-            // The next candidate is asked, so a present-but-useless tool does not stand
-            // in the way of one that works.
+            // The next candidate is asked, so a useless tool does not stand in the way.
             Run::Refused(e) => {
                 last = e;
                 let _ = std::fs::remove_file(&out);
             }
-            // A deadline or a cap is not a refusal: asking the next tool would spend the
-            // same wait again.
+            // A deadline or a cap is not a refusal: the next tool would spend the same wait.
             Run::Stopped(e) => {
                 let _ = std::fs::remove_file(&out);
                 return Err(e);
@@ -346,18 +277,15 @@ fn page_png_with(
     Err(last)
 }
 
-/// **The whole document as markdown**, in one converter call: `pdftotext -layout` prints every page
-/// separated by a form feed, so a fifty-page document is one process rather than fifty. Each page
-/// becomes a heading and its laid-out text a fenced block, which is what a terminal renders at the
-/// reader's own font size - the thing a page rendered as a picture cannot do.
+/// The whole document as markdown, in one `pdftotext -layout` call: a heading a page
+/// and its laid-out text a fenced block, rendered at the reader's own font size.
 pub fn document_markdown(path: &Path, title: &str) -> Result<String, String> {
     checked(path)?;
     let pages = page_count(path)?;
     let file = path.to_string_lossy().into_owned();
     let cmd = Cmd {
         program: "pdftotext".to_string(),
-        // `-layout` keeps columns and tables as the page has them; `-` writes to stdout, which
-        // `run` reads back as this call's answer.
+        // `-layout` keeps columns and tables; `-` writes to stdout, which `run` reads back.
         args: vec!["-layout".to_string(), file, "-".to_string()],
         prints: true,
     };
@@ -375,9 +303,7 @@ pub fn document_markdown(path: &Path, title: &str) -> Result<String, String> {
     Ok(markdown_of(title, &text, pages))
 }
 
-/// **The markdown a document becomes**: a title, then a heading a page and the page's own layout
-/// inside a fence, so the terminal's renderer keeps the spacing it took the extractor a call to
-/// preserve. A blank page is a heading with nothing under it, which is honest about the document.
+/// A title, then a heading a page and the page's own layout inside a fence.
 fn markdown_of(title: &str, text: &str, pages: u32) -> String {
     let mut out = format!("# {title}\n");
     let mut seen = 0u32;
@@ -394,8 +320,7 @@ fn markdown_of(title: &str, text: &str, pages: u32) -> String {
     out
 }
 
-/// [`page_rgb`] with the caps and the renderers a caller chooses: the file the renderer wrote,
-/// unparsed. Split out so a test can hand in a stand-in and read the bytes back.
+/// [`page_rgb`] with caller-chosen caps and renderers: the bytes the renderer wrote.
 fn page_raster(
     path: &Path,
     page_index: u32,
@@ -447,8 +372,7 @@ fn page_raster(
     Err(last)
 }
 
-/// **A PPM's header and its pixels**, as `(width, height, rgb)`. `P6` only: a `P3` (ASCII) or a
-/// 16-bit `maxval` is refused by name, because neither is what a terminal takes.
+/// A P6 PPM as `(width, height, rgb)`; P3 and 16-bit `maxval` are refused by name.
 fn ppm_to_rgb(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut fields: Vec<String> = Vec::new();
     let mut at = 0usize;
@@ -524,9 +448,7 @@ fn page_text_with(
     let cmd = tool.unwrap_or_else(|| Cmd {
         program: "pdftotext".to_string(),
         args: vec![
-            // **`-layout`, because the paragraph breaks are in it.** Without it a page comes back
-            // with two blank lines where the document had nine, and a reader joining the rest
-            // gets one wall of prose.
+            // `-layout` carries the paragraph breaks; without it the page is one wall of prose.
             "-layout".to_string(),
             "-f".to_string(),
             page.clone(),
@@ -553,10 +475,8 @@ fn page_text_with(
     result
 }
 
-/// **The file itself, before any tool is asked about it**: it is there, it is a file, and
-/// its first kilobyte says `%PDF-`. The signature is checked here rather than left to the
-/// tools so a text file named `.pdf` is refused by a sentence naming the file whether or
-/// not poppler is installed.
+/// The file, before any tool is asked: present, a file, and starting with `%PDF-`, so
+/// a text file named `.pdf` is refused whether or not poppler is installed.
 fn checked(path: &Path) -> Result<(), String> {
     use std::io::Read;
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -578,9 +498,8 @@ fn checked(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// **A dpi the caller may ask for**, or a sentence saying why not. It is refused rather
-/// than clamped: a caller that asked for 1200 and got 600 would draw a picture at a size
-/// it never asked for and never be told.
+/// A dpi the caller may ask for. Refused, not clamped: a silent clamp draws a size
+/// the caller never asked for.
 fn checked_dpi(dpi: u32) -> Result<u32, String> {
     if !(MIN_DPI..=MAX_DPI).contains(&dpi) {
         return Err(format!(
@@ -592,8 +511,7 @@ fn checked_dpi(dpi: u32) -> Result<u32, String> {
     Ok(dpi)
 }
 
-/// The sentence for an index past the last page: it names the index, the count and the
-/// numbering, so a caller that counted from one can see what happened.
+/// The sentence for an index past the last page: index, count and the numbering.
 fn page_refused(page_index: u32, pages: u32) -> String {
     if pages == 0 {
         return format!("page {page_index}: the document has no pages");
@@ -605,9 +523,8 @@ fn page_refused(page_index: u32, pages: u32) -> String {
     )
 }
 
-/// **How many pages, and which route said so**: `pdfinfo` when it is on PATH and answers,
-/// the page tree otherwise. A `pdfinfo` that is present and refuses (an encrypted file, a
-/// broken one) falls through to the bytes rather than failing the count.
+/// The count and which route said so; a `pdfinfo` that refuses (encrypted, broken)
+/// falls through to the bytes.
 fn count_with(path: &Path, pdfinfo: Option<Cmd>, limits: Limits) -> Result<(u32, Counted), String> {
     checked(path)?;
     let tool = match pdfinfo {
@@ -660,8 +577,7 @@ fn pages_line(bytes: &[u8]) -> Option<u32> {
         .and_then(|n| n.trim().parse().ok())
 }
 
-/// The bytes of the document, for the parse path — capped, because this is the one place
-/// this file holds a whole PDF in memory.
+/// The document's bytes for the parse path, capped: the one place a whole PDF is held.
 fn read_for_parse(path: &Path) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if meta.len() > MAX_PARSE_BYTES {
@@ -675,13 +591,9 @@ fn read_for_parse(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// **The page count out of the bytes**: the `/Count` of the page tree's root, or — when
-/// the tree is not in the clear — the `/Type /Page` objects themselves.
-///
-/// The root of the tree is the one dictionary that is `/Type /Pages` and carries a
-/// `/Count`; an intermediate node carries one too, of its own subtree, so the largest of
-/// them is the document. A file whose objects are in a compressed object stream has no
-/// page tree in the clear at all, and that is a sentence rather than a guess.
+/// The page count out of the bytes: the largest `/Count` on a `/Type /Pages` dictionary
+/// (intermediate nodes count only their subtree), or the `/Type /Page` objects when the
+/// tree is not in the clear.
 fn count_from_bytes(bytes: &[u8]) -> Result<u32, String> {
     let mut best: Option<u32> = None;
     for at in find_all(bytes, b"/Type") {
@@ -689,8 +601,7 @@ fn count_from_bytes(bytes: &[u8]) -> Result<u32, String> {
         if !bytes[after..].starts_with(b"/Pages") {
             continue;
         }
-        // The enclosing dictionary: back to the nearest `<<`, forward to the nearest
-        // `>>`, so `/Count` is found whether it is written before `/Type` or after it.
+        // The enclosing dictionary, so `/Count` is found before or after `/Type`.
         let start = rfind(bytes, b"<<", at).unwrap_or(0);
         let end = find(bytes, b">>", after).unwrap_or(bytes.len());
         if let Some(n) = count_in(&bytes[start..end]) {
@@ -785,22 +696,17 @@ enum Run {
     Stopped(String),
 }
 
-/// **Run one tool, watched.** It gets a memory cap, a file-size cap and a wall-clock
-/// deadline; it is sampled as it runs and killed when it passes either, and its own exit
-/// is what says whether the file it wrote is the answer.
-///
-/// **No pipes and no shell**: its own words go nowhere, its answer goes to a *file* when
-/// it prints (so a pipe nobody drains cannot block it), and every argument is passed to
-/// the program as it stands — a path with a space or a `;` in it is a path.
+/// Run one tool, watched: memory cap, file-size cap, deadline, sampled and killed as
+/// it runs. No pipes and no shell — the answer goes to a file, so a pipe nobody
+/// drains cannot block it.
 fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
     let program = cmd.program.as_str();
     if program.is_empty() {
         return Run::Refused("the renderer command is empty".to_string());
     }
     let shown = out.to_string_lossy().into_owned();
-    // The stem is the name without whatever extension this call writes, which is `.png` for a
-    // picture and `.ppm` for pixels. Hard-coding one of them makes the tool write
-    // `name.ppm.ppm`, which then looks like a renderer that wrote nothing.
+    // The name without this call's extension; hard-coding one makes the tool write
+    // `name.ppm.ppm`, which looks like a renderer that wrote nothing.
     let stem = std::path::Path::new(&shown)
         .with_extension("")
         .to_string_lossy()
@@ -824,9 +730,8 @@ fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
     } else {
         child.stdout(std::process::Stdio::null());
     }
-    // **The kernel's half of the caps**, where the kernel keeps them: an address space and
-    // a file size the child cannot pass even if the sampler below never runs. Best effort
-    // — a platform that will not take them still has the sampler and the deadline.
+    // The kernel's half, best effort: a platform that refuses still has the sampler
+    // and the deadline.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -858,8 +763,7 @@ fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Run::Done,
             Ok(Some(status)) => {
-                // A file at the cap is `RLIMIT_FSIZE` having fired: the tool did not
-                // refuse the page, it was writing one bigger than we allow.
+                // A file at the cap is `RLIMIT_FSIZE` having fired, not a refusal.
                 let wrote = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
                 if wrote >= limits.output {
                     return Run::Stopped(format!(
@@ -878,9 +782,8 @@ fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
             Ok(None) => {}
             Err(e) => return Run::Refused(format!("{program}: {e}")),
         }
-        // **Sampled, not assumed**: the memory is read off the process itself while it
-        // runs, because a renderer that has run away is one the kernel will not stop by
-        // itself on every platform.
+        // Sampled off the process itself: the kernel will not stop a runaway renderer
+        // on every platform.
         if sampled.elapsed() >= std::time::Duration::from_millis(25) {
             sampled = std::time::Instant::now();
             if let Some(rss) = rss(child.id())
@@ -912,10 +815,7 @@ fn stop(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// **A process's resident memory in bytes**, or `None` where this platform will not say.
-/// `/proc/<pid>/statm` on Linux, `proc_pidinfo` on macOS — the same two answers
-/// `image.rs` reads, and a `None` here leaves the kernel's cap and the deadline as the
-/// guards.
+/// A process's resident memory in bytes, or `None` where the platform will not say.
 fn rss(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -930,9 +830,8 @@ fn rss(pid: u32) -> Option<u64> {
     {
         let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
         let want = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
-        // SAFETY: the buffer is this struct and `want` is exactly its size; the call
-        // answers the number of bytes it wrote, and anything short of `want` is a
-        // process this cannot describe (gone, or not ours).
+        // SAFETY: the buffer is this struct and `want` exactly its size; anything
+        // short of `want` is a process this cannot describe.
         let got = unsafe {
             libc::proc_pidinfo(
                 pid as libc::c_int,
@@ -951,8 +850,7 @@ fn rss(pid: u32) -> Option<u64> {
     }
 }
 
-/// Whether `program` is on PATH and executable. A name with a `/` in it is a path and is
-/// tried as one.
+/// Whether `program` is on PATH and executable; a name with a `/` is tried as a path.
 fn on_path(program: &str) -> bool {
     let is_exe = |p: &Path| {
         let Ok(meta) = std::fs::metadata(p) else {
@@ -979,9 +877,8 @@ fn on_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// **What a tool wrote, read back**: the file, refused when it is empty, past the cap or
-/// not there at all. The cap is checked again here because `RLIMIT_FSIZE` is the kernel's
-/// best effort rather than a promise.
+/// What a tool wrote, refused when empty, past the cap or missing — `RLIMIT_FSIZE` is
+/// best effort, so the cap is checked again here.
 fn read_out(path: &Path, cap: u64, what: &str) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("the {what} wrote no file: {e}"))?;
     if meta.len() == 0 {
@@ -1008,8 +905,7 @@ fn size(bytes: u64) -> String {
     }
 }
 
-/// The file a render is written to, in the temp directory: the process id and a counter,
-/// so two pages of two documents cannot write over one another.
+/// The temp file a render writes to: pid and counter, so two pages cannot collide.
 fn temp_file(tag: &str, ext: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1020,9 +916,7 @@ fn temp_file(tag: &str, ext: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// **A PDF built here**, page by page: nothing on the machine is needed to make one,
-    /// and its objects are in the clear so the parsing path can be exercised without
-    /// poppler. One word per page, so a page's text and a page's raster can be told apart.
+    /// A PDF built in the clear, one word a page: the parse path runs without poppler.
     pub(super) fn fixture(words: &[&str]) -> Vec<u8> {
         let font = 3 + words.len() as u32 * 2;
         let kids: Vec<String> = (0..words.len())
@@ -1102,8 +996,7 @@ mod tests {
         path
     }
 
-    /// A PNG-shaped buffer: signature and a real IHDR carrying `w` and `h`. Nothing here
-    /// decodes a PNG, so the rest need not be one.
+    /// A PNG-shaped buffer: signature and a real IHDR. Nothing here decodes one.
     fn png_header(w: u32, h: u32) -> Vec<u8> {
         let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
         v.extend_from_slice(&13u32.to_be_bytes());
@@ -1121,8 +1014,7 @@ mod tests {
         (be(16), be(20))
     }
 
-    /// A stand-in for a tool: a shell script, so the guards can be watched where poppler
-    /// and ghostscript are not — **Linux and macOS alike**, which is why it is `sh`.
+    /// A stand-in tool: a shell script, so guards are watched without poppler or gs.
     fn script(d: &TempDir, name: &str, body: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         let path = d.0.join(name);
@@ -1146,9 +1038,7 @@ mod tests {
         cmd.args.get(at + 1).map(String::as_str)
     }
 
-    /// **The page tree is read in either order, and the page objects answer when it is
-    /// not there.** This is the parsing path — no converter, no `pdfinfo`, nothing but
-    /// the bytes — so it runs on every machine.
+    /// The page tree is read in either order; the page objects answer when it is not.
     #[test]
     fn the_page_tree_is_read_in_either_order() {
         assert_eq!(
@@ -1183,7 +1073,6 @@ mod tests {
         assert!(e.contains("no page tree"), "{e}");
         let e = count_from_bytes(b"not a pdf at all").unwrap_err();
         assert!(e.contains("no page tree"), "{e}");
-        // And the fixture itself, one page and three.
         assert_eq!(count_from_bytes(&fixture(&["alpha"])).unwrap(), 1);
         assert_eq!(
             count_from_bytes(&fixture(&["alpha", "bravo", "charlie"])).unwrap(),
@@ -1191,9 +1080,7 @@ mod tests {
         );
     }
 
-    /// **The count is right, and it says which route gave it.** On a machine with
-    /// `pdfinfo` the answer comes from it; on one without, from the bytes; either way the
-    /// document has three pages.
+    /// The count is right and names the route that answered, whatever the machine has.
     #[test]
     fn the_count_is_right_and_names_the_route_that_answered() {
         let d = temp_dir("count");
@@ -1209,7 +1096,6 @@ mod tests {
             },
             "the route is the one this machine has"
         );
-        // The same document, counted by the bytes, whatever the machine has.
         assert_eq!(count_with(&pdf, None, Limits::text()).unwrap().0, 3);
         // One page is one page, so nothing here is a constant.
         let other = temp_dir("count-one");
@@ -1217,9 +1103,7 @@ mod tests {
         assert_eq!(count_with(&one, None, Limits::text()).unwrap().0, 1);
     }
 
-    /// **`pdfinfo` is preferred, and a `pdfinfo` that cannot read the file falls through
-    /// to the bytes.** Both halves are watched with a stand-in, so neither depends on what
-    /// this machine has installed.
+    /// `pdfinfo` is preferred; one that cannot read the file falls through to the bytes.
     #[test]
     fn pdfinfo_is_preferred_and_the_bytes_answer_when_it_cannot() {
         let d = temp_dir("prefer");
@@ -1250,9 +1134,7 @@ mod tests {
         );
     }
 
-    /// **One page is asked for, and never the document.** The argv is read back, so this
-    /// holds whether or not either renderer is installed: `-f` and `-l` are the same page,
-    /// and so are ghostscript's `-dFirstPage` and `-dLastPage`.
+    /// One page is asked for, never the document; the argv is read back, installed or not.
     #[test]
     fn one_page_is_asked_for_and_never_the_document() {
         let path = Path::new("/d/a b.pdf");
@@ -1293,9 +1175,7 @@ mod tests {
         assert!(gs.args.iter().any(|a| a == "-dLastPage=2"));
     }
 
-    /// **The page asked for is the page that comes back**, which is the bug a "render page
-    /// one always" would be: the stand-in writes a different picture per page number, and
-    /// the size read out of each proves which one arrived.
+    /// The page asked for is the page written: each stand-in page draws a different size.
     #[test]
     fn the_page_asked_for_is_the_page_written() {
         let d = temp_dir("pages");
@@ -1325,8 +1205,7 @@ mod tests {
         assert_ne!(one, two);
     }
 
-    /// **The text of a page is that page's text**: the page number reaches the extractor,
-    /// and what it wrote is what comes back.
+    /// The text of a page is that page's text.
     #[test]
     fn the_text_of_a_page_is_that_pages_text() {
         let d = temp_dir("text");
@@ -1359,8 +1238,7 @@ mod tests {
         assert!(e.contains("is not on PATH"), "{e}");
     }
 
-    /// **An index past the last page is refused with the count in the sentence**, by both
-    /// functions, before any tool is asked.
+    /// An index past the last page is refused with the count, before any tool is asked.
     #[test]
     fn a_page_past_the_last_is_refused_with_the_count() {
         let d = temp_dir("range");
@@ -1382,8 +1260,7 @@ mod tests {
         assert!(e.contains("no pages"), "{e}");
     }
 
-    /// **A dpi outside the range is refused, not clamped**: a caller that asked for 1200
-    /// and silently got 600 would draw a page at a size it never asked for.
+    /// A dpi outside the range is refused, not clamped.
     #[test]
     fn a_dpi_outside_the_range_is_refused() {
         let d = temp_dir("dpi");
@@ -1401,8 +1278,7 @@ mod tests {
         assert_eq!(checked_dpi(150), Ok(150));
     }
 
-    /// **A renderer that hangs is killed and said to have been** — the reader gets a
-    /// sentence, not a frozen editor. The deadline is the guard; the sleep is longer.
+    /// A hanging renderer is killed by the deadline, not a frozen editor.
     #[test]
     fn a_renderer_that_hangs_is_stopped_by_the_clock() {
         let d = temp_dir("hang");
@@ -1423,9 +1299,7 @@ mod tests {
         );
     }
 
-    /// **A renderer that writes past the cap is stopped, not truncated**: the file it was
-    /// writing is at the cap, the kernel refused the next write, and the caller is told —
-    /// a page cut in half is worse than no page.
+    /// A renderer writing past the cap is stopped, not truncated.
     #[test]
     fn a_renderer_that_writes_past_the_cap_is_stopped() {
         let d = temp_dir("big");
@@ -1440,31 +1314,22 @@ mod tests {
             ..Limits::page()
         };
         let r = page_png_with(&pdf, 0, 150, caps, Some(vec![stand_in(&sh, &["{out}"])]));
-        // **No page comes back**, which is the guarantee. Which guard wins is the OS's business:
-        // the kernel's file cap stops the tool (`was stopped`, with the size in the sentence), and
-        // a tool that gives up on its own write exits non-zero instead. Asserting only the first
-        // spelling made this test fail about one full run in ten.
         let e = r.expect_err("a renderer that writes past the cap must not hand back a page");
-        // **No page comes back**, which is the guarantee. Which of three guards or exits says so
-        // is the OS's business, and all three have been observed on this machine: the kernel's
-        // file cap stops the tool (`was stopped`), a tool that gives up on its write exits
-        // non-zero (`could not read it`), and a tool killed mid-write leaves something that is
-        // not a PNG. Asserting one spelling made this fail about one full run in ten.
+        // Which of the guards says so is the OS's business; asserting one spelling
+        // made this fail about one run in ten.
         assert!(
             e.contains("was stopped") || e.contains("could not read it") || e.contains("not a PNG"),
             "{e}"
         );
     }
 
-    /// **A renderer that goes for memory is killed before the machine notices.** The
-    /// kernel's cap is lifted out of the way for this one, so what stops it is the
-    /// sampler — the guard that has to work where the kernel will not keep one.
+    /// A renderer that goes for memory is stopped by the sampler; the kernel's cap is
+    /// lifted out of the way for this one.
     #[test]
     fn a_renderer_that_runs_away_with_memory_is_stopped() {
         let d = temp_dir("fat");
         let pdf = document(&d, &["alpha", "bravo", "charlie"]);
-        // A shell holding 8 MB in a variable: `/dev/zero` through `tr`, which is on both of
-        // rano's platforms and needs nothing installed.
+        // A shell holding 8 MB in a variable, via tools both platforms have.
         let sh = script(
             &d,
             "fat.sh",
@@ -1481,9 +1346,7 @@ mod tests {
         assert!(e.contains("(the cap is 2 MiB)"), "{e}");
     }
 
-    /// **A renderer that refuses is passed over for the next one**, and when every one
-    /// refuses, the sentence names the last — a present-but-useless tool does not stand in
-    /// the way of one that works.
+    /// A refusing renderer is passed over for the next; when all refuse, the last is named.
     #[test]
     fn a_renderer_that_refuses_is_passed_over() {
         let d = temp_dir("fallback");
@@ -1532,9 +1395,7 @@ mod tests {
         assert!(e.contains("not a PNG"), "{e}");
     }
 
-    /// **A file that is not a PDF is refused by all three, by a sentence naming it** — no
-    /// tool is asked and nothing panics. The signature is the reason, so this holds on a
-    /// machine with no poppler and on one with it.
+    /// A file that is not a PDF is refused by all three; no tool is asked.
     #[test]
     fn a_file_that_is_not_a_pdf_is_refused_by_all_three() {
         let d = temp_dir("notpdf");
@@ -1560,8 +1421,7 @@ mod tests {
         assert!(page_count(&empty).unwrap_err().contains("not a PDF"));
     }
 
-    /// The sampler answers on the platforms rano runs on, and says nothing about a process
-    /// it cannot see: past that, the kernel's cap and the deadline are the guards.
+    /// The sampler answers on rano's platforms and says nothing about one it cannot see.
     #[test]
     fn the_memory_sampler_reads_a_process_it_can_see() {
         let me = rss(std::process::id()).expect("this process's own memory");
@@ -1569,12 +1429,8 @@ mod tests {
         assert_eq!(rss(u32::MAX), None, "a pid that is not a process");
     }
 
-    /// **The real thing, on a machine that has it.** Ignored by default because it needs
-    /// `pdftoppm` from poppler, which rano did not install:
-    /// `cargo test -- --ignored a_real_renderer`.
-    ///
-    /// Page two is not page one — the raster differs, and the size is the dpi that was
-    /// asked for — which is the bug a "render the first page always" would be.
+    /// The real thing, needs `pdftoppm`: `cargo test -- --ignored a_real_renderer`.
+    /// Page two is not page one, and the size is the dpi that was asked for.
     #[test]
     #[ignore = "needs pdftoppm on PATH (poppler)"]
     fn a_real_renderer_draws_the_page_it_was_asked_for() {
@@ -1604,7 +1460,7 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
-    /// **The real text of a page**, which needs `pdftotext` from poppler:
+    /// The real text of a page, needs `pdftotext`:
     /// `cargo test -- --ignored a_real_page_of_text`.
     #[test]
     #[ignore = "needs pdftotext on PATH (poppler)"]
@@ -1625,8 +1481,7 @@ mod tests {
         );
     }
 
-    /// **Ghostscript, when it is the renderer** — the fallback path, asked for by name so
-    /// the primary one is not what answers:
+    /// Ghostscript, asked for by name so the primary renderer is not what answers:
     /// `cargo test -- --ignored a_real_page_comes_back_from_ghostscript`.
     #[test]
     #[ignore = "needs gs on PATH (ghostscript), and it is only the fallback"]
@@ -1662,8 +1517,7 @@ mod ppm_tests {
         assert!(rgb.iter().all(|b| *b == 7));
     }
 
-    /// A comment may sit anywhere whitespace may, which is the one thing a hand-rolled header
-    /// reader gets wrong.
+    /// A comment may sit anywhere whitespace may.
     #[test]
     fn comments_in_the_header_are_skipped() {
         let mut v = b"P6\n# written by gs\n2 2\n# another\n255\n".to_vec();
@@ -1673,8 +1527,7 @@ mod ppm_tests {
         assert_eq!(rgb.len(), 12);
     }
 
-    /// What it will not take, named: an ASCII `P3`, a 16-bit raster, and a raster short of the
-    /// pixels its own header claims.
+    /// ASCII `P3`, 16-bit rasters and short pixel runs are refused by name.
     #[test]
     fn what_is_not_a_picture_the_terminal_takes_is_refused() {
         let e = ppm_to_rgb(b"P3\n1 1\n255\n255 0 0\n").unwrap_err();
@@ -1688,8 +1541,7 @@ mod ppm_tests {
         assert!(ppm_to_rgb(b"").is_err());
     }
 
-    /// **The renderers are asked for PPM, not PNG**: this is the whole point of the path, so the
-    /// argv is read back rather than trusted.
+    /// The RGB renderers ask for PPM, not PNG; the argv is read back, not trusted.
     #[test]
     fn the_rgb_renderers_ask_for_ppm() {
         let cmds = renderers_rgb(Path::new("/tmp/a.pdf"), 2, 96);
@@ -1714,8 +1566,7 @@ mod ppm_tests {
         );
     }
 
-    /// The real thing, where a renderer is installed: a page comes back as pixels whose count
-    /// matches its own size, and two pages differ.
+    /// The real thing, where a renderer is installed.
     #[test]
     #[ignore = "needs pdftoppm or gs on PATH"]
     fn a_page_renders_as_pixels_that_match_their_size() {

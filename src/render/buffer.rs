@@ -31,12 +31,10 @@ impl Rect {
         self.width == 0 || self.height == 0
     }
 
-    /// One past the last column.
     pub const fn right(&self) -> u16 {
         self.x.saturating_add(self.width)
     }
 
-    /// One past the last row.
     pub const fn bottom(&self) -> u16 {
         self.y.saturating_add(self.height)
     }
@@ -53,7 +51,6 @@ impl Rect {
         Rect::new(x, y, r - x, b - y)
     }
 
-    /// Shrunk by `n` cells on every side.
     pub fn inner(&self, n: u16) -> Rect {
         let w = self.width.saturating_sub(2 * n);
         let h = self.height.saturating_sub(2 * n);
@@ -68,7 +65,6 @@ impl Rect {
         Rect::new(self.x, self.y + i, self.width, 1)
     }
 
-    /// Split off the top `h` rows: `(top, rest)`.
     pub fn split_top(&self, h: u16) -> (Rect, Rect) {
         let h = h.min(self.height);
         (
@@ -82,19 +78,13 @@ impl Rect {
     }
 }
 
-/// One cell: a grapheme cluster and its style.
-///
-/// A wide cluster occupies two cells: the **lead**, which holds the cluster and
-/// `width == 2`, and a **continuation** after it with `width == 0` and an empty symbol.
-/// The emitter writes the lead and skips the continuation, and every write that lands on
-/// half of a wide pair blanks the other half — a terminal given half a wide glyph draws
-/// something different on every terminal, and a row that measures differently from what
-/// the painter believes is how a diff paints over the wrong cells.
+/// One cell: a grapheme cluster and its style. A wide cluster occupies a
+/// lead (`width == 2`) and a continuation after it (`width == 0`, empty); the
+/// emitter writes the lead only, and a write onto half of a pair blanks the other half.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
-    /// The whole cluster — a base and every mark that joined it, so a kitty graphics
-    /// placeholder keeps its row and column diacritics and no escape can ever be written
-    /// between them.
+    /// The whole cluster — base and marks together, so no escape can be written
+    /// inside one.
     pub symbol: String,
     /// Columns: 1 or 2 for a lead, 0 for a continuation.
     pub width: u8,
@@ -135,7 +125,6 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /// Blank cells over `area`.
     pub fn empty(area: Rect) -> Buffer {
         Buffer {
             area,
@@ -155,7 +144,6 @@ impl Buffer {
         }
     }
 
-    /// A different area, blank; reuses the storage when it can.
     pub fn resize(&mut self, area: Rect) {
         self.area = area;
         self.cells.resize(area.area(), Cell::blank());
@@ -214,14 +202,11 @@ impl Buffer {
         }
     }
 
-    /// Write `s` at `(x, y)` in `style`, at most `max` columns and never past the buffer's
-    /// right edge. Returns the column after the last one written.
-    ///
-    /// What does not get a cell: an escape sequence (dropped — see [`Span`]), a control
-    /// character, and a zero-width mark with no base in `s` (it joins the cell to its
-    /// left, which is where a span boundary put its base). A tab advances to the next stop
-    /// counted from `origin`, in spaces. A wide cluster that does not fit whole is not
-    /// halved: the column it would have started is filled with a space instead.
+    /// Write `s` at `(x, y)` in `style`, at most `max` columns and never past the
+    /// buffer's right edge; returns the column after the last written. Escapes
+    /// and controls get no cell; a zero-width mark with no base joins the cell
+    /// to its left; a wide cluster that does not fit whole is not halved — the
+    /// column becomes a space. Tabs advance to the next stop from `origin`.
     pub fn set_str(&mut self, x: u16, y: u16, s: &str, style: &Style, max: usize) -> u16 {
         self.set_str_from(x, x, y, s, style, max)
     }
@@ -257,7 +242,6 @@ impl Buffer {
             if c.cols == 0 {
                 let ch = c.text.chars().next().unwrap_or('\0');
                 if !crate::width::text::is_control(ch) && cx > self.area.x.max(origin) {
-                    // A mark whose base is in the previous span: it belongs to that cell.
                     let mut i = self.index(cx - 1, y).unwrap_or(0);
                     if self.cells[i].is_continuation() && i > 0 {
                         i -= 1;
@@ -285,13 +269,12 @@ impl Buffer {
         cx
     }
 
-    /// Write a span at `(x, y)`, at most `max` columns. Returns the column after it.
     pub fn set_span(&mut self, x: u16, y: u16, span: &Span, max: usize) -> u16 {
         self.set_str(x, y, &span.content, &span.style, max)
     }
 
-    /// Write a line at `(x, y)`, at most `max` columns, each span's style patched over the
-    /// line's. Returns the column after it.
+    /// Write a line at `(x, y)`, at most `max` columns, each span's style
+    /// patched over the line's.
     pub fn set_line(&mut self, x: u16, y: u16, line: &Line, max: usize) -> u16 {
         let mut cx = x;
         let end = x as usize + max;
@@ -306,8 +289,7 @@ impl Buffer {
         cx
     }
 
-    /// Patch `style` over every cell in `area`, keeping their text: a row's tint under
-    /// text already drawn, a selection over a list.
+    /// Patch `style` over every cell in `area`, keeping their text.
     pub fn set_style(&mut self, area: Rect, style: &Style) {
         let a = self.area.intersection(area);
         for y in a.y..a.bottom() {
@@ -336,8 +318,8 @@ impl Buffer {
         }
     }
 
-    /// The text of every row, full width, styles dropped. A wide cluster is its lead's
-    /// symbol, so each string measures exactly the buffer's width.
+    /// The text of every row, full width, styles dropped — each string measures
+    /// exactly the buffer's width.
     pub fn to_plain_lines(&self) -> Vec<String> {
         (self.area.y..self.area.bottom())
             .map(|y| {
@@ -367,7 +349,6 @@ mod tests {
         assert_eq!(end, 4);
         b.set_line(3, 1, &Line::raw("abcdef"), 99);
         assert_eq!(b.to_plain_lines(), vec!["hell  ", "   abc"]);
-        // Off the buffer entirely: nothing, and no panic.
         b.set_line(0, 9, &Line::raw("x"), 9);
     }
 
@@ -375,13 +356,10 @@ mod tests {
     fn a_wide_character_takes_two_cells_and_is_never_halved() {
         let mut b = buf(5, 1);
         b.set_line(0, 0, &Line::raw("你好世"), 5);
-        // Two wide clusters fit; the third would straddle the edge and becomes a space.
         assert_eq!(b.to_plain_lines(), vec!["你好 "]);
         assert_eq!(b.cell(1, 0).unwrap().width, 0, "continuation");
-        // Overwriting the continuation blanks the lead it belonged to.
         b.set_str(1, 0, "x", &Style::new(), 1);
         assert_eq!(b.to_plain_lines(), vec![" x好 "]);
-        // Overwriting a lead blanks its continuation.
         b.set_str(2, 0, "y", &Style::new(), 1);
         assert_eq!(b.to_plain_lines(), vec![" xy  "]);
         for row in b.to_plain_lines() {
@@ -394,7 +372,6 @@ mod tests {
         let mut b = buf(4, 1);
         b.set_line(0, 0, &Line::raw("e\u{301}x"), 4);
         assert_eq!(b.cell(0, 0).unwrap().symbol, "e\u{301}");
-        // A mark at the start of a span joins the previous span's last cell.
         let mut b = buf(4, 1);
         let l = Line::new(vec![Span::raw("e"), Span::role("\u{301}z", Role::Code)]);
         b.set_line(0, 0, &l, 4);

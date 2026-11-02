@@ -1,24 +1,10 @@
-//! **A buffer as terminal rows**: one `String` per row, each independently paintable,
-//! under a [`Palette`].
-//!
-//! # The rules, and what each one is for
-//!
-//! - **Minimal transitions.** Between two cells only what changed is said — `22` to drop
-//!   bold, `39` to drop a colour — or a reset and the whole new pen when that is shorter.
-//!   A frame that rewrites a row of syntax-coloured code is mostly these bytes, and the
-//!   row-diffing painter only saves what the emitter does not waste.
-//! - **Never an escape inside a cluster.** Transitions are written between cells and a
-//!   cell is a whole cluster, so a combining mark, a ZWJ sequence or a kitty graphics
-//!   placeholder's diacritics are never separated from their base.
-//! - **Every row ends closed.** An open link is closed (`OSC 8 ;; ST`) and any open
-//!   attribute reset at the end of the row: the painter erases each row with `ESC[K`
-//!   *in the current attributes*, and letibot's string `wrap` and `truncate` carry a
-//!   reset and a link close for the same reason — here it is one place instead of every
-//!   function that cuts a string.
-//! - **Trailing blanks are not written.** A plain space with no link at the end of a row
-//!   is what the painter's erase leaves anyway; writing it is bytes for nothing.
-//! - **`Palette::None` is plain text**: no SGR, no link, no raw colour — byte-identical
-//!   on every machine, which is what a replay diff and a CI log compare.
+//! A buffer as terminal rows: one `String` per row, independently paintable,
+//! under a [`Palette`]. Transitions say only what changed between two cells,
+//! or a reset and the whole pen when that is shorter. Never an escape inside
+//! a cluster: transitions sit between cells, and a cell is a whole cluster.
+//! Every row ends closed — links closed, attributes reset — because the
+//! painter erases rows in the current pen. Trailing blanks are not written.
+//! `Palette::None` emits plain text: no SGR, no link, no raw colour.
 
 use super::buffer::{Buffer, Cell, Rect};
 use super::style::Style;
@@ -72,7 +58,6 @@ impl Pen {
         }
     }
 
-    /// Every parameter that turns this pen on from a reset.
     fn full(&self, out: &mut Vec<String>) {
         for (a, on, _) in Attrs::TABLE {
             if self.attrs.contains(a) {
@@ -103,11 +88,10 @@ fn transition(from: Pen, to: Pen) -> String {
     if to == Pen::default() {
         return "\x1b[0m".into();
     }
-    // The incremental spelling.
     let mut inc: Vec<String> = Vec::new();
     let mut have = from.attrs;
-    // Bold and dim share their off (`22`): dropping either drops both, and whichever the
-    // new pen keeps is turned back on below.
+    // Bold and dim share their off (`22`): dropping either drops both, and whichever
+    // the new pen keeps is turned back on below.
     let lost = |a| have.contains(a) && !to.attrs.contains(a);
     if lost(Attrs::BOLD) || lost(Attrs::DIM) {
         inc.push("22".into());
@@ -166,8 +150,7 @@ fn is_blank(c: &Cell, pen: Pen) -> bool {
 }
 
 impl Buffer {
-    /// Every row of the buffer as a terminal string, under `palette`. See the module
-    /// header for the rules each row keeps.
+    /// Every row of the buffer as a terminal string, under `palette`.
     pub fn emit(&self, palette: Palette) -> Vec<String> {
         let a = self.area();
         (a.y..a.bottom())
@@ -223,9 +206,8 @@ pub fn emit_row(cells: &[Cell], palette: Palette) -> String {
     out
 }
 
-/// **A buffer for tests**: draw a widget, read the result as plain text or as the rows a
-/// palette emits. Tests that assert on what a reader sees use [`TestBuffer::plain`];
-/// tests about bytes use [`TestBuffer::rows`].
+/// A buffer for tests: what a reader sees ([`TestBuffer::plain`]) or the rows
+/// a palette emits ([`TestBuffer::rows`]).
 pub struct TestBuffer {
     pub buf: Buffer,
 }
@@ -237,14 +219,12 @@ impl TestBuffer {
         }
     }
 
-    /// Draw `w` over the whole buffer.
     pub fn draw(mut self, w: &impl Widget) -> TestBuffer {
         let a = self.buf.area();
         w.render(a, &mut self.buf);
         self
     }
 
-    /// Each row's text, trailing blanks trimmed: exactly what `Palette::None` emits.
     pub fn plain(&self) -> Vec<String> {
         self.buf.emit(Palette::None)
     }
@@ -276,7 +256,6 @@ mod tests {
 
     #[test]
     fn transitions_say_only_what_changed() {
-        // Bold to bold+cyan: just the colour.
         let l = Line::new(vec![
             Span::role("a", Role::Strong),
             Span::role("b", Role::Heading),
@@ -287,14 +266,11 @@ mod tests {
             row(&l, 4, Palette::Colour),
             "\x1b[1ma\x1b[36mb\x1b[22mc\x1b[0md"
         );
-        // Dropping dim but keeping bold: `22` drops both, so bold has to come back —
-        // `22;1` — and a reset then bold is a byte shorter, so that is what is written.
         let l = Line::new(vec![
             Span::styled("x", Style::new().bold().dim()),
             Span::styled("y", Style::new().bold()),
         ]);
         assert_eq!(row(&l, 2, Palette::Colour), "\x1b[1;2mx\x1b[0;1my\x1b[0m");
-        // Dropping italic under a colour that stays: the incremental `23` wins.
         let l = Line::new(vec![
             Span::styled("x", Style::of(Role::Code).italic()),
             Span::styled("y", Style::of(Role::Code)),
@@ -343,7 +319,6 @@ mod tests {
         for r in &none {
             assert!(!r.contains('\x1b'), "{r:?}");
         }
-        // And it is the plain grid, trimmed.
         let plain: Vec<String> = b
             .to_plain_lines()
             .iter()
@@ -369,7 +344,6 @@ mod tests {
         let cut = row(&l, 8, Palette::Colour);
         assert_eq!(cut, format!("see \x1b]8;;{url}\x1b\\exam\x1b]8;;\x1b\\"));
         assert_eq!(width(&cut), 8);
-        // Truncated through it: the ellipsis is linked, and the link is closed after it.
         let t = crate::render::truncate(&l, 8);
         let cut = row(&t, 20, Palette::Colour);
         assert!(cut.ends_with(&format!("exa…{LINK_CLOSE}")), "{cut:?}");
@@ -387,9 +361,8 @@ mod tests {
         );
     }
 
-    /// The kitty graphics placeholders pass through as cells: the cluster whole (the
-    /// placeholder and its two diacritics), the image id in a 24-bit foreground and the
-    /// placement in the underline colour — what letibot's `image_rows` spells by hand.
+    /// Placeholders pass through as cells: the cluster whole, the ids in the
+    /// colours the protocol reads.
     #[test]
     fn a_graphics_placeholder_row_survives_intact() {
         let raw = Raw {

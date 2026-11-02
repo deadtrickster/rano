@@ -1,18 +1,10 @@
-//! **Hyperlinks** (OSC 8): a file named on a row, and every URL on a frame. Zero columns wide,
-//! so nothing that measures a row has to know they are there.
-//!
-//! Ported from letibot's `crates/tui/src/backend/links.rs`. [`file_link`] and [`link_urls`] are
-//! letibot's string forms; [`file_url`] and [`link_urls_in`] are the same decisions for a
-//! [`Line`], where a link is a [`crate::render::Style::link`] and the emitter writes the bytes.
+//! Hyperlinks (OSC 8): files and URLs on a row, zero columns wide. String forms
+//! ([`file_link`], [`link_urls`], [`link_words`]) and the same for [`Line`]s.
 
 use crate::render::{Line, Span};
 
-/// `text` as a link to the file `target` names — absolute, or relative to `root` — when
-/// `target` is one path and nothing else. Anything else (a quoted command, a pattern with a
-/// path after it, a call id) comes back as it was.
-///
-/// The URL carries this machine's name, so a link drawn by a head on the far end of `ssh`
-/// does not open the same-named file on the near one.
+/// `text` as a link to the file `target` names (absolute, or under `root`) when it is one
+/// path; the URL names this host, so it survives `ssh`.
 pub fn file_link(root: &str, target: &str, text: &str) -> String {
     match file_url(root, target) {
         Some(url) => format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"),
@@ -20,8 +12,7 @@ pub fn file_link(root: &str, target: &str, text: &str) -> String {
     }
 }
 
-/// The `file://` URL [`file_link`] would link to, or `None` when `target` is not one path.
-/// For a [`crate::render::Style::link`].
+/// The `file://` URL [`file_link`] would draw, or `None` when `target` is not one path.
 pub fn file_url(root: &str, target: &str) -> Option<String> {
     let t = target.trim();
     if t.is_empty()
@@ -39,9 +30,8 @@ pub fn file_url(root: &str, target: &str) -> Option<String> {
     Some(format!("file://{}{}", host_name(), uri_path(&abs)))
 }
 
-/// **Every `http://` and `https://` in a rendered row, made a link.** Only inside a plain text
-/// run: an escape sequence is copied through untouched, and a URL broken by one is left as
-/// text rather than half-linked. Trailing sentence punctuation is not part of the URL.
+/// Every `http(s)://` URL in a rendered row, made a link — plain text runs only, escapes pass
+/// through, trailing punctuation excluded.
 pub fn link_urls(row: &str) -> String {
     let b = row.as_bytes();
     let mut out = String::with_capacity(row.len() + 64);
@@ -74,14 +64,8 @@ pub fn link_urls(row: &str) -> String {
     out
 }
 
-/// **Every WORD in a rendered row that `url_of` knows a link for, made that link** — the
-/// host's own references: `owner/repo#12`, `#12`, a commit, a branch. A word is a run of letters,
-/// digits and `/#-_.` standing on its own, its trailing sentence punctuation not part of it; the
-/// host decides, so a word it does not know stays text. Only plain text runs, as [`link_urls`]:
-/// escapes are copied through and a word inside a link already drawn is left alone.
-///
-/// `None` when nothing in the row was linked — the common case, and one that copies nothing, so a
-/// frame pays only for the rows that change.
+/// Every standalone word `url_of` knows a link for, made that link; escapes and
+/// links already drawn are left alone, as [`link_urls`]. `None` when nothing changed.
 pub fn link_words(row: &str, url_of: &mut dyn FnMut(&str) -> Option<String>) -> Option<String> {
     let b = row.as_bytes();
     let word = |c: char| c.is_alphanumeric() || matches!(c, '/' | '#' | '-' | '_' | '.');
@@ -142,8 +126,7 @@ pub fn link_words(row: &str, url_of: &mut dyn FnMut(&str) -> Option<String>) -> 
     Some(out)
 }
 
-/// The length of the URL that `rest` starts with, or `None` when it does not start with one.
-/// Trailing sentence punctuation is not part of the URL.
+/// The length of the URL `rest` starts with, or `None`; trailing punctuation is not part of it.
 fn url_at(rest: &str) -> Option<usize> {
     if !(rest.starts_with("https://") || rest.starts_with("http://")) {
         return None;
@@ -154,8 +137,7 @@ fn url_at(rest: &str) -> Option<usize> {
         })
         .unwrap_or(rest.len());
     while end > 0 && rest[..end].ends_with(['.', ',', ';', ':', '!', '?', ')', ']']) {
-        // A closing bracket is the URL's own only while the URL has opened more of
-        // them than it has closed — `…/c_(d)` keeps its `)`, `(…/c_(d))` gives one back.
+        // A closing bracket is the URL's own only while more of its kind are open than closed.
         let url = &rest[..end];
         let last = url.chars().last().unwrap_or(' ');
         let opens = match last {
@@ -173,9 +155,8 @@ fn url_at(rest: &str) -> Option<usize> {
     (end > "https://".len()).then_some(end)
 }
 
-/// [`link_urls`] for a [`Line`]: every URL in a span that is not already a link is split out
-/// into its own span carrying the link, in the span's own style. A span that is a link
-/// already is left alone, as letibot leaves a run inside an OSC 8 it did not draw.
+/// [`link_urls`] for a [`Line`]: URLs in plain spans become their own linked spans, in the
+/// span's style; one already a link is left alone.
 pub fn link_urls_in(line: &Line) -> Line {
     let mut out = Line {
         spans: Vec::with_capacity(line.spans.len()),
@@ -289,7 +270,6 @@ mod tests {
             crate::width::text::width(row),
             "a link is zero columns"
         );
-        // Inside a coloured run, the colour stays and the URL is linked.
         let coloured = "\x1b[33mhttps://x.org\x1b[0m";
         assert_eq!(
             link_urls(coloured),
@@ -298,9 +278,7 @@ mod tests {
                 opened("https://x.org")
             )
         );
-        // A bare scheme is not a link.
         assert_eq!(link_urls("https:// nothing"), "https:// nothing");
-        // An existing OSC sequence is copied through, not re-linked.
         let already = format!("{}https://x.org\x1b]8;;\x1b\\", opened("https://x.org"));
         assert_eq!(link_urls(&already), already);
     }
@@ -338,7 +316,6 @@ mod tests {
         assert_eq!(out.spans[1].style.top(), Role::Faint);
         assert_eq!(out.spans[3].style.link.as_deref(), Some("https://other"));
         assert_eq!(out.width(), line.width(), "a link is zero columns");
-        // And through the emitter it is the same link the string form draws.
         let mut b = Buffer::empty(Rect::new(0, 0, 40, 1));
         b.set_line(0, 0, &link_urls_in(&Line::raw("go https://x.org now")), 40);
         assert_eq!(
@@ -357,9 +334,6 @@ mod tests {
         assert_eq!(file_url("/w", "a b"), None);
     }
 
-    /// **The host's own references become links, and nothing else does** — a word it knows is
-    /// wrapped, one it does not stays text, an escape and a link already drawn are left alone,
-    /// and a row with nothing to link comes back as `None`.
     #[test]
     fn a_word_the_host_knows_is_linked() {
         let mut url_of = |w: &str| match w {

@@ -1,37 +1,17 @@
-//! **The log pane**: the tail of a file that is still being written.
+//! The log pane: the tail of a file that is still being written.
 //!
-//! TODO.md §20.3 F and §20.4 — the pane half of log mode. The *bookkeeping* half
-//! is [`crate::logtail::LogTail`], and that is where §20.4's budget lives: it
-//! holds a file's line count, a sparse row → byte index and its block boundaries
-//! and **no rows at all**, so a log nobody is looking at costs those and nothing
-//! else. This widget is the other side of the same line — it draws the rows that
-//! have been read for the window on screen, and the host drops them when the pane
-//! goes away.
+//! The bookkeeping is [`crate::logtail::LogTail`]'s — a file's line count, a sparse row → byte index,
+//! and no rows at all, so a log nobody is looking at costs those and nothing else. This draws the rows
+//! read for the window on screen; the host drops them when the pane goes away.
 //!
-//! ## What the host supplies, and what it must not
+//! [`LogPane`] is a view model like every other widget here: it reads no file and knows no path, and a
+//! host fills it with `LogTail::last_rows`.
 //!
-//! [`LogPane`] is a view model like every other widget here: rows, a count, a
-//! scroll. It reads no file and knows no path. `LogTail::last_rows` is what a host
-//! calls to fill it, and it is deliberately outside this module — everything in
-//! `agent` is pure drawing, so no widget here touches the filesystem (see
-//! `agent/mod.rs`).
+//! [`LogRow::continues`] is [`crate::logblocks`]' verdict, carried into the pane so a stack trace reads
+//! as one thing: a continuation is drawn against a dim `│` rather than as a record of its own.
 //!
-//! ## The structure §20.4 pays for
-//!
-//! [`LogRow::continues`] is [`crate::logblocks`]' verdict, carried into the pane
-//! so a stack trace reads as one thing: a continuation row is drawn against a dim
-//! `│` instead of looking like a record of its own. That is the visible payoff of
-//! having worked the block boundaries out while nobody was looking, and it is the
-//! whole of what this widget does with them — folding is §20.5's *later* step, and
-//! a block a growing log has not finished writing is not a block to hide rows in.
-//!
-//! ## Numbering
-//!
-//! Every row is numbered **by the file**, not by the window: `first_row` is the
-//! file row of `rows[0]` and `total` is the file's row count, both from the same
-//! bookkeeping pass. A pane that numbered its own window from 1 would be the lie
-//! TODO.md §20.3 C exists to remove, and here there is no reason to tell it: the
-//! count is already known and costs nothing.
+//! Every row is numbered by the file, not by the window: `first_row` and `total` come from the same
+//! pass, and a pane that numbered its own window from 1 would be a lie that costs nothing to avoid.
 
 use crate::agent::pane;
 use crate::agent::text::clean_line;
@@ -42,8 +22,8 @@ use crate::render::{Line, Widget};
 pub struct LogRow {
     /// The row's text, as the file has it.
     pub text: String,
-    /// **This row continues the block above it** — a stack frame, a wrapped
-    /// continuation — under [`crate::logblocks`]' one rule.
+    /// This row continues the block above it — a stack frame, a wrapped continuation — under
+    /// [`crate::logblocks`]' one rule.
     pub continues: bool,
 }
 
@@ -52,8 +32,7 @@ pub struct LogRow {
 pub struct LogPane {
     /// The file's name, as the host knows it. Foreign text.
     pub name: String,
-    /// The rows read for this window, oldest first. **The host drops these when
-    /// the pane is not shown**, which is §20.4's budget in one sentence.
+    /// The rows read for this window, oldest first. The host drops these when the pane is not shown.
     pub rows: Vec<LogRow>,
     /// The FILE row number of `rows[0]`, 1-based.
     pub first_row: u64,
@@ -66,12 +45,9 @@ pub struct LogPane {
 }
 
 impl LogPane {
-    /// The view, exactly `room` rows or fewer, and the scroll actually used.
-    ///
-    /// The tail shows by default — the newest rows are the reason a log pane
-    /// exists — and `scroll` walks back from there, clamped to what has actually
-    /// been read, so a host that kept a scroll across a shorter read gets a
-    /// window rather than a blank pane.
+    /// The view, exactly `room` rows or fewer, and the scroll actually used. The tail shows by default —
+    /// the newest rows are the reason a log pane exists — and `scroll` walks back from there, clamped to
+    /// what was actually read, so a stale scroll gets a window rather than a blank pane.
     pub fn lines(&self, room: usize) -> (Vec<Line>, usize) {
         let mut out = vec![pane::title(format!("log — {}", clean_line(&self.name)))];
         let mut meta = format!("    {} lines", self.total);
@@ -94,8 +70,8 @@ impl LogPane {
         let scroll = self.scroll.min(self.rows.len().saturating_sub(visible));
         let end = self.rows.len() - scroll;
         let start = end.saturating_sub(visible);
-        // The gutter is as wide as the file's last row needs, so a 4 000 000-row
-        // log's numbers do not push the text sideways.
+        // The gutter is as wide as the file's last row needs, so a 4 000 000-row log's numbers do not
+        // push the text sideways.
         let w = self.total.to_string().len().max(4);
         for (i, r) in self.rows[start..end].iter().enumerate() {
             let n = self.first_row + (start + i) as u64;
@@ -142,9 +118,8 @@ mod tests {
         }
     }
 
-    /// The tail shows by default, and scrolling back stops at the window's
-    /// beginning rather than running off it — letibot's `job_out_lines` rule,
-    /// which this pane keeps because it is the same pane.
+    /// The tail shows by default, and scrolling back stops at the window's beginning rather than running
+    /// off it.
     #[test]
     fn the_tail_shows_and_scrolling_back_stops_at_the_beginning() {
         let p = tail_pane(50);
@@ -162,8 +137,8 @@ mod tests {
         assert!(body[0].contains("row 3951"), "{body:?}");
     }
 
-    /// **The numbers are the FILE's.** A window of rows 3951..4000 is numbered
-    /// 3951..4000, not 1..50, and the header says how many rows the file has.
+    /// The numbers are the file's: a window of rows 3951..4000 is numbered 3951..4000, not 1..50, and the
+    /// header says how many rows the file has.
     #[test]
     fn every_number_is_the_files_own() {
         let (rows, _) = tail_pane(50).lines(12);
@@ -174,8 +149,8 @@ mod tests {
         assert_eq!(body.len(), 9, "a window of nine: {body:?}");
         assert!(body[0].starts_with("3992 "), "{:?}", body[0]);
         assert!(body.last().unwrap().starts_with("4000 "), "{body:?}");
-        // And scrolled to the top of what was read, the same arithmetic on the
-        // other end — so the numbers are the file's wherever the window sits.
+        // And scrolled to the top of what was read, the same arithmetic on the other end — so the numbers
+        // are the file's wherever the window sits.
         let p = LogPane {
             scroll: 999,
             ..tail_pane(50)
@@ -185,8 +160,8 @@ mod tests {
         assert!(body.last().unwrap().starts_with("3959 "), "{body:?}");
     }
 
-    /// A continuation row is drawn hanging off its block, which is the whole of
-    /// what §20.4's boundaries buy a reader.
+    /// A continuation row is drawn hanging off its block, which is the whole of what the boundaries buy a
+    /// reader.
     #[test]
     fn a_continuation_row_is_marked_and_a_record_is_not() {
         let p = LogPane {
@@ -216,11 +191,8 @@ mod tests {
         );
     }
 
-    /// An empty window is said rather than drawn as blank rows.
-    ///
-    /// The pane is content-driven, as every height-follows-content widget here
-    /// is: `lines(room)` gives `room` rows or fewer, and a host lays out a screen
-    /// from the count it gets back.
+    /// An empty window is said rather than drawn as blank rows. The pane is content-driven, so
+    /// `lines(room)` gives `room` rows or fewer and a host lays out a screen from the count it gets back.
     #[test]
     fn an_empty_window_says_so() {
         let p = LogPane {
@@ -235,8 +207,8 @@ mod tests {
         assert_eq!(text.len(), 3, "no rows, so no body: {text:?}");
     }
 
-    /// A pane that is not following says so, because "this stopped" and "this is
-    /// still arriving" are the two things a reader needs to tell apart.
+    /// A pane that is not following says so, because "this stopped" and "this is still arriving" are the
+    /// two things a reader needs to tell apart.
     #[test]
     fn following_is_only_said_when_it_is_true() {
         let p = tail_pane(5);
@@ -248,8 +220,8 @@ mod tests {
         assert!(!plain(&p.lines(8).0)[1].contains("following"));
     }
 
-    /// **No file, no rows, no scroll — the widget still draws its frame**, which
-    /// is what a host gets for a pane it has opened but not yet filled.
+    /// No file, no rows, no scroll — the widget still draws its frame, which is what a host gets for a
+    /// pane it has opened but not yet filled.
     #[test]
     fn a_blank_model_draws_a_titled_empty_pane() {
         let rows = drawn(&LogPane::default(), 40, 5);

@@ -1,19 +1,12 @@
-//! **The quit card**: what leaving would stop, and the choices for it.
-//!
-//! Ported from letibot's `crates/tui/src/ui/cards/quit.rs`. letibot painted the title
-//! `sgr::BOLD` ([`Role::Strong`] here) and the consequences `sgr::DIM` ([`Role::Faint`]).
+//! The quit card: what leaving would stop, and the choices for it.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
 
 use super::text::{one, wrap};
 
-/// The quit card's view model.
-///
-/// letibot fills it from: `selected` ← `quit_sel`; `other_heads` ← `heads - 1`;
-/// `running_jobs` ← jobs with `running`; `running_subagents` ← subagents whose state is
-/// `"running"` (only the RUNNING count: a settled job is history the store keeps, and
-/// `opening` is a subagent that has not started — nothing that dies).
+/// The quit card's view model. `running_jobs` and `running_subagents` count only what is
+/// running: a settled job is history the store keeps, and `opening` has not started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QuitCard {
     /// 0 leaves this head (the default, the cheap one), 1 stops the daemon too.
@@ -24,11 +17,9 @@ pub struct QuitCard {
 }
 
 impl QuitCard {
-    /// The two rows: what Enter does, and the consequence of it.
-    ///
-    /// The consequence is on the row rather than in a footnote because it is the whole reason
-    /// the card exists — one of these two is cheap and the other is not, and a card that made
-    /// them look alike would be a card that answered for the operator.
+    /// The two rows: what Enter does, and the consequence of it — on the row rather than in a
+    /// footnote, because one of the two is cheap and the other is not, and a card that made them
+    /// look alike would answer for the operator.
     pub fn choices(&self) -> [(&'static str, String); 2] {
         [
             (
@@ -38,11 +29,8 @@ impl QuitCard {
                     .to_string(),
             ),
             ("leave and stop the daemon", {
-                // **AND THE WORK THAT DIES WITH IT, SAID FIRST** — the operator's ask,
-                // 2026-10-05: stopping the daemon stops the jobs and the subagents with it, and
-                // a card that named only the cold prefill made the cheap row and the killing row
-                // read alike. A running job is `cargo test --release` an hour in; a running
-                // subagent is a session mid-task. Neither survives the stop.
+                // The work that dies with it, said first: a running job may be an hour into a
+                // test run and a running subagent is mid-task, and neither survives the stop.
                 let (j, s) = (self.running_jobs, self.running_subagents);
                 let plural = |n: usize| if n == 1 { "" } else { "s" };
                 let dies = if j > 0 && s > 0 {
@@ -52,8 +40,6 @@ impl QuitCard {
                         plural(s)
                     )
                 } else if j > 0 {
-                    // letibot's spelling pasted `is` straight onto `job` (`1 jobis running`) and
-                    // said the verb twice (`it stops stop with the daemon`); both are fixed here.
                     format!(
                         "{j} job{} running — {} with the daemon. ",
                         if j == 1 { " is" } else { "s are" },
@@ -124,8 +110,7 @@ mod tests {
     use super::*;
     use crate::agent::testing::{plain, role_of};
 
-    /// letibot `app/tests/misc.rs::the_quit_card_offers_both_exits_and_defaults_to_the_cheap_one`
-    /// (the card).
+    /// Both exits are offered, and the default is the cheap one.
     #[test]
     fn the_quit_card_offers_both_exits_and_defaults_to_the_cheap_one() {
         let card = QuitCard::default();
@@ -144,8 +129,7 @@ mod tests {
         assert_eq!(role_of(&lines[rows[1]], "leave"), Some(Role::Plain));
     }
 
-    /// letibot `app/tests/subagents.rs` — the running pair is named on the stop row, and the
-    /// cheap row names no dying work.
+    /// The running pair is named on the stop row, and the cheap row names no dying work.
     #[test]
     fn the_stop_row_names_the_work_that_dies_with_it() {
         let card = QuitCard {

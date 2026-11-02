@@ -1,19 +1,8 @@
-//! Performance measurement, kept in the tree because the numbers matter and
-//! the tool to reproduce them should not be rebuilt from scratch each time.
-//!
-//! Run: `cargo test --release --bin rano bench -- --ignored --nocapture`
-//!
-//! Three numbers per file, in the order a person notices them:
-//!
-//! - **open** — read the file and do the first highlight (what you wait for
-//!   after `rano big.rs`).
-//! - **keystroke** — `handle_key` for one inserted character. This is the one
-//!   that matters: it is the latency of typing, and it runs on EVERY key.
-//! - **frame** — one `ui::draw` into a headless backend, which is what a
-//!   scroll costs per notch.
-//!
-//! Deliberately does not touch a terminal: a `render::Buffer` counts the same
-//! cells without a pty, so the numbers are the editor's own work.
+//! Performance measurement, kept in the tree so the numbers are reproducible.
+//! Run: `cargo test --release --bin rano bench -- --ignored --nocapture`.
+//! Three numbers per file: open (read + first highlight), keystroke
+//! (`handle_key` for one inserted character — the latency of typing), and
+//! frame (one `ui::draw` into a headless `render::Buffer`, no pty).
 
 use crate::buffer::Buffer;
 use crate::config;
@@ -90,8 +79,7 @@ fn human(n: u64) -> String {
 }
 
 /// The measured files: big in different ways. Synthetic ones live in
-/// `/tmp/ranoperf` (`--bench` is where they come from); the real ones are the
-/// largest text files on this machine at the time of writing.
+/// `/tmp/ranoperf`; the real ones are large text files on this machine.
 fn samples() -> Vec<Sample> {
     let mut v = Vec::new();
     // One enormous line: the minified-JS shape, and the wrap/cursor stress.
@@ -156,11 +144,10 @@ fn bench() {
         e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
         e.adjust_scroll(text_h);
 
-        // A keystroke: insert one character. Times the full path, which is
-        // the re-highlight plus the syntax-error walk plus the LSP dirtying.
-        // ONE insertion per iteration — a key+backspace pair measured two
-        // edits and doubled every number here before 2026-09-22. The document
-        // grows by one character per iteration, which is what typing does.
+        // A keystroke: insert one character — the full path, re-highlight
+        // included. ONE insertion per iteration: a key+backspace pair measures
+        // two edits, and the document grows by one character per iteration,
+        // which is what typing does.
         let keys = 3;
         let (kmed, kp95) = time(keys, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
@@ -188,11 +175,8 @@ fn bench() {
     let _ = width::is_simple(&[]);
 }
 
-/// Attribute one keystroke's cost to the steps that make it up.
-///
-/// The point is to know WHICH step is O(document) before touching anything:
-/// a keystroke on a 30 MB file should not cost 30 MB of work, and if it does,
-/// saying so precisely is what makes the fix obvious.
+/// Attribute one keystroke's cost to its steps, so the O(document) step is
+/// known before anything is touched.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_breakdown() {
@@ -204,9 +188,8 @@ fn bench_breakdown() {
         ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
         ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
     ];
-    // One labelled line per metric rather than a table: the columns here have
-    // been renamed often enough that a mislabelled number is a real risk, and
-    // a measurement nobody can read is worse than no measurement.
+    // One labelled line per metric rather than a table: the columns have been
+    // renamed often enough that a mislabelled number is a real risk.
     println!();
     for (label, path) in paths {
         let p = Path::new(path);
@@ -218,9 +201,8 @@ fn bench_breakdown() {
         let mut e = Editor::new(buf.clone(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
-        // Put the edit point somewhere real: mid-document, so the undo
-        // snapshot and the wrap re-sum have rows below them as they would when
-        // someone is actually typing.
+        // Mid-document, so the undo snapshot and the wrap re-sum have rows
+        // below them as they would when someone is typing.
         let mid = e.bs().buf.row_count() / 2;
         e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
 
@@ -231,7 +213,7 @@ fn bench_breakdown() {
             e.bs().buf.row_count(),
             e.bs().buf.rows().map(Vec::len).max().unwrap_or(0)
         );
-        // The whole document, for scale: what a keystroke used to pay.
+        // The whole document, for scale.
         let (t, _) = time(3, || {
             e.bs_mut().hl.refresh(&buf);
         });
@@ -248,8 +230,7 @@ fn bench_breakdown() {
         });
         println!("    {:>22}  {}", "edit + highlight", ms(t));
         // The wrap table's incremental update: one row re-measured, then the
-        // prefix re-summed from that row to the end. Arithmetic, but over every
-        // remaining row — O(rows).
+        // prefix re-summed to the end — O(rows).
         let (t, _) = time(3, || {
             let bs = e.bs_mut();
             bs.edit_gen = bs.edit_gen.wrapping_add(1);
@@ -257,8 +238,7 @@ fn bench_breakdown() {
             e.ensure_wrap_prefix();
         });
         println!("    {:>22}  {}", "wrap table (re-sum)", ms(t));
-        // The undo snapshot: `begin_action` copies the affected rows, so a
-        // one-character insertion on a single enormous row copies the row.
+        // The undo snapshot: `begin_action` copies the affected rows.
         let (t, _) = time(3, || {
             let bs = e.bs_mut();
             let r = bs.cursor.row;
@@ -277,8 +257,8 @@ fn bench_breakdown() {
     }
 }
 
-/// What a person waits for after `rano FILE`: read the file, then the first
-/// highlight. Both are in here because both are before the first frame.
+/// What a person waits for after `rano FILE`: read, then the first highlight —
+/// both before the first frame.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_open() {
@@ -322,17 +302,13 @@ fn bench_open() {
     println!();
 }
 
-/// How the read path behaves: time AND memory.
-///
-/// The read is the one part of the open cost that was never opened up — every
-/// other measurement in this file is about highlighting. It matters because
-/// `Buffer`'s text model is `Vec<Vec<char>>`, and a `char` is four bytes.
+/// The read path, time AND memory. `Buffer`'s text model is `Vec<Vec<char>>`,
+/// and a `char` is four bytes.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_read() {
-    /// Peak resident set size in KiB, from the kernel. Monotonic: it is the
-    /// high-water mark, so it must be read once at the end of the process's
-    /// heaviest point, not per file.
+    /// Peak RSS in KiB from the kernel — a high-water mark, so read once at
+    /// the end, not per file.
     fn peak_rss_kib() -> u64 {
         let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
         for line in s.lines() {
@@ -414,11 +390,8 @@ fn bench_read() {
     println!();
 }
 
-/// The read path, phase by phase: what `Buffer::from_file` actually spends.
-///
-/// `from_file` is four steps — read the bytes, validate them as UTF-8, look
-/// for CRLF, convert every line to `Vec<char>` — and the conversion is the one
-/// that costs both time and memory, because a `char` is four bytes.
+/// The read path, phase by phase: read bytes, validate UTF-8, look for CRLF,
+/// convert to `Vec<char>` — the conversion costs both time and memory.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_read_phases() {
@@ -468,15 +441,9 @@ fn bench_read_phases() {
     println!();
 }
 
-/// What a line index costs when it is built from BYTES instead of characters.
-///
-/// In UTF-8 a 0x0A byte is always a newline — multi-byte sequences use only
-/// lead bytes C2-F4 and continuation bytes 80-BF, so no 0x0A can appear inside
-/// one (verified over every codepoint in the 0.1-0.2 s this test's sibling
-/// takes). That means the row index can be built by scanning the file's bytes,
-/// with no decoding at all, which is what makes "load only the viewport"
-/// possible: you need to know where row N starts before you can decode it, and
-/// this answers that without touching a `char`.
+/// What a line index costs built from BYTES: in UTF-8 a 0x0A byte is always a
+/// newline (no multi-byte sequence contains one), so the row index needs no
+/// decoding — which is what makes "load only the viewport" possible.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_line_index() {
@@ -507,7 +474,7 @@ fn bench_line_index() {
             }
             std::hint::black_box(starts.len());
         });
-        // What that index costs to keep, against decoding the whole file.
+        // What the index costs to keep, against decoding the whole file.
         let mut starts: Vec<u64> = Vec::new();
         for (i, b) in bytes.iter().enumerate() {
             if *b == b'\n' {
@@ -532,17 +499,10 @@ fn bench_line_index() {
     println!();
 }
 
-/// Time to the first frame — the freeze a person actually experiences.
-///
-/// Every other measurement here is in-process. This one is the wall clock from
-/// "the process started" to "something is on screen", which is what `rano
-/// huge.log` makes you wait through: the read, the first highlight, and the
-/// first draw, all before a single row is painted.
-///
-/// The second column is the same work with the READ hoisted onto a worker
-/// thread — hand-rolled, `std::thread` + a channel, the pattern `exec.rs` and
-/// `lsp.rs` already use. It is the bound a loading change can reach: the frame
-/// is drawn immediately from an empty buffer, so the wait is one frame instead
+/// Time to the first frame — the freeze a person experiences: process start
+/// to something on screen. The second column hoists the READ onto a worker
+/// thread (`std::thread` + a channel, the pattern `exec.rs` and `lsp.rs` use):
+/// the frame is drawn from an empty buffer, so the wait is one frame instead
 /// of the whole file.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
@@ -565,8 +525,8 @@ fn bench_cold_open() {
         }
         let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 
-        // Today: nothing is on screen until the whole file has been read,
-        // decoded, highlighted and drawn.
+        // Today: nothing on screen until the whole file is read, decoded,
+        // highlighted and drawn.
         let t = Instant::now();
         let buf = Buffer::from_file(p).expect("read");
         let mut e = Editor::new(buf, config::Config::default());
@@ -578,17 +538,15 @@ fn bench_cold_open() {
         ui::draw(&mut terminal, &e);
         let today = t.elapsed();
 
-        // Hand-rolled: the read happens on a worker; the main thread draws a
-        // frame it can draw now. Measured as "start the worker, then do the
-        // frame the loader owes the user" — the wait is the frame, not the
-        // read, because the read is no longer on this thread.
+        // The read on a worker; the wait is the frame the loader owes the
+        // user, not the read.
         let t = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel::<Buffer>();
         let path_buf = p.to_path_buf();
         std::thread::spawn(move || {
             let _ = tx.send(Buffer::from_file(&path_buf).expect("worker read"));
         });
-        // The frame the user sees first: an empty buffer, immediately.
+        // The first frame the user sees: an empty buffer, immediately.
         let mut e = Editor::new(Buffer::new(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
@@ -612,24 +570,16 @@ fn bench_cold_open() {
     println!();
 }
 
-/// Scheduling, measured: time to the first SCREENFUL of text rather than the
-/// first frame.
-///
-/// A frame with nothing in it is not the goal — the goal is the top of the
-/// file, and that does not need the whole file. This reads in chunks and stops
-/// as soon as it has enough rows to fill a viewport, which is the "minimum
-/// that makes the user happy" from §13.6 stated as a number.
-///
-/// It also measures cancellation latency: a chunked reader that checks a flag
-/// between chunks can abandon a 184 MB read promptly, which a single
-/// `read_to_string` cannot.
+/// Time to the first SCREENFUL of text: the goal is the top of the file, and
+/// that does not need the whole file. Reads in chunks, stops at a viewport's
+/// worth of rows, and measures cancellation latency (a chunked reader can
+/// abandon a long read within one chunk; `read_to_string` cannot).
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_first_screen() {
     /// A viewport's worth of rows.
     const ROWS: usize = 40;
-    /// Read granularity. 64 KiB is one page-cache-friendly read and ~800 rows
-    /// of a log line, so the first chunk is usually enough on its own.
+    /// Read granularity: one page-cache-friendly read, ~800 rows of a log.
     const CHUNK: usize = 64 * 1024;
 
     let paths: Vec<(&str, &str)> = vec![
@@ -678,14 +628,14 @@ fn bench_first_screen() {
             (t.elapsed(), total)
         };
 
-        // The whole file, for contrast (the number in §14.1).
+        // The whole file, for contrast.
         let t = Instant::now();
         let whole = Buffer::from_file(p).expect("read");
         let whole_t = t.elapsed();
         std::hint::black_box(whole.row_count());
 
-        // Cancellation: how soon does a chunked read notice the flag? The flag
-        // is checked per chunk, so the bound is one chunk, not one file.
+        // Cancellation: the flag is checked per chunk, so the bound is one
+        // chunk, not one file.
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let f2 = flag.clone();
         let t = Instant::now();
@@ -728,22 +678,16 @@ fn bench_first_screen() {
 }
 
 /// A prototype of lazy loading: the file stays on disk, an index is built from
-/// its BYTES, and rows are decoded only when something asks for them.
-///
-/// This exists to answer the questions a design would otherwise assume:
-/// what does the index cost, what does a window cost on demand, does the
-/// cheap path agree with the eager one, and what does it all weigh.
+/// its BYTES, rows are decoded on demand.
 mod lazy {
     use std::fs::File;
     use std::io::{self, Read};
     use std::os::unix::fs::FileExt;
 
-    /// One bit per row. NOT "is the row pure ASCII" — see `narrow_here`: the
-    /// property that matters is "every character is exactly one column and
-    /// there is no tab", which Latin-1, Greek, Cyrillic and most of the world's
-    /// text satisfy while being non-ASCII. The first version of this prototype
-    /// used `is_ascii` and was wrong: it excluded text that wraps exactly like
-    /// ASCII does.
+    /// One bit per row — NOT "is the row pure ASCII": the property that
+    /// matters is "every character is one column and no tab", which most of
+    /// the world's non-ASCII text satisfies. `is_ascii` was wrong here: it
+    /// excluded text that wraps exactly like ASCII.
     #[derive(Default)]
     pub struct Bits(Vec<u64>);
 
@@ -764,12 +708,9 @@ mod lazy {
         }
     }
 
-    /// Does the UTF-8 sequence starting at `b[i]` occupy exactly one column,
-    /// and is it not a tab? Answered from bytes; the 3- and 4-byte cases need
-    /// the codepoint, which is arithmetic on the sequence — no `char`, no
-    /// allocation, and nothing at all for the 99% of bytes that are ASCII.
-    ///
-    /// Returns `(width_is_one, sequence_len)`.
+    /// Does the UTF-8 sequence at `b[i]` occupy exactly one column, and is it
+    /// not a tab? From bytes; the 3-4 byte cases need the codepoint, which is
+    /// arithmetic on the sequence. Returns `(width_is_one, sequence_len)`.
     fn narrow_here(b: &[u8], i: usize) -> (bool, usize) {
         let x = b[i];
         match x {
@@ -798,9 +739,8 @@ mod lazy {
                     | (b[i + 3] as u32 & 0x3f);
                 (!crate::width::is_wide_cp(cp), 4)
             }
-            // A continuation byte where a lead was expected, a surrogate, or an
-            // overlong: not text we can reason about. Treat as wide so the row
-            // takes the decoding path.
+            // A continuation byte where a lead was expected, a surrogate or an
+            // overlong: treat as wide so the row takes the decoding path.
             _ => (false, 1),
         }
     }
@@ -812,18 +752,16 @@ mod lazy {
         /// count. The end of a row is the next start minus one (the newline),
         /// except for the last row, whose end is `last_end`.
         starts: Vec<u64>,
-        /// End of the final row's CONTENT — which is not the file size when
-        /// the file ends in a newline. Getting this wrong was the one bug the
-        /// prototype had: it produced a phantom empty final row on every file.
+        /// End of the final row's CONTENT — not the file size when the file
+        /// ends in a newline; a phantom empty final row is the bug this field
+        /// exists to avoid.
         last_end: u64,
         ascii: Bits,
         /// One bit per row: every BYTE is ASCII, so `char_count == byte_len`.
         pure_ascii: Bits,
-        /// Char counts for rows that are not pure ASCII, `(row, chars)`,
-        /// ascending. EMPTY for an all-ASCII file — which is every source file
-        /// and almost every log, and the reason the index stays 19.8 MB rather
-        /// than doubling: counting chars costs nothing for a row whose count
-        /// equals its byte length.
+        /// Char counts for non-pure-ASCII rows, `(row, chars)`, ascending.
+        /// Empty for an all-ASCII file — a pure-ASCII row's char count IS its
+        /// byte count, which is why the index stays small.
         non_ascii_chars: Vec<(u32, u32)>,
         size: u64,
     }
@@ -849,16 +787,11 @@ mod lazy {
                     break;
                 }
                 let chunk = &buf[..n];
-                // Whole-chunk fast path: if the chunk is ASCII there are no
-                // multi-byte sequences to reason about, so the scan is a
-                // newline loop plus one tab test. This is the path every source
-                // file and log takes, and it is what keeps the index near the
-                // cost of the bare newline scan.
+                // Whole-chunk fast path: an ASCII chunk has no multi-byte
+                // sequences, and a pure-ASCII row's char count IS its byte
+                // count — nothing to store, nothing to count. This is the path
+                // every source file and log takes.
                 if chunk.is_ascii() {
-                    // No char counting here: a pure-ASCII row's char count IS
-                    // its byte count, so there is nothing to store and nothing
-                    // to count. This is why the index stays near the cost of
-                    // the bare newline scan.
                     if chunk.contains(&b'\t') {
                         row_narrow = false;
                     }
@@ -910,10 +843,9 @@ mod lazy {
                 }
                 offset += n as u64;
             }
-            // `starts` now holds one entry per row plus a phantom entry for the
-            // row a trailing newline would begin. Resolve which case this is,
-            // and make sure every real row has its ASCII flag — the final row
-            // is the one the scan could not push, because no newline ended it.
+            // `starts` holds one entry per row plus a phantom entry for the
+            // row a trailing newline would begin; resolve which, and push the
+            // final row's flags (no newline ended it).
             let last_end;
             if size == 0 {
                 last_end = 0;
@@ -984,14 +916,13 @@ mod lazy {
                 .map(|i| self.non_ascii_chars[i].1 as u64)
         }
 
-        /// Decode rows `[first, last]`. The only place bytes become chars, and
-        /// the only place that touches the disk after `open`.
+        /// Decode rows `[first, last]` — the only place bytes become chars or
+        /// the disk is touched after `open`.
         pub fn decode(&self, first: usize, last: usize) -> io::Result<Vec<Vec<char>>> {
             let last = last.min(self.rows().saturating_sub(1));
             let lo = self.starts[first];
-            // Up to the END OF CONTENT of the last row, so the text has one
-            // newline between rows and none after the last — `split('\n')`
-            // then yields exactly the rows asked for, with no trailing "".
+            // Up to the END OF CONTENT of the last row, so `split('\n')`
+            // yields exactly the rows asked for, with no trailing "".
             let hi = self.byte_range(last).1;
             let mut buf = vec![0u8; (hi - lo) as usize];
             self.file.read_exact_at(&mut buf, lo)?;
@@ -1012,9 +943,8 @@ mod lazy {
     }
 }
 
-/// Does the lazy path agree with the eager one, on every row, and what does it
-/// cost? The first question is the one that decides whether the design is
-/// sound; the second whether it is worth having.
+/// Does the lazy path agree with the eager one on every row, and what does it
+/// cost?
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_lazy_is_correct_and_cheap() {
@@ -1022,8 +952,8 @@ fn bench_lazy_is_correct_and_cheap() {
         ("big.rs (7 MB)", "/tmp/ranoperf/big.rs"),
         ("big.log (30 MB)", "/tmp/ranoperf/big.log"),
         ("huge200.log (193 MB)", "/tmp/ranoperf/huge200.log"),
-        // Multibyte, so the byte scan must not mistake a continuation byte for
-        // a newline and the ASCII flags must be honest about it.
+        // Multibyte, so the byte scan must not mistake a continuation byte
+        // for a newline.
         ("cjk-check.md", "/tmp/cjk-check.md"),
     ];
     println!("\nlazy loading — index cost, on-demand windows, and agreement with eager decode\n");
@@ -1067,8 +997,8 @@ fn bench_lazy_is_correct_and_cheap() {
             .expect("decode deep window");
         let deep_t = t.elapsed();
 
-        // THE correctness question: does every row decoded lazily equal the
-        // row the eager path produced? Checked on every row, not a sample.
+        // THE correctness question: every row decoded lazily vs the eager
+        // path, on every row, not a sample.
         let eager = Buffer::from_file(p).expect("eager read");
         let mut cols: Vec<(usize, usize)> = (0..lazy.rows()).map(|r| (r, r)).collect();
         cols.extend((0..lazy.rows()).map(|r| (r, r)));
@@ -1096,17 +1026,17 @@ fn bench_lazy_is_correct_and_cheap() {
                 }
             }
         }
-        // The claim that makes wrapping possible without decoding: for an
-        // ASCII row, segment count is ceil(byte_len / view_w), exactly.
-        // Verified against the decoded rows for every row of the file.
+        // The claim that makes wrapping possible without decoding: for a
+        // narrow row, segment count is ceil(chars / view_w), exactly — verified
+        // against the decoded rows.
         let vw = 100u64;
         let mut seg_mismatch = 0usize;
         let mut non_ascii_rows = 0usize;
         let mut chars_mismatch = 0usize;
         for r in 0..lazy.rows() {
             if lazy.is_narrow(r) {
-                // Segment count from bytes alone: ceil(chars / view_w), where
-                // `chars` was counted from lead bytes and never decoded.
+                // Segment count from bytes alone: ceil(chars / view_w), chars
+                // counted from lead bytes, never decoded.
                 let from_index = lazy
                     .char_count(r)
                     .expect("narrow rows have a count")
@@ -1162,28 +1092,20 @@ fn bench_lazy_is_correct_and_cheap() {
     println!();
 }
 
-/// Encoding detection does not need the whole file.
-///
-/// The design in §13.5 implied a full-file pass to validate UTF-8, and that
-/// implication is what made encoding look like it forces an eager read. It does
-/// not: a BOM is four bytes, and a valid UTF-8 PREFIX is the evidence the
-/// decision is made on — which is also how `chardetng` is designed (its own
-/// docs: "If you want to perform detection on just the prefix of a longer
-/// stream, do not pass `last=true`"). Combined with lazy loading, no step of
-/// opening a file needs the whole file.
-///
-/// What this measures: the cost of deciding from a prefix, and whether that
-/// decision agrees with the whole-file answer.
+/// Encoding detection does not need the whole file: a BOM is four bytes and a
+/// valid UTF-8 PREFIX is the evidence the decision is made on (also how
+/// `chardetng` is designed). Measures the cost of deciding from a prefix and
+/// whether it agrees with the whole-file answer.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_detect_from_prefix() {
-    /// The prefix the ladder looks at. One page-cache read; big enough for a
+    /// The prefix the ladder looks at: one page-cache read, big enough for a
     /// BOM, a shebang and many kilobytes of text.
     const PREFIX: usize = 64 * 1024;
 
     /// The std-only rungs: BOM sniffing, then "does this prefix validate as
-    /// UTF-8". The legacy rung (chardetng) is the one that needs a crate; it is
-    /// fed the same prefix and is documented for exactly that.
+    /// UTF-8". The legacy rung (chardetng) is fed the same prefix and is
+    /// documented for exactly that.
     fn sniff(prefix: &[u8]) -> &'static str {
         if prefix.starts_with(b"\xef\xbb\xbf") {
             return "utf-8 (BOM)";
@@ -1199,9 +1121,8 @@ fn bench_detect_from_prefix() {
         }
         match std::str::from_utf8(prefix) {
             Ok(_) => "utf-8 (prefix validates)",
-            // Not valid: either the file is legacy, or the prefix ended
-            // mid-sequence. The rung below has to look, and for a prefix the
-            // trailing partial sequence is expected rather than evidence.
+            // Not valid: legacy, or the prefix ended mid-sequence — for a
+            // prefix that trailing partial sequence is expected, not evidence.
             Err(e) if e.error_len().is_none() => "utf-8 (prefix cut mid-sequence)",
             Err(_) => "legacy -> detector",
         }
@@ -1265,14 +1186,9 @@ fn bench_detect_from_prefix() {
     println!();
 }
 
-/// Which EDIT operations scale with the document? "Size does not influence
-/// editability" is the principle, so the question is which edit paths violate
-/// it — measured on a real 2.6M-row file, not reasoned about.
-///
-/// Each row of the table is one thing a keystroke or a key can do, run on the
-/// same buffer at two sizes. A cost that scales with the file is a violation;
-/// a cost that tracks the ROW is not (that is what "the row you are typing in"
-/// costs, and it is the same at every file size).
+/// Which EDIT operations scale with the document? Each row of the table is one
+/// thing a keystroke can do, at two file sizes: a cost that scales with the
+/// file is a violation; one that tracks the ROW is the floor.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_edit_scaling() {
@@ -1293,8 +1209,8 @@ fn bench_edit_scaling() {
         }
         let mut buf = Buffer::from_file(p).expect("read");
         let rows = buf.row_count();
-        // Edit at the START, which is the worst case for anything that shifts
-        // the lines after the edit point.
+        // Edit at the START: the worst case for anything that shifts the lines
+        // after the edit point.
         let (row, col) = (0usize, 0usize);
 
         let (t_char, _) = time(5, || {
@@ -1337,17 +1253,12 @@ fn bench_edit_scaling() {
     println!();
 }
 
-/// Does chunking the row store fix the line-insert violation?
-///
-/// Measured above: `Vec<Vec<char>>` costs 1.5 ms to insert a row at the top of a
-/// 2.6M-row file, because that is a memmove of 2.6M `Vec` headers. "Size does
-/// not influence editability" says that must go. A chunked row store makes the
-/// insert a memmove of one CHUNK instead — and, crucially, keeps line lookup
-/// O(1) (chunk index + offset), which is the property §13.6a's survey says the
-/// piece table gives up.
+/// Does chunking the row store fix the line-insert violation? A chunked store
+/// makes the insert a memmove of one CHUNK, and keeps line lookup O(1) — the
+/// property the piece table gives up.
 mod chunked {
-    /// Rows per chunk. 1,024 rows is 8 KiB of pointers to shift on an insert —
-    /// one cache line's worth of work beyond the copy, at any file size.
+    /// Rows per chunk: 8 KiB of pointers to shift on an insert, at any file
+    /// size.
     const CHUNK: usize = 1024;
 
     /// A row store with O(1) lookup and O(chunk) structural edits.
@@ -1465,9 +1376,8 @@ fn bench_chunked_fixes_the_scaling() {
 
         let mut ch = chunked::Chunked::from_rows(buf.to_lines());
         assert_eq!(ch.rows(), rows, "the chunked store must hold every row");
-        // Correctness, not just speed: every row must read back identically,
-        // and structural edits must keep the numbering right. This is the check
-        // that earned its keep on the lazy prototype (it found a phantom row).
+        // Correctness, not just speed: every row reads back identically and
+        // structural edits keep the numbering right.
         for r in 0..rows {
             assert_eq!(ch.row(r), buf.row(r).as_slice(), "row {r} differs");
         }
@@ -1511,14 +1421,9 @@ fn bench_chunked_fixes_the_scaling() {
     println!();
 }
 
-/// Scrolling, profiled. Not attributed by hand — this test exists to be run
-/// under `perf record`, so the split comes from samples rather than from my
-/// guesses about which phase is expensive.
-///
-/// It scrolls the whole file, one wheel notch at a time, doing exactly what the
-/// run loop does per frame: adjust the scroll, highlight the window, rebuild the
-/// wrap table if it is stale, draw. Then it scrolls back up. Repeat, so there is
-/// enough work to sample.
+/// Scrolling, profiled — meant to be run under `perf record`, so the split
+/// comes from samples. Scrolls the whole file one notch at a time doing what
+/// the run loop does per frame, then back up, enough times to sample.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_scroll_profile() {
@@ -1618,8 +1523,8 @@ fn bench_scroll_profile() {
     report("scroll down", &down);
     report("scroll up", &up);
 
-    // The same scroll without the highlight, to separate "the frame" from "the
-    // window highlight the frame asked for".
+    // The same scroll without the highlight, to separate the frame from the
+    // window highlight it asked for.
     let mut no_hl: Vec<u128> = Vec::new();
     for _ in 0..notches.min(2_000) {
         let t = Instant::now();
@@ -1643,13 +1548,10 @@ fn bench_scroll_profile() {
     println!();
 }
 
-/// Either side of where `LARGE_BUFFER` used to be (2 MiB).
-///
-/// Kept after the threshold was removed, because it is the regression test for
-/// the cliff it caused: `Editor::highlight_now` used to pick a whole-document
-/// highlight below that size and a window above it, which cost **402 ms per
-/// keystroke on a 2.09 MB file against 2.5 ms on the same file one byte over**.
-/// Both columns must now be the window, at every size.
+/// Either side of where `LARGE_BUFFER` used to be (2 MiB): the regression
+/// test for the cliff a threshold caused — a whole-document highlight below
+/// it, a window above, orders of magnitude apart per keystroke. Both columns
+/// must now be the window, at every size.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_threshold_cliff() {
@@ -1679,8 +1581,7 @@ fn bench_threshold_cliff() {
         let (t_whole, _) = time(3, || {
             e.bs_mut().hl.refresh(&buf);
         });
-        // A keypress: the edit plus the frame's highlight, which is where the
-        // threshold decides which path runs.
+        // A keypress: the edit plus the frame's highlight.
         let (t_key, _) = time(5, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
@@ -1704,15 +1605,9 @@ fn bench_threshold_cliff() {
     println!();
 }
 
-/// Load throughput: how fast rows arrive, and where the time goes.
-///
-/// This exists because a load was quadratic in disguise and nothing measured
-/// it. Each adopted batch bumped `edit_gen`, invalidating the wrap table, and
-/// the next frame re-measured EVERY row so far — ~800M row measurements across
-/// a 2.6M-line file, which showed up as 315k rows/s against a page-cached read
-/// of 17 GB/s. Extending the table from the join instead of rebuilding it is
-/// what the number below is checking: it should now be a small multiple of the
-/// raw read, not thousands of times it.
+/// Load throughput: how fast rows arrive. The wrap table is extended from the
+/// join rather than rebuilt per batch, so this should be a small multiple of
+/// the raw read, not thousands of times it.
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_load_throughput() {
@@ -1732,8 +1627,8 @@ fn bench_load_throughput() {
     let raw_bytes = bytes.len();
     drop(bytes);
 
-    // The whole editor loop: adopt, highlight the window, extend the wrap
-    // table, draw — which is what the run loop does while a file arrives.
+    // The whole editor loop — adopt, highlight, extend the wrap table, draw —
+    // what the run loop does while a file arrives.
     let t = Instant::now();
     let mut ed = Editor::new(Buffer::new(), config::Config::default());
     ed.text_w = 120;

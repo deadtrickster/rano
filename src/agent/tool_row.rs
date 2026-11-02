@@ -1,9 +1,5 @@
-//! **A tool's result row** in the transcript: the header, the diff or the payload's window,
-//! the decision that gated it, and the picture it returned.
-//!
-//! Ported from letibot's `crates/tui/src/ui/transcript/tool_result.rs`
-//! (`tool_result_row_lines`). The view model is [`ToolRow`]; what letibot read out of its
-//! `ItemCtx` and `TranscriptItem::ToolResult` is a field each.
+//! A tool's result row in the transcript: the header, the diff or the payload's window, the decision
+//! that gated it, and the picture it returned.
 
 use crate::render::text::truncate_owned;
 use crate::render::{Line, Span, Style};
@@ -25,48 +21,38 @@ pub struct ToolRow {
     /// The tool's name: `bash`, `read`, `edit`.
     pub name: String,
     pub call_id: String,
-    /// The display target the call was proposed with — the path, the pattern, the command.
-    /// Empty when the host does not know it; the row then names `(call_id)`, a correlation
-    /// key that reads as one, rather than borrowing a neighbour's path, which would read
-    /// as a fact.
+    /// The display target the call was proposed with — the path, the pattern, the command. Empty
+    /// draws `(call_id)` rather than borrowing a neighbour's path, which would read as a fact.
     pub target: String,
     pub outcome: Outcome,
-    /// The payload, one [`Line`] per line of it, as the tool wrote it. A host that
-    /// interprets the tool's own SGR into roles passes those spans; [`payload_lines`] is
-    /// the plain form. Envelope marker lines are dropped here.
+    /// The payload, one [`Line`] per line of it, as the tool wrote it, envelope markers dropped.
     pub payload: Vec<Line>,
-    /// How long it took, when the host watched it run. `None` for a row read out of a
-    /// snapshot — the rule `Phase::Replayed` follows, for the same reason.
+    /// How long it took, when the host watched it run. `None` for a row read out of a snapshot.
     pub elapsed_ms: Option<u64>,
-    /// **The person at the keyboard ran this** (`! ls`), not the model. Drawn as the `▌` bar
-    /// in [`Role::UserAccent`] in front of the header.
+    /// The person at the keyboard ran this (`! ls`), not the model: drawn as the `▌` bar in
+    /// [`Role::UserAccent`].
     pub operator: bool,
     /// The before/after view, when the host holds both sides of an edit.
     pub diff: Option<EditDiff>,
     /// The decision this call was gated by.
     pub decision: Option<SettledDecision>,
-    /// **The picture the tool returned, where the terminal can draw one**: rows from
-    /// [`crate::term::graphics::image_lines`], already sized. Empty otherwise.
+    /// The picture the tool returned, where the terminal can draw one.
     pub picture: Vec<Line>,
     /// The directory a relative target is resolved against, when the terminal speaks OSC 8:
     /// the subject of a read/edit/write/list is then a link to the file it names.
     pub link_root: Option<String>,
     /// The conversation's tool fold (`/t`).
     pub fold: Fold,
-    /// `Some(page)` when THIS row's payload window is open (`ctrl-v`), at that offset.
-    /// The host owns the offset; [`ToolRow::layout`] returns the furthest useful one so the
-    /// host can clamp its own.
+    /// Some(page) when this row's payload window is open (`ctrl-v`), at that offset: the host owns
+    /// the offset and clamps it with [`ToolRow::layout`]'s furthest useful one.
     pub window: Option<usize>,
-    /// Rows the window may take on this screen (letibot: the screen's height less its
-    /// chrome), so an open window fits.
+    /// Rows the window may take on this screen, so an open window fits.
     pub window_rows: usize,
-    /// The body budget an unfolded row may draw (letibot `Budget::body_lines`, 40).
+    /// The body budget an unfolded row may draw.
     pub body_lines: usize,
-    /// Whether this is the newest long result — the one `ctrl-v` reaches, so the one
-    /// whose seam names it.
+    /// Whether this is the newest long result — the one `ctrl-v` reaches.
     pub newest: bool,
-    /// Columns the whole row is stepped in by: a turn's activity indent
-    /// ([`super::card::activity_indent`]).
+    /// Columns the whole row is stepped in by: a turn's activity indent.
     pub indent: usize,
 }
 
@@ -74,15 +60,13 @@ pub struct ToolRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowLayout {
     pub lines: Vec<Line>,
-    /// With the window open: the furthest offset worth paging to — the one whose window
-    /// ends on the payload's last line. A host clamps its stored offset to this, which is
-    /// what makes the first Up after paging past the end move at once.
+    /// With the window open: the furthest offset worth paging to, so a host clamping its stored
+    /// offset makes the first Up after paging past the end move at once.
     pub max_page: Option<usize>,
 }
 
-/// A payload's text as plain lines: one per line, foreign text cleaned (escapes removed —
-/// which also removes a coloured command's SGR; a host that wants those colours maps them
-/// to spans itself).
+/// A payload's text as plain lines: one per line, foreign text cleaned — which also removes a
+/// coloured command's SGR, so a host that wants those colours maps them to spans itself.
 pub fn payload_lines(text: &str) -> Vec<Line> {
     text.lines().map(|l| Line::raw(clean_line(l))).collect()
 }
@@ -91,8 +75,8 @@ pub fn payload_lines(text: &str) -> Vec<Line> {
 const BIG: usize = 40;
 
 impl ToolRow {
-    /// A row with the defaults the rest of the fields usually take: folded, no window,
-    /// letibot's 40-row body budget.
+    /// A row with the defaults the rest of the fields usually take: folded, no window, a 40-row body
+    /// budget.
     pub fn new(name: &str, call_id: &str, outcome: Outcome, payload: Vec<Line>) -> ToolRow {
         ToolRow {
             name: name.into(),
@@ -123,20 +107,9 @@ impl ToolRow {
         let ind = self.indent;
         let p = &self.picture;
         let picture = || p.iter().cloned().map(|l| indent(l, 2));
-        // **The envelope is addressed to the model, not to the operator.**
-        //
-        // `<<<TOOL_ERROR 5ebfdef6>>>` and its `<<<END_…>>>` are how a result tells the model
-        // where the harness's text stops and the payload starts — a marker, with a per-call
-        // nonce so a payload cannot forge one. On a screen it is a line of noise in the middle
-        // of the two lines a folded row has.
-        //
-        // **And the bytes are the command's, not this terminal's.** A payload is whatever a
-        // tool wrote, escape sequences included; measured in the operator's store, 20 rows
-        // carried a mode string — mouse tracking, the alternate screen, bracketed paste — and
-        // rendering one turned the wheel off (*"when i expand tools with Ct scroll stops
-        // working, even after collapsing back"*). The buffer never writes an escape from span
-        // content, and the fold below is taken from the cleaned TEXT, so `+N lines` counts
-        // lines a reader can read.
+        // The envelope markers are addressed to the model, not to the operator: a marker with a
+        // per-call nonce, which on screen is a line of noise in a folded row. The bytes are the
+        // command's too, so the text is cleaned before the fold is counted.
         let texts: Vec<String> = self
             .payload
             .iter()
@@ -152,9 +125,8 @@ impl ToolRow {
         let lines: Vec<&str> = kept.iter().map(|(_, t)| *t).collect();
         let bad = !matches!(self.outcome, Outcome::Ok);
         let mark = if self.fold.is_open() { "▾" } else { "▸" };
-        // `▾ Read crates/ui/src/style.rs · ok · 183 lines`, not `▾ read(call_0) …`. The verb
-        // and the target are the two words a person scans a settled call for, and the id — a
-        // correlation key — takes their place only when the target is not known.
+        // The verb and the target are the two words a person scans a settled call for; the id takes
+        // their place only when the target is not known.
         let verb_kind = Verb::of(&self.name);
         let verb = verb_kind.label(false).to_string();
         let full_subject = if self.target.is_empty() {
@@ -166,25 +138,10 @@ impl ToolRow {
             Some(ms) => format!(" · {}", duration(ms)),
             None => String::new(),
         };
-        // # Everything used to be the same weight
-        //
-        // A one-line `ls` and a two-hundred-line search rendered identically. The operator's
-        // words — *"size, indentation and rule-weight should tell you what matters before you
-        // read a word"*. So the header is built out of roles, chosen so the **scan** works
-        // with no reading at all:
-        //
-        // - The subject — the path, the pattern — is [`Role::Plain`], so it is the brightest
-        //   thing on the row. It is what a person is looking for.
-        // - Everything structural around it is [`Role::Faint`]: the glyph, the verb, the
-        //   separators.
-        // - `ok` is faint too. It is the boring case and it is most of them; anything else
-        //   keeps its own loud role (§8.2: abstention must not read like success).
-        // - The line count is [`Role::Strong`] once the output is big enough to be worth a
-        //   fold — the size signal, as an attribute rather than a second colour, so it
-        //   survives a terminal-native theme.
-        //
-        // Under `Palette::None` the words are unchanged and the count is still a number,
-        // which is the whole reason the weighting is carried by *which* field.
+        // The header is built out of roles so the scan works without reading: the subject plain (it
+        // is what a person looks for), everything structural faint, `ok` faint because it is the
+        // boring case, and the line count strong once the output is big enough to fold — an
+        // attribute rather than a second colour, so it survives a terminal-native theme.
         let w = width.saturating_sub(ind).max(20);
         let outcome_role = self.outcome.row_role();
         let size_role = if lines.len() >= BIG {
@@ -192,34 +149,15 @@ impl ToolRow {
         } else {
             Role::Faint
         };
-        // # It degrades by shortening the subject, never by losing the tail
-        //
-        // This row was built left to right and trimmed at the right, so a long target ate
-        // the outcome. Measured on the operator's session — an `ask_code` call that did not
-        // run rendered `▸ ask_code "Give an overview of the crate architecture: what each…`
-        // with the word `not run` cut off the end, which is a failed call wearing the shape of
-        // a successful one. So the tail is measured first and the subject is given what is
-        // left.
+        // It degrades by shortening the subject, never by losing the tail: left to right and trimmed
+        // at the right, a long target ate the outcome, and `not run` cut off the end is a failed call
+        // wearing the shape of a successful one.
         let word = self.outcome.word();
         let tail_cols =
             3 + visible_width(word) + visible_width(&took) + 3 + 6 + lines.len().to_string().len();
-        // # A call the person ran says so
-        //
-        // The operator typed `! ls` on a live head, the row landed and was drawn, and their
-        // words about what they saw were *"no colors tho?"*. Every role on this header is
-        // chosen from the outcome, the name, the payload and the fold — so an operator's row
-        // and a model's rendered byte for byte the same, and what the operator's row did not
-        // have is the one thing a model's row has no need to say: WHO acted.
-        //
-        // So the row wears the `▌` bar in [`Role::UserAccent`]: the glyph and the role the
-        // operator's own words already wear. **The same glyph and role rather than a new
-        // colour**, because the palette has exactly one meaning for *the person at the
-        // keyboard*. And it is a GLYPH as well as a colour: under `Palette::None` a
-        // provenance carried by a colour alone would say nothing at all.
-        //
-        // **What it does not change**: the fold, the count, the one-line form, the diff, the
-        // reason, the decision block. It is two columns of the header, measured into `lead`
-        // so a long subject is shortened by the same arithmetic.
+        // A call the person ran says so, in the glyph and role the operator's own words already
+        // wear — the palette has one meaning for the person at the keyboard — and in a glyph as well
+        // as a colour, so the provenance survives `Palette::None`. Nothing else changes.
         let provenance = if self.operator { "▌ " } else { "" };
         let lead = format!("{provenance}{mark} {verb} ");
         let subject = shorten_subject(
@@ -234,8 +172,8 @@ impl ToolRow {
         head.spans.push(Span::role(mark, outcome_role));
         head.spans
             .push(Span::role(format!(" {verb} "), Role::Faint));
-        // **The file, as a link** (OSC 8) where the terminal speaks it: the full target the
-        // shortened subject stands for, so a click opens the file and not `…/app.rs`.
+        // The file as a link (OSC 8) where the terminal speaks it: the full target the shortened
+        // subject stands for.
         let mut subject_style = Style::new();
         if let Some(root) = &self.link_root
             && verb_kind.names_a_file()
@@ -246,20 +184,17 @@ impl ToolRow {
         head.spans.push(Span::styled(subject, subject_style));
         head.spans
             .push(Span::role(format!(" · {word}"), outcome_role));
-        // Pushed even when empty: a host printing strings writes the faint run's open and
-        // close around nothing, the bytes letibot's header always carried there.
+        // Pushed even when empty: a host printing strings writes the faint run's open and close
+        // around nothing.
         head.spans.push(Span::role(took.clone(), Role::Faint));
 
-        // A result of one line goes ON the header. `▸ Read .gitignore · ok · 1.1s · /target`
-        // is one row where `▸ Read .gitignore · ok · 1 line` over `  /target` was two, and the
-        // second of them carried the count for a fold that has nothing to fold. At 34 rows that
-        // halving is the difference between four calls fitting and eight.
+        // A result of one line goes on the header, where a second row would carry a count for a fold
+        // with nothing to fold — at 34 rows that halving is four calls fitting or eight. An edit with
+        // an excerpt is excluded: its diff is the content.
         let inline = (!bad
             && lines.len() == 1
-            // An edit with an excerpt draws its diff, not the tool's prose — the rule the
-            // folded arm below follows. The one-line shortcut used to preempt it, so a landed
-            // edit whose payload was a single line put the prose on the header and the change
-            // was nowhere on the screen.
+            // An edit with an excerpt draws its diff, not the tool's prose — the rule the folded arm
+            // below follows.
             && self.diff.is_none())
         .then(|| strip_gutter(lines[0]))
         .filter(|l| !l.is_empty())
@@ -268,8 +203,7 @@ impl ToolRow {
             head.spans.push(Span::role(" · ", Role::Faint));
             head.spans.push(Span::raw(l));
             let mut out = vec![truncate_owned(head, w)];
-            // The approval rides the one-line form too: a gated call whose result fit on the
-            // header is no less gated for it.
+            // The approval rides the one-line form too.
             if let Some(d) = &self.decision {
                 out.extend(decision_lines(d, self.fold, w));
             }
@@ -288,28 +222,18 @@ impl ToolRow {
             ),
             size_role,
         ));
-        // No chord on the header. It belongs on the elision row below, which exists exactly
-        // when something is hidden — an affordance on a card with nothing folded is columns
-        // of every row spent advertising a key that would do nothing.
+        // No chord on the header: it belongs on the elision row below, which exists exactly when
+        // something is hidden.
         let mut out = vec![truncate_owned(head, w)];
-        // The reason, on its own wrapping line rather than in the header's tail. Never
-        // truncated, and in the outcome's own role: a call that abstained or was refused
-        // said *why*, and that sentence is the whole content of the row.
-        //
-        // **A reason that is a DOCUMENT is not a sentence.** Layer A's names every construct
-        // it could not resolve, one indented paragraph each — twenty lines of prose addressed
-        // to the MODEL. The operator: *"i get what it tries to do, but it just throws up on my
-        // chat"*. So the first sentence stands unfolded — what happened, always visible — and
-        // the rest arrives with the fold like every other long thing on this screen.
+        // The reason, on its own wrapping line, in the outcome's own role and never truncated. A
+        // reason that is a document — layer A names every construct it could not resolve, addressed to
+        // the model — stands unfolded only as its first sentence, and the rest arrives with the fold.
         let why = self.outcome.reason().map(|r| clean(r).into_owned());
         let mut why_folded = false;
         if let Some(why) = &why {
-            // **The payload says it too, so this stays a gist.** Unfolding reveals the
-            // payload, and a refusal's payload is a complete explanation; printing the whole
-            // `why` above it produced the same paragraph twice in one card. The operator,
-            // counting: *"how many times is 'nothing ran' needed?"* Once. When the reason is
-            // NOT below, unfolding still shows all of it. Matched on the reason's FIRST LINE:
-            // one line of forty-plus characters appearing verbatim below is not a coincidence.
+            // The payload says it too, so this stays a gist: a refusal's payload is a complete
+            // explanation, and printing the whole `why` above it puts the same paragraph twice in one
+            // card. When the reason is not below, unfolding shows all of it.
             let first = why.lines().next().unwrap_or("").trim();
             let echoed = first.len() >= 40 && lines.iter().any(|l| l.contains(first));
             let shown: String = if self.fold.is_open() && !echoed {
@@ -325,18 +249,14 @@ impl ToolRow {
                     .map(|l| one(format!("  {l}"), outcome_role)),
             );
         }
-        // The decision this call was gated by — the same block the live card draws, carried
-        // across with the card. Without this the approval leaves the screen the moment the
-        // result row takes the call over.
+        // The decision it was gated by, carried across with the card: without it the approval leaves
+        // the screen the moment the result row takes the call over.
         if let Some(d) = &self.decision {
             out.extend(decision_lines(d, self.fold, w));
         }
-        // **A file edit draws its diff, not the tool's prose.** The tool's payload is
-        // addressed to the model — "path: 1 replacement(s)" and a window of the new file —
-        // and the operator's question about an edit is "what changed". Folded keeps the first
-        // hunk's opening rows so the change is on the screen without the fold; open shows it
-        // whole, up to the diff's own cap. A row whose host did not hold both sides has no
-        // diff and keeps the prose.
+        // A file edit draws its diff, not the tool's prose: the payload is addressed to the model,
+        // and the operator's question about an edit is what changed. Folded keeps the first hunk's
+        // rows so the change is on screen; a row whose host did not hold both sides keeps the prose.
         if let Some(d) = &self.diff
             && verb_kind.is_an_edit()
             && !bad
@@ -361,19 +281,14 @@ impl ToolRow {
                 max_page: None,
             };
         }
-        // **The payload's own window, which is what makes the rest of it reachable.**
-        //
-        // Under the fold this row draws two rows; unfolded, the body budget. Either way it was
-        // drawn from the **head** — so for a 418 KB log the fold reported `… +N lines` and the
-        // chord revealed nothing, because opening the fold changed the *budget*, not the
-        // *offset*. So a row whose window is open draws a window into its payload and the
-        // arrows page it.
+        // The payload's own window is what makes the rest of it reachable: drawn from the head, a
+        // 418 KB log's fold reported `+N lines` and the chord revealed nothing, because opening the
+        // fold changed the budget and not the offset.
         let window = self.window.is_some();
         let total = lines.len();
-        // **The window is the row's own length, not the fold's**, so one result can be read
-        // to its end without unfolding every result in the conversation — which is what made
-        // the old chord a wall. And it fits the screen: on a 24-row terminal a forty-row
-        // window's first lines were above the top.
+        // The window is the row's own length, not the fold's, so one result can be read to its end
+        // without unfolding every result — and it fits the screen, where a forty-row window's first
+        // lines sat above the top of a 24-row terminal.
         let shown_rows = if window {
             self.body_lines.min(self.window_rows).max(4)
         } else if self.fold.is_open() || (bad && why.is_none()) {
@@ -381,9 +296,8 @@ impl ToolRow {
         } else {
             2
         };
-        // **The last page is a full one.** It clamped to `total - 1`, so the end of a long
-        // output was one line under a seam; the furthest useful offset is the one whose window
-        // ends on the last line (a window with the `↑` seam above it).
+        // The last page is a full one: clamping to `total - 1` left the end of a long output one line
+        // under a seam.
         let max_page = total.saturating_sub(shown_rows.saturating_sub(2).max(1));
         let page = match self.window {
             Some(p) => p.min(max_page),
@@ -403,9 +317,8 @@ impl ToolRow {
                 Role::Faint,
             ));
         }
-        // The payload's block is FAINT, and a coloured run inside it stacks its own role over
-        // that and closes back to faint — letibot's `Painter::inside`, which is what a role
-        // stack is.
+        // The payload's block is faint, and a coloured run inside it stacks its own role over that
+        // and closes back to faint.
         let faint = Style::of(Role::Faint);
         out.extend(kept[page..end].iter().map(|(l, _)| {
             let mut row = indent((*l).clone(), 2);
@@ -414,33 +327,28 @@ impl ToolRow {
         }));
         if below {
             let hidden = total - end;
-            // grok-build's `execute.rs:549` form: the seam where content was taken out, not a
-            // sentence. **And it says which key now does what** — the chord opens the view, the
-            // arrows move inside it, and a row that named only the chord was the row that
-            // could not be read past its head.
+            // The seam where content was taken out, not a sentence, and it names which key does what
+            // now: the chord opens the view and the arrows move inside it.
             out.push(one(
                 if window {
                     format!("  … +{hidden} lines · ↓ pages down · esc closes")
                 } else if self.newest {
-                    // **The chord, on the row it acts on.** `ctrl-v` opens the window into the
-                    // newest long result, and this is that row.
+                    // The chord, on the row it acts on.
                     format!("  … +{hidden} lines · ctrl-v opens it")
                 } else {
-                    // **Not this chord.** It acts on the newest long result and there is no
-                    // cursor to point it at an older one, so this row names the verb that does
-                    // reach it: `/t` unfolds every tool row.
+                    // Not this chord: it acts on the newest long result and there is no cursor to
+                    // point at an older one, so this row names the verb that does reach it.
                     format!("  … +{hidden} lines · /t unfolds it")
                 },
                 Role::Faint,
             ));
         } else if window {
-            // The end of the payload: say so, so "no more" is not confused with "the arrow
-            // stopped working".
+            // The end of the payload, said so "no more" is not confused with "the arrow stopped
+            // working".
             out.push(one("  … end of output · esc closes", Role::Faint));
         } else if why_folded {
-            // The payload was short enough to show whole, but the REASON was cut — so the
-            // affordance has to be here, or the rest of it would be hidden behind a chord
-            // nothing on the row mentions.
+            // The payload was short enough to show whole but the reason was cut, so the affordance
+            // has to be here or the rest is hidden behind a chord nothing on the row mentions.
             out.push(one(
                 "  … the rest of the reason · /t unfolds it",
                 Role::Faint,
@@ -467,7 +375,6 @@ mod tests {
         payload_lines(&(0..n).map(|i| format!("{word} {i}\n")).collect::<String>())
     }
 
-    /// letibot's `item_rows` shape: width 120, the activity indent, tools open.
     fn bang(operator: bool) -> ToolRow {
         let mut r = ToolRow::new("bash", "bang-1", Outcome::Ok, numbered(60, "line"));
         r.operator = operator;
@@ -476,8 +383,6 @@ mod tests {
         r
     }
 
-    /// `a_models_tool_row_is_unmarked_and_its_paint_has_not_moved`: the header pinned
-    /// literally, and its registers span by span.
     #[test]
     fn a_models_tool_row_is_unmarked_and_its_paint_has_not_moved() {
         let theirs = bang(false).lines(120);
@@ -491,10 +396,7 @@ mod tests {
         assert!(!h.plain().contains('▌'));
     }
 
-    /// `an_operators_tool_row_is_the_models_row_with_the_persons_own_mark_on_it`.
-    /// letibot `app/tests/tools.rs::a_models_tool_row_is_unmarked_and_its_paint_has_not_moved`,
-    /// byte for byte: a row with no duration still writes the faint run where the duration
-    /// would be.
+    /// A row with no duration still writes the faint run where the duration would be.
     #[test]
     fn a_models_tool_row_header_is_the_bytes_it_has_always_been() {
         assert_eq!(
@@ -522,13 +424,13 @@ mod tests {
             theirs[1..],
             "the count, the fold and the body must be the model's"
         );
-        // **And with no palette at all**: the provenance is a glyph, so it survives.
+        // And with no palette at all: the provenance is a glyph, so it survives.
         let rows = TestBuffer::new(120, 3).draw(&bang(true)).plain();
         assert!(rows[0].contains('▌'), "{rows:?}");
         assert!(!rows.iter().any(|l| l.contains('\x1b')));
     }
 
-    /// `a_settled_call_is_one_row_and_the_row_is_the_one_with_the_result_on_it`.
+    /// A settled call is one row, and the row is the one with the result on it.
     #[test]
     fn a_settled_call_is_one_row_and_the_row_is_the_one_with_the_result_on_it() {
         let mut r = ToolRow::new(
@@ -553,7 +455,6 @@ mod tests {
         assert_eq!(role_of(&out[0], "/target"), Some(Role::Plain));
     }
 
-    /// `a_subject_too_long_for_the_row_never_pushes_the_outcome_off_it`.
     #[test]
     fn a_subject_too_long_for_the_row_never_pushes_the_outcome_off_it() {
         let r = ToolRow::new(
@@ -579,14 +480,12 @@ mod tests {
         assert!(r.lines(60)[0].width() <= 60);
     }
 
-    /// `a_result_whose_round_the_head_cannot_see_says_so_rather_than_borrowing`.
     #[test]
     fn a_result_whose_round_the_head_cannot_see_says_so_rather_than_borrowing() {
         let r = ToolRow::new("read", "call_0", Outcome::Ok, payload_lines("hello\n"));
         assert!(plain(&r.lines(120))[0].contains("(call_0)"));
     }
 
-    /// `a_big_result_weighs_more_than_a_small_one_and_costs_no_cube_colour`.
     #[test]
     fn a_big_result_weighs_more_than_a_small_one_and_costs_no_cube_colour() {
         let small = ToolRow::new("grep", "call_0", Outcome::Ok, numbered(3, "x"));
@@ -607,7 +506,6 @@ mod tests {
         }
     }
 
-    /// `a_settled_rows_register_comes_from_the_outcome_not_from_a_not_ok_test`, on the row.
     #[test]
     fn a_backgrounded_call_is_not_drawn_as_a_failure() {
         let r = ToolRow::new(
@@ -623,7 +521,7 @@ mod tests {
         assert_eq!(role_of(&f.lines(120)[0], " · failed"), Some(Role::Failure));
     }
 
-    /// `ctrl_v_opens_one_rows_window_and_the_whole_folds_are_the_verb`: the seams.
+    /// The seam names the key that reaches the rest on this row.
     #[test]
     fn the_seam_names_the_key_that_reaches_the_rest_on_this_row() {
         let mut r = ToolRow::new("bash", "c1", Outcome::Ok, numbered(40, "line"));
@@ -642,7 +540,6 @@ mod tests {
         );
     }
 
-    /// `a_long_payload_can_be_paged_to_its_end`.
     #[test]
     fn a_long_payload_can_be_paged_to_its_end() {
         let mut r = ToolRow::new("bash", "c1", Outcome::Ok, numbered(200, "line"));
@@ -672,7 +569,7 @@ mod tests {
         assert_eq!(end.max_page, Some(200 - 38));
     }
 
-    /// `an_open_result_window_reaches_its_end_comes_back_at_once_and_fits`.
+    /// A window reaches its end, comes back at once, and fits the screen.
     #[test]
     fn an_open_result_window_reaches_its_end_comes_back_at_once_and_fits() {
         let mut r = ToolRow::new("bash", "c0", Outcome::Ok, numbered(300, "output line"));
@@ -699,8 +596,8 @@ mod tests {
         assert_ne!(shown(&r).last(), end.last(), "Up did not move");
     }
 
-    /// The envelope's markers never show, and a document of a reason folds to its gist with
-    /// the verb that has the rest.
+    /// The envelope's markers never show, and a document of a reason folds to its gist with the verb
+    /// that has the rest.
     #[test]
     fn a_reason_that_is_a_document_folds_and_the_envelope_never_shows() {
         let reason = "this command's meaning does not exist yet, so nothing can decide about \

@@ -272,8 +272,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
             .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     };
-    // Unified first (the session's default): the file's name, the hunk, and
-    // each line numbered in its own file.
     let rows = text(&ed);
     assert!(rows[0].ends_with("f.txt"), "{rows:?}");
     assert!(rows[1].starts_with("@@"), "{rows:?}");
@@ -283,7 +281,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
         rows.contains(&"3 -three from elsewhere".to_string()),
         "{rows:?}"
     );
-    // s: two panels, the disk's line on the left and the buffer's on the right.
     press(&mut ed, KeyCode::Char('s'), Mods::NONE);
     assert!(ed.diff_split, "the choice is remembered");
     let rows = text(&ed);
@@ -291,11 +288,9 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     let (left, right) = pair.split_once('│').expect("two panels");
     assert!(left.contains("- one"), "{pair:?}");
     assert!(right.contains("+ Xone"), "{pair:?}");
-    // A resize re-renders at the new width.
     ed.text_w = 60;
     assert!(ed.refresh_diff_view());
     assert!(!ed.refresh_diff_view());
-    // Drawn over the text, with the header naming the view.
     ed.text_h = 8;
     let buf = ui::Screen::of(&ed, 60, 12);
     let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
@@ -304,7 +299,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
-    // y from the diff itself answers the question.
     press(&mut ed, KeyCode::Char('d'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     press(&mut ed, KeyCode::Char('y'), Mods::NONE);
@@ -336,13 +330,11 @@ fn m_p_previews_a_patch_buffer_and_closes_again() {
     assert!(rows.contains(&"8 -    old();".to_string()), "{rows:?}");
     assert!(rows.contains(&"8 +    new();".to_string()), "{rows:?}");
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Patch"));
-    // y and n are not answers here; M-P closes and leaves no prompt.
     press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.prompt.is_none());
-    // The text is untouched: the preview is a view, not an edit.
     assert_eq!(lines(&ed)[0], "diff --git a/src/a.rs b/src/a.rs");
 }
 
@@ -353,8 +345,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
     ed.text_w = 100;
     ed.text_h = 20;
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
-    // The markup is gone, not coloured: a heading, emphasis and a code span
-    // arrive as the words they wrap.
     let rows = diff_view_text(&ed);
     assert_eq!(rows[0], "# Title", "{rows:?}");
     assert!(
@@ -364,7 +354,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
     assert!(rows.contains(&"· one".to_string()), "{rows:?}");
     let header = ed.diff_view.as_ref().unwrap().header();
     assert!(header.contains("Markdown /tmp/rano_preview.md"), "{header}");
-    // `s` is the shared diff map's split, and this view is one column.
     press(&mut ed, KeyCode::Char('s'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     assert!(
@@ -372,7 +361,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
         "{:?}",
         ed.status.as_ref().map(|f| f.text.clone())
     );
-    // M-P closes back to the text, which is untouched.
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.prompt.is_none());
@@ -426,7 +414,6 @@ fn conflict_ed() -> Editor {
 #[test]
 fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
     let mut ed = conflict_ed();
-    // A short screen, so moving to a conflict has to scroll.
     ed.text_h = 6;
     assert!(
         ed.diff_view
@@ -438,14 +425,12 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
     press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     let v = ed.diff_view.as_ref().unwrap();
     assert!(v.header().contains("Conflict 2/2"), "{}", v.header());
-    // Scrolled to it: the first row shown is its header, marked current.
     let first: String = v.lines[v.top]
         .spans
         .iter()
         .map(|s| s.content.as_str())
         .collect();
     assert!(first.starts_with("▶ Conflict 2 of 2"), "{first:?}");
-    // Past the last one it stays.
     press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(
         ed.diff_view
@@ -454,7 +439,6 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
             .header()
             .contains("Conflict 2/2")
     );
-    // c: base against ours shows the base's line.
     press(&mut ed, KeyCode::Char('c'), Mods::NONE);
     let rows = diff_view_text(&ed);
     assert!(
@@ -485,11 +469,9 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
         "{:?}",
         lines(&ed)
     );
-    // One left, and it is now current.
     let v = ed.diff_view.as_ref().expect("still open");
     assert!(v.header().contains("Conflict 1/1"), "{}", v.header());
     assert!(ed.status_text().unwrap().contains("1 conflict left"));
-    // b: both, ours first — the last one, so the view closes.
     press(&mut ed, KeyCode::Char('b'), Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert!(ed.status_text().unwrap().contains("All conflicts resolved"));
@@ -504,15 +486,12 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
             "}"
         ]
     );
-    // Each take is one undo step.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert!(lines(&ed).contains(&"<<<<<<< HEAD".to_string()));
     assert!(lines(&ed).contains(&"    let sum = 1;".to_string()));
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
 }
-
-// ---- keymaps, M-x, help pages, which-key ----
 
 fn screen(ed: &Editor, w: u16, h: u16) -> Vec<String> {
     let s = ui::Screen::of(ed, w, h);
@@ -526,7 +505,6 @@ fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
     assert_eq!(ed.pending.keys.len(), 1, "M-t is a prefix");
     assert!(ed.pending_card().is_none(), "its card waits a moment");
     assert!(ed.card_due().is_some());
-    // Held still: the card shows.
     ed.pending.since = Some(Instant::now() - Duration::from_secs(1));
     let (m, _) = ed.pending_card().expect("card");
     assert_eq!(m.name, "todo");
@@ -537,12 +515,10 @@ fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
             .any(|r| r.contains("Tick") && r.contains("Decline")),
         "{rows:#?}"
     );
-    // The bar shows what can follow, too.
     assert!(ed.bar_items().iter().any(|(k, t)| k == "t" && t == "Tick"));
     press(&mut ed, KeyCode::Char('t'), Mods::NONE);
     assert!(ed.pending.keys.is_empty());
     assert_eq!(lines(&ed)[0], "- [x] task", "M-t t ticked it");
-    // ESC abandons a prefix; an unbound key says so.
     press(&mut ed, KeyCode::Char('t'), Mods::ALT);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert_eq!(ed.status_text().as_deref(), Some("Quit"));
@@ -580,12 +556,10 @@ fn the_help_key_shows_its_card_at_once_and_opens_pages() {
         text.iter()
             .any(|r| r.contains("Conflict view") || r.contains("Patch and conflict"))
     );
-    // A page's own keys, and q closes it; typing does not reach the text.
     press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["text"]);
     press(&mut ed, KeyCode::Char('q'), Mods::NONE);
     assert!(ed.info.is_none());
-    // C-g C-g: the overview.
     press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     assert_eq!(ed.info.as_ref().unwrap().title, "Help");
@@ -653,13 +627,11 @@ fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
         Some(PromptKind::WriteName)
     );
     ed.prompt = None;
-    // Recently run comes first among equals; an empty query lists all.
     press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     assert_eq!(ed.palette.as_ref().unwrap().items[0], "write-out");
     assert!(ed.palette.as_ref().unwrap().items.len() > 40);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.palette.is_none());
-    // Nothing matches: Enter says so and runs nothing.
     press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     press_text(&mut ed, "qqqq");
     press(&mut ed, KeyCode::Enter, Mods::NONE);
@@ -678,7 +650,6 @@ fn a_view_puts_its_own_keys_on_the_bar() {
         bar.iter().any(|(k, t)| k == "s" && t == "Split/Unified"),
         "{bar:?}"
     );
-    // A key the view does not bind is ignored, not typed.
     press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
@@ -746,27 +717,21 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     let header = ed.diff_view.as_ref().unwrap().header();
     assert!(header.contains("Picture"), "{header}");
     assert!(header.contains("sun.png"), "{header}");
-    // The text under the view was never touched.
     assert_eq!(
         lines(&ed)[0],
         "the buffer is the file's bytes, and they are not the picture"
     );
-    // Uploaded once, then placed where the rows draw it.
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");
     assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
     assert!(out[1].contains("a=p,U=1"), "{:?}", out[1]);
     assert!(out[1].contains(&format!("c={},", cells.0)), "{:?}", out[1]);
-    // Nothing changed since: nothing is sent again.
     assert!(graphics(&mut ed).is_empty());
-    // A resize moves the box, and the terminal is given the picture again at it.
     ed.text_w = 200;
     assert!(ed.refresh_diff_view());
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "the picture again, at the new box: {out:?}");
     assert!(graphics(&mut ed).is_empty(), "and then quiet again");
-    // A narrow frame takes a narrow picture; the rows always fit the width
-    // they are drawn in.
     ed.text_w = 15;
     assert!(ed.refresh_diff_view());
     let rows = picture_rows(&ed);
@@ -779,7 +744,6 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_some(), "the only buffer is the picture");
     assert!(ed.status_text().unwrap().contains("Last buffer"));
-    // With a file beside it, the same key closes the picture's buffer and drops the bytes.
     let other = d.0.join("notes.txt");
     fs::write(&other, "text\n").unwrap();
     ed.config.multibuffer = true;
@@ -807,14 +771,12 @@ fn a_markdown_preview_draws_the_pictures_the_document_names() {
     ed.images = true;
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     let rows = picture_rows(&ed);
-    // The picture goes under the reference, not under the sentence that names the file.
     let reference = rows
         .iter()
         .position(|r| r.contains("the sun"))
         .unwrap_or_else(|| panic!("{rows:?}"));
     assert!(rows[reference + 1].starts_with('\u{10EEEE}'), "{rows:?}");
     assert!(rows[0].contains("Intro"), "{rows:?}");
-    // One picture: one upload, one placement.
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");
     assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
@@ -860,7 +822,6 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     let d = temp_dir("png_why");
     let file = d.0.join("sun.png");
     write_png(&file, 20, 10);
-    // No pictures on this terminal: the placeholder cells would be garbage.
     let mut ed = test_ed("x");
     ed.bs_mut().buf.name = Some(file.clone());
     ed.images = false;
@@ -972,7 +933,6 @@ fn a_copy_reaches_the_terminal_clipboard() {
     press(&mut ed, KeyCode::Char('6'), Mods::ALT);
     assert_eq!(ed.take_clipboard().as_deref(), Some("ne\nt"));
     assert!(ed.take_clipboard().is_none(), "and it is taken once");
-    // The cutbuffer got it too: rano's own paste still works.
     assert_eq!(ed.cut.len(), 2);
     // A selection that starts at a row's first column is line-wise: the
     // newline comes back.
@@ -984,12 +944,10 @@ fn a_copy_reaches_the_terminal_clipboard() {
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
     assert_eq!(lines(&ed), vec!["o", "three"]);
-    // ^K with no mark takes the line, newline and all.
     let mut ed = test_ed("first\nsecond\n");
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("first\n"));
     assert_eq!(lines(&ed)[0], "second");
-    // A mouse selection is a selection: dragging and letting go puts it on the clipboard.
     let mut ed = test_ed("alpha beta\nsecond line\n");
     ed.text_w = 40;
     ed.text_h = 10;
@@ -999,7 +957,6 @@ fn a_copy_reaches_the_terminal_clipboard() {
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 1, 5)));
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 5));
     assert_eq!(ed.take_clipboard().as_deref(), Some("alpha"));
-    // A plain click is not a selection, and queues nothing.
     ed.bs_mut().mark = None;
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 2)));
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 2));
@@ -1014,7 +971,6 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
     let file = deep.join("notes.txt");
     let mut ed = test_ed("hello\n");
     ed.bs_mut().buf.modified = true;
-    // ^O then the name: the save is offered the directory.
     ed.do_write(file.display().to_string());
     assert_eq!(
         ed.prompt.as_ref().map(|p| p.kind),
@@ -1086,7 +1042,6 @@ fn saving_a_go_file_runs_gofmt_first() {
         "gofmt wrote tabs: {written:?}"
     );
     assert!(!written.contains("    println"), "{written:?}");
-    // The buffer is the formatted text, not the spaces that were typed.
     assert_eq!(lines(&ed).join("\n") + "\n", written);
     assert!(!ed.bs().buf.modified, "and the save landed");
     // One undo step takes the formatting back, which is why the buffer is
@@ -1096,13 +1051,11 @@ fn saving_a_go_file_runs_gofmt_first() {
         lines(&ed).join("\n").contains("    println(1)"),
         "M-U undoes it"
     );
-    // A file that is already formatted is left alone: no edit, no undo step, no flash.
     let mut ed = test_ed(&written);
     ed.bs_mut().buf.name = Some(file.clone());
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed).join("\n") + "\n", written);
-    // And another language is never handed to gofmt.
     let rs = d.0.join("main.rs");
     let rust = "fn main() {\n    let x = 1;\n}\n";
     fs::write(&rs, rust).unwrap();
@@ -1125,7 +1078,6 @@ fn a_folder_opens_as_a_listing_and_ret_enters_it() {
     let mut ed = test_ed("");
     ed.text_h = 20;
     assert!(ed.open_at(&d.0, 1, None).is_ok(), "a folder is an open");
-    // The listing: the folder is the buffer's name, the rows are its entries.
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
     assert_eq!(ed.bs().dir.as_deref(), Some(d.0.as_path()));
     assert!(ed.bs().read_only, "a listing is a view, not a document");
@@ -1135,10 +1087,8 @@ fn a_folder_opens_as_a_listing_and_ret_enters_it() {
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(src.as_path()));
     assert_eq!(lines(&ed), vec!["deep/", "main.rs"]);
-    // `-` is the folder above, back where we were.
     press(&mut ed, KeyCode::Char('-'), Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
-    // And RET on a file opens it: no longer a listing.
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.bs().dir.is_none(), "a file is not a listing");
@@ -1185,7 +1135,6 @@ fn a_folder_that_is_not_there_says_so_and_changes_nothing() {
     assert!(ed.bs().dir.is_none());
     assert_eq!(lines(&ed), vec!["the buffer stays"]);
     assert!(ed.status_text().unwrap().contains("No such folder"));
-    // The prompt path is the same answer: F8 on a folder opens it, F8 on nothing says so.
     let d = temp_dir("dired_f8");
     fs::write(d.0.join("one.txt"), "x").unwrap();
     assert!(ed.open_file(&d.0.display().to_string()));
@@ -1258,7 +1207,6 @@ fn saving_runs_the_save_hook_and_the_buffer_is_what_was_written() {
     assert_eq!(fs::read_to_string(&f).unwrap(), "after\n");
     assert_eq!(lines(&ed), vec!["after"]);
     assert!(!ed.bs().buf.modified);
-    // One press takes the hook's transformation back — it was an edit, and says so.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["before"], "M-U undoes the plugin's step");
 }
@@ -1339,11 +1287,9 @@ fn a_folder_opens_through_the_plugin() {
         },
     );
     assert!(ed.open_at(&d.0, 1, None).is_ok());
-    // The plugin answered: the buffer is a listing with the editor's own mode and keys.
     assert_eq!(lines(&ed), vec!["sub/", "one.txt"]);
     assert!(ed.bs().dir.is_some(), "a folder keeps the listing keys");
     assert!(ed.bs().read_only);
-    // RET enters: the folder through the plugin again, the file as a file.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.join("sub").as_path()));
     press(&mut ed, KeyCode::Char('-'), Mods::NONE);
@@ -1584,7 +1530,6 @@ fn the_example_plugin_transforms_through_the_editor() {
     let d = temp_dir("example_plugin");
     let f = d.0.join("notes.txt");
     fs::write(&f, "hello rano\n").unwrap();
-    // The open hook: the text arrives uppercase, the file on disk does not.
     let mut ed = test_ed("");
     ed.set_plugin_bytes(wasm, PathBuf::from("plugin-upper.wasm"));
     assert!(ed.open_at(&f, 1, None).is_ok());
@@ -3569,19 +3514,15 @@ fn mouse_wheel_scrolls_view_not_cursor() {
     let mut ed = test_ed(&text);
     ed.text_h = 10; // max_scroll = 30 - 10 = 20
     ed.bs_mut().cursor = Pos { row: 4, col: 1 };
-    // Wheel down: the viewport moves, the edit point stays.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 4, "wheel must not move the cursor");
-    // Scrolling past the cursor pins it to the top edge of the view.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 6);
     assert_eq!(ed.bs().cursor.row, 6, "cursor pinned to the viewport top");
-    // Wheel up: the viewport moves back, the cursor stays.
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 6);
-    // Cursor on the bottom row of the view: scrolling up pins it there.
     ed.bs_mut().cursor = Pos { row: 12, col: 1 };
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
@@ -3590,11 +3531,9 @@ fn mouse_wheel_scrolls_view_not_cursor() {
         9,
         "cursor pinned to the viewport bottom"
     );
-    // Clamped at the top of the file.
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
     assert_eq!(ed.bs().cursor.row, 9);
-    // Clamped at the end of the file.
     ed.bs_mut().scroll = 20;
     ed.bs_mut().cursor = Pos { row: 25, col: 1 };
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
@@ -3629,7 +3568,6 @@ fn search_history_cycles() {
     press_text(&mut ed, "foo");
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.search_hist, vec!["foo".to_string()]);
-    // no matches → ^F re-opens the prompt seeded with the old query
     press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for _ in 0..3 {
         press(&mut ed, KeyCode::Backspace, Mods::NONE);
@@ -3740,9 +3678,6 @@ fn prompt_ctrl_arrow_word_motion() {
     assert!(ed.prompt.is_some());
 }
 
-// Search wiring: regex + case toggle, invalid regex flashes, M-C / M-R
-// toggle in the search prompt only.
-
 #[test]
 fn regex_search_matches_line_starts() {
     let mut ed = test_ed("ba\naba\nbar");
@@ -3824,7 +3759,6 @@ fn m_c_m_r_toggle_in_prompt() {
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "q", "toggle leaves prompt text unchanged");
     assert_eq!(p.cursor, 1);
-    // Toggles must not leak into other prompt kinds: M-C types 'c' there.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Char('c'), Mods::ALT);
@@ -3834,8 +3768,7 @@ fn m_c_m_r_toggle_in_prompt() {
 }
 
 // Multi-buffer: open pushes/replaces, M-</M-> switch with per-buffer
-// state, title index, and ^X cycling over modified buffers.
-
+// state, ^X cycles over modified buffers.
 fn buf_with(text: &str) -> Buffer {
     let mut b = Buffer::new();
     b.set_rows(text.lines().map(|l| l.chars().collect()).collect());
@@ -3880,7 +3813,6 @@ fn open_file_multibuffer_replaces_an_untouched_scratch() {
     ed.open_at(&f, 2, None).unwrap();
     assert_eq!(ed.buffers.len(), 1);
     assert_eq!(ed.bs().buf.name, Some(f.clone()));
-    // A scratch with text in it is work, and keeps its place.
     let cfg = config::Config {
         multibuffer: true,
         ..config::Config::default()
@@ -3924,7 +3856,6 @@ fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
         ed.buffers[0].buf.row(0).iter().collect::<String>(),
         "EDIT seed"
     );
-    // Back in an unmodified buffer, the next open replaces as before.
     let f2 = d.0.join("b.txt");
     fs::write(&f2, "b").unwrap();
     press(&mut ed, KeyCode::F(8), Mods::NONE);
@@ -3980,7 +3911,6 @@ fn per_buffer_state_isolated() {
         Pos { row: 1, col: 1 },
         "buffer 2's cursor preserved across the switch"
     );
-    // Undo stacks are per buffer: each M-U hits only the current one.
     press_text(&mut ed, "Z");
     press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     press_text(&mut ed, "Q");

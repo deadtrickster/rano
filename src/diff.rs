@@ -1,48 +1,17 @@
 //! Diffs: a line diff, an intra-line word diff, and a unified rendering.
 //!
-//! # Provenance
+//! Myers' greedy O(ND) edit-script algorithm, with the common prefix and suffix stripped first and
+//! `max_d` as a cap: two unrelated large files must not stall a frame, so past the cap the region is
+//! reported as a whole replacement — honest, and what a reader would conclude anyway. [`Diff::degraded`]
+//! says when that happened, so it is never silent.
 //!
-//! Ported from letibot's `crates/ui/src/diff.rs`, which adapted the hunk model
-//! from grok-build (xAI, Apache-2.0, `xai-grok-pager-diff`): `Row`,
-//! `MAX_CONTEXT = 3`, overlapping-hunk stitching. The edit script, the hunks, the
-//! word diff and the tab rule are letibot's, unchanged; what changed in the move is
-//! the medium. letibot drew ANSI strings, and rano draws [`crate::render`] [`Line`]s
-//! — so a row is spans whose [`Style`]s stack roles, a diff tint survives the syntax
-//! role patched over it, and the wrap is rano's own cluster-aware
-//! [`crate::width::segments`] rather than an escape-carrying string wrapper.
+//! Within a changed region every deletion precedes every addition, and [`pair_rows`] depends on it: the
+//! k-th removal pairs with the k-th addition for the intra-line highlight. The unified gutter carries
+//! one number, the line's own in its own file, because two columns leave one of them blank on every
+//! changed line — exactly where the reader is looking.
 //!
-//! # The algorithm, and the bound on it
-//!
-//! Myers' greedy O(ND) edit-script algorithm, with the two standard
-//! preconditioners (strip the common prefix and suffix first) and one
-//! non-standard guard: **`max_d`**. Myers is O(ND) where D is the size of the
-//! edit script, so two unrelated 10,000-line files cost 10⁸ steps — and a frame
-//! must not stall. Past `max_d` the diff gives up and reports the region as a
-//! whole replacement, which is both honest and what a reader would conclude
-//! anyway. [`Diff::degraded`] says when that happened, so it is never silent.
-//!
-//! # Word-level highlight, and where it stops
-//!
-//! Inside a hunk, a removed line adjacent to an added line is *usually* an edit
-//! of that line, and showing which run of characters changed is the difference
-//! between reading a diff and scanning it. The pairing rule is positional — the
-//! k-th removal in a run pairs with the k-th addition — and is only attempted
-//! when the two lines are similar enough ([`SIMILARITY_FLOOR`]), so two entirely
-//! different lines are shown plainly rather than as a sea of emphasis.
-//!
-//! **That pairing is a consumer of an ordering guarantee, so the guarantee is
-//! written down.** Within one changed region the algorithm lists every deletion
-//! before every addition — [`diff_lines`] states it, `pair_rows` depends on it,
-//! and `deletions_precede_additions_within_a_changed_region` pins it.
-//!
-//! # One number column, not two
-//!
-//! The unified view's gutter carries the line's number **in its own file**: the
-//! old file's on a deletion and on a context row, the new file's on an addition.
-//! Two columns — old beside new — leave one of them blank on every changed line,
-//! exactly where the reader is looking. The split view ([`crate::sidediff`])
-//! keeps two numbers, one per panel: two panels over two files are two files'
-//! lines.
+//! The hunk model is grok-build's (xAI, Apache-2.0, `xai-grok-pager-diff`): `Row`, `MAX_CONTEXT = 3`,
+//! overlapping-hunk stitching.
 
 use crate::render::{Line, Span, Style};
 
@@ -54,13 +23,12 @@ use crate::width;
 /// Byte spans within one line, in order and non-overlapping.
 pub type Spans = Vec<(usize, usize)>;
 
-/// Below this ratio of shared tokens, two paired lines are treated as unrelated
-/// and no intra-line highlight is attempted. Chosen so that a renamed variable
-/// highlights and a rewritten line does not.
+/// Below this ratio of shared tokens, two paired lines are unrelated and get no intra-line highlight:
+/// a renamed variable highlights, a rewritten line does not.
 pub const SIMILARITY_FLOOR: f32 = 0.35;
 
-/// Default cap on Myers' D. Roughly "a thousand changed lines", which is far
-/// past the point where a human reads the diff rather than the file.
+/// Default cap on Myers' D: roughly a thousand changed lines, far past the point where a human reads
+/// the diff rather than the file.
 pub const DEFAULT_MAX_D: usize = 2000;
 
 /// One element of an edit script.
@@ -78,38 +46,24 @@ pub enum Op {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diff {
     pub ops: Vec<Op>,
-    /// True when `max_d` was hit and part of the file is reported as a
-    /// wholesale replacement rather than a minimal edit.
+    /// True when `max_d` was hit and part of the file is a wholesale replacement rather than a minimal
+    /// edit.
     pub degraded: bool,
 }
 
 /// Line-level diff of two sequences.
 ///
-/// # A guarantee a consumer depends on: deletions precede additions
-///
-/// **Within one maximal run of non-`Equal` ops — one changed region — every
-/// `Delete` comes before every `Insert`.** Given the old `a\nb\nc` and the new
-/// `a\nx\nb\nc`, the script is `Equal(a) Delete(b) Insert(x) Equal(b) Equal(c)`
-/// and never `… Insert(x) Delete(b) …`, even though both reconstruct the new file.
-///
-/// It falls out of Myers' greedy walk: between two snakes the path takes
-/// `dx` horizontal and `dy` vertical steps, and the backtrack recovers them as the
-/// removals then the additions of the region. It is therefore a property of the
-/// **algorithm** rather than of anything this file asserts — which is exactly why
-/// it is written down here and pinned by
-/// `deletions_precede_additions_within_a_changed_region`. [`pair_rows`] silently
-/// depends on it: it finds a run of removals followed by a run of additions and
-/// pairs the k-th of each for the intra-line highlight. Reordering the two halves
-/// of a region — or emitting an insert before its delete — would not fail to
-/// compile, would not fail any existing test, and would silently take every
-/// intra-line highlight away, because the scan would find no run of removals.
+/// Within one maximal run of non-`Equal` ops every `Delete` comes before every `Insert`. It falls out of
+/// Myers' greedy walk rather than of anything asserted here, which is exactly why it is written down:
+/// [`pair_rows`] finds a run of removals followed by a run of additions and pairs the k-th of each, so
+/// reordering the halves would silently take every intra-line highlight away and fail no test.
 pub fn diff_lines(old: &[&str], new: &[&str]) -> Diff {
     diff_lines_with(old, new, DEFAULT_MAX_D)
 }
 
 pub fn diff_lines_with(old: &[&str], new: &[&str], max_d: usize) -> Diff {
-    // Strip the common prefix and suffix. On a real edit this removes almost
-    // everything, which is what makes Myers affordable on a large file.
+    // Strip the common prefix and suffix: on a real edit this removes almost everything, which is what
+    // makes Myers affordable on a large file.
     let mut lo = 0usize;
     while lo < old.len() && lo < new.len() && old[lo] == new[lo] {
         lo += 1;
@@ -145,11 +99,8 @@ pub fn diff_lines_with(old: &[&str], new: &[&str], max_d: usize) -> Diff {
     Diff { ops, degraded }
 }
 
-/// Myers' greedy algorithm with a D cap.
-///
-/// The trace is kept per D — `v_trace` — and walked backwards to recover the
-/// script, which is the memory-hungry but simple form. Memory is O(D²) worst
-/// case and D is capped, so the cap bounds both axes at once.
+/// Myers' greedy algorithm with a D cap. The trace is kept per D and walked backwards to recover the
+/// script — memory O(D²) worst case, and the cap bounds both axes at once.
 fn myers<T: PartialEq>(a: &[T], b: &[T], max_d: usize) -> (Vec<Op>, bool) {
     let n = a.len();
     let m = b.len();
@@ -250,14 +201,10 @@ pub enum Row {
     Added { b: usize },
 }
 
-/// Group an edit script into hunks. `context` is lines of unchanged code kept
-/// either side; three is the `diff -u` convention and is a parameter here
-/// because a terminal head with fifteen rows wants one.
+/// Group an edit script into hunks: `context` is lines of unchanged code kept either side, three being
+/// the `diff -u` convention and a parameter here because a head with fifteen rows wants one.
 ///
-/// Rows are emitted in op order, so a hunk inherits [`diff_lines`]'s guarantee in
-/// `Row` terms: within one changed region, every [`Row::Removed`] comes before
-/// every [`Row::Added`]. [`pair_rows`] relies on that adjacency; see the note on
-/// [`diff_lines`].
+/// Rows are emitted in op order, so a hunk inherits [`diff_lines`]'s guarantee in `Row` terms.
 pub fn hunks(d: &Diff, context: usize) -> Vec<Hunk> {
     let changed: Vec<usize> = d
         .ops
@@ -274,8 +221,8 @@ pub fn hunks(d: &Diff, context: usize) -> Vec<Hunk> {
     while i < changed.len() {
         let start = changed[i].saturating_sub(context);
         let mut j = i;
-        // Extend while the next change is close enough that the context would
-        // overlap; otherwise a two-line gap becomes two hunks and reads worse.
+        // Extend while the next change is close enough that the context would overlap; otherwise a
+        // two-line gap becomes two hunks and reads worse.
         while j + 1 < changed.len() && changed[j + 1] <= changed[j] + 2 * context + 1 {
             j += 1;
         }
@@ -326,13 +273,13 @@ pub struct DiffConfig {
     pub palette: Palette,
     /// Unchanged lines either side of a change.
     pub context: usize,
-    /// Show the line's number in a gutter: one column in the unified view (the
-    /// line's own number in its own file), one per panel in the split view.
+    /// Show the line's number in a gutter: one column in the unified view (the line's own number in
+    /// its own file), one per panel in the split view.
     pub line_numbers: bool,
     /// Highlight the changed run inside a paired removed/added line.
     pub intra_line: bool,
-    /// Stop after this many rows and say how many were dropped. A caller that
-    /// scrolls (rano's own diff view) passes `usize::MAX`.
+    /// Stop after this many rows and say how many were dropped. A caller that scrolls passes
+    /// `usize::MAX`.
     pub max_rows: usize,
 }
 
@@ -349,17 +296,14 @@ impl Default for DiffConfig {
     }
 }
 
-/// Render a unified diff.
-///
-/// Unified degrades to a narrow terminal by wrapping, which loses alignment but
+/// Render a unified diff. Unified degrades to a narrow terminal by wrapping, which loses alignment but
 /// no content; the split view needs twice the width for the same code.
 pub fn render(old: &[&str], new: &[&str], cfg: &DiffConfig) -> Vec<Line> {
     render_from(old, new, cfg, 1, 1)
 }
 
-/// [`render`] for an **excerpt**: `old_start` / `new_start` are the 1-based
-/// lines of the whole files the two slices begin at, so the gutter and the hunk
-/// headers number the file and not the excerpt.
+/// [`render`] for an excerpt: `old_start` / `new_start` are the 1-based lines of the whole files the
+/// two slices begin at, so the gutter and the headers number the file and not the excerpt.
 pub fn render_from(
     old: &[&str],
     new: &[&str],
@@ -370,8 +314,8 @@ pub fn render_from(
     render_in(old, new, cfg, old_start, new_start, None)
 }
 
-/// [`render_from`], syntax-coloured in `lang`: the code keeps its colours
-/// under the row's tint, as in the split view.
+/// [`render_from`], syntax-coloured in `lang`: the code keeps its colours under the row's tint, as in
+/// the split view.
 pub fn render_in(
     old: &[&str],
     new: &[&str],
@@ -380,8 +324,7 @@ pub fn render_in(
     new_start: usize,
     lang: Option<Lang>,
 ) -> Vec<Line> {
-    // Tabs first, once, so the class grid and the painted line are one grid
-    // (the split view's rule, and the reason it has one).
+    // Tabs first, once, so the class grid and the painted line are one grid.
     let old_x: Vec<String> = old.iter().map(|l| expand_tabs(l, TAB_STOP)).collect();
     let new_x: Vec<String> = new.iter().map(|l| expand_tabs(l, TAB_STOP)).collect();
     let old: Vec<&str> = old_x.iter().map(String::as_str).collect();
@@ -413,8 +356,8 @@ pub fn render_in(
     let mut rows_left = cfg.max_rows;
     let mut dropped = 0usize;
     for h in hs.iter() {
-        // A header before every hunk, including the only one: a real `@@`
-        // precedes the first hunk too, and the one-hunk edit is the common one.
+        // A header before every hunk, including the only one: a real `@@` precedes the first hunk too,
+        // and the one-hunk edit is the common one.
         if rows_left == 0 {
             dropped += 1;
         } else {
@@ -461,9 +404,8 @@ pub(crate) fn faint_line(p: Palette, s: &str) -> Line {
     Line::from(Span::styled(s.to_string(), p.style(Role::Faint)))
 }
 
-/// `@@ -a,b +c,d @@`, with `a` and `c` the 1-based lines the hunk starts at
-/// once `old_first` / `new_first` (the 1-based first lines of the slices) are
-/// added.
+/// `@@ -a,b +c,d @@`, with `a` and `c` the 1-based lines the hunk starts at once `old_first` /
+/// `new_first` are added.
 pub(crate) fn hunk_header(h: &Hunk, old_first: usize, new_first: usize) -> String {
     let count_old = h
         .rows
@@ -496,10 +438,8 @@ fn row_lines(
     old_base: usize,
     new_base: usize,
 ) -> Vec<Line> {
-    // **One number column, not two.** The line's own number in its own file:
-    // the old file's on a deletion and on a context row, the new file's on an
-    // addition. Right-aligned, and `numw` spans **both** files' numbering,
-    // because the one column carries either.
+    // One number column, not two: the line's own number in its own file — the old file's on a deletion
+    // and on a context row, the new file's on an addition — right-aligned across both files' numbering.
     let (sign, role, text, num, classes) = match *r {
         Row::Context { a, .. } => (
             " ",
@@ -536,8 +476,8 @@ fn row_lines(
     let text = expand_tabs(text, TAB_STOP);
     let base = p.style(role);
     let em = p.style(Role::Emphasis);
-    // Tint, then the syntax colour over it, then the changed-word emphasis
-    // over both: each layer adds to the one under it.
+    // Tint, then the syntax colour over it, then the changed-word emphasis over both: each layer adds
+    // to the one under it.
     let cells: Vec<(char, Style)> = text
         .char_indices()
         .enumerate()
@@ -548,8 +488,8 @@ fn row_lines(
             (c, if inside { s.patch(&em) } else { s })
         })
         .collect();
-    // The gutter takes the line's own foreground on a changed row — the same
-    // rule the split view's number follows — and stays dim on a context row.
+    // The gutter takes the line's own foreground on a changed row — the same rule the split view's
+    // number follows — and stays dim on a context row.
     let gut_style = p.style(if role == Role::Plain {
         Role::Faint
     } else {
@@ -561,13 +501,13 @@ fn row_lines(
         .map(|(i, body)| {
             let mut spans = Vec::with_capacity(body.len() + 2);
             if i == 0 {
-                // The sign keeps the role's foreground; the body's style is
-                // background-only, so the text keeps its own foreground.
+                // The sign keeps the role's foreground; the body's style is background-only, so the text
+                // keeps its own foreground.
                 spans.push(Span::styled(gutter.clone(), gut_style.clone()));
                 spans.push(Span::styled(sign, p.style(role.foreground())));
             } else {
-                // A wrapped continuation keeps the colour and loses the sign, so
-                // the eye does not read it as a second changed line.
+                // A wrapped continuation keeps the colour and loses the sign, so the eye does not read
+                // it as a second changed line.
                 spans.push(Span::styled(" ".repeat(gutter_w), p.style(Role::Faint)));
                 spans.push(Span::raw(" "));
             }
@@ -577,10 +517,9 @@ fn row_lines(
         .collect()
 }
 
-/// Styled characters wrapped to `w` columns, one span list per row, by rano's
-/// own greedy cluster fill ([`width::segments`]): a wide character or a base and
-/// its combining marks never split. An empty input is one empty row — an empty
-/// line is still a line.
+/// Styled characters wrapped to `w` columns, one span list per row, by rano's own greedy cluster fill
+/// ([`width::segments`]): a wide character or a base and its combining marks never split. An empty
+/// input is one empty row — an empty line is still a line.
 pub(crate) fn wrap_cells(cells: &[(char, Style)], w: usize) -> Vec<Vec<Span>> {
     let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
     let starts = width::segments(&chars, TAB_STOP, w);
@@ -625,14 +564,9 @@ pub fn spans_width(spans: &[Span]) -> usize {
 
 /// For each row, the byte spans that changed relative to its pair, or `None`.
 ///
-/// **This depends on [`diff_lines`]'s ordering guarantee** — one changed region is
-/// a run of [`Row::Removed`] followed by a run of [`Row::Added`], never the
-/// reverse and never interleaved. The scan below finds each run in turn and pairs
-/// the k-th removal with the k-th addition; given the other order it would find no
-/// run of removals at all and quietly return no emphasis anywhere, which is a
-/// silent loss of the whole intra-line highlight rather than a visible failure.
-/// `pair_rows_pairs_the_k_th_removal_with_the_k_th_addition` pins the pair, and
-/// `deletions_precede_additions_within_a_changed_region` pins the order it needs.
+/// This depends on [`diff_lines`]'s ordering guarantee: one changed region is a run of removals
+/// followed by a run of additions. Given the other order the scan finds no run of removals and quietly
+/// returns no emphasis anywhere — a silent loss of the whole intra-line highlight, not a failure.
 fn pair_rows(rows: &[Row], old: &[&str], new: &[&str]) -> Vec<Option<Spans>> {
     let mut out: Vec<Option<Spans>> = vec![None; rows.len()];
     let mut i = 0usize;
@@ -676,8 +610,8 @@ fn pair_rows(rows: &[Row], old: &[&str], new: &[&str]) -> Vec<Option<Spans>> {
     out
 }
 
-/// Byte spans that differ between two similar lines, or `None` when they are not
-/// similar enough for the highlight to mean anything.
+/// Byte spans that differ between two similar lines, or `None` when they are not similar enough for
+/// the highlight to mean anything.
 fn word_spans(a: &str, b: &str) -> Option<(Spans, Spans)> {
     let at = tokens(a);
     let bt = tokens(b);
@@ -717,8 +651,8 @@ fn merge(v: &mut Spans, s: (usize, usize)) {
     }
 }
 
-/// Split into runs of word characters and runs of everything else, as byte
-/// spans. Whitespace is its own token so that an indentation change highlights.
+/// Split into runs of word characters and runs of everything else, as byte spans. Whitespace is its
+/// own token so that an indentation change highlights.
 fn tokens(s: &str) -> Spans {
     let mut out = Vec::new();
     let mut it = s.char_indices().peekable();
@@ -738,28 +672,17 @@ fn tokens(s: &str) -> Spans {
     out
 }
 
-/// **Where a tab lands, for every renderer in this workspace that shows code.**
-///
-/// One constant because three renderers draw the same fact — the unified diff, the
-/// side-by-side diff and the markdown fence — and a reader who sees an indent four
-/// deep in one and eight in another cannot tell which is lying. Eight is what a
-/// terminal does with a raw tab, which is what the fence used to hand it; three of
-/// these are ours, so the stop is a decision, and a decision gets one home.
-///
-/// Four rather than eight because that is the stop the diff has always used and the
-/// one leticl's `classed-segments` agrees to; two heads must not disagree about how
-/// deep an indent is.
+/// Where a tab lands, for every renderer in this workspace that shows code: one constant, because a
+/// reader who sees an indent four deep in one pane and eight in another cannot tell which is lying.
+/// Four rather than eight is the stop the diff has always used, and two heads must not disagree.
 pub const TAB_STOP: usize = 4;
 
-/// Expand tabs to a tab stop. A diff that measures a tab as one column
-/// mis-aligns every line that has one, which in Go and Makefiles is all of them.
+/// Expand tabs to a tab stop. A diff that measures a tab as one column mis-aligns every line that has
+/// one, which in Go and Makefiles is all of them.
 ///
-/// **The stop is measured in EMITTED COLUMNS, not in the source index**, and the
-/// difference is a run of tabs: `"\t\t"` is eight columns, not seven. A version that
-/// computed each stop from the character's index would place the second tab at
-/// `(1 / 4 + 1) * 4 = 4` and pad it by three, because the first tab had already
-/// pushed the text four columns right while advancing the index by one. The same
-/// arithmetic is wrong after any double-width character, for the same reason.
+/// The stop is measured in emitted columns, not in the source index: `"\t\t"` is eight columns, where
+/// an index-based stop would pad the second tab by three — and the same arithmetic is wrong after any
+/// double-width character.
 pub fn expand_tabs(s: &str, stop: usize) -> String {
     if !s.contains('\t') {
         return s.to_string();
@@ -790,12 +713,8 @@ mod tests {
             .collect()
     }
 
-    /// An excerpt of lines 310..314 must be numbered 310..314, not 1..5: the
-    /// pair a `ToolFinished` carries is a window, and a diff numbered from 1
-    /// tells the reader line 4 changed when it was line 313.
-    ///
-    /// And the number is one column, so every row carries one: context and the
-    /// deletion take the old file's, the addition the new file's.
+    /// An excerpt of lines 310..314 must be numbered 310..314, not 1..5: the pair a `ToolFinished`
+    /// carries is a window, and a diff numbered from 1 tells the reader line 4 changed when it was 313.
     #[test]
     fn an_excerpt_is_numbered_from_where_it_starts_in_the_file() {
         let cfg = DiffConfig {
@@ -809,10 +728,8 @@ mod tests {
         let old = ["a", "b", "c"];
         let new = ["a", "B", "c"];
         let rows = text(&render_from(&old, &new, &cfg, 310, 310));
-        // Pinned whole rather than probed: the gutter's shape *is* the requirement,
-        // so `310  a` / `311 -b` / `311 +B` / `312  c` — three columns of number,
-        // then the sign, then the code — is the assertion. The `@@` now precedes
-        // the only hunk, as it does in a real diff (see `render_from`).
+        // Pinned whole rather than probed: the gutter's shape is the requirement, so `310  a` /
+        // `311 -b` / `311 +B` / `312  c` is the assertion.
         assert_eq!(
             rows,
             vec![
@@ -834,10 +751,8 @@ mod tests {
         );
     }
 
-    /// **The single column never shows a blank.** Two columns printed an old number
-    /// beside an empty cell on every deletion and the reverse on every addition —
-    /// half the gutter empty on every changed line, which is what the requirement is
-    /// against. Every row of a real diff must carry a number in the one column.
+    /// The single column never shows a blank: two columns printed an old number beside an empty cell on
+    /// every deletion, half the gutter empty on every changed line.
     #[test]
     fn every_row_of_a_diff_carries_a_number_in_the_one_column() {
         let cfg = DiffConfig {
@@ -853,8 +768,7 @@ mod tests {
         let rows = text(&render_from(&old, &new, &cfg, 1, 1));
         // Drop the hunk header only; every code row is checked.
         for r in rows.iter().filter(|r| !r.starts_with("@@")) {
-            // `<numw> <sign><code>`: a digit, space, sign. There is no row whose
-            // number column is empty, and none with a second column of padding.
+            // `<numw> <sign><code>`: a digit, space, sign. No row has an empty number column.
             let sign = r.chars().nth(2);
             assert!(
                 matches!(sign, Some(' ' | '-' | '+')),
@@ -865,10 +779,8 @@ mod tests {
                 "row {r:?} has a blank number column"
             );
         }
-        // And every row is numbered by its own file — old on a context row and on a
-        // deletion, new on an addition: 1 a, 2 -b, 2 +B, 3 c, 4 -d, 5 -e, 4 +D,
-        // 5 +E, 6 f. The two deletions come before the two additions, which is the
-        // invariant `deletions_precede_additions_within_a_changed_region` pins.
+        // And every row is numbered by its own file — old on a context row and on a deletion, new on an
+        // addition — with the deletions before the additions.
         assert_eq!(
             rows.iter()
                 .filter(|r| !r.starts_with("@@"))
@@ -880,11 +792,8 @@ mod tests {
         );
     }
 
-    /// **A wrapped continuation keeps the body's column.** `body_w` and the
-    /// continuation's blank prefix are both derived from the gutter's width, so the
-    /// gutter narrowing by `numw + 1` widens the body by the same amount and the
-    /// continuation lines up under the first. Neither number is written down here:
-    /// the assertion is that the two agree, at a width where wrapping happens.
+    /// A wrapped continuation keeps the body's column: the body width and the continuation's blank
+    /// prefix are both derived from the gutter's width, so the two agree and neither is written down.
     #[test]
     fn a_wrapped_continuation_starts_where_the_body_starts() {
         let long = "x".repeat(120);
@@ -902,12 +811,8 @@ mod tests {
             };
             let rows = text(&render(&old, &new, &cfg));
             assert!(rows.len() > 2, "width {width} must wrap: {rows:?}");
-            // Row 0 is the hunk header; row 1 is `<num> -<code>`; a continuation is
-            // the same gutter's width of blanks, then a space where the sign was,
-            // then the code — so the code stays in its column and only the sign's
-            // does not. Both widths are derived from the gutter, so neither is
-            // written down here: the assertion is that the two agree at a width
-            // where wrapping happens.
+            // Row 0 is the hunk header; row 1 is `<num> -<code>`; a continuation is the gutter's width of
+            // blanks, a space where the sign was, then the code — so only the sign's column moves.
             let body_col = rows[1].find('x').expect("code on the first diff row");
             assert_eq!(
                 rows[2].find('x').expect("code on the continuation"),
@@ -927,8 +832,8 @@ mod tests {
         s.lines().collect()
     }
 
-    /// One maximal run of non-`Equal` ops is a changed region, and in every one of
-    /// them no `Insert` precedes a `Delete`.
+    /// One maximal run of non-`Equal` ops is a changed region, and in every one of them no `Insert`
+    /// precedes a `Delete`.
     fn regions_list_deletions_first(ops: &[Op]) -> bool {
         ops.split(|o| matches!(o, Op::Equal { .. })).all(|run| {
             let mut added = false;
@@ -943,8 +848,7 @@ mod tests {
         })
     }
 
-    /// The same rule in `Row` terms, which is the form a consumer sees: one run of
-    /// `Context`-bounded removed rows then added rows.
+    /// The same rule in `Row` terms, which is the form a consumer sees.
     fn rows_list_removals_first(rows: &[Row]) -> bool {
         rows.split(|r| matches!(r, Row::Context { .. })).all(|run| {
             let mut added = false;
@@ -959,28 +863,21 @@ mod tests {
         })
     }
 
-    /// **Deletions precede additions within a changed region — an invariant, not a
-    /// coincidence, and a consumer depends on it.**
+    /// Deletions precede additions within a changed region — an invariant, not a coincidence, and a
+    /// consumer depends on it: rows follow Myers op order, and [`pair_rows`] relies on the adjacency.
+    /// Nothing else in the crate states it, so a rewrite of `myers` or `backtrack` could take it away
+    /// without failing to compile, failing another test, or even changing the rendered diff — the only
+    /// symptom would be that every intra-line highlight disappeared.
     ///
-    /// Rows follow Myers op order (`Op::Delete` then `Op::Insert` for a region), and
-    /// [`pair_rows`] relies on the adjacency when it pairs a removed run with an
-    /// added run for the intra-line emphasis. Nothing else in the crate states it:
-    /// it is a property of how the walk is recovered, so a rewrite of `myers` or
-    /// `backtrack` could take it away without failing to compile, failing any other
-    /// test, or even changing the rendered diff — the only symptom would be that
-    /// every intra-line highlight silently disappeared.
-    ///
-    /// Named cases first, then a pseudo-random corpus over a tiny alphabet, because
-    /// the interesting regions are the ones with several deletions *and* several
-    /// insertions, where the k-path can zig-zag — and that is exactly where a
-    /// hand-written case stops looking.
+    /// Named cases first, then a pseudo-random corpus, because the interesting regions are the ones with
+    /// several deletions and several insertions, where a hand-written case stops looking.
     #[test]
     fn deletions_precede_additions_within_a_changed_region() {
         let named: [(&str, &str); 9] = [
             // A substitution: one each side.
             ("a\nb\nc", "a\nB\nc"),
-            // Two deletions and two insertions in one region — four alignments have
-            // the same D, and the walk has to pick one of them.
+            // Two deletions and two insertions in one region — four alignments have the same D, and the
+            // walk has to pick one.
             ("a\nb\nc\nd\ne", "a\nB\nC\nD\nE"),
             ("a\nb\nc\nd\ne\nf", "a\nB\nc\nD\nE\nf"),
             // Uneven runs.
@@ -1010,9 +907,8 @@ mod tests {
             }
         }
 
-        // The same for the path that gives up: a degraded script is every deletion
-        // then every insertion, which satisfies the rule by construction — asserted
-        // rather than assumed, since it is the branch a reader would not check.
+        // The same for the path that gives up: a degraded script is every deletion then every insertion,
+        // which satisfies the rule by construction — asserted rather than assumed.
         let big: Vec<String> = (0..400).map(|i| format!("aaa {i}")).collect();
         let other: Vec<String> = (0..400).map(|i| format!("zzz {}", i * 3)).collect();
         let (bl, bnl): (Vec<&str>, Vec<&str>) = (
@@ -1059,11 +955,8 @@ mod tests {
         }
     }
 
-    /// **And the consumer is for real.** `pair_rows` pairs the k-th removal of a run
-    /// with the k-th addition of the run that follows it, so reversing the two halves
-    /// of a region takes the emphasis away entirely — a silent loss of the whole
-    /// intra-line feature rather than a visible failure, which is why
-    /// `deletions_precede_additions_within_a_changed_region` exists.
+    /// And the consumer is for real: with an addition before its deletion, `pair_rows` finds no pair —
+    /// the silent loss of the whole intra-line feature that the ordering test exists to prevent.
     #[test]
     fn pair_rows_pairs_the_k_th_removal_with_the_k_th_addition() {
         let old = ["    let total = a + b;", "    let count = n;"];
@@ -1084,8 +977,7 @@ mod tests {
         assert_eq!(word(old[1], &spans[1]), "count");
         assert_eq!(word(new[1], &spans[3]), "tally");
 
-        // The same two rows in the other order pair with nothing at all, which is
-        // the failure the invariant prevents.
+        // The same two rows in the other order pair with nothing at all.
         let flipped = vec![Row::Added { b: 0 }, Row::Removed { a: 0 }];
         let spans = pair_rows(&flipped, &[old[0]], &[new[0]]);
         assert!(
@@ -1189,22 +1081,13 @@ mod tests {
         assert_eq!(expand_tabs("\tif x {", 4), "    if x {");
         assert_eq!(expand_tabs("ab\tc", 4), "ab  c");
         assert_eq!(cols(&expand_tabs("a\tb", 4)), 5);
-        // **THE RUN IS THE CASE THAT SEPARATES the two implementations**, and it is
-        // the one no test covered until 2026-10-02 — which is why `sidediff` carried a
-        // second, wrong copy of this arithmetic for as long as it did. A stop computed
-        // from the source INDEX makes the second of two tabs three columns wide, since
-        // the first tab moved the text four columns while advancing the index by one:
-        // seven where a terminal shows eight.
+        // The run is the case that separates the two implementations: a stop computed from the source
+        // index makes the second of two tabs three columns wide — seven where a terminal shows eight.
         assert_eq!(expand_tabs("\t\treturn", 4), "        return");
         assert_eq!(cols(&expand_tabs("\t\treturn", 4)), 14);
-        // And the same arithmetic after a double-width character, which is the other
-        // way index and column part company. Two CJK chars are FOUR columns, so the tab
-        // lands exactly ON the stop and pads four more — five spaces before the `x`,
-        // counting the literal one. (Written out because the first version of this line
-        // guessed three: the arithmetic that pads by `stop - (col % stop)` is easy to
-        // do in the head and get wrong, which is the whole reason it lives in one
-        // function.) An index-based stop would have called the column 2 and padded by
-        // two, putting the `x` three columns left of where a terminal puts it.
+        // And the same arithmetic after a double-width character, the other way index and column part
+        // company: two CJK chars are four columns, so the tab lands exactly on the stop and pads four
+        // more — five spaces before the `x`, counting the literal one.
         assert_eq!(
             expand_tabs("\u{4e2d}\u{6587}\t x", 4),
             "\u{4e2d}\u{6587}     x"
@@ -1254,8 +1137,8 @@ mod tests {
         s.chars().map(width::char_width).sum()
     }
 
-    /// The tint is a background on the changed text, the sign carries the
-    /// foreground, and the paired word is emphasised on top of the tint.
+    /// The tint is a background on the changed text, the sign carries the foreground, and the paired
+    /// word is emphasised on top of the tint.
     #[test]
     fn a_changed_row_is_tinted_and_its_changed_word_emphasised() {
         let o = ["    let total = a + b;"];
@@ -1299,8 +1182,8 @@ mod tests {
         }
     }
 
-    /// The unified view colours the code in its language under the row's tint,
-    /// and with no language it does not.
+    /// The unified view colours the code in its language under the row's tint, and with no language it
+    /// does not.
     #[test]
     fn the_unified_view_is_syntax_coloured_under_the_tint() {
         let o = ["fn a() {}"];

@@ -32,9 +32,7 @@ pub const MAX_DPI: u32 = 600;
 /// Which route answered a page count; read back through [`last_count`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Counted {
-    /// `pdfinfo` on PATH, asked, and it answered.
     PdfInfo,
-    /// The page tree, parsed out of the file's own bytes.
     Parsed,
 }
 
@@ -303,7 +301,6 @@ pub fn document_markdown(path: &Path, title: &str) -> Result<String, String> {
     Ok(markdown_of(title, &text, pages))
 }
 
-/// A title, then a heading a page and the page's own layout inside a fence.
 fn markdown_of(title: &str, text: &str, pages: u32) -> String {
     let mut out = format!("# {title}\n");
     let mut seen = 0u32;
@@ -511,7 +508,6 @@ fn checked_dpi(dpi: u32) -> Result<u32, String> {
     Ok(dpi)
 }
 
-/// The sentence for an index past the last page: index, count and the numbering.
 fn page_refused(page_index: u32, pages: u32) -> String {
     if pages == 0 {
         return format!("page {page_index}: the document has no pages");
@@ -569,7 +565,6 @@ fn count_with(path: &Path, pdfinfo: Option<Cmd>, limits: Limits) -> Result<(u32,
     }
 }
 
-/// The `Pages:` line of `pdfinfo`'s output.
 fn pages_line(bytes: &[u8]) -> Option<u32> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -622,7 +617,6 @@ fn count_from_bytes(bytes: &[u8]) -> Result<u32, String> {
     )
 }
 
-/// The `/Count` in one dictionary, if it has one.
 fn count_in(dict: &[u8]) -> Option<u32> {
     for at in find_all(dict, b"/Count") {
         let start = skip_space(dict, at + 6);
@@ -650,7 +644,6 @@ fn count_page_objects(bytes: &[u8]) -> u32 {
         .count() as u32
 }
 
-/// Every place `pat` starts in `hay`.
 fn find_all(hay: &[u8], pat: &[u8]) -> Vec<usize> {
     let mut at = Vec::new();
     let mut i = 0;
@@ -665,19 +658,16 @@ fn find_all(hay: &[u8], pat: &[u8]) -> Vec<usize> {
     at
 }
 
-/// The first place `pat` starts at or after `from`.
 fn find(hay: &[u8], pat: &[u8], from: usize) -> Option<usize> {
     find_all(&hay[from.min(hay.len())..], pat)
         .first()
         .map(|at| at + from.min(hay.len()))
 }
 
-/// The last place `pat` starts at or before `to`.
 fn rfind(hay: &[u8], pat: &[u8], to: usize) -> Option<usize> {
     find_all(&hay[..to.min(hay.len())], pat).pop()
 }
 
-/// Past the whitespace a PDF dictionary may put between a key and its value.
 fn skip_space(hay: &[u8], from: usize) -> usize {
     let mut i = from.min(hay.len());
     while i < hay.len() && matches!(hay[i], b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | b'\0') {
@@ -686,13 +676,9 @@ fn skip_space(hay: &[u8], from: usize) -> usize {
     i
 }
 
-/// What a watched child did.
 enum Run {
-    /// It exited zero: whatever it was asked to write is there.
     Done,
-    /// It said no — the next candidate may be asked.
     Refused(String),
-    /// One of the caps fired: the answer is a sentence, not a retry.
     Stopped(String),
 }
 
@@ -894,7 +880,6 @@ fn read_out(path: &Path, cap: u64, what: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("the {what}'s file: {e}"))
 }
 
-/// A number of bytes as a person reads it, for the sentences above.
 fn size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 && bytes.is_multiple_of(1024 * 1024) {
         format!("{} MiB", bytes / (1024 * 1024))
@@ -989,7 +974,6 @@ mod tests {
         TempDir(d)
     }
 
-    /// The fixture on disk, as the three functions take it.
     fn document(d: &TempDir, words: &[&str]) -> PathBuf {
         let path = d.0.join("doc.pdf");
         std::fs::write(&path, fixture(words)).unwrap();
@@ -1023,7 +1007,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    /// A command for one of those scripts, with the page and the output placeholder.
     fn stand_in(program: &str, args: &[&str]) -> Cmd {
         Cmd {
             program: program.to_string(),
@@ -1032,7 +1015,6 @@ mod tests {
         }
     }
 
-    /// The argument after `flag`, for reading a tool's argv back.
     fn after<'a>(cmd: &'a Cmd, flag: &str) -> Option<&'a str> {
         let at = cmd.args.iter().position(|a| a == flag)?;
         cmd.args.get(at + 1).map(String::as_str)
@@ -1460,8 +1442,7 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
-    /// The real text of a page, needs `pdftotext`:
-    /// `cargo test -- --ignored a_real_page_of_text`.
+    /// The real text of a page, needs `pdftotext`: `cargo test -- --ignored a_real_page_of_text`.
     #[test]
     #[ignore = "needs pdftotext on PATH (poppler)"]
     fn a_real_page_of_text_carries_its_word() {

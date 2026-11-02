@@ -1,15 +1,6 @@
-//! Search a log by reading the FILE, never the buffer: a log is opened at its
-//! tail, so the wanted line is usually older than the held rows. Scans stream
-//! the bytes in `block`-sized windows, forward or backward, matching raw bytes
-//! (a literal with optional ASCII case folding, or `regex::bytes::Regex`);
-//! memory is O(block). A hit is a byte offset plus a row counted in `\n`
-//! bytes, so a jump decodes only the screenful it lands on; a backward scan
-//! first makes one forward counting pass over `[0, from)`. Caveats, stated
-//! rather than pretended: matching is byte-wise and folding ASCII-only,
-//! `^`/`$` anchor at window edges, and a regex match longer than a window is
-//! reported where it enters the last window — use a bigger `block` for
-//! anchored or long-span patterns. Interruptible via `cancel`: the partial
-//! list found so far comes back with `interrupted: true`.
+//! Search a log by reading the FILE, never the buffer: a log is opened at its tail, so
+//! the wanted line is usually older than the held rows. Windows of `block` bytes, memory
+//! O(block), interruptible via `cancel`; a hit is an offset plus a row counted in `\n`.
 
 use std::fs::File;
 use std::io;
@@ -34,9 +25,9 @@ pub struct Hit {
     pub len: usize,
 }
 
-/// What to look for: a bytewise literal with optional ASCII case folding
-/// (overlapping occurrences reported), or a `regex::bytes::Regex`, which
-/// matches raw bytes including non-UTF-8.
+/// What to look for: a bytewise literal with optional ASCII case folding (overlapping
+/// occurrences reported), or a `regex::bytes::Regex`, which matches raw bytes including
+/// non-UTF-8.
 pub enum Pattern<'a> {
     Literal {
         needle: &'a [u8],
@@ -66,14 +57,9 @@ pub struct Outcome {
     pub interrupted: bool,
 }
 
-/// Search `path`'s bytes in `block`-sized windows from `from` (clamped to
-/// the end): `Forward` over `[from, size)` ascending, `Backward` over
-/// `[0, from)` descending — the two partition the file, so continuing in
-/// either direction from a hit never repeats it. `block` is the read
-/// granularity and the peak-memory knob (0 is 1); `max_hits` caps and stops
-/// the scan (`0` reads nothing); `cancel` is checked between blocks. An
-/// empty literal needle matches nothing, as does any pattern against an
-/// empty file.
+/// Search `path`'s bytes in `block`-sized windows from `from` (clamped to the end), forward
+/// over `[from, size)` or backward over `[0, from)` — the two partition the file, so a hit
+/// is never repeated. `max_hits` caps the scan, `cancel` is checked between blocks.
 pub fn scan(
     path: &Path,
     pattern: &Pattern,
@@ -106,9 +92,9 @@ pub fn scan(
     }
 }
 
-/// Forward scan over `[from, size)`. Block `k` is `[from + k·block, ...)`,
-/// so tests can place a needle against a known boundary; the first window
-/// carries nothing (a match starting before `from` is out of range).
+/// Forward scan over `[from, size)`. Block `k` is `[from + k·block, ...)`, so tests can
+/// place a needle against a known boundary; the first window carries nothing, because a
+/// match starting before `from` is out of range.
 #[allow(clippy::too_many_arguments)]
 fn scan_forward(
     file: File,
@@ -194,10 +180,9 @@ fn scan_forward(
     Ok(Outcome { hits, interrupted })
 }
 
-/// Backward scan over `[0, from)`: blocks tile DOWN from `from` (block 0 is
-/// `[from - block, from)`), each window plus `overlap` bytes read ABOVE the
-/// block — the peek above is what finds a match straddling the boundary.
-/// Matches at `from` or later are not reported.
+/// Backward scan over `[0, from)`: blocks tile DOWN from `from`, each window plus
+/// `overlap` bytes read ABOVE the block — the peek above is what finds a match straddling
+/// the boundary. Matches at `from` or later are not reported.
 #[allow(clippy::too_many_arguments)]
 fn scan_backward(
     file: File,
@@ -309,9 +294,8 @@ fn count_newlines(
     Ok((total, false))
 }
 
-/// One positional read: bytes at `at` into `buf`, how many came back (0 at
-/// EOF or if the file shrank mid-scan). Positional, so a window's block and
-/// carry reads keep no seek state.
+/// One positional read: bytes at `at` into `buf`, how many came back (0 at EOF or if the
+/// file shrank mid-scan). Positional, so a window's block and carry reads keep no seek state.
 fn read_at_most(file: &File, buf: &mut [u8], at: u64) -> io::Result<usize> {
     if buf.is_empty() {
         return Ok(0);
@@ -323,8 +307,8 @@ fn count_newlines_in(s: &[u8]) -> usize {
     s.iter().filter(|&&b| b == b'\n').count()
 }
 
-/// Every match in `win`, as (index into `win`, length), ascending. Literal
-/// matches overlap; regex matches follow `find_iter` within the window.
+/// Every match in `win`, as (index into `win`, length), ascending. Literal matches
+/// overlap; regex matches follow `find_iter` within the window.
 fn for_each_match(pattern: &Pattern, win: &[u8], mut f: impl FnMut(usize, usize)) {
     match pattern {
         Pattern::Literal {
@@ -362,9 +346,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    /// A temp file, removed on drop — a panicking test never reaches a
-    /// tidy-up line. The name carries the pid and the test's tag, so runs
-    /// and tests cannot collide.
+    /// A temp file, removed on drop, so a panicking test never reaches a tidy-up line. The
+    /// name carries the pid and the test's tag, so runs and tests cannot collide.
     struct Temp(PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
@@ -385,7 +368,6 @@ mod tests {
         }
     }
 
-    /// A temp file with a per-test-unique name.
     fn tmp(name: &str, bytes: &[u8]) -> Temp {
         let p =
             std::env::temp_dir().join(format!("rano-logsearch-{}-{}", std::process::id(), name));
@@ -393,7 +375,6 @@ mod tests {
         Temp(p)
     }
 
-    /// A fresh unset cancel flag.
     fn go() -> AtomicBool {
         AtomicBool::new(false)
     }
@@ -500,8 +481,7 @@ mod tests {
 
     #[test]
     fn ascii_folding_does_not_touch_non_ascii() {
-        // Documented: folding is ASCII-only, so 'É' (C3 89) does not fold to
-        // 'é' (C3 A9).
+        // Documented: folding is ASCII-only, so 'É' (C3 89) does not fold to 'é' (C3 A9).
         let p = tmp("nonascii", "É\né\n".as_bytes());
         let insensitive = scan(
             &p,
@@ -570,9 +550,8 @@ mod tests {
         assert_eq!(got, vec![(0, 0, 5), (6, 0, 5)]);
     }
 
-    /// Block-boundary straddle: block 8, so forward windows are [0,8), [7,16),
-    /// [15,24) with a 1-byte carry. The needle at `at`, at every position
-    /// that matters: inside a block, beside it, straddling it, on it.
+    /// Block-boundary straddle: block 8, so forward windows are [0,8), [7,16), [15,24) with
+    /// a 1-byte carry. `at` is every position that matters: inside a block, beside it, on it.
     fn straddle_file(tag: &str, at: usize) -> Temp {
         let mut data = vec![b'.'; 24];
         data[at..at + 2].copy_from_slice(b"XY");
@@ -667,9 +646,8 @@ mod tests {
 
     #[test]
     fn regex_long_match_is_where_it_enters_the_last_window() {
-        // DOCUMENTED BEHAVIOUR: `a+` over a 20-byte run is longer than any
-        // window. One hit, at the offset where it enters the last window,
-        // not its true start (1). Bounded patterns are exact.
+        // DOCUMENTED BEHAVIOUR: `a+` over a 20-byte run is longer than any window. One hit,
+        // at the offset where it enters the last window, not its true start (1).
         let mut data = vec![b'b'];
         data.extend(std::iter::repeat_n(b'a', 20));
         data.push(b'b');
@@ -684,8 +662,7 @@ mod tests {
 
     #[test]
     fn interrupt_before_any_block() {
-        // Flag pre-set: checked before the first block, so not even the
-        // first hit comes back.
+        // Flag pre-set: checked before the first block, so not even the first hit comes back.
         let p = tmp("cancel-pre", b"hit\nhit\nhit\n");
         let stop = AtomicBool::new(true);
         let out = scan(&p, &lit(b"hit"), Dir::Forward, 0, 2, usize::MAX, &stop).unwrap();
@@ -868,9 +845,9 @@ mod tests {
 
     #[test]
     fn multi_mb_scan_measured() {
-        // ~4 MB of log-shaped lines, an ERROR every 1000th. Timed and printed
-        // for the record; assertions are correctness only. Allocated: the
-        // 64 KiB + 4 B buffer and the hits Vec — nothing grows with the file.
+        // ~4 MB of log-shaped lines, an ERROR every 1000th. Timed and printed for the
+        // record, asserting correctness only: the buffer and the hits Vec are all that is
+        // allocated.
         let stamp = "2026-10-09T12:00:00Z ";
         let error_at = format!("{}ERROR", stamp).find("ERROR").unwrap() as u64;
         let mut data = Vec::with_capacity(4 * 1024 * 1024);
@@ -947,11 +924,9 @@ mod tests {
         );
     }
 
-    /// Against a whole-file in-memory scan — no windows, no carry, no
-    /// direction — over a corpus of real log shapes, at block sizes from 1
-    /// byte to longer than the file, both directions, eight offsets. A
-    /// boundary bug no hand-picked case sits on still has to agree. Literals
-    /// only: the regex caveats above are real limits a reference would share.
+    /// Against a whole-file in-memory scan — no windows, no carry, no direction — over a
+    /// corpus of real log shapes, at block sizes from 1 byte to longer than the file, both
+    /// directions, eight offsets. Literals only: the regex caveats are real limits.
     #[test]
     fn agrees_with_a_whole_file_scan_over_a_corpus() {
         let mut corpus: Vec<u8> = Vec::new();

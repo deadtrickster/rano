@@ -69,11 +69,10 @@ pub struct LspClient {
     stdin: Box<dyn Write + Send>,
     next_id: u64,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
-    /// ids of in-flight completion requests. Completion is fire-and-forget,
-    /// so the reader needs this set to tell a completion response (or an
-    /// error response) apart from a late answer to a timed-out synchronous
+    /// ids of in-flight completion requests, so the reader can tell a
+    /// completion response apart from a late answer to a timed-out synchronous
     /// request — both look "unclaimed", and conflating them desyncs the
-    /// editor's completion queue.
+    /// completion queue.
     completion_ids: Arc<Mutex<HashSet<u64>>>,
     rx: mpsc::Receiver<LspEvent>,
     root_uri: String,
@@ -87,13 +86,9 @@ pub struct LspClient {
     pub lang: Lang,
 }
 
-/// Resolve an LSP server binary: search `PATH`, then the directories a tool manager
-/// installs into but does not always put on a process's `PATH` — `~/.local/bin` and
-/// `~/.cargo/bin` (rustup's `rust-analyzer`, letibot's own installs), **mise's shims**
-/// (`~/.local/share/mise/shims`, which `mise activate` adds to a shell's `PATH` and
-/// nothing else's — a head launched from a GUI, or a host's pane, inherits no shell), and
-/// `~/go/bin` (`go install`'s default, which is on no `PATH` at all). Falls back to the
-/// bare name so a "not found" error is still meaningful — and that is how a caller tells
+/// Resolve an LSP server binary: `PATH`, then the tool-manager directories a
+/// process does not inherit (`~/.local/bin`, `~/.cargo/bin`, mise's shims,
+/// `~/go/bin`). Falls back to the bare name, which is how a caller tells
 /// "found" from "not found" without a second `Option` type.
 pub(crate) fn find_bin(name: &str) -> String {
     for dir in search_dirs(std::env::var_os("PATH"), std::env::var_os("HOME")) {
@@ -117,10 +112,9 @@ fn search_dirs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString
         for sub in [
             ".local/bin",
             ".cargo/bin",
-            // mise (this host's tool manager): the shims are what `mise activate` puts on
-            // an interactive shell's PATH, and a process that does not inherit that shell
-            // sees none of the tools installed through it — `gopls`, `taplo`, `marksman`,
-            // `typescript-language-server` and the rest are all installed this way here.
+            // mise shims: `mise activate` puts them on an interactive shell's
+            // PATH only — a process that does not inherit that shell sees none
+            // of the tools installed through it.
             ".local/share/mise/shims",
             // `go install golang.org/x/tools/gopls@latest` and its kind.
             "go/bin",
@@ -139,8 +133,8 @@ fn search_dirs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString
 /// attempt and no error flash.
 pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
     let (name, args): (&str, &[&str]) = match lang {
-        // The rustup `rust-analyzer` component speaks LSP over stdio by
-        // default (no --stdio flag; that's the standalone release binary).
+        // The rustup `rust-analyzer` speaks LSP over stdio by default (no
+        // --stdio flag; that's the standalone binary).
         Lang::Rust => ("rust-analyzer", &[]),
         Lang::Go => ("gopls", &[]),
         // v5.x CLI: `bash-language-server start` listens on stdin/stdout.
@@ -148,9 +142,8 @@ pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
         Lang::Python => ("pylsp", &[]),
         Lang::C => ("clangd", &[]),
         Lang::Json => ("vscode-json-language-server", &["--stdio"]),
-        // cl-lsp (roswell-installable) is the closest thing to a standard
-        // Common Lisp server; when it's absent the spawn fails and the
-        // buffer simply runs without LSP.
+        // cl-lsp is the closest thing to a standard Common Lisp server; when
+        // absent the spawn fails and the buffer runs without LSP.
         Lang::CommonLisp => ("cl-lsp", &[]),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
             ("typescript-language-server", &["--stdio"])
@@ -166,10 +159,8 @@ pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
         Lang::Java => ("jdtls", &[]),
         Lang::Sql => ("sqls", &[]),
         Lang::Clojure => ("clojure-lsp", &[]),
-        // No standard server worth spawning: make, dockerfiles, ini-style
-        // configs, diffs, the emacs/scheme lisps and the inline half of
-        // markdown (which is never a buffer — a consumer drives it as a
-        // second Stream) all run without LSP.
+        // No standard server worth spawning: make, dockerfiles, ini configs,
+        // diffs and the lisps all run without LSP.
         Lang::Make
         | Lang::Dockerfile
         | Lang::Ini
@@ -234,10 +225,9 @@ pub fn find_project_root(start: &Path, marker: &str) -> PathBuf {
     }
 }
 
-/// A `file://` URI names an absolute path, so a relative one — what
-/// `rano src/main.rs` names its buffer — is made absolute against the working
-/// directory first. Without that the server is told about `file://src/main.rs`,
-/// which is no file, and answers every request with nothing.
+/// A `file://` URI names an absolute path, so a relative one is made absolute
+/// first — without that the server is told about no file and answers every
+/// request with nothing.
 pub(crate) fn path_to_uri(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy();
@@ -500,15 +490,15 @@ fn spawn_reader(
                     // Other notifications (logMessage, showMessage, progress)
                     // are not surfaced yet.
                 }
-                // A response to one of our requests (id, no method). Requests
-                // with a pending waiter are synchronous (handshake, shutdown);
-                // everything else rano sends fire-and-forget is completion.
+                // A response to one of our requests: with a pending waiter it
+                // is synchronous (handshake, shutdown); everything else rano
+                // sends fire-and-forget is completion.
                 (None, Some(i)) => {
                     let waiter = pending.lock().ok().and_then(|m| m.get(&i).cloned());
                     if let Some(tx) = waiter {
                         let _ = tx.send(v.get("result").cloned().unwrap_or(Value::Null));
                     } else if completion_ids.lock().ok().is_some_and(|mut s| s.remove(&i)) {
-                        // A completion answer: a result, null, or an error —
+                        // A completion answer — a result, null, or an error;
                         // each consumes exactly one queued request.
                         let items = v.get("result").map(parse_completion).unwrap_or_default();
                         let _ = tx.send(LspEvent::Completion(items));
@@ -534,13 +524,11 @@ fn text_end(text: &str) -> (u64, u64) {
     (last as u64, last_len)
 }
 
-/// Build the `textDocument/didChange` params for a full-document sync: one
-/// range edit replacing the whole of the SERVER's copy — from the start to
-/// `old_end`, where the last text sent to it ended — with `text`. The range
-/// has to describe the old document, not the new one: a file still arriving
-/// is opened empty, and a range sized to the new text then points past the
-/// end of the server's copy, which rust-analyzer rejects, leaving it with an
-/// empty document that answers every request with an error.
+/// Build the `didChange` params for a full-document sync: one range edit
+/// replacing the whole of the SERVER's copy, from the start to where the last
+/// text sent ended. The range must describe the OLD document — a range sized
+/// to the new text points past the end of the server's copy, which
+/// rust-analyzer rejects, leaving it with an empty document.
 fn did_change_params(uri: &str, version: i32, old_end: (u64, u64), text: &str) -> Value {
     json!({
         "textDocument": { "uri": uri, "version": version },
@@ -720,9 +708,8 @@ impl LspClient {
         out
     }
 
-    /// Fire-and-forget `textDocument/completion`. The response arrives as
-    /// `LspEvent::Completion` (the reader routes responses without a pending
-    /// waiter there); completion is rano's only async request kind.
+    /// Fire-and-forget `textDocument/completion`; the response arrives as
+    /// `LspEvent::Completion`.
     pub fn request_completion(&mut self, uri: &str, line: u64, character: u64) {
         if !self.initialized {
             return;
@@ -765,9 +752,8 @@ impl LspClient {
         Ok(parse_definition(&result))
     }
 
-    /// Synchronous `textDocument/references` (M-?): every usage of the
-    /// symbol at the position, the declaration included, in the server's
-    /// order. An empty list when the server answers null.
+    /// Synchronous `textDocument/references` (M-?): every usage of the symbol
+    /// at the position, declaration included.
     pub fn references(
         &mut self,
         uri: &str,

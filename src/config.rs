@@ -1,6 +1,5 @@
-//! Editor configuration: a tiny `key = value` file, no serde, at
-//! $XDG_CONFIG_HOME/rano/config.toml (else $HOME/.config/...). Unknown keys
-//! and bad values are ignored, never fatal.
+//! Editor configuration: a tiny `key = value` file at
+//! $XDG_CONFIG_HOME/rano/config.toml. Unknown keys and bad values are ignored.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub tab_width: usize,
     pub auto_indent: bool,
-    /// What a Tab inserts — see [`Indent`]. Defaults to `indent_size` spaces,
-    /// which is what a buffer with no style of its own gets.
+    /// What a Tab inserts — see [`Indent`]. Defaults to `indent_size` spaces.
     pub indent: Indent,
     /// Columns one indent step is, when the step is spaces, clamped to 1..=16
     /// (unlike [`Config::tab_width`], how wide a tab is drawn).
@@ -17,35 +15,28 @@ pub struct Config {
     pub line_numbers: bool,
     pub multibuffer: bool,
     pub wrap: bool,
-    /// Check GitHub for a newer release at startup: `None` not set, which is
-    /// what lets the `RANO_AUTOUPDATE` environment variable decide. See
-    /// `crate::update`.
+    /// Check GitHub for a newer release at startup: `None` leaves it to
+    /// `RANO_AUTOUPDATE`. See `crate::update`.
     pub autoupdate: Option<bool>,
-    /// M-S: a shell command (`sh -c`) that receives the cursor, the file and
-    /// the selection as JSON on stdin and `RANO_FILE`/`RANO_LINE`/
-    /// `RANO_COLUMN` in its environment. `None`: M-S has nowhere to send.
+    /// M-S: a shell command (`sh -c`) that gets the cursor, the file and the
+    /// selection as JSON, plus `RANO_FILE`/`RANO_LINE`/`RANO_COLUMN`. `None`: nowhere to send.
     pub send_command: Option<String>,
-    /// Write keys nano's way (`^X`, `M-U`) instead of emacs's (`C-x`, `M-u`)
-    /// in the bar, the help pages and `M-x`: `key_notation = nano`.
+    /// Write keys nano's way (`^X`, `M-U`) instead of emacs's: `key_notation = nano`.
     pub nano_keys: bool,
-    /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file. See
-    /// [`crate::theme`].
+    /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file.
     pub theme: Option<String>,
-    /// The WASM plugin: a `.wasm` whose `on_open`/`on_save` hooks run at the
-    /// two seams. `RANO_PLUGIN` overrides it. Stage 1 plugins are pure text
-    /// transforms: no hook is granted anything it imports.
+    /// The WASM plugin: a `.wasm` whose `on_open`/`on_save` hooks run at the two
+    /// seams. `RANO_PLUGIN` overrides it.
     pub plugin: Option<String>,
     /// What the configured plugin may import — `capabilities = ["read-dir"]`.
-    /// Empty grants nothing; a module importing anything ungranted is refused
-    /// at load, and a misspelt name is ignored rather than granted.
+    /// Empty grants nothing; a misspelt name is ignored rather than granted.
     pub capabilities: Vec<String>,
-    /// `color.ROLE = "look"` lines, in file order: one role overridden on top of the
-    /// theme. Kept as written; [`crate::theme::resolve`] reads and reports them.
+    /// `color.ROLE = "look"` lines, in file order; [`crate::theme::resolve`] reads them.
     pub colors: Vec<(String, String)>,
 }
 
-/// What a Tab inserts: Go and the Makefile world want a tab, most everything
-/// else spaces, so it is one setting with three values rather than a guess.
+/// What a Tab inserts: Go and the Makefile world want a tab, most everything else
+/// spaces, so it is one setting with three values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Indent {
     /// `indent_size` spaces. The default, and what a buffer with no detectable
@@ -53,17 +44,15 @@ pub enum Indent {
     #[default]
     Spaces,
     /// One tab character, drawn at `tab_width`. gofmt rewrites a Go file's
-    /// indentation to these whatever rano inserts, which is why `auto` exists.
+    /// indentation to these whatever rano inserts.
     Tabs,
-    /// The buffer's own style: a file that indents with tabs gets tabs, one
-    /// with two, three or four spaces gets exactly those. Fallback:
-    /// `indent_size` spaces.
+    /// The buffer's own style: a tab-indented file gets tabs, a two-space file two.
+    /// Fallback: `indent_size` spaces.
     Auto,
 }
 
 impl Indent {
-    /// From a config value: `spaces`, `tabs`, `auto`; anything else is ignored
-    /// like every other bad value in this file.
+    /// From a config value: `spaces`, `tabs`, `auto`; anything else is ignored.
     pub fn parse(v: &str) -> Option<Indent> {
         match v.trim().to_ascii_lowercase().as_str() {
             "spaces" | "space" => Some(Indent::Spaces),
@@ -75,8 +64,8 @@ impl Indent {
 }
 
 impl Config {
-    /// The whitespace a Tab (and an auto-indent) inserts for this buffer: the
-    /// configured unit, or under [`Indent::Auto`] the buffer's own, detected.
+    /// The whitespace a Tab (and an auto-indent) inserts; under [`Indent::Auto`],
+    /// the buffer's own.
     pub fn indent_unit(&self, buf: &crate::buffer::Buffer) -> String {
         match self.indent {
             Indent::Tabs => "\t".to_string(),
@@ -86,13 +75,9 @@ impl Config {
     }
 }
 
-/// The buffer's own indent style, or `None` when it has none to speak of: a
-/// tab if any row indents with one, else the greatest common divisor of the
-/// leading-space runs. One pass, no collected Vec — this runs on every Enter
-/// with auto-indent, every Tab and every Backspace. The GCD is tracked as the
-/// scan goes: it is monotonically non-increasing, so reaching 1 ends the
-/// search. Still O(rows) over the whole buffer; the exact fix is to maintain
-/// it incrementally per row written.
+/// The buffer's own indent style, or `None` when it has none to speak of: a tab if
+/// any row indents with one, else the GCD of the leading-space runs. One pass: this
+/// runs on every Enter with auto-indent, every Tab and every Backspace.
 pub fn detect_indent(buf: &crate::buffer::Buffer) -> Option<String> {
     let mut unit = 0usize;
     for l in buf.rows() {
@@ -108,8 +93,8 @@ pub fn detect_indent(buf: &crate::buffer::Buffer) -> Option<String> {
             }
         }
     }
-    // Eight or more is not a unit anyone means, and a one-space run usually means "this
-    // row was indented by one", not "my style is one column".
+    // Eight or more is not a unit anyone means, and a one-space run usually means
+    // "this row has one space", not "my style is one column".
     (unit > 1 && unit <= 8).then(|| " ".repeat(unit))
 }
 
@@ -145,7 +130,6 @@ impl Default for Config {
 }
 
 /// $XDG_CONFIG_HOME/rano/config.toml, falling back to $HOME/.config/...
-/// when XDG_CONFIG_HOME is unset or empty.
 pub fn config_path() -> PathBuf {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -182,8 +166,8 @@ fn parse_config(text: &str) -> Config {
         };
         let key = key.trim();
         let value = value.trim();
-        // A double-quoted value is taken whole, `#` and all (a shell command
-        // can carry one); anything else ends at an inline comment.
+        // A double-quoted value is taken whole, `#` and all; anything else ends at
+        // an inline comment.
         let value = match value.strip_prefix('"') {
             Some(q) => q.split_once('"').map_or(q, |(v, _)| v),
             None => value.split('#').next().unwrap_or("").trim(),
@@ -195,8 +179,8 @@ fn parse_config(text: &str) -> Config {
                     cfg.tab_width = n.clamp(1, 16);
                 }
             }
-            // `indent = spaces | tabs | auto` and how wide a step is. `tab_width` above is a
-            // different question — how wide a tab is *drawn*.
+            // `indent = spaces | tabs | auto`; `tab_width` above is a different
+            // question — how wide a tab is *drawn*.
             "indent" => {
                 if let Some(i) = Indent::parse(value) {
                     cfg.indent = i;
@@ -248,8 +232,8 @@ fn parse_config(text: &str) -> Config {
                 let v = value.trim();
                 cfg.plugin = (!v.is_empty()).then(|| v.to_string());
             }
-            // `capabilities = ["read-dir"]`: a list, in the one shape this parser reads — brackets
-            // and quotes optional, so `capabilities = read-dir` is the same statement.
+            // `capabilities = ["read-dir"]`: brackets and quotes optional, so
+            // `capabilities = read-dir` is the same statement.
             "capabilities" => {
                 cfg.capabilities = value
                     .trim_matches(|c| c == '[' || c == ']')
@@ -279,7 +263,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
 
-    /// `theme` names a file; `color.ROLE` lines are kept in order for the theme to read.
+    /// `theme` names a file; `color.ROLE` lines are kept in order.
     #[test]
     fn a_theme_and_colour_lines_are_read() {
         let c = parse_config(
@@ -340,7 +324,6 @@ mod tests {
         assert!(!cfg.multibuffer);
     }
 
-    /// What a Tab inserts, in each of the three modes, and the keys that set it.
     #[test]
     fn a_capability_is_a_named_list_and_the_empty_list_grants_nothing() {
         assert!(
@@ -376,8 +359,8 @@ mod tests {
         assert_eq!(cfg.indent, Indent::Tabs);
         assert_eq!(cfg.indent_unit(&buf), "\t");
 
-        // `auto` follows the buffer: a tab-indented file gets a tab, a two-space file two,
-        // and a file with nothing to detect gets the configured size.
+        // `auto` follows the buffer: a tab-indented file gets a tab, a two-space file
+        // two, and a file with nothing to detect gets the configured size.
         let cfg = parse_config("indent = auto\nindent_size = 3");
         assert_eq!(cfg.indent, Indent::Auto);
         let mut tabs = crate::buffer::Buffer::new();
@@ -388,8 +371,7 @@ mod tests {
         assert_eq!(cfg.indent_unit(&two), "  ", "the GCD of the runs");
         assert_eq!(cfg.indent_unit(&buf), "   ", "nothing to detect: the size");
 
-        // A bad value is ignored, like every other bad value in this file; the size is
-        // clamped like `tab_width`.
+        // A bad value is ignored; the size is clamped like `tab_width`.
         let cfg = parse_config("indent = whichever\nindent_size = 99");
         assert_eq!(cfg.indent, Indent::Spaces);
         assert_eq!(cfg.indent_size, 16);
@@ -401,8 +383,7 @@ mod tests {
 
     #[test]
     fn autoupdate_is_unset_by_default_and_parseable() {
-        // None, not Some(true): unset is what lets RANO_AUTOUPDATE decide, and
-        // what makes the config "not saying" rather than "saying yes".
+        // None, not Some(true): unset is what lets RANO_AUTOUPDATE decide.
         assert_eq!(Config::default().autoupdate, None);
         assert_eq!(parse_config("autoupdate = false").autoupdate, Some(false));
         assert_eq!(parse_config("autoupdate = true").autoupdate, Some(true));

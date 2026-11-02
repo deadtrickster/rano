@@ -1,33 +1,28 @@
 //! What a host's loop calls between events: [`Editor::tick`], and
-//! [`Editor::next_wakeup`] for when to call it again. Also the rest of what
-//! a host asks: its own keymaps over the editor's, and whether the editor
-//! wants to be closed.
+//! [`Editor::next_wakeup`] for when to call it again.
 
 use std::time::{Duration, Instant};
 
 use crate::editor::Editor;
 use crate::keymap::Keymap;
 
-/// How long an idle editor may be left without a tick: the pollers are how
-/// an async reply, a finished job or an expired status reaches the screen.
+/// How long an idle editor may go without a tick: the pollers are how an async
+/// reply or an expired status reaches the screen.
 const IDLE_WAIT: Duration = Duration::from_millis(200);
 
-/// While a file is arriving: a frame at 120 Hz. Longer, and the text appears
-/// in lumps and the load looks like a stutter rather than a stream.
+/// While a file is arriving: a frame at 120 Hz. Longer, and the text appears in
+/// lumps rather than as a stream.
 const LOADING_WAIT: Duration = Duration::from_millis(8);
 
 impl Editor {
-    /// Everything the editor does between events, at `now`; returns whether
-    /// the screen changed. Call once per loop iteration and before every draw
-    /// — it also brings the frame's highlight and scroll up to date. Never
-    /// blocks; each poller does a bounded amount of work and comes back.
+    /// Everything the editor does between events, at `now`; true when the screen
+    /// changed. Call once per loop iteration, before every draw. Never blocks.
     pub fn tick(&mut self, now: Instant) -> bool {
-        // The pollers first: what they adopt is what the refreshes and the
-        // scroll below must see. The load is bounded per call and never waits.
+        // The pollers first: what they adopt is what the refreshes and the scroll
+        // below must see.
         let mut dirty = self.load_poll();
-        // A tail's line count, which decides whether the gutter can state a
-        // number at all. After the load poll: the tail's rows are what the
-        // count is an offset into.
+        // A tail's line count, which decides whether the gutter can state a number
+        // at all. After the load poll: the tail's rows are what it is an offset into.
         dirty |= self.line_count_poll();
         dirty |= self.diag_flush(now);
         dirty |= self.tick_status();
@@ -47,23 +42,19 @@ impl Editor {
             self.pending.card_shown = card;
             dirty = true;
         }
-        // Before the scroll: `--line` centres the target, and centring sets
-        // the scroll; adjust_scroll first would pull the view back to the
-        // nearest edge. See `apply_startup_pos`.
+        // Before the scroll: `--line` centres the target, and centring sets the
+        // scroll; adjust_scroll first would pull the view back. See `apply_startup_pos`.
         self.apply_startup_pos();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        // The frame's highlight, after the scroll the window is measured
-        // against. One highlight per frame rather than one per key, and only
-        // this window on a huge file.
+        // The frame's highlight, after the scroll the window is measured against:
+        // once per frame, and only this window on a huge file.
         self.ensure_highlight();
         dirty
     }
 
-    /// Stack a host's keymap over the editor's; its bindings win key by key
-    /// in every mode. A binding to a name that is not an editor command
-    /// comes back as [`crate::editor::KeyOutcome::Host`]; one to an editor
-    /// command simply runs it.
+    /// Stack a host's keymap over the editor's; its bindings win key by key in
+    /// every mode. A name that is not an editor command comes back as `KeyOutcome::Host`.
     pub fn push_keymap(&mut self, map: Keymap) {
         self.host_keymaps.push(map);
     }
@@ -73,17 +64,14 @@ impl Editor {
         self.host_keymaps.pop()
     }
 
-    /// The editor has been asked to exit (`^X`, after any save prompt) and
-    /// wants to be closed. The editor itself does nothing more once this is
-    /// set — tearing down is the host's.
+    /// The editor has been asked to exit and wants to be closed; tearing down is
+    /// the host's.
     pub fn wants_quit(&self) -> bool {
         self.quit
     }
 
-    /// How long a host may wait for input before it must tick again. Zero
-    /// while the loader is saturated — the budget keeps one iteration short,
-    /// it does not pace the load. Never past the moment a pending prefix's
-    /// card is due, so it appears on time.
+    /// How long a host may wait for input before ticking again: zero while the
+    /// loader is saturated, never past a prefix card's due moment.
     pub fn next_wakeup(&self) -> Duration {
         let wait = if self.load_saturated {
             Duration::ZERO
@@ -94,7 +82,7 @@ impl Editor {
         };
         match self.card_due() {
             // The +1 ms rounds past the deadline: waking a hair early would
-            // find the card not yet due and sleep the whole wait again.
+            // find the card not due and sleep the whole wait again.
             Some(d) => wait.min(Duration::from_millis(d.as_millis() as u64 + 1)),
             None => wait,
         }
@@ -176,8 +164,8 @@ mod tests {
 
     #[test]
     fn tick_flushes_debounced_diagnostics() {
-        // A syntax error typed into Rust surfaces 300 ms after the last
-        // edit, through tick's `now` rather than the wall clock.
+        // A syntax error typed into Rust surfaces 300 ms after the last edit,
+        // through tick's `now` rather than the wall clock.
         let mut buf = Buffer::new();
         buf.set_rows(vec!["fn main() {}".chars().collect()]);
         buf.name = Some("t.rs".into());
@@ -296,8 +284,8 @@ mod tests {
         // An editor command under a host's key: it simply runs.
         map.bind("<f12>", "undo");
         ed.push_keymap(map);
-        // Unbound characters are still typed: what decides that is the
-        // editor's own map, not the host's on top of it.
+        // Unbound characters are still typed: the editor's own map decides that,
+        // not the host's on top of it.
         ed.handle_key(key(KeyCode::Char('z'), Mods::NONE));
         assert_eq!(text(&ed), vec!["z"]);
         let out = ed.handle_key(key(KeyCode::F(12), Mods::NONE));
@@ -321,8 +309,8 @@ mod tests {
 
     #[test]
     fn a_host_opens_a_file_at_a_position_and_ticks_it_in() {
-        // The whole embedding flow, short of a terminal: an empty editor, a
-        // pane, a file opened at line 40 column 3, and ticks until it is read.
+        // The whole embedding flow, short of a terminal: an empty editor, a pane,
+        // a file opened at line 40 column 3, and ticks until it is read.
         let path = std::env::temp_dir().join(format!("rano_host_open_{}.txt", std::process::id()));
         let text: String = (1..=80).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&path, &text).unwrap();

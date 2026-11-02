@@ -1,6 +1,5 @@
-//! LSP session control: start/restart the server to match the current
-//! buffer, adopt async handshakes, debounce didChange flushes, and surface
-//! diagnostics (status line summary + M-D jump).
+//! LSP session control: start the server for the current buffer, adopt async
+//! handshakes, debounce didChange, and surface diagnostics.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -13,9 +12,8 @@ use crate::lsp;
 use crate::syntax;
 
 impl Editor {
-    /// Send the pending didChange once the 300 ms debounce window has
-    /// elapsed. The flag is cleared even with no client attached, so a later
-    /// handshake never sends a stale change. Returns whether one went out.
+    /// Send the pending didChange once the 300 ms debounce has elapsed; the flag
+    /// clears even with no client, so a later handshake never sends a stale change.
     pub(crate) fn lsp_flush(&mut self, now: Instant) -> bool {
         let bs = self.bs_mut();
         if !bs.lsp_dirty || now < bs.lsp_last_send + Duration::from_millis(300) {
@@ -33,12 +31,10 @@ impl Editor {
 
     // ---------- LSP ----------
 
-    /// Start (or restart) the language server to match the current buffer's
-    /// file name and language. Stops it for scratch/unsupported files.
+    /// Start (or restart) the server to match the buffer's file name and language.
     pub(crate) fn lsp_sync(&mut self) {
         let bs = self.bs_mut();
-        // A view starts no language server: a server handed a rendering
-        // would report diagnostics about a document that is not the file.
+        // A view starts no server: it would report on a document that is not the file.
         if bs.synthetic {
             if bs.lsp.take().is_some() {
                 bs.lsp_diags.clear();
@@ -69,14 +65,13 @@ impl Editor {
             old.shutdown();
         }
         bs.lsp_diags.clear();
-        // Languages rano has no server for run highlighting-only: shut any
-        // old client down (above) but don't spawn, and don't flash an error
-        // for a server that was never supposed to exist.
+        // A language with no server is highlighting-only: the old client is shut
+        // down above, nothing spawns, and no error is flashed.
         if lsp::command_for(lang).is_none() {
             return;
         }
-        // From the absolute path: a relative name's parent walks up to the
-        // empty path, and a root of "" is no project.
+        // From the absolute path: a relative name's parent is the empty path,
+        // and a root of "" is no project.
         let dir = std::path::absolute(&name)
             .unwrap_or_else(|_| name.clone())
             .parent()
@@ -87,33 +82,30 @@ impl Editor {
             syntax::Lang::Go => lsp::find_project_root(&dir, "go.mod"),
             syntax::Lang::Python => lsp::find_project_root(&dir, "pyproject.toml"),
             syntax::Lang::C => lsp::find_project_root(&dir, "compile_commands.json"),
-            // JS/TS projects are rooted by package.json, PHP by composer.json,
-            // Ruby by the Gemfile.
+            // JS/TS projects are rooted by package.json, PHP by composer.json, Ruby
+            // by the Gemfile.
             syntax::Lang::JavaScript | syntax::Lang::TypeScript | syntax::Lang::Tsx => {
                 lsp::find_project_root(&dir, "package.json")
             }
             syntax::Lang::Php => lsp::find_project_root(&dir, "composer.json"),
             syntax::Lang::Ruby => lsp::find_project_root(&dir, "Gemfile"),
-            // CL projects are rooted by their .asd files, whose names vary
-            // with the system, so there is no marker to walk up for.
+            // CL projects are rooted by .asd files whose names vary, so there is no
+            // marker to walk up for.
             syntax::Lang::Bash | syntax::Lang::Json | syntax::Lang::CommonLisp => dir,
-            // The rest have no reliable single marker (or no server at all);
-            // the file's own directory is the root.
+            // The rest have no reliable single marker: the file's own directory.
             _ => dir,
         };
         let text = bs.buf.text();
-        // Async handshake: spawn_async returns instantly; lsp_poll adopts
-        // the client when the background initialize finishes. Dropping a
-        // stale receiver drops its in-flight LspClient (→ Drop::shutdown).
+        // Async handshake: `lsp_poll` adopts the client when the background
+        // initialize finishes; dropping a stale receiver shuts it down.
         bs.lsp_starting = Some((
             name.display().to_string(),
             lsp::LspClient::spawn_async(lang, &root, &name, &text),
         ));
     }
 
-    /// Adopt a finished async handshake, then drain LSP notifications into
-    /// `lsp_diags`; one open document, so the latest report is the latest
-    /// one. Returns whether diagnostics were replaced.
+    /// Adopt a finished async handshake, then drain notifications into `lsp_diags`:
+    /// the latest report is the latest one. True when diagnostics were replaced.
     pub(crate) fn lsp_poll(&mut self) -> bool {
         let mut dirty = false;
         let pending = self.bs_mut().lsp_starting.take();
@@ -128,8 +120,7 @@ impl Editor {
             match rx.try_recv() {
                 Ok(Ok(client)) => {
                     if tag == started_for {
-                        // Catch-up: edits made during the handshake were only
-                        // flagged; lsp_flush sends the current text.
+                        // Catch-up: edits made during the handshake were only flagged.
                         let bs = self.bs_mut();
                         bs.lsp_dirty = true;
                         bs.lsp = Some(client);
@@ -228,9 +219,8 @@ impl Editor {
         Some(format!("LSP: {}", parts.join(", ")))
     }
 
-    /// M-D: move to the next diagnostic on a line strictly below the
-    /// cursor, wrapping to the first one. Diags are sorted by (line, col)
-    /// defensively; cols are UTF-16 units and may exceed the char count.
+    /// M-D: the next diagnostic below the cursor, wrapping to the first. Cols are
+    /// UTF-16 units and can exceed the char count.
     pub(crate) fn jump_next_diag(&mut self) {
         let ds_all = self.all_diags();
         if ds_all.is_empty() {

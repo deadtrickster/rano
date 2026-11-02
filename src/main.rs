@@ -1,5 +1,4 @@
-//! The `rano` binary: arguments, the terminal, and the event loop. The editor
-//! itself is the library's (`rano::editor`); this is one host of it.
+//! The `rano` binary: arguments, the terminal, and the event loop.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -13,18 +12,15 @@ use rano::send_ctrl::split_position;
 use rano::term::{self, Event, Terminal};
 use rano::{config, export, send_ctrl, syntax, ui};
 
-/// The command line, parsed. Hand-rolled: files, a handful of flags, no
-/// subcommands; a flag's value must not be mistaken for the file.
+/// The command line, parsed by hand: files, a few flags, no subcommands.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
-    /// In command-line order; each opens as its own buffer, the first one
-    /// current. `--line`/`--column` apply to the first.
+    /// In command-line order; each opens as its own buffer, the first current.
     files: Vec<String>,
-    /// Each file's own position, 1-based (line, column), from `file:line:col`
-    /// or a preceding `+line[,col]`; parallel to `files`.
+    /// Each file's own position, 1-based, parallel to `files`.
     positions: Vec<Option<(usize, Option<usize>)>>,
-    /// 1-based, as a person reads them and as `Ln` in the status bar counts.
-    /// Converted to 0-based before the editor sees them.
+    /// 1-based, as a person reads them; converted to 0-based before the editor
+    /// sees them.
     line: Option<usize>,
     col: Option<usize>,
     export: Option<export::Format>,
@@ -122,8 +118,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 }
 
 impl Args {
-    /// The first file: the one that opens current, and the one `--line`,
-    /// `--column`, `--follow` and `--export` act on.
+    /// The first file: the one that opens current and that the flags act on.
     fn file(&self) -> Option<&str> {
         self.files.first().map(String::as_str)
     }
@@ -164,8 +159,7 @@ fn main() {
         println!("rano {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // `--export`: read, colourise, write, exit — no terminal touched, so it
-    // works in a pipe.
+    // `--export`: read, colourise, write, exit — no terminal, so it works in a pipe.
     if let Some(fmt) = args.export {
         if let Err(e) = export_to_stdout(args.file().map(str::to_string), fmt) {
             eprintln!("rano: {e}");
@@ -173,16 +167,15 @@ fn main() {
         }
         return;
     }
-    // The file is not read here: reading before the terminal is up made
-    // `rano huge.log` a dead screen for seconds on a large file. The run
-    // loop starts a loader instead (`load_ctrl.rs`, `loader.rs`).
+    // The file is not read here: reading before the terminal is up made a huge file
+    // a dead screen. The run loop starts a loader instead.
     let file = args.file().map(str::to_string);
     let mut buf = Buffer::new();
     let mut load: Option<PathBuf> = None;
     if let Some(f) = &file {
         let p = Path::new(f);
-        // The name is set either way, so language detection, the title bar and
-        // the gutter are right from the first frame.
+        // Named either way, so language detection, the title bar and the gutter are
+        // right from the first frame.
         buf.name = Some(p.to_path_buf());
         if p.exists() {
             load = Some(p.to_path_buf());
@@ -201,9 +194,8 @@ fn main() {
         .or(args.positions.first().copied().flatten())
         .map(to_pos);
     let mut cfg = config::load();
-    // The theme the config names, and its own `color.` lines, before anything is drawn. What
-    // cannot be used is said on stderr rather than dropped: a typo must not look like a
-    // deliberate default.
+    // The theme the config names, and its own `color.` lines, before anything is
+    // drawn. What cannot be used is said on stderr rather than dropped.
     let themes = config::config_path()
         .parent()
         .map(|d| d.join("themes"))
@@ -213,9 +205,8 @@ fn main() {
         eprintln!("rano: {p}");
     }
     rano::theme::set_active(theme);
-    // The other files become buffers of their own, read when first visited;
-    // naming several files asks for several buffers, so the session is
-    // multibuffer whatever the config says.
+    // The other files become buffers of their own, read when first visited; naming
+    // several asks for several, so the session is multibuffer.
     let rest: Vec<(PathBuf, Option<Pos>)> = args
         .files
         .iter()
@@ -232,8 +223,7 @@ fn main() {
     }
 }
 
-/// Read a file (or stdin), colourise it, write it out; no terminal is
-/// touched.
+/// Read a file (or stdin), colourise it, write it out; no terminal is touched.
 fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()> {
     let buf = match &path {
         Some(p) => match Buffer::from_file(Path::new(p)) {
@@ -255,23 +245,20 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
             b
         }
     };
-    // A name is what `detect` works from, and it also supplies the markdown
-    // fence tag and the HTML title, so it is set before highlighting.
+    // A name is what `detect` works from, and it supplies the fence tag and HTML title.
     let mut buf = buf;
     let title = match &path {
         Some(p) => p.clone(),
         None => String::from("<stdin>"),
     };
     buf.name = Some(std::path::PathBuf::from(&title));
-    // The whole document, not a window: colouring everything is the point of
-    // an export, and there is no viewport to bound it by.
+    // The whole document, not a window: an export has no viewport to bound it.
     let mut hl = syntax::Highlighter::new();
     hl.refresh(&buf);
     let style_of = |p: Pos| hl.style_at(p);
     let out = export::render(&buf.rows_vec(), 8, &title, fmt, &style_of);
-    // Written, not `print!`ed: a closed pipe is the normal end of
-    // `rano --export ansi f.rs | head`, not a panic. `println!` aborts the
-    // process with a broken-pipe message when the reader goes away.
+    // Written, not `print!`ed: a closed pipe is the normal end of `rano --export
+    // ansi f.rs | head`, not a panic.
     let mut stdout = io::stdout().lock();
     if let Err(e) = stdout.write_all(out.as_bytes()) {
         if e.kind() == io::ErrorKind::BrokenPipe {
@@ -292,39 +279,32 @@ fn run(
     edit: bool,
     cfg: config::Config,
 ) -> io::Result<()> {
-    // Raw mode, the alternate screen, bracketed paste and mouse buttons (the
-    // wheel scrolls, a drag selects). `Terminal::enter_with` installs the
-    // panic hook that restores the terminal; `Drop` restores it on every
-    // other way out.
+    // Raw mode, the alternate screen, bracketed paste and mouse buttons; `Drop`
+    // restores the terminal on every other way out.
     let terminal = Terminal::enter_with(term::Options {
         mouse: term::Mouse::Buttons,
         block_cursor: false,
     })?;
-    // Until the terminal answers the background question (if it can), the dark
-    // palette; the two differ only in the diff tints.
+    // Until the terminal answers the background question: the dark palette.
     let mut palette = Palette::Colour;
     let mut ed = Editor::new(buf, cfg);
-    // A picture is drawn as placeholder cells, which a terminal that cannot
-    // fill them shows as garbage, so M-P on a PNG is refused by name where
-    // the protocol is not kitty.
+    // A picture is drawn as placeholder cells a terminal may fill with garbage, so
+    // M-P is refused by name where the protocol is not kitty.
     ed.images = matches!(
         terminal.features().proto,
         rano::term::Proto::Kitty | rano::term::Proto::KittyPassthrough
     );
-    // `--edit`: the escape from the mode a `.log` name puts it in. Set before
-    // any load, because every load asks (`Editor::log_mode_for`).
+    // `--edit`: the escape from the mode a `.log` name puts it in, set before any
+    // load.
     ed.edit_override = edit;
-    // One request at startup, off the main thread; in `run` rather than
-    // `Editor::new` so no test makes a network call by constructing an
-    // editor.
+    // One request at startup, off the main thread, here rather than in
+    // `Editor::new` so no test makes a network call by constructing an editor.
     ed.start_update_check();
     if let Some(cmd) = ed.config.send_command.clone() {
         ed.on_send = Some(send_ctrl::command_sender(cmd));
     }
-    // `RANO_PLUGIN` beats the config file, and either may be absent; a plugin
-    // that cannot load says so once and leaves the editor as it was.
-    // `RANO_CAPABILITIES` overrides the grant, so a plugin can be tried
-    // without editing the config.
+    // `RANO_PLUGIN` beats the config file and `RANO_CAPABILITIES` the grant, so a
+    // plugin can be tried without editing the config.
     if let Some(p) = std::env::var("RANO_PLUGIN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -340,14 +320,12 @@ fn run(
         }
         ed.set_plugin(&PathBuf::from(expand_tilde(&p)));
     }
-    // 0-based, once, here: `--line 1` is the first row, and the editor's own
-    // coordinates are 0-based throughout. `--column` alone leaves the row at 0.
+    // 0-based, once, here: the editor's own coordinates are 0-based throughout.
     ed.bs_mut().goto = pos;
-    // What ships is loaded before anything is opened, so a builtin can claim
-    // the file the command line names.
+    // What ships is loaded first, so a builtin can claim the file the command line
+    // names.
     ed.load_builtins();
-    // The viewport before the open: a provider is told the size it will be
-    // drawn at, and a plugin asked for 0 columns answers "not mine".
+    // The viewport before the open: a plugin asked for 0 columns answers "not mine".
     let (tw, th) = terminal.size();
     ed.set_area(Area::new(
         0,
@@ -356,24 +334,20 @@ fn run(
         th.min(u16::MAX as usize) as u16,
     ));
     if let Some(path) = load {
-        // A folder on the command line is a listing, not a read: a directory
-        // read as a file is a load failure with nothing on screen to say it.
+        // A folder on the command line is a listing, not a read.
         if !follow && path.is_dir() {
             ed.open_dir(&path);
         } else {
-            // `-f`/`--follow` forces the tail; without it the name decides —
-            // `start_named` is the one decision every door uses, so a `.log`
-            // opens in log mode from here and from F8 alike.
+            // `-f` forces the tail; without it the name decides, through the one door
+            // every door uses.
             let started = if follow {
                 ed.start_tail(&path)
             } else {
-                // One door for the command line and `M->`: a provider answers first, and a
-                // path nobody claims goes through `start_named` as before.
+                // One door for the command line and `M->`: a provider answers first.
                 ed.open_named(&path)
             };
             if let Err(e) = started {
-                // The one load failure reported before a frame is drawn: there is
-                // nothing on screen yet to attach a status line to.
+                // Reported before a frame is drawn: there is no status line yet.
                 drop(terminal);
                 eprintln!("rano: cannot read {}: {}", path.display(), e);
                 std::process::exit(1);
@@ -382,13 +356,11 @@ fn run(
     }
     ed.add_deferred_buffers_at(&rest);
     let mut frame = render::Buffer::empty(Rect::default());
-    // Dirty-draw: any handled key, paste or resize dirties; `tick` reports
-    // the editor's own state changes. text_w is the full viewport width here
-    // (draw renders full-width lines).
+    // Dirty-draw: any handled key, paste or resize dirties; `tick` reports the
+    // editor's own state changes.
     let mut dirty = true;
     loop {
-        // The terminal reports no resize event; the size is asked every turn,
-        // which is one ioctl, and a change re-lays the editor out.
+        // The terminal reports no resize event, so the size is asked every turn.
         let (w, h) = terminal.size();
         let (w, h) = (
             w.min(u16::MAX as usize) as u16,
@@ -399,26 +371,22 @@ fn run(
             frame.resize(Rect::new(0, 0, w, h));
             dirty = true;
         }
-        // The pollers, the overlays' refreshes, the scroll and the frame's
-        // highlight: everything between two events, the same call a host
-        // embedding the editor makes.
+        // The pollers, the overlays' refreshes, the scroll and the highlight:
+        // everything between two events, the same call a host makes.
         dirty |= ed.tick(Instant::now());
-        // The clipboard is not the screen: drained on every pass, not when a
-        // frame is due, so a copy does not wait for the next keystroke. On a
-        // terminal without OSC 52 nothing is written.
+        // The clipboard is not the screen: drained on every pass, so a copy does not
+        // wait for the next keystroke.
         if let Some(text) = ed.take_clipboard() {
             terminal.copy(&text);
         }
         if dirty {
-            // The pictures' own bytes before the frame that draws their
-            // placeholder rows: uploads, placements, deletes — not part of
-            // the text frame, so they go out around it.
+            // The pictures' bytes before the frame that draws their placeholder
+            // rows: not part of the text frame, so they go out around it.
             for bytes in ed.take_graphics() {
                 terminal.write_raw(&bytes);
             }
-            // Only the rows that changed reach the glass; the cursor is
-            // hidden while they are written and shown where the editor says,
-            // or left hidden (the edit point is outside the view).
+            // Only the rows that changed reach the glass; the cursor is hidden while
+            // they are written and shown where the editor says.
             let cursor = ui::draw(&mut frame, &ed);
             terminal.draw_buffer(
                 &frame,
@@ -430,9 +398,8 @@ fn run(
         if ed.wants_quit() {
             break;
         }
-        // The idle wait is the long one, because a keystroke is what ends
-        // it; `next_wakeup` shortens it while a file streams in or a
-        // prefix's card is due.
+        // The idle wait is the long one: a keystroke ends it; `next_wakeup` shortens
+        // it while a file streams in or a prefix's card is due.
         if !terminal.poll(ed.next_wakeup()) {
             continue;
         }
@@ -460,9 +427,8 @@ fn run(
         }
     }
     drop(terminal);
-    // The update offer is announced on the way out: installing replaces the
-    // running executable, so it takes effect on the next start, and printing
-    // after the terminal is restored lands it in the shell's scrollback.
+    // The update offer is announced on the way out: installing replaces the running
+    // executable, and printing after the terminal is restored lands in scrollback.
     if let Some(u) = &ed.update.found
         && ed.update_installable_on_exit()
     {
@@ -529,8 +495,7 @@ mod args_tests {
 
     #[test]
     fn edit_is_the_escape_from_a_log_default() {
-        // `--edit` takes no value either; the default rule is
-        // `Editor::log_mode_for`'s, and the flag only overrides it.
+        // `--edit` takes no value either; the flag only overrides the name rule.
         let a = parse_args(&argv(&["--edit", "server.log"])).expect("parse");
         assert!(a.edit);
         assert_eq!(a.file(), Some("server.log"));
@@ -555,8 +520,7 @@ mod args_tests {
 
     #[test]
     fn bad_arguments_are_refused_rather_than_guessed() {
-        // Each of these is a mistake the user wants told about, not silently
-        // reinterpreted.
+        // Each of these is a mistake the user wants told about.
         for (args, why) in [
             (argv(&["--line"]), "a flag with no value"),
             (argv(&["--line", "abc"]), "a non-number"),

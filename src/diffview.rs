@@ -1,6 +1,5 @@
-//! A view drawn over the text by the library's renderers: the save question's
-//! diff, M-P's patch, conflict, markdown and picture views, or a host's
-//! review. Lines re-render only when the width or the view changes.
+//! A view drawn over the text: the save question's diff, M-P's patch, conflict,
+//! markdown and picture views, or a host's review. Re-rendered on width or change.
 
 use std::path::PathBuf;
 
@@ -25,14 +24,15 @@ pub enum Source {
     Markdown {
         name: String,
         text: String,
-        /// Read when the view opened, not while a frame is drawn: a
-        /// reference's target is not in the rendered rows.
+        /// Read when the view opened, not while a frame is drawn: a reference's
+        /// target is not in the rendered rows.
         images: Vec<Img>,
     },
     /// A PNG drawn as placeholder cells the terminal fills from its own copy.
     Picture {
         name: String,
-        /// Hashed from the file's name: placeholders and upload must name the same image.
+        /// Hashed from the file's name: placeholders and upload must name the same
+        /// image.
         id: u32,
         /// Base64 bytes, never re-read — the same picture whatever box it is drawn in.
         png: String,
@@ -55,7 +55,7 @@ pub enum Source {
     },
 }
 
-/// A picture named by a rendered document; `alt` and `target` find the row it goes under.
+/// A picture named by a rendered document; `alt` and `target` find its row.
 #[derive(Debug, Clone)]
 pub struct Img {
     pub id: u32,
@@ -227,7 +227,8 @@ pub(crate) fn body_rows(text_h: usize) -> usize {
     text_h.saturating_sub(1).max(1)
 }
 
-/// The cells a picture of `intrinsic` pixels fills at this width — the one call the placeholders and the placement share.
+/// The cells a picture of `intrinsic` pixels fills at this width — the one call the
+/// placeholders and the placement share.
 fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
     crate::term::graphics::image_cells(
         Some(intrinsic.0),
@@ -253,8 +254,7 @@ fn splice_pictures(rows: &mut Vec<Line>, images: &mut [Img], width: usize) {
 }
 
 /// Where a picture goes: after the first row at or past `from` that shows its
-/// reference — literal markdown (a fence), alt text, or bare target, in that
-/// order. One inside a code frame hangs under the frame, not in it.
+/// reference — markdown link, alt text, or bare target. Inside a code frame it hangs under it.
 fn picture_anchor(rows: &[String], from: usize, alt: &str, target: &str) -> Option<usize> {
     let reference = format!("]({target}");
     let on = |needle: &str| {
@@ -380,13 +380,13 @@ impl Editor {
     }
 
     /// Bring the terminal's pictures in line with the open view: upload one it lacks,
-    /// re-place one whose box moved, drop one no longer drawn — nothing when nothing changed.
+    /// re-place one whose box moved, drop one no longer drawn.
     fn sync_image(&mut self) {
         let want = match &self.diff_view {
             Some(v) => v.images(),
             None => Vec::new(),
         };
-        // A picture no longer drawn goes first, with its bytes; a moved box only needs the same id uploaded again.
+        // A picture no longer drawn goes first, with its bytes.
         let mut stale: Vec<u32> = self
             .images_held
             .keys()
@@ -411,7 +411,7 @@ impl Editor {
         }
     }
 
-    /// Drain the graphics commands queued for the terminal, in write order; the host owns the terminal.
+    /// Drain the graphics commands queued for the terminal, in write order.
     pub fn take_graphics(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.graphics_out)
     }
@@ -426,8 +426,8 @@ impl Editor {
             .buf
             .row_opt(0)
             .map(|l| l.iter().collect::<String>());
-        // A picture file is asked about by name, not bytes: the buffer holds a
-        // lossy decode the conflict and patch questions cannot use.
+        // A picture file is asked about by name, not bytes: the buffer holds a lossy
+        // decode the conflict and patch questions cannot use.
         if crate::image::kind(named).is_some() {
             return self.open_picture(name);
         }
@@ -445,8 +445,8 @@ impl Editor {
         {
             self.open_view(Source::Patch { name, text });
         } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown)
-            // The text is asked about too, not just the name: an answer named
-            // after a non-markdown file opens with a heading `detect` passes over.
+            // The text is asked about too, not just the name: an answer named after a
+            // non-markdown file opens with a heading `detect` passes over.
             || looks_like_markdown(&text)
         {
             self.open_markdown_view(name, text);
@@ -499,8 +499,8 @@ impl Editor {
                     return;
                 }
                 if matches!(v.source, Source::Picture { .. }) {
-                    // Esc leaves the file, not the view; the view goes back up
-                    // so the last buffer keeps the picture, not PNG bytes.
+                    // Esc leaves the file, not the view; the view goes back up so the
+                    // last buffer keeps the picture, not PNG bytes.
                     self.diff_view = Some(v);
                     self.close_buffer();
                     return;
@@ -607,15 +607,15 @@ impl Editor {
         v.top = v.top.min(last);
     }
 
-    /// Replace the current conflict's marker block with the side taken, as one
-    /// undo step, then show what is left — or close when nothing is.
+    /// Replace the current conflict's marker block with the side taken, as one undo
+    /// step, then show what is left — or close when nothing is.
     fn resolve_conflict(&mut self, mut v: DiffView, take: Take) {
         let Source::Conflict { current, .. } = &v.source else {
             return;
         };
         let k = *current;
-        // The buffer itself, not the view's snapshot: the view is modal, so the
-        // two agree, and the edit must be computed against what it edits.
+        // The buffer itself, not the view's snapshot: the view is modal, so the two
+        // agree, and the edit must be computed against what it edits.
         let text = self.bs().buf.text();
         let Some((start, end, lines)) = crate::conflict::resolution(&text, k, take) else {
             self.flash("No base recorded for this conflict");
@@ -679,7 +679,7 @@ impl Editor {
 }
 
 impl DiffView {
-    /// The `(id, cells, png)` of the pictures these rows are placeholders for; empty when the rows are their own text.
+    /// The `(id, cells, png)` of the pictures these rows are placeholders for.
     fn images(&self) -> Vec<(u32, (u32, u32), &str)> {
         match &self.source {
             Source::Picture { id, cells, png, .. } => vec![(*id, *cells, png.as_str())],
@@ -702,13 +702,14 @@ impl DiffView {
     }
 }
 
-/// No diff name can still be a patch (`git diff > out`): a file header and a hunk make it one.
+/// No diff name can still be a patch (`git diff > out`): a file header and a hunk
+/// make it one.
 fn looks_like_a_patch(text: &str) -> bool {
     !crate::patch::parse(text).files.is_empty() && text.lines().any(|l| l.starts_with("@@ -"))
 }
 
 /// No name to go by (`rano:manual`): markdown only when a heading opens it and
-/// another block marker follows — a heading alone would make a folder listing prose.
+/// another block marker follows — a heading alone would make a listing prose.
 pub(crate) fn looks_like_markdown(text: &str) -> bool {
     let mut heading = false;
     for line in text.lines() {
@@ -737,7 +738,7 @@ pub(crate) fn looks_like_markdown(text: &str) -> bool {
     false
 }
 
-/// `# Title`: one to six `#`, then a space — CommonMark's ATX heading.
+/// `# Title`: one to six `#`, then a space.
 fn is_atx_heading(t: &str) -> bool {
     let hashes = t.chars().take_while(|c| *c == '#').count();
     (1..=6).contains(&hashes) && t[hashes..].starts_with(' ')

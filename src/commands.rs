@@ -1,8 +1,5 @@
-//! Every command, by name, and every key that reaches one.
-//!
-//! One table of commands (name, title, documentation line, group, action) and keymaps
-//! saying which keys reach which command; dispatch, the bar, the help pages, `M-x` and the
-//! which-key cards all read these two, so nothing else can drift. The shape is emacs's.
+//! Every command, by name, and every key that reaches one: one table of commands
+//! and the keymaps, which dispatch, the bar, the help pages, M-x and the cards all read.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -756,28 +753,23 @@ pub fn command(name: &str) -> Option<&'static Command> {
     commands().iter().find(|c| c.name == name)
 }
 
-/// The keymaps: the global layer, and one per mode. A mode's maps replace the
-/// global one while it is open (a view is modal), most specific first.
+/// The keymaps: the global layer and one per mode, the mode's replacing it while open.
 #[derive(Debug, Clone)]
 pub struct Keymaps {
     pub global: Keymap,
     pub diff: Keymap,
     pub save: Keymap,
     pub patch: Keymap,
-    /// A markdown buffer rendered as prose, pictures and all. There is no second panel
-    /// here, so the shared `diff` map's `s` answers with the reason rather than with a
-    /// re-render (see `DiffAct::ToggleSplit`).
+    /// A markdown buffer rendered as prose: there is no second panel, so the shared
+    /// `diff` map's `s` answers with the reason rather than a re-render.
     pub markdown: Keymap,
-    /// A picture: one column, and no keys but its own scrolling — the same `s` rule as
-    /// `markdown`.
+    /// A picture: one column, and no keys but its own scrolling.
     pub picture: Keymap,
-    /// The keys that reach past a view, so a preview is not a place with no way
-    /// out: F8, M-W, M-x, M-< / M->. Stacked under a view's own bindings, and
-    /// deliberately NOT over the save question, which is waiting for an answer.
+    /// The keys that reach past a view, so a preview is not a place with no way out:
+    /// F8, M-W, M-x, M-</M->. Not over the save question, which waits for an answer.
     pub view: Keymap,
     pub conflict: Keymap,
-    /// A host's review ([`Editor::open_review`]): send from the view, and M-P
-    /// closes it as it opened it.
+    /// A host's review ([`Editor::open_review`]): M-s sends, M-P closes.
     pub review: Keymap,
     /// A folder listing (the dired): its own keys over the global ones.
     pub dir: Keymap,
@@ -787,12 +779,10 @@ pub struct Keymaps {
     pub palette: Keymap,
 }
 
-/// Prefix maps whose card shows at once rather than after a pause: a help key
-/// is pressed to be shown something.
+/// Prefix maps whose card shows at once: a help key is pressed to be shown something.
 pub const SHOW_AT_ONCE: &[&str] = &["help"];
 
-/// How long a prefix key waits before its card shows (emacs's which-key
-/// default is a second; a terminal editor is quicker).
+/// How long a prefix key waits before its card shows (emacs's which-key is slower).
 pub const CARD_DELAY: Duration = Duration::from_millis(400);
 
 impl Keymaps {
@@ -1012,9 +1002,8 @@ impl Keymaps {
     }
 }
 
-/// The global bar, in nano's order: the commands worth a slot, as many as the
-/// width fits. Their keys come from the global keymap; `@KEY` is a prefix,
-/// shown as its key and its map's name.
+/// The global bar, in nano's order: the commands worth a slot, as many as fit; `@KEY`
+/// is a prefix, shown as its key and its map's name.
 pub const BAR: &[&str] = &[
     "@C-g",
     "exit",
@@ -1054,16 +1043,14 @@ pub const BAR: &[&str] = &[
     "send-position",
 ];
 
-/// A key sequence that has started but not finished: a prefix pressed, or a
-/// `describe-key` waiting for its key.
+/// A key sequence that has started but not finished: a prefix or `describe-key`.
 #[derive(Debug, Default)]
 pub struct Pending {
     pub keys: Vec<Key>,
     pub since: Option<Instant>,
     /// `describe-key`: the next whole sequence is described, not run.
     pub describe: bool,
-    /// The loop drew the card for this prefix (so it redraws once, when the
-    /// delay passes).
+    /// The loop drew this prefix's card already, so it redraws once when the delay passes.
     pub card_shown: bool,
 }
 
@@ -1076,18 +1063,16 @@ enum Decision {
 }
 
 impl Editor {
-    /// The keymaps in effect, most specific first: a host's maps come first, last
-    /// pushed first, over the editor's own stack, so a host's chord works in a
-    /// list or a diff as well as in the text.
+    /// The keymaps in effect, most specific first: a host's maps (last pushed first)
+    /// over the editor's own, so a host's chord works in a list or a diff too.
     pub(crate) fn active_keymaps(&self) -> Vec<&Keymap> {
         let mut stack: Vec<&Keymap> = self.host_keymaps.iter().rev().collect();
         stack.extend(self.editor_keymaps());
         stack
     }
 
-    /// The editor's own maps in effect, without a host's: the global layer or
-    /// the open mode's. What decides whether an unbound character is typed,
-    /// which a host map stacked on top must not change.
+    /// The editor's own maps, without a host's: what decides whether an unbound
+    /// character is typed, which a host map on top must not change.
     pub(crate) fn editor_keymaps(&self) -> Vec<&Keymap> {
         let k = &self.keymaps;
         if self.palette.is_some() {
@@ -1105,10 +1090,8 @@ impl Editor {
                 DiffKind::Conflict => &k.conflict,
                 DiffKind::Review => &k.review,
             };
-            // The keys that reach past a view sit under the view's own, except
-            // the save question, which these keys would walk away from. The
-            // global layer is last, so a view shadows what it likes and the
-            // editor's own keys still reach.
+            // The keys that reach past a view sit under the view's own, except the save
+            // question; the global layer is last, so the editor's keys still reach.
             return match kind {
                 DiffKind::Save => vec![own, &k.diff, &k.global],
                 _ => vec![own, &k.diff, &k.view, &k.global],
@@ -1121,17 +1104,16 @@ impl Editor {
                 vec![&k.list]
             };
         }
-        // A folder listing: its own keys (RET, -, r, q) over the global ones, so
-        // movement, search and M-x still work while it is open.
+        // A folder listing: its own keys over the global ones, so movement and search
+        // work while it is open.
         if self.bs().dir.is_some() {
             return vec![&k.dir, &k.global];
         }
         vec![&k.global]
     }
 
-    /// One key through the keymaps: a command runs, a prefix waits for the next key
-    /// (its card shows after [`CARD_DELAY`]), and an unbound printable character is
-    /// typed. A command no editor command has came from a host's map, so it is returned.
+    /// One key through the keymaps: a command runs, a prefix waits, and an unbound
+    /// printable character is typed. A name no command has came from a host's map.
     pub(crate) fn dispatch_key(&mut self, key: Key) -> KeyOutcome {
         let mut seq = std::mem::take(&mut self.pending.keys);
         let describing = std::mem::take(&mut self.pending.describe);
@@ -1197,8 +1179,7 @@ impl Editor {
         (c.run)(self);
     }
 
-    /// The prefix card to show now, if any: the map a pending prefix leads to,
-    /// once it has waited [`CARD_DELAY`] (or at once for help).
+    /// The prefix card to show now, if any: after [`CARD_DELAY`], or at once for help.
     pub(crate) fn pending_card(&self) -> Option<(&Keymap, Vec<Key>)> {
         let since = self.pending.since?;
         match lookup(&self.active_keymaps(), &self.pending.keys) {
@@ -1211,16 +1192,15 @@ impl Editor {
         }
     }
 
-    /// Whether a prefix is waiting for its card's delay to pass, so the loop
-    /// knows to come back and draw it.
+    /// Whether a prefix is waiting for its card's delay, so the loop comes back to draw
+    /// it.
     pub(crate) fn card_due(&self) -> Option<Duration> {
         let since = self.pending.since?;
         CARD_DELAY.checked_sub(since.elapsed())
     }
 
     /// The bar's entries for what is in effect, `(key, title)` in the configured
-    /// notation: a pending prefix shows what can follow it, the global layer shows
-    /// [`BAR`], and a mode shows its own maps.
+    /// notation: a pending prefix, the global layer's [`BAR`], or a mode's maps.
     pub(crate) fn bar_items(&self) -> Vec<(String, String)> {
         let nano = self.config.nano_keys;
         let note = |seq: &[Key]| crate::help::notation(nano, seq);
@@ -1269,8 +1249,7 @@ impl Editor {
     }
 }
 
-/// A prefix as an entry's title: its map's name, capitalised, and `…` for
-/// "more keys follow".
+/// A prefix as an entry's title: its map's name, capitalised, then `…`.
 pub(crate) fn prefix_title(m: &Keymap) -> String {
     let mut c = m.name.chars();
     let first: String = c
@@ -1280,8 +1259,7 @@ pub(crate) fn prefix_title(m: &Keymap) -> String {
     format!("{first}{}…", c.as_str())
 }
 
-/// A map's entries as `(key, title)`, one per command (its first key), a
-/// prefix shown as its name with `…`.
+/// A map's entries as `(key, title)`, one per command (its first key).
 pub(crate) fn entries_of(m: &Keymap, nano: bool) -> Vec<(String, String)> {
     let key = |k: &Key| crate::help::notation(nano, std::slice::from_ref(k));
     let mut out = Vec::new();

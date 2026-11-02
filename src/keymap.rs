@@ -1,9 +1,6 @@
-//! Keys and keymaps, emacs-shaped. A [`Key`] is one chord; a [`Keymap`] binds
-//! keys to a command's name or to another keymap (a prefix), and a stack of
-//! maps, most specific first, resolves a sequence in the first map that knows
-//! it. The maps hold names, not functions: this module is pure data a host can
-//! use without the editor. Notation: `C-`/`M-`/`S-` prefixes, `<f8>`, `RET`,
-//! sequences joined by spaces; [`Key::nano`] spells a key as nano's bar does.
+//! Keys and keymaps, emacs-shaped. A [`Key`] is one chord; a [`Keymap`] binds keys
+//! to a command's name or to another keymap, and a stack of maps, most specific
+//! first, resolves a sequence. Notation: `C-`/`M-`/`S-`, `<f8>`, `RET`.
 
 use crate::term::{KeyCode, KeyEvent};
 
@@ -13,8 +10,8 @@ pub struct Key {
     pub code: KeyCode,
     pub ctrl: bool,
     pub alt: bool,
-    /// Only for keys that are not characters (`S-<tab>`); a character's case
-    /// is the shift.
+    /// Only for keys that are not characters (`S-<tab>`); a character's case is the
+    /// shift.
     pub shift: bool,
 }
 
@@ -46,9 +43,8 @@ impl Key {
         }
     }
 
-    /// A terminal key event as a key, with the terminal's spellings undone:
-    /// `C-/` arrives as `C-_`, some terminals spell `C-\` as `C-4`, and a
-    /// character's shift is already its case.
+    /// A terminal key event as a key, with its spellings undone: `C-/` arrives as
+    /// `C-_`, some terminals spell `C-\` as `C-4`. A character's shift is its case.
     pub fn from_event(e: &KeyEvent) -> Key {
         let ctrl = e.mods.ctrl();
         let alt = e.mods.alt();
@@ -77,8 +73,8 @@ impl Key {
         }
     }
 
-    /// The same key with a letter's case folded to lower — what `M-U` falls
-    /// back to when only `M-u` is bound (nano's Meta keys ignore case).
+    /// The same key with a letter's case folded to lower — what `M-U` falls back to
+    /// when only `M-u` is bound (nano's Meta keys ignore case).
     pub fn folded(self) -> Key {
         match self.code {
             KeyCode::Char(c) if c.is_ascii_uppercase() => Key {
@@ -89,8 +85,7 @@ impl Key {
         }
     }
 
-    /// A plain printable character: what is typed, not a command, unless a
-    /// map binds it.
+    /// A plain printable character: typed, not a command, unless a map binds it.
     pub fn printable(self) -> Option<char> {
         match self.code {
             KeyCode::Char(c) if !self.ctrl && !self.alt && !c.is_control() => Some(c),
@@ -250,8 +245,7 @@ pub enum Entry {
     Prefix(Keymap),
 }
 
-/// Keys to entries, in the order they were bound (which is the order cards and
-/// the bar show them in).
+/// Keys to entries, in the order they were bound (the order cards show them in).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Keymap {
     /// What the map is called when it is shown: `"global"`, `"todo"`, `"diff"`.
@@ -267,9 +261,8 @@ impl Keymap {
         }
     }
 
-    /// Bind `seq` (emacs notation) to `command`, creating prefix maps on the
-    /// way; a rebind replaces. Panics on a bad sequence or one that goes
-    /// through a bound command — a keymap is written by hand, either is a typo.
+    /// Bind `seq` to `command`, creating prefix maps on the way; a rebind replaces.
+    /// Panics on a bad sequence or one that goes through a bound command.
     pub fn bind(&mut self, seq: &str, command: &str) -> &mut Keymap {
         let keys = parse_seq(seq).unwrap_or_else(|| panic!("bad key sequence {seq:?}"));
         assert!(!keys.is_empty(), "empty key sequence");
@@ -355,9 +348,8 @@ pub enum Lookup<'a> {
     Unbound,
 }
 
-/// Resolve `seq` in `stack`, most specific map first: the first map in which
-/// the sequence leads anywhere decides — so a mode's map shadows the global
-/// one key by key, as emacs's minor and major mode maps do.
+/// Resolve `seq` in `stack`, most specific map first: the first map in which the
+/// sequence leads anywhere decides, so a mode's map shadows the global one key by key.
 pub fn lookup<'a>(stack: &[&'a Keymap], seq: &[Key]) -> Lookup<'a> {
     for map in stack {
         let mut m: &Keymap = map;
@@ -383,8 +375,8 @@ pub fn lookup<'a>(stack: &[&'a Keymap], seq: &[Key]) -> Lookup<'a> {
     Lookup::Unbound
 }
 
-/// Every sequence that reaches `command` in `stack` and is not shadowed by a
-/// map above — emacs's `where-is`. Shortest first.
+/// Every sequence that reaches `command` in `stack` and is not shadowed by a map
+/// above — emacs's `where-is`. Shortest first.
 pub fn where_is(stack: &[&Keymap], command: &str) -> Vec<Vec<Key>> {
     let mut out: Vec<Vec<Key>> = Vec::new();
     for map in stack {
@@ -467,9 +459,8 @@ mod tests {
         }
     }
 
-    /// The spellings a decoder could get wrong for an emacs map: `0x1c` is
-    /// `C-\`, `0x1f` is `C-/`, NUL is `C-SPC`, and the kitty keyboard's
-    /// `CSI 99;5u` is plain `C-c`.
+    /// The spellings a decoder could get wrong: `0x1c` is `C-\`, `0x1f` is `C-/`,
+    /// NUL is `C-SPC`, and the kitty keyboard's `CSI 99;5u` is plain `C-c`.
     #[test]
     fn the_keymap_sees_the_keys_the_decoder_reports() {
         assert_eq!(decoded(b"\x18"), Key::ctrl('x'));

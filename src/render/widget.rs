@@ -163,18 +163,18 @@ impl Widget for Bordered {
             buf.set_str(x, row, "│", st, 1);
             buf.set_str(r, row, "│", st, 1);
         }
-        if let Some(t) = &self.title {
-            if inner >= 4 {
-                let room = inner - 3;
-                let t = super::text::truncate(t, room);
-                let mut l = Line::new(vec![Span::raw(" ")]);
-                l.spans.extend(t.spans.iter().map(|s| Span {
-                    content: s.content.clone(),
-                    style: t.style.patch(&s.style),
-                }));
-                l.spans.push(Span::raw(" "));
-                buf.set_line(x + 2, y, &l.on(st.clone()), room + 2);
-            }
+        if let Some(t) = &self.title
+            && inner >= 4
+        {
+            let room = inner - 3;
+            let t = super::text::truncate(t, room);
+            let mut l = Line::new(vec![Span::raw(" ")]);
+            l.spans.extend(t.spans.iter().map(|s| Span {
+                content: s.content.clone(),
+                style: t.style.patch(&s.style),
+            }));
+            l.spans.push(Span::raw(" "));
+            buf.set_line(x + 2, y, &l.on(st.clone()), room + 2);
         }
     }
 }

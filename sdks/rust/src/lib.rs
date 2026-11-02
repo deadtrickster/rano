@@ -1,7 +1,6 @@
-//! **Write a rano plugin in Rust, not in wasm.**
-//!
-//! The ABI (`plans/S10-wasm-hooks.md`) is four exports and a few raw pointers; this crate is the
-//! safe layer over them, so a plugin is a function from `&str` to `String` and nothing else:
+//! **Write a rano plugin in Rust, not in wasm.** The ABI is four exports and
+//! a few raw pointers; this crate is the safe layer over them, so a plugin is
+//! a function from `&str` to `String` and nothing else:
 //!
 //! ```no_run
 //! use rano_plugin as rano;
@@ -14,35 +13,12 @@
 //! }
 //! ```
 //!
-//! What the helpers do, so a plugin does not have to: read the input out of linear memory, write
-//! the answer back, and write the two-`u32` result block the host reads — including the sentinel
-//! that means "leave it alone" when a hook decides it has nothing to say.
-//!
-//! # What a plugin may reach
-//!
-//! Nothing, unless the config grants it: [`read_dir`] is the one capability in stage 1, and a
-//! module that calls it has the import and is refused at load unless the config says
-//! `capabilities = ["read-dir"]`.
-//!
-//! # JSON hooks
-//!
-//! A pane hook (`pane_<name>`) is handed a JSON object and answers one, so the `json` feature adds
-//! [`json_hook`]: serde in, serde out, and the malformed-input case answered as the `{"error"}` the
-//! host already knows how to report.
-//!
-//! ```no_run
-//! # #[cfg(feature = "json")] {
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Deserialize)] struct In_ { v: u32 }
-//! #[derive(Serialize)] struct Out { title: String }
-//!
-//! #[unsafe(no_mangle)]
-//! pub extern "C" fn pane_x(ptr: u32, len: u32) -> u32 {
-//!     rano_plugin::json_hook(ptr, len, |_in: In_| Some(Out { title: "x".into() }))
-//! }
-//! # }
-//! ```
+//! The helpers read the input out of linear memory, write the answer back, and
+//! write the result block — including the "leave it alone" sentinel. A plugin
+//! may reach nothing unless the config grants it ([`read_dir`] is the stage-1
+//! capability). The `json` feature adds [`json_hook`] for pane hooks: serde in,
+//! serde out, malformed input answered as the `{"error"}` the host knows how
+//! to report.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -60,8 +36,8 @@ pub const ABI: i32 = 1;
 /// path) alone.
 pub const UNCHANGED: u32 = u32::MAX;
 
-/// The module's memory: the result block at its start, the arena above it. 18 MiB is the host's
-/// 16 MiB text cap plus room, and it is BSS — the `.wasm` file does not carry it.
+/// The module's memory: the result block at its start, the arena above it
+/// (BSS — the `.wasm` file does not carry it).
 static mut MEM: [u8; 18 << 20] = [0; 18 << 20];
 
 /// Where the arena starts, past the result block (the block is two `u32`s at offset 0).
@@ -69,34 +45,32 @@ const ARENA: u32 = 8;
 
 static NEXT: AtomicU32 = AtomicU32::new(ARENA);
 
-/// The address of this module's memory. `addr_of_mut!` rather than `&mut MEM`: edition 2024 has no
-/// static-mut references, and a pointer is all this needs.
+/// The address of this module's memory — `addr_of_mut!` because edition 2024
+/// has no static-mut references.
 fn base() -> u32 {
     std::ptr::addr_of_mut!(MEM) as u32
 }
 
-/// **`rano_alloc`: reserve `n` bytes and answer their offset.** The host writes a hook's input at
-/// the answer; a fresh instance per call means the bump never has to be rewound.
+/// **`rano_alloc`: reserve `n` bytes and answer their offset.** A fresh
+/// instance per call means the bump never has to be rewound.
 pub fn alloc(n: u32) -> u32 {
-    // The arena never grows back, so an overflow is a plugin that asked for more than
-    // `ARENA_BYTES` at once — the host's own cap (16 MiB of text) is far below this.
+    // The arena never grows back, so an overflow is a plugin that asked for
+    // more than the arena at once — far above the host's own text cap.
     NEXT.fetch_add(n.max(1), Ordering::Relaxed) + base()
 }
 
-/// Where the result block lives: the first bytes of the module's memory. It is deliberately not
-/// address 0 — Rust turns a write through a null pointer into `unreachable`, which the host sees
-/// as a bare trap.
+/// Where the result block lives: the first bytes of memory, deliberately not
+/// address 0 — a write through a null pointer traps in Rust.
 fn block() -> u32 {
     base()
 }
 
-/// **The text a hook was handed**, or `None` when the host's range is outside this module's
-/// memory (which cannot happen from a correct host, and is checked rather than trusted).
+/// **The text a hook was handed**, or `None` when the host's range is outside
+/// this module's memory (checked rather than trusted).
 ///
 /// # Safety
 ///
-/// `ptr` and `len` come from the host as a range inside this module's memory; the slice lives as
-/// long as the call, and the hook's answer is copied out before it returns.
+/// `ptr` and `len` come from the host as a range inside this module's memory.
 pub unsafe fn input<'a>(ptr: u32, len: u32) -> Option<&'a str> {
     let start = usize::try_from(ptr).ok()?;
     let len = usize::try_from(len).ok()?;
@@ -155,13 +129,11 @@ pub fn provider(
     }
 }
 
-/// **A JSON hook**: the input parsed as `I`, `f`'s answer serialized. `None` means "leave it
-/// alone", the same sentinel every other hook answers.
-///
-/// **Malformed input is answered, not trapped**: `I` that the host's text does not fit comes back
-/// as `{"error": "…"}` — JSON, so the host reads it through the same path as a real view and says
-/// why the pane is empty instead of showing a trap. A pane that answers nothing at all is the one
-/// failure a reader cannot act on, which is why the absence of `I` is still an answer.
+/// **A JSON hook**: the input parsed as `I`, `f`'s answer serialized; `None`
+/// is the "leave it alone" sentinel. **Malformed input is answered, not
+/// trapped**: it comes back as `{"error": "…"}` so the host can say why the
+/// pane is empty — a pane that answers nothing is the one failure a reader
+/// cannot act on.
 #[cfg(feature = "json")]
 pub fn json_hook<I: DeserializeOwned, O: Serialize>(
     ptr: u32,
@@ -179,12 +151,10 @@ pub fn json_hook<I: DeserializeOwned, O: Serialize>(
     }
 }
 
-/// [`json_hook`] without the pointers: the parse, `f`, and the serialize — `Ok(None)` is "leave it
-/// alone", `Err` is the reason an `{"error"}` answer will carry.
-///
-/// It is a separate function because **this is the half that can be tested natively**: the SDK's
-/// arena is an 18 MiB static addressed as a `u32` (only true on wasm32), so a test that went
-/// through the real pointers would be a test of the host's pointer width, not of the JSON path.
+/// [`json_hook`] without the pointers: the parse, `f`, and the serialize —
+/// separate because this is the half that can be tested natively (the arena's
+/// address truncated to a `u32` is the ABI on wasm32 and a wrong address on
+/// the host).
 #[cfg(feature = "json")]
 fn json_answer<I: DeserializeOwned, O: Serialize>(
     text: &str,
@@ -215,8 +185,8 @@ fn error_text(why: &str) -> String {
     struct Error<'a> {
         error: &'a str,
     }
-    // Serializing a struct of one `&str` cannot fail; the fallback is here so a plugin never panics
-    // into a trap, which is the one outcome the host cannot report.
+    // Serializing a struct of one `&str` cannot fail; the fallback is here so
+    // a plugin never panics into a trap, the one outcome the host cannot report.
     serde_json::to_string(&Error { error: why })
         .unwrap_or_else(|_| "{\"error\":\"unreportable error\"}".to_string())
 }
@@ -227,13 +197,11 @@ unsafe extern "C" {
     fn host_read_dir(path_ptr: u32, path_len: u32, out_ptr: u32, out_cap: u32) -> i32;
 }
 
-/// **The host's listing of `path`** — a folder's text, rendered by the host with the same rules as
-/// its own dired (directories first, `name/`), or `None` when the path is not a folder the host can
-/// read. Calling this is what gives the module the `read-dir` import, so a plugin that does not
-/// want the capability does not have it.
+/// **The host's listing of `path`** — a folder's text, rendered by the host
+/// with the same rules as its own dired, or `None` for a non-folder. Calling
+/// this is what gives the module the `read-dir` import.
 pub fn read_dir(path: &str) -> Option<String> {
-    // A listing that does not fit is retried once at the size the host asks for; 1 MiB fits a
-    // folder with tens of thousands of entries, and the retry covers the rest.
+    // A listing that does not fit is retried once at the size the host asks for.
     let mut cap = 1usize << 20;
     for _ in 0..2 {
         let out = alloc(cap as u32);
@@ -276,11 +244,9 @@ macro_rules! abi {
     };
 }
 
-/// **A native test of the JSON path**: the parse, the serialize, and the `{"error"}` escaping — the
-/// three things a pane plugin's correctness actually rests on. What a native test cannot do is go
-/// through `json_hook`'s pointers: the arena is an 18 MiB static whose address is truncated to a
-/// `u32`, which is the ABI on wasm32 and a wrong address on the host, so that half is exercised by
-/// the host's own WAT fixtures instead.
+/// **A native test of the JSON path** — the parse, the serialize and the
+/// `{"error"}` escaping. The pointer half is exercised by the host's WAT
+/// fixtures (the arena address is a `u32`, wrong on the host).
 #[cfg(all(test, feature = "json"))]
 mod json {
     use super::*;
@@ -309,15 +275,15 @@ mod json {
             None
         );
 
-        // Malformed input is an error the hook answers as JSON, not a panic.
+        // Malformed input is an error answered as JSON, not a panic.
         let e = json_answer::<Ask, View>("{\"n\": ", |_| Some(View { doubled: 0 })).unwrap_err();
         assert!(e.contains("malformed input"), "{e}");
     }
 
     #[test]
     fn an_error_answer_is_json_with_the_message_escaped() {
-        // The message is what a reader sees, so it must survive being put in a JSON string: a
-        // quote inside it would otherwise end the string and produce a view the host cannot parse.
+        // The message is what a reader sees, so it must survive being put in a
+        // JSON string.
         let text = error_text("the input said \"no\"");
         let back: serde_json::Value = serde_json::from_str(&text).expect("an error answer is JSON");
         assert_eq!(back["error"], serde_json::json!("the input said \"no\""));

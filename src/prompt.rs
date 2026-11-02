@@ -1,4 +1,4 @@
-//! Prompt line (E4): the Prompt/PromptKind model, its key handling, word
+//! Prompt line: the Prompt/PromptKind model, its key handling, word
 //! motion, history, tilde expansion, path completion and the status-bar
 //! prompt labels.
 
@@ -253,9 +253,9 @@ impl Editor {
                     _ => {}
                 }
             }
-            // Modifier-specific arms MUST sit above the modifier-blind
-            // Char/Left/Right arms below, or M-b/M-f type letters instead of
-            // moving by words.
+            // Modifier-specific arms sit above the modifier-blind
+            // Char/Left/Right arms below, or M-b/M-f type letters instead
+            // of moving by words.
             KeyCode::Char('b') if alt => {
                 prompt_prev_word(&mut p);
                 self.prompt = Some(p);
@@ -264,7 +264,7 @@ impl Editor {
                 prompt_next_word(&mut p);
                 self.prompt = Some(p);
             }
-            // Search-modifier toggles, Search prompt ONLY, and above the
+            // Search-modifier toggles, Search prompt only, kept above the
             // modifier-blind arms so M-c/M-r toggle instead of typing.
             KeyCode::Char('c') if alt && matches!(p.kind, PromptKind::Search) => {
                 self.search_case_sensitive = !self.search_case_sensitive;

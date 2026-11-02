@@ -1,9 +1,6 @@
 //! The list overlay: one modal list over the text area, used by the buffer
-//! list (M-L) and by find-usages (M-?). Both end the same way — Enter puts
-//! the cursor somewhere — so they share the keys, the drawing and, for a
-//! usage in another file, the jump-to-definition path (`goto_location`), which
-//! is what makes M-, come back from a usage exactly as it does from a
-//! definition.
+//! list (M-L) and find-usages (M-?), which share keys, drawing and the
+//! jump-to-definition path (`goto_location`) so M-, returns the same way.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -151,9 +148,9 @@ impl Editor {
             self.flash("No usages found");
             return;
         }
-        // Grouped by file, in reading order, with any duplicates gone:
-        // servers differ in how they order references, and a list a person
-        // scans should not depend on which server it came from.
+        // Grouped by file, in reading order, with any duplicates gone: a
+        // list a person scans should not depend on which server it came
+        // from.
         locs.sort_by(|a, b| (&a.uri, a.line, a.character).cmp(&(&b.uri, b.line, b.character)));
         locs.dedup();
         let here = self.bs().buf.name.as_deref().map(lsp::path_to_uri);
@@ -250,9 +247,8 @@ impl Editor {
 
     // ---------- keys ----------
 
-    /// Keys while the list is open. Returns with the list closed (Enter,
-    /// Esc) or still open (motion).
-    /// One action in the list overlay, from a command (`commands.rs`).
+    /// One action in the list overlay, from a command (`commands.rs`);
+    /// returns with the list closed (Enter, Esc) or still open (motion).
     pub(crate) fn picker_act(&mut self, act: PickAct) {
         let Some(mut p) = self.picker.take() else {
             return;

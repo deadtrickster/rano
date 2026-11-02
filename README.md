@@ -4,6 +4,10 @@ A nano clone for the terminal, in Rust. nano's keys and nano's immediacy, with t
 syntax highlighting, a minimal LSP client, and a tail that opens a 2 GiB log without reading
 it. It is also a library, so a host can show the editor as a pane.
 
+Why: nano is the editor people reach for when they do not want to learn one. rano keeps that
+and adds what a programmer misses in nano - highlighting, diagnostics, jump to definition, logs
+that do not fit in memory - without modes or a config file to get started.
+
 ![rano editing a markdown file](screenshot.png)
 
 ## Install
@@ -98,6 +102,8 @@ transform text on open and save ([docs/plugins.md](docs/plugins.md)).
 - [docs/plugins.md](docs/plugins.md) - the wasm ABI, capabilities, the SDKs.
 - [docs/embedding.md](docs/embedding.md) - the `Editor` API, sending the reader's place.
 - [docs/logs.md](docs/logs.md) - what a `.log` does.
+- [docs/pdf.md](docs/pdf.md) - reading a PDF through the example plugin.
+- [TODO.md](TODO.md) - open work.
 
 ## Development
 

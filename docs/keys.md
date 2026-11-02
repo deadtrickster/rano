@@ -1,22 +1,16 @@
 # Keys
 
 `C-x` is Ctrl+x, `M-x` is Alt+x, `F8` is a function key. `key_notation = nano` in the config
-makes the bar and the help pages print them nano's way (`^X`, `M-X`). The keys themselves do
-not change.
-
-Every key is written down once, in `src/commands.rs`, and the bar, the help pages, `M-x` and
-the prefix cards all read from that table.
+prints them nano's way (`^X`, `M-X`). The keys do not change.
 
 ## Finding a key
 
-- `M-x` runs any command by name. Type a few letters in any order (`wri out` finds Write
-  Out). Recently run commands come first, and each row shows the command's key.
+- `M-x` runs a command by name. A few letters in any order match (`wri out` finds Write Out).
+  Recent commands come first, each with its key.
 - `C-g` (or `F1`) is the help prefix: `?` for the help page, `k` then a key to see what it
   runs, `b` for every key in effect, `m` for rano's own manual, `x` for `M-x`.
-- A prefix key shows a card of what can follow when you pause after it: `M-t` for todo, the
-  help prefix at once. `Esc` abandons a prefix.
-- The bottom bar shows the keys of what you are doing: the text's, a list's, a diff's,
-  `M-x`'s, or a prefix's.
+- A prefix key (`M-t`, `C-g`) shows a card of what can follow. `Esc` abandons it.
+- The bottom bar shows the keys of the current mode.
 
 ## Text
 
@@ -24,7 +18,7 @@ the prefix cards all read from that table.
 |---|---|
 | `C-o` / `F2` | Save the buffer, asking for the file name |
 | `C-r` / `F5` | Insert a file's contents at the cursor |
-| `F8` | Open a file. `name:line[:col]` jumps there. A new buffer under `multibuffer`, else it replaces the current one unless that one has unsaved edits |
+| `F8` | Open a file. `name:line[:col]` jumps there. Replaces the current buffer unless it has unsaved edits or `multibuffer` is on |
 | `F7` | Copy the file on disk to `file~` |
 | `M-g` | Open a folder as a listing |
 | `C-x` | Quit, offering each modified buffer for saving in turn |
@@ -98,8 +92,8 @@ back.
 | `M-l` | Buffer list |
 | `M-w` | Close the current buffer, asking to save a modified one |
 
-`multibuffer = true`, or more than one file on the command line, gives every file its own
-buffer, cursor, undo history and language server. The last buffer stays open. `C-x` exits.
+`multibuffer = true`, or several files on the command line, gives each file its own buffer,
+cursor, undo history and language server. The last buffer cannot be closed. `C-x` exits.
 
 ## Todo lists and headings
 
@@ -111,18 +105,11 @@ buffer, cursor, undo history and language server. The last buffer stays open. `C
 | `M-t ]` / `M-}` | Next heading |
 | `M-t [` / `M-{` | Previous heading |
 
-The todo keys act on a line that has a task marker, in any markdown file. A file named
-`TODO.md` is the [todo-md](https://github.com/todo-md/todo-md) standard, with three states:
-`- [ ]`, `- [-]`, `- [x]`. Checking and reporting are scoped to that name.
-
-`[-]` means declined, not in progress. A parent follows its children: completing the last
-sub-task completes the parent, and un-completing one opens it again. A tick rewrites three
-bytes and leaves every other byte alone, so prose, metadata tails and wrapping survive.
-
-A marker the standard does not define, such as `- [/]`, is reported in the gutter as an error.
-In a file that is not `TODO.md` the editor stays out of it.
-
-Heading motion walks markdown's own outline, wrapping at the ends, in any markdown file.
+The todo keys work on any task line in any markdown file. Heading motion wraps at the ends.
+A file named `TODO.md` follows the [todo-md](https://github.com/todo-md/todo-md) standard:
+`- [ ]`, `- [-]` (declined, not in progress), `- [x]`. There a parent follows its children,
+and an unknown marker such as `- [/]` is an error in the gutter. A tick rewrites only the
+marker.
 
 ## View
 
@@ -138,13 +125,11 @@ Heading motion walks markdown's own outline, wrapping at the ends, in any markdo
 |---|---|
 | `M-s` | Send the file, cursor and selection to `send_command` (see [embedding](embedding.md)) |
 | `M-v` | Install the newer release the startup check found |
-| `M-x` | Run a command by name |
-| `C-g` / `F1` | Help prefix |
 
 ## In a view
 
-A preview, a diff, a markdown rendering, a picture, a review and the conflict view are modal.
-Their keys replace the text's. `F8`, `M-w`, `M-<` / `M->` and `M-x` still reach through.
+Previews, diffs, pictures, reviews and the conflict view replace the text's keys. `F8`,
+`M-w`, `M-<` / `M->` and `M-x` still work.
 
 | Key | What it does |
 |---|---|
@@ -167,13 +152,11 @@ the surrounding lines for context.
 | `b` / `B` | Take both, ours first / theirs first |
 | `c` | Cycle ours against theirs, base against ours, base against theirs |
 
-Each resolution is one undo step, and the view moves on to what is left. `c` needs the base,
-recorded by `git config merge.conflictStyle diff3`.
+Each resolution is one undo step. `c` needs the base: `git config merge.conflictStyle diff3`.
 
 ## A file changed on disk
 
-rano does not watch files. Saving over a file that something else wrote since rano read it
-asks first.
+Saving over a file changed on disk since rano read it asks first.
 
 | Key | What it does |
 |---|---|
@@ -181,14 +164,12 @@ asks first.
 | `n` / `C-g` | Do not save |
 | `d` | Show what the save would change: disk against buffer, unified or in two panels |
 
-In that diff the arrows, `PgUp` / `PgDn` / `Space` and `Home` / `End` scroll, `y` / `n`
-answer, `s` switches panels, and `Esc` goes back to the question. A save that was part of
-`C-x` or `M-w` is called off by `n`.
+In that diff `y` / `n` answer, `s` switches panels and `Esc` returns to the question. `n`
+also calls off the `C-x` or `M-w` the save was part of.
 
 ## Folder listing
 
-`M-g`, `F8` on a folder's name, or `rano some/folder/` opens a folder as a listing: one row
-per entry, directories first and marked with `/`.
+`M-g`, `F8` on a folder, or `rano some/folder/` opens a listing, directories first with `/`.
 
 | Key | What it does |
 |---|---|
@@ -197,8 +178,7 @@ per entry, directories first and marked with `/`.
 | `r` | Read the folder again, keeping the cursor where it was |
 | `q` / `Esc` / `C-g` | Close the listing |
 
-The listing is read-only, like a tail. Editing is refused with a line saying so. Everything
-that only moves works as it does over text, and a listing opens no language server.
+The listing is read-only. Motion keys work as over text.
 
 ## Lists
 
@@ -237,6 +217,5 @@ cancels a prompt.
 
 Bracketed paste arrives as a single undoable edit.
 
-Mouse: left click moves the cursor, and a click on the cursor toggles the mark. A left drag
-selects from where it was pressed, and letting go puts the selection on the system clipboard
-(OSC 52, where the terminal speaks it). The wheel scrolls the view.
+Mouse: a click moves the cursor, a click on the cursor toggles the mark, a drag selects and
+copies to the system clipboard (OSC 52), the wheel scrolls.

@@ -1,8 +1,7 @@
 //! What the terminal on the other end can do beyond drawing cells: seven switches decided once
 //! here, each on only for a terminal known to speak it, since one that does not may print the
-//! sequence as garbage. `RANO_TERM_FEATURES` overrides either way — `all`, `none`, or a comma
-//! list where `-name` removes one. Inside tmux nothing is on unless the override says so, since
-//! tmux mangles the sequences.
+//! sequence as garbage. `RANO_TERM_FEATURES` overrides either way; inside tmux nothing is on
+//! unless it says so.
 
 /// The seven, as switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,8 +20,8 @@ pub struct Features {
     pub images: bool,
     /// Asking the terminal its background colour (OSC 11), to choose a light or dark palette.
     pub background: bool,
-    /// How a picture is delivered when [`Features::images`] is on. A field of this value, not
-    /// a second detection, so the two cannot disagree.
+    /// How a picture is delivered when [`Features::images`] is on — a field, not a second
+    /// detection, so the two cannot disagree.
     pub proto: crate::term::Proto,
 }
 
@@ -48,21 +47,18 @@ impl Features {
         proto: crate::term::Proto::Kitty,
     };
 
-    /// What Ghostty gets with no override: everything but `progress` — Ghostty animates an
-    /// indeterminate bar for the whole of a turn.
+    /// What Ghostty gets: everything but `progress`, which it animates for a whole turn.
     pub const GHOSTTY: Features = Features {
         progress: false,
         ..Features::ALL
     };
 
-    /// From this process's environment. Asks tmux's `allow-passthrough` only where it can
-    /// change the answer (see [`crate::term::proto`]).
+    /// From this process's environment, asking tmux only where it can change the answer.
     pub fn detect() -> Features {
         let mut env = crate::term::proto::Env::now();
         let mut f = Features::of_env(&env, &words());
         if !f.images {
-            // A name promises nothing over ssh; the terminal's own answer does. One query, at
-            // startup, before input.
+            // A name promises nothing over ssh; the terminal's own answer does.
             f.proto = crate::term::Proto::detect(&env, true);
             // tmux is asked only when it can change the answer.
             if f.proto == crate::term::Proto::Kitty && env.tmux {
@@ -78,9 +74,7 @@ impl Features {
         f
     }
 
-    /// The decision from its four inputs — a function so it can be tested without the
-    /// environment. `images` is the protocol's answer, not a switch; with no `Env`, tmux is
-    /// assumed off.
+    /// The decision from its four inputs, so it can be tested without the environment.
     pub fn from_env(term: &str, term_program: &str, in_tmux: bool, wanted: &str) -> Features {
         let env = crate::term::proto::Env {
             term: term.to_string(),
@@ -98,8 +92,7 @@ impl Features {
         let mut f = if ghostty && !env.tmux {
             Features::GHOSTTY
         } else if env.tmux {
-            // OSC 52 is the one sequence tmux passes along, so it stays on and
-            // `Terminal::copy` must not decline it.
+            // OSC 52 is the one sequence tmux passes along, so `copy` must not decline it.
             Features {
                 clipboard: true,
                 ..Features::default()
@@ -128,8 +121,8 @@ impl Features {
                 }
             }
         }
-        // Protocol last, after the override: naming `images` where nothing was detected
-        // asserts kitty, the one placeholder protocol.
+        // Protocol last, after the override: naming `images` where nothing was detected asserts
+        // kitty, the one placeholder protocol.
         f.proto = if !f.images {
             crate::term::Proto::None
         } else if crate::term::proto::Proto::of(env, true).speaks() {

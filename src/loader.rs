@@ -16,19 +16,18 @@ const CHUNK: usize = 64 * 1024;
 /// Rows per message — a hard cap, which is what makes the adoption budget exact.
 const BATCH: usize = 512;
 
-/// Rows one [`LoadJob::poll`] may adopt at most: a whole number of batches (a batch that does
-/// not fit cannot be put back on the channel).
+/// Rows one [`LoadJob::poll`] may adopt at most: a whole number of batches, since a batch that
+/// does not fit cannot be put back on the channel.
 pub const ADOPT_BUDGET: usize = 8 * BATCH;
 
-/// Rows a tail opens with: several screens, under one [`BATCH`], so the tail lands in the first
-/// poll.
+/// Rows a tail opens with: several screens, under one [`BATCH`].
 pub const TAIL_ROWS: usize = 200;
 
 /// The first window [`tail_offset`] reads, widened 4x until it holds [`TAIL_ROWS`] rows.
 pub const TAIL_WINDOW: u64 = CHUNK as u64;
 
 /// A buffer opened at a file's tail, remembering the size at open: below it a row can be
-/// numbered, styled and searched; at or above it rows are arriving.
+/// numbered and styled, at or above it rows are arriving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tail {
     /// The file's length when it was opened.
@@ -41,8 +40,8 @@ pub struct Tail {
 /// One message from the reader thread.
 #[derive(Debug)]
 pub enum LoadMsg {
-    /// Not text (a NUL in the first bytes); nothing read into rows — 64 KiB of mojibake is worse
-    /// than saying so.
+    /// Not text (a NUL in the first bytes): nothing is read into rows rather than 64 KiB of
+    /// mojibake.
     Binary,
     /// The encoding, decided before any row; only the byte-splittable encodings reach here.
     Encoding(crate::encoding::Encoding),
@@ -54,8 +53,7 @@ pub enum LoadMsg {
     Done { crlf: bool },
     /// A follower has read everything that exists; what arrives after is growth.
     CaughtUp { crlf: bool },
-    /// The read failed — a message, so it becomes a status line rather than vanishing into a
-    /// thread nobody reads.
+    /// The read failed — a message, so it becomes a status line rather than vanishing.
     Failed(String),
 }
 
@@ -86,8 +84,7 @@ pub struct LoadJob {
     cancel: Arc<AtomicBool>,
     /// Set when `Done` or `Failed` has been seen, so `poll` stops asking.
     done: bool,
-    /// Set when `CaughtUp` has been seen: a follower waiting for growth — a finished view, not a
-    /// read in flight.
+    /// Set when `CaughtUp` has been seen: a follower waiting for growth, not a read in flight.
     caught_up: bool,
     /// Rows handed out so far, for the status line.
     pub rows_read: usize,
@@ -101,8 +98,8 @@ impl LoadJob {
         Self::spawn_from(path, 0)
     }
 
-    /// Start reading `path` from byte `from` — the tail path. The seek happens on the caller's
-    /// thread, so a bad position is reported now.
+    /// Start reading `path` from byte `from`. The seek happens on the caller's thread, so a bad
+    /// position is reported now.
     pub fn spawn_from(path: PathBuf, from: u64) -> io::Result<Self> {
         Self::open(path, from, false)
     }
@@ -138,8 +135,7 @@ impl LoadJob {
         self.caught_up
     }
 
-    /// Append at most [`ADOPT_BUDGET`] rows to `out`, never blocking. A `Finished` with zero
-    /// rows is normal.
+    /// Append at most [`ADOPT_BUDGET`] rows to `out`, never blocking.
     pub fn poll(&mut self, out: &mut Vec<Vec<char>>) -> Adopted {
         if self.done {
             return Adopted::Nothing;
@@ -213,8 +209,8 @@ impl LoadJob {
     }
 }
 
-/// One row's bytes as characters, in the file's encoding — whole rows at a time, so a character
-/// split across chunk reads just accumulates.
+/// One row's bytes as characters, in the file's encoding: whole rows at a time, so a split
+/// character just accumulates.
 fn decode_row(
     bytes: &[u8],
     encoding: Option<crate::encoding::Encoding>,
@@ -230,7 +226,7 @@ fn decode_row(
 }
 
 /// Where the tail begins: the byte offset of the first of the last `rows` rows, found by
-/// scanning backwards, so the cost is the tail and not the file.
+/// scanning backwards, so the cost is the tail.
 pub fn tail_offset(file: &mut File, size: u64, rows: usize, window: u64) -> io::Result<u64> {
     if size == 0 || rows == 0 {
         return Ok(size);
@@ -291,8 +287,7 @@ pub fn read_from(file: &mut File, from: u64) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// How long a follower waits at the end before looking again: a poll, not an inotify watch. A
-/// file replaced rather than appended is not noticed.
+/// How long a follower waits at the end before looking again: a poll, not an inotify watch.
 const FOLLOW_SLEEP: Duration = Duration::from_millis(100);
 
 /// Send `batch` as a `Rows` message, leaving it empty; whether the loop is still there.
@@ -304,8 +299,7 @@ fn send_batch(tx: &mpsc::Sender<LoadMsg>, batch: &mut Vec<Vec<char>>) -> bool {
 }
 
 /// The reader thread: one pass, decoding rows as their newlines arrive. In follow mode it waits
-/// at the end, says `CaughtUp` once, and does not flush `pending` — a half-written row is not a
-/// row.
+/// at the end and says `CaughtUp` once, holding a half-written row back.
 fn read_all(
     mut file: File,
     from: u64,
@@ -451,8 +445,7 @@ fn read_all(
     let _ = tx.send(LoadMsg::Done { crlf });
 }
 
-/// One record into rows: its `log` is a chunk of a line, so only complete lines become rows; a
-/// stray line is shown as it is.
+/// One record into rows: its `log` is a chunk of a line, so only complete lines become rows.
 fn docker_rows(unwrap: &mut crate::dockerlog::Unwrap, line: &[u8], batch: &mut Vec<Vec<char>>) {
     let mut done: Vec<String> = Vec::new();
     match crate::dockerlog::record(line) {
@@ -485,8 +478,7 @@ mod docker_tests {
         }
     }
 
-    /// A docker log read through the loader: the container's text, and a line spanning three
-    /// records back to one row.
+    /// A docker log read through the loader: a line spanning three records back to one row.
     #[test]
     fn a_docker_log_reads_as_the_containers_text() {
         let long = "x".repeat(16384);
@@ -604,8 +596,7 @@ mod tail_tests {
         start as u64
     }
 
-    /// The backward scan agrees with a forward read, over the shapes where the off-by-ones live
-    /// (trailing newline, fewer rows, a huge row, CRLF).
+    /// The backward scan agrees with a forward read on the shapes where off-by-ones live.
     #[test]
     fn the_tail_offset_matches_a_forward_read() {
         let bodies: Vec<(&str, Vec<u8>)> = vec![
@@ -954,8 +945,7 @@ mod tests {
         );
     }
 
-    /// A follower appends what arrives and holds back a half-written row, driven against a real
-    /// file that grows under it.
+    /// A follower appends what arrives and holds back a half-written row.
     #[test]
     fn a_follower_appends_growth_and_holds_back_a_partial_row() {
         use std::io::Write;
@@ -1050,8 +1040,7 @@ mod tests {
         assert_eq!(job.encoding, Some(crate::encoding::Encoding::Cp1252));
     }
 
-    /// A mid-file byte-order mark is content: eating one a tail read happens to land on would
-    /// corrupt a line out of the middle of a log.
+    /// A mid-file byte-order mark is content: eating one would corrupt a line out of a log.
     #[test]
     fn a_tail_read_does_not_eat_a_mid_file_byte_order_mark() {
         let mut body = b"first\n".to_vec();

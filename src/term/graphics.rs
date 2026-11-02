@@ -4,8 +4,7 @@
 
 use crate::render::{Line, Raw, Span, Style};
 
-/// The protocol's row diacritics: the combining mark after a placeholder that names its row;
-/// entry 0 is also column 0's mark. Caps at [`IMAGE_MAX_ROWS`].
+/// The protocol's row diacritics: the combining mark after a placeholder that names its row.
 const ROW_DIACRITICS: [char; 30] = [
     '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}', '\u{033F}',
     '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
@@ -19,15 +18,13 @@ const PLACEHOLDER: char = '\u{10EEEE}';
 /// An image is at most this many cells tall.
 pub const IMAGE_MAX_ROWS: u32 = ROW_DIACRITICS.len() as u32;
 
-/// How wide an image may be on a frame `width` columns wide: half of it, clamped to 20..80 and
-/// never wider than the frame — the floor of 20 would overflow a narrower pane.
+/// How wide an image may be on a frame `width` columns wide: half of it, clamped to 20..80.
 pub fn image_box(width: usize) -> u32 {
     let frame = (width as u32).max(1);
     ((width / 2) as u32).clamp(20, 80).min(frame)
 }
 
-/// An image's id from the row it belongs to, so any renderer computes the same number. 24 bits
-/// (it rides a colour), never zero.
+/// An image's id from the row it belongs to: 24 bits, since it rides a colour, never zero.
 pub fn image_id(item_id: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in item_id.bytes() {
@@ -36,8 +33,8 @@ pub fn image_id(item_id: &str) -> u32 {
     (h & 0x00ff_ffff).max(1)
 }
 
-/// Cells an image takes in a box `box_cols` wide: as tall as its aspect says (a cell is ~2×
-/// taller than wide), capped, narrowed to keep its shape.
+/// Cells an image takes in a box `box_cols` wide, from its aspect — a cell is ~2× taller than
+/// wide — capped and narrowed to keep its shape.
 pub fn image_cells(width: Option<u32>, height: Option<u32>, box_cols: u32) -> (u32, u32) {
     let (Some(w), Some(h)) = (width.filter(|w| *w > 0), height.filter(|h| *h > 0)) else {
         return (box_cols, (box_cols * 3 / 10).clamp(1, IMAGE_MAX_ROWS));
@@ -51,10 +48,10 @@ pub fn image_cells(width: Option<u32>, height: Option<u32>, box_cols: u32) -> (u
 }
 
 /// The rows of text that ARE the image: the placeholder repeated, the first cell carrying its
-/// row mark. To every renderer and diff, ordinary text.
+/// row mark.
 pub fn image_rows(id: u32, cols: u32, rows: u32) -> Vec<String> {
-    // The image id in the foreground and the placement id in the underline colour — without it
-    // a terminal with two placements picks one itself.
+    // The image id in the foreground and the placement id in the underline colour, or a terminal
+    // with two placements picks one itself.
     let colour = format!(
         "\x1b[38;2;{};{};{}m\x1b[58;5;{PLACEMENT}m",
         (id >> 16) & 0xff,
@@ -84,8 +81,7 @@ pub fn placeholder_style(id: u32) -> Style {
     })
 }
 
-/// Whether a row is a picture's placeholder row — first cell is [`PLACEHOLDER`]; style it with
-/// [`placeholder_style`].
+/// Whether a row is a picture's placeholder row: first cell is [`PLACEHOLDER`].
 pub fn is_placeholder_row(row: &[char]) -> bool {
     row.first() == Some(&PLACEHOLDER)
 }
@@ -108,13 +104,13 @@ pub fn image_lines(id: u32, cols: u32, rows: u32) -> Vec<Line> {
 }
 
 /// Bytes that put a PNG in the terminal's memory under `id`; where it goes is
-/// [`image_place`]'s, which a resize repeats without re-sending this.
+/// [`image_place`]'s.
 pub fn image_upload(id: u32, png_base64: &str) -> Vec<u8> {
     upload(&format!("a=t,f=100,i={id}"), png_base64)
 }
 
-/// Raw RGB under `id` (`f=24`), for providers that draw pixels and would gain nothing from a
-/// PNG encoder. `s=`/`v=` is what the payload is measured against.
+/// Raw RGB under `id` (`f=24`), for providers that draw pixels: `s=`/`v=` is what the payload
+/// is measured against.
 pub fn image_upload_rgb(id: u32, width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     upload(
         &format!("a=t,f=24,i={id},s={width},v={height}"),
@@ -122,8 +118,7 @@ pub fn image_upload_rgb(id: u32, width: u32, height: u32, rgb: &[u8]) -> Vec<u8>
     )
 }
 
-/// One transmission: `head` on the first chunk, 4096-byte chunks, `m=1` on all but the last,
-/// `q=2` to keep the terminal quiet.
+/// One transmission: `head` on the first chunk, 4096-byte chunks, `m=1` on all but the last.
 fn upload(head: &str, base64: &str) -> Vec<u8> {
     let mut out = String::new();
     let chunks: Vec<&[u8]> = base64.as_bytes().chunks(4096).collect();
@@ -142,14 +137,13 @@ fn upload(head: &str, base64: &str) -> Vec<u8> {
 /// The one placement id this head uses for every image, which its placeholders name.
 const PLACEMENT: u32 = 1;
 
-/// Drops an image and every placement — `d=I` frees the data too: an undrawn picture is
-/// terminal memory nothing else can free.
+/// Drops an image and every placement; `d=I` frees the data too, which nothing else can.
 pub fn image_delete(id: u32) -> Vec<u8> {
     format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").into_bytes()
 }
 
-/// The virtual placement the placeholders draw. The image's old placements are deleted first,
-/// so one left at another size cannot sit beside the new.
+/// The virtual placement the placeholders draw, after deleting the image's old placements so one
+/// left at another size cannot sit beside the new.
 pub fn image_place(id: u32, cols: u32, rows: u32) -> Vec<u8> {
     format!(
         "\x1b_Ga=d,d=i,i={id},q=2\x1b\\\x1b_Ga=p,U=1,i={id},p={PLACEMENT},c={cols},r={rows},q=2\x1b\\"

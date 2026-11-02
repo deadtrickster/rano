@@ -4,8 +4,7 @@
 
 use super::{char_width, is_regional_indicator};
 
-/// One display cell: the escape run that precedes it, the grapheme cluster itself, and how many
-/// columns it occupies.
+/// One display cell: the escape run before it, the cluster itself, and its columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell<'a> {
     /// Escapes immediately before this cluster: zero columns, never split.
@@ -17,8 +16,7 @@ pub struct Cell<'a> {
 }
 
 /// Split a string into escape-prefixed grapheme clusters. The last cell may have an empty
-/// `text` when the string ends in escapes — dropping a trailing reset would leave attributes
-/// open.
+/// `text`: dropping a trailing reset would leave attributes open.
 pub fn cells(s: &str) -> Vec<Cell<'_>> {
     // A capacity guess: this runs under every frame the head draws, so the early doublings are
     // worth skipping; a wrong guess costs a little memory.
@@ -28,8 +26,7 @@ pub fn cells(s: &str) -> Vec<Cell<'_>> {
 }
 
 /// The cluster walk, once: every cell of `s`, in order, handed to `f`. Shared because the rules
-/// are the subtle ones (ZWJ, regional pairs, controls that do not combine) — one implementation,
-/// not two to keep in step.
+/// are the subtle ones — one implementation, not two to keep in step.
 pub fn for_each_cell<'a>(s: &'a str, mut f: impl FnMut(Cell<'a>)) {
     let b = s.as_bytes();
     let mut i = 0usize;
@@ -104,8 +101,8 @@ pub fn for_each_cell<'a>(s: &'a str, mut f: impl FnMut(Cell<'a>)) {
     }
 }
 
-/// Bytes past the escape at `i`: CSI to its final byte, OSC to BEL or ST, the two-byte forms. An
-/// unterminated sequence consumes the rest — a partially arrived frame is not content.
+/// Bytes past the escape at `i`: CSI to its final byte, OSC to BEL or ST. An unterminated
+/// sequence consumes the rest — a partially arrived frame is not content.
 fn skip_escape(b: &[u8], i: usize) -> usize {
     let mut j = i + 1;
     if j >= b.len() {
@@ -136,8 +133,7 @@ fn skip_escape(b: &[u8], i: usize) -> usize {
     }
 }
 
-/// Columns a string occupies on a terminal, escapes excluded — a sum over the walk, so it
-/// allocates nothing.
+/// Columns a string occupies on a terminal, escapes excluded.
 pub fn width(s: &str) -> usize {
     let mut cols = 0usize;
     for_each_cell(s, |c| cols += c.cols);
@@ -152,8 +148,8 @@ pub fn is_control(c: char) -> bool {
 /// The reset sequence, spelled once.
 pub const RESET: &str = "\x1b[0m";
 
-/// Active SGR state, so a wrapped line can reopen what the previous one closed. Not a full
-/// model: it keeps the sequences since the last reset, in order, and replays them.
+/// Active SGR state, so a wrapped line can reopen what the previous one closed: the sequences
+/// since the last reset, in order, replayed.
 #[derive(Debug, Default, Clone)]
 struct Sgr {
     open: String,
@@ -185,7 +181,7 @@ impl Sgr {
 }
 
 /// Truncate to `cols` columns, never splitting a cluster or an escape. When something is
-/// dropped the last column becomes `…`; any open attribute is closed at the end.
+/// dropped the last column becomes `…`, and any open attribute is closed.
 pub fn truncate(s: &str, cols: usize) -> String {
     if width(s) <= cols {
         return s.to_string();
@@ -223,8 +219,7 @@ pub fn truncate(s: &str, cols: usize) -> String {
 }
 
 /// Shorten to `cols` columns by eating the left, keeping the end — the one for a path:
-/// `…/src/protocol.rs` names the file, `crates/…/protoco…` does not. The cut lands at a
-/// separator when one is within six columns.
+/// `…/src/protocol.rs` names the file. The cut lands at a separator when one is close.
 pub fn ellipsise_left(s: &str, cols: usize) -> String {
     if width(s) <= cols {
         return s.to_string();
@@ -272,10 +267,8 @@ pub fn fit(s: &str, cols: usize) -> String {
     out
 }
 
-/// Wrap to `cols` columns. Three break rules, in priority: at a space; between two wide
-/// clusters (without which CJK does not wrap at all); anywhere, when one unbreakable run is
-/// longer than the width — overflowing instead corrupts the painter. Every line returned is
-/// independently paintable: attributes closed and reopened.
+/// Wrap to `cols` columns: at a space, between two wide clusters (or CJK does not wrap), or
+/// anywhere when one run is longer. Every line returned is independently paintable.
 pub fn wrap(s: &str, cols: usize) -> Vec<String> {
     let cs = cells(s);
     let rows = break_cells(&cs, cols.max(4));
@@ -304,9 +297,8 @@ pub fn wrap(s: &str, cols: usize) -> Vec<String> {
     out
 }
 
-/// The single breakpoint finder: [`wrap`] and [`wrap_ranges`] both go through it, so the two
-/// cannot drift. Returns half-open cell-index ranges that tile the input; a trailing space
-/// belongs to the row it ended.
+/// The single breakpoint finder, shared by [`wrap`] and [`wrap_ranges`] so the two cannot drift:
+/// half-open cell-index ranges that tile the input.
 pub(crate) fn break_cells(cs: &[Cell], cols: usize) -> Vec<(usize, usize)> {
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let mut row_start = 0usize;
@@ -394,8 +386,8 @@ pub(crate) fn break_cells(cs: &[Cell], cols: usize) -> Vec<(usize, usize)> {
     rows
 }
 
-/// Wrap, returning byte ranges rather than strings — the editor needs to know which bytes are
-/// on which row. Same breakpoints as [`wrap`], both through [`break_cells`].
+/// Wrap, returning byte ranges rather than strings: the editor needs to know which bytes are on
+/// which row. Same breakpoints as [`wrap`].
 pub fn wrap_ranges(s: &str, cols: usize) -> Vec<std::ops::Range<usize>> {
     let cs = cells(s);
     // Byte offset of each cell's start, plus the end sentinel.
@@ -412,8 +404,7 @@ pub fn wrap_ranges(s: &str, cols: usize) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-/// The row a byte offset lands on, and the display column within it — display columns, not
-/// characters and not bytes.
+/// The row a byte offset lands on, and the display column within it.
 pub fn locate(s: &str, byte: usize, cols: usize) -> (usize, usize) {
     let rows = wrap_ranges(s, cols);
     let byte = byte.min(s.len());
@@ -421,8 +412,7 @@ pub fn locate(s: &str, byte: usize, cols: usize) -> (usize, usize) {
     (row, width(&s[rows[row].start..byte]))
 }
 
-/// The byte offset at display column `col` of row `row`, clamping into the row: a cursor moved
-/// onto a shorter row lands at its end.
+/// The byte offset at display column `col` of row `row`, clamping into the row.
 pub fn offset_at(s: &str, row: usize, col: usize, cols: usize) -> usize {
     let rows = wrap_ranges(s, cols);
     let r = match rows.get(row) {
@@ -621,8 +611,7 @@ mod tests {
         assert_eq!(width(&fit("", 3)), 3);
     }
 
-    /// The two walks over the one table agree wherever both can see the text
-    /// (they differ by design on tabs, escapes and controls).
+    /// The two walks over the one table agree wherever both can see the text.
     #[test]
     fn the_two_walks_agree_on_plain_text() {
         for s in [

@@ -4,9 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// What the file looked like on disk when this buffer last read or wrote it. A save compares
-/// it with the file as it is now: a difference means something else wrote it in between, and
-/// the save asks first.
+/// What the file looked like on disk when this buffer last read or wrote it: a save compares it
+/// with the file now, and asks first when they differ.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DiskStamp {
     pub mtime: Option<SystemTime>,
@@ -14,8 +13,7 @@ pub struct DiskStamp {
 }
 
 impl DiskStamp {
-    /// The stamp of `path` now; `None` when it cannot be read, which a save treats as a change
-    /// when it had one before.
+    /// The stamp of `path` now; `None` when it cannot be read, which a save treats as a change.
     pub fn of(path: &Path) -> Option<Self> {
         let m = fs::metadata(path).ok()?;
         Some(Self {
@@ -33,17 +31,16 @@ pub struct Pos {
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    /// The rows, in chunks: a structural edit shifts one chunk, not every row header below it.
-    /// Private so every read goes through the methods below.
+    /// The rows, in chunks: a structural edit shifts one chunk, not every row below it. Private
+    /// so every read goes through the methods below.
     lines: Rows,
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
-    /// How the bytes map to these characters, carried like `crlf` so a save writes the file
-    /// back as it was found.
+    /// How the bytes map to these characters, carried so a save writes the file back as found.
     pub encoding: Encoding,
-    /// Not text: a NUL in its first [`crate::encoding::BINARY_PROBE`] bytes. Such a buffer opens
-    /// read-only and is never highlighted — a save would corrupt it.
+    /// Not text: a NUL in its first [`crate::encoding::BINARY_PROBE`] bytes. Such a buffer is
+    /// read-only — a save would corrupt it.
     pub binary: bool,
     /// The file as it was when last read or written; `None` for a buffer that never was.
     pub disk: Option<DiskStamp>,
@@ -71,7 +68,7 @@ impl Default for Buffer {
 
 impl Buffer {
     /// Read `path`, detecting its encoding: a UTF-16 or windows-1252 file opens at all, and a
-    /// UTF-8 BOM is stripped rather than becoming a column.
+    /// UTF-8 BOM is stripped.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
         // Stamped BEFORE the read: a write landing during it then shows as a change, which
         // errs toward asking.
@@ -88,8 +85,7 @@ impl Buffer {
         Ok(b)
     }
 
-    /// A buffer over already-decoded text: the rows, the CRLF decision and the one-row
-    /// invariant in one place.
+    /// A buffer over already-decoded text: the rows, the CRLF decision and the one-row invariant.
     pub fn from_text(text: &str, name: Option<PathBuf>, encoding: Encoding) -> Self {
         // Detect CRLF before `str::lines()` strips the \r.
         let crlf = text.contains("\r\n");
@@ -151,8 +147,7 @@ impl Buffer {
         self.lines.iter()
     }
 
-    /// A copy of rows `[a, b)`: the rows live in chunks, so there is no contiguous range to
-    /// lend out.
+    /// A copy of rows `[a, b)`: the rows live in chunks, so there is nothing to lend out.
     pub fn rows_range(&self, a: usize, b: usize) -> Vec<Vec<char>> {
         self.lines.range(a, b)
     }
@@ -187,8 +182,7 @@ impl Buffer {
         self.lines.push(chars);
     }
 
-    /// Append every row of `rows`, leaving it empty — `Vec::append`'s contract, which the
-    /// loader relies on.
+    /// Append every row of `rows`, leaving it empty — `Vec::append`'s contract.
     pub fn append_rows(&mut self, rows: &mut Vec<Vec<char>>) {
         self.lines.append(rows);
     }
@@ -198,8 +192,7 @@ impl Buffer {
         self.lines.extend(rows);
     }
 
-    /// Replace rows `[start, end)` with `items` — explicit bounds because callers use both
-    /// `start..end` and `a..=b`.
+    /// Replace rows `[start, end)` with `items`; explicit bounds, since callers use both forms.
     pub fn splice_rows<I>(&mut self, start: usize, end: usize, items: I)
     where
         I: IntoIterator<Item = Vec<char>>,
@@ -207,8 +200,7 @@ impl Buffer {
         self.lines.splice(start, end, items);
     }
 
-    /// Drop every row. The buffer is momentarily not a valid buffer; every caller refills it
-    /// in the same breath.
+    /// Drop every row. The buffer is momentarily invalid; callers refill it in the same breath.
     pub fn clear_rows(&mut self) {
         self.lines.clear();
     }
@@ -243,9 +235,8 @@ impl Buffer {
         Pos { row, col }
     }
 
-    /// Whether this buffer holds at least `cap` bytes, stopping as soon as known. A predicate
-    /// and not a length: the exact size needs a pass over every line, and the only caller
-    /// compares a threshold.
+    /// Whether this buffer holds at least `cap` bytes, stopping as soon as known: a predicate,
+    /// since the exact size needs a pass over every line.
     pub fn is_at_least(&self, cap: usize) -> bool {
         let mut n = 0usize;
         for l in self.lines.iter() {
@@ -293,7 +284,7 @@ impl Buffer {
     }
 
     /// The file's bytes: `file_text` in the buffer's own encoding, BOM included. A character
-    /// the encoding cannot represent is an error, not a `?` — a silent replacement is data loss.
+    /// the encoding cannot represent is an error — a silent replacement is data loss.
     pub fn file_bytes(&self) -> Result<Vec<u8>, String> {
         encoding::encode(&self.file_text(), self.encoding)
     }
@@ -381,8 +372,7 @@ impl Buffer {
         out
     }
 
-    /// Copy the region [a, b) in row-major order without modifying the buffer. Empty edge
-    /// fragments are dropped.
+    /// Copy the region [a, b) in row-major order, without modifying the buffer.
     pub fn copy_range(&self, a: Pos, b: Pos) -> Vec<Vec<char>> {
         let mut out: Vec<Vec<char>> = Vec::new();
         if a.row == b.row {

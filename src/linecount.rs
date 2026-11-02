@@ -1,8 +1,6 @@
-//! Counting a file's lines without reading them into anything: one pass over
-//! the bytes before a tail begins, counting newlines — nothing decoded, held,
-//! or allocated per row. A separate job from the loader, which would answer by
-//! building every row; a scan from a byte offset because a future line index
-//! wants the same walk.
+//! Counting a file's lines without reading them into anything: one pass over the bytes before
+//! a tail begins, counting newlines — nothing decoded, held, or allocated per row. A separate
+//! job from the loader, which would answer by building every row.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -24,8 +22,8 @@ pub enum Counted {
     Progress(u64),
     /// The scan finished: this many newlines in the bytes it was given.
     Done(u64),
-    /// The scan ended without an answer — cancelled, or its owner went away.
-    /// Deliberately not a partial count.
+    /// The scan ended without an answer — cancelled, or its owner went away. Deliberately not
+    /// a partial count.
     Stopped,
     /// The file could not be read. The string is for a status line.
     Failed(String),
@@ -47,9 +45,9 @@ pub struct LineCountJob {
 }
 
 impl LineCountJob {
-    /// Count the newlines in `path[0..upto)` on a worker. The open happens
-    /// here, on the caller's thread, so an unreadable file fails now. `upto` of
-    /// 0 is legitimate; past the end, the count of what is there.
+    /// Count the newlines in `path[0..upto)` on a worker. The open happens here, on the
+    /// caller's thread, so an unreadable file fails now. `upto` of 0 is legitimate; past the
+    /// end, the count of what is there.
     pub fn spawn(path: PathBuf, upto: u64) -> io::Result<Self> {
         let file = File::open(&path)?;
         let (tx, rx) = mpsc::channel();
@@ -86,8 +84,7 @@ impl LineCountJob {
                     return Counted::Failed(e);
                 }
                 Err(TryRecvError::Empty) => break,
-                // Cancelled, or the sender dropped: the partial count is not
-                // the answer.
+                // Cancelled, or the sender dropped: the partial count is not the answer.
                 Err(TryRecvError::Disconnected) => {
                     self.done = true;
                     return Counted::Stopped;
@@ -103,8 +100,8 @@ impl LineCountJob {
     }
 }
 
-/// The worker: one pass over `[0, upto)`, one buffer for the whole run, so its
-/// footprint is the same on a 10 KiB file and a 2 GiB one.
+/// The worker: one pass over `[0, upto)`, one buffer for the whole run, so its footprint is
+/// the same on a 10 KiB file and a 2 GiB one.
 fn count_prefix(mut file: File, upto: u64, tx: &mpsc::Sender<Msg>, cancel: &AtomicBool) {
     let mut buf = vec![0u8; CHUNK];
     let mut total: u64 = 0;
@@ -192,8 +189,7 @@ mod tests {
         assert_eq!(counted(b"one\ntwo\nthree\n", 14), 3);
     }
 
-    /// No trailing newline: the last row has no newline of its own; the caller
-    /// adds 1.
+    /// No trailing newline: the last row has no newline of its own; the caller adds 1.
     #[test]
     fn a_file_without_a_trailing_newline_counts_its_rows() {
         assert_eq!(counted(b"one\ntwo\nthree", 13), 2);
@@ -214,8 +210,7 @@ mod tests {
         assert_eq!(counted(body, body.len() as u64), 5);
     }
 
-    /// A tail offset is one past a newline, so the count is exactly the rows
-    /// above the tail.
+    /// A tail offset is one past a newline, so the count is exactly the rows above the tail.
     #[test]
     fn a_prefix_ending_in_a_newline_counts_whole_rows() {
         let body = b"a\nb\nc\n";
@@ -240,8 +235,7 @@ mod tests {
         assert!(LineCountJob::spawn(missing, 10).is_err());
     }
 
-    /// A cancelled scan answers `Stopped` or the whole count (a race), never a
-    /// partial one.
+    /// A cancelled scan answers `Stopped` or the whole count (a race), never a partial one.
     #[test]
     fn a_cancelled_scan_answers_stopped_or_a_whole_count_and_never_a_partial_one() {
         let body = b"a line of about forty bytes, give or take\n".repeat(40_000);
@@ -267,8 +261,8 @@ mod tests {
         }
     }
 
-    /// Pins the behaviour — a 200k-row log counted in one pass — not the
-    /// memory: the footprint is structural (one buffer, once).
+    /// Pins the behaviour — a 200k-row log counted in one pass — not the memory: the footprint
+    /// is structural (one buffer, once).
     #[test]
     fn a_large_file_is_counted_in_one_pass() {
         let body = b"2026-10-09T12:00:00 INFO a row of a log\n".repeat(200_000);

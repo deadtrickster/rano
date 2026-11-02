@@ -1,6 +1,5 @@
-//! The editor's side of async loading: adopt rows into the buffer as they
-//! arrive, and say so on the status line. `lsp_ctrl.rs`'s pattern, except the
-//! job feeds the buffer itself.
+//! The editor's side of async loading: adopt rows into the buffer as they arrive, and say so
+//! on the status line. The job feeds the buffer itself, unlike `lsp_ctrl`'s pattern.
 
 use crate::buffer::Buffer;
 use crate::editor::Editor;
@@ -11,11 +10,11 @@ use crate::loader::{
 use std::path::Path;
 
 impl Editor {
-    /// Start reading `path` on a worker: the buffer becomes an empty document
-    /// with that name, so the title bar is right from the first frame.
+    /// Start reading `path` on a worker: the buffer becomes an empty document with that name,
+    /// so the title bar is right from the first frame.
     pub fn start_load(&mut self, path: &Path) -> std::io::Result<()> {
-        // A plugin with `on_open` reads a small file whole, synchronously: a
-        // transform needs the whole text, and a load is not an undo step.
+        // A plugin with `on_open` reads a small file whole, synchronously: a transform needs
+        // the whole text.
         if self.plugin.as_ref().is_some_and(|p| p.has("on_open")) {
             match std::fs::metadata(path) {
                 Ok(m) if m.len() as usize <= crate::plugin::MAX_HOOK_BYTES => {
@@ -41,8 +40,7 @@ impl Editor {
         Ok(())
     }
 
-    /// Make `buf` the current buffer, whole: the synchronous twin of
-    /// [`Self::begin_load`].
+    /// Make `buf` the current buffer, whole: the synchronous twin of [`Self::begin_load`].
     fn adopt_read(&mut self, path: &Path, mut buf: Buffer) {
         buf.name = Some(path.to_path_buf());
         buf.disk = crate::buffer::DiskStamp::of(path);
@@ -69,16 +67,15 @@ impl Editor {
         Ok(())
     }
 
-    /// [`Self::start_load_from`], and keep reading as the file grows
-    /// (`-f`/`--follow`).
+    /// [`Self::start_load_from`], and keep reading as the file grows (`-f`/`--follow`).
     pub fn start_follow_from(&mut self, path: &Path, from: u64) -> std::io::Result<()> {
         let job = LoadJob::spawn_follow_from(path.to_path_buf(), from)?;
         self.begin_load(path, job);
         Ok(())
     }
 
-    /// The buffer's half of opening a file: name it, hand it the job,
-    /// invalidate what a new file invalidates.
+    /// The buffer's half of opening a file: name it, hand it the job, invalidate what a new
+    /// file invalidates.
     fn begin_load(&mut self, path: &Path, job: LoadJob) {
         {
             let bs = self.bs_mut();
@@ -103,9 +100,9 @@ impl Editor {
         self.preview_if_picture();
     }
 
-    /// Whether `path` opens in LOG MODE: the name ends in `.log` — not a path
-    /// rule and not a content sniff, because a rule per directory its author
-    /// saw is a bug per directory they did not.
+    /// Whether `path` opens in log mode: the name ends in `.log` — a name rule rather than a
+    /// content sniff, because a rule per directory its author saw is a bug per directory they
+    /// did not.
     pub fn log_mode_for(&self, path: &Path) -> bool {
         if self.edit_override {
             return false;
@@ -116,8 +113,7 @@ impl Editor {
         name.len() > 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".log")
     }
 
-    /// Open `path` the way its name says — one decision, called from every
-    /// door.
+    /// Open `path` the way its name says — one decision, called from every door.
     pub fn start_named(&mut self, path: &Path) -> std::io::Result<()> {
         if self.log_mode_for(path) {
             self.start_tail(path)
@@ -126,8 +122,7 @@ impl Editor {
         }
     }
 
-    /// Open `path` as a tail: the last few screens, read-only, followed as it
-    /// grows.
+    /// Open `path` as a tail: the last few screens, read-only, followed as it grows.
     pub fn start_tail(&mut self, path: &Path) -> std::io::Result<()> {
         let mut file = std::fs::File::open(path)?;
         let size = file.metadata()?.len();
@@ -141,8 +136,7 @@ impl Editor {
                 rows_at_open: None,
             });
             bs.read_only = true;
-            // The tail's row 1 is not the file's row 1; unknown until the scan
-            // answers.
+            // The tail's row 1 is not the file's row 1; unknown until the scan answers.
             bs.lines_before = None;
         }
         self.start_line_count(path, from);
@@ -187,8 +181,8 @@ impl Editor {
         self.bs().line_count.is_some()
     }
 
-    /// Adopt whatever the loader has ready, bounded by [`loader::ADOPT_BUDGET`],
-    /// returning whether to redraw. Never waits; a saturated job says so.
+    /// Adopt whatever the loader has ready, bounded by `loader::ADOPT_BUDGET`, returning
+    /// whether to redraw. Never waits; a saturated job says so.
     pub(crate) fn load_poll(&mut self) -> bool {
         let Some(job) = self.bs_mut().load.as_mut() else {
             return false;
@@ -200,14 +194,12 @@ impl Editor {
         if !rows.is_empty() {
             let text_h = self.text_h;
             let bs = self.bs_mut();
-            // An append, not an edit: the wrap table extends instead of
-            // re-measuring.
+            // An append, not an edit: the wrap table extends instead of re-measuring.
             let was = bs.buf.row_count();
-            // The view holds the end if it already had it: a tail that yanked
-            // the scroll back would be unreadable.
+            // The view holds the end if it already had it: a tail that yanked the scroll back
+            // would be unreadable.
             let at_end = was <= text_h || bs.scroll + text_h >= was;
-            // The first batch replaces the seed row, so a file does not begin
-            // with a blank line.
+            // The first batch replaces the seed row, so a file does not begin with a blank line.
             if bs.buf.row_count() == 1 && bs.buf.row(0).is_empty() && !bs.buf.modified {
                 bs.buf.clear_rows();
             }
@@ -245,8 +237,7 @@ impl Editor {
                     // A view, refused at the keystroke rather than at a save.
                     bs.read_only = true;
                 }
-                // A PDF, a `.pyc`: binary, and things a provider could open —
-                // tell a configured reader to look at the grant.
+                // A PDF, a `.pyc`: binary, and things a provider could open.
                 let configured = self.config.plugin.is_some()
                     || std::env::var_os("RANO_PLUGIN").is_some()
                     || self.plugin.is_some()
@@ -266,8 +257,7 @@ impl Editor {
                 self.bs_mut().buf.encoding = enc;
             }
             Adopted::NeedsEager(enc) => {
-                // UTF-16 cannot be split on byte newlines: read whole, and do
-                // not leave the editor stuck loading.
+                // UTF-16 cannot be split on byte newlines: read whole rather than staying stuck.
                 self.bs_mut().load = None;
                 let path = self.bs().buf.name.clone();
                 if let Some(path) = path {
@@ -303,8 +293,7 @@ impl Editor {
                         bs.buf.push_row(Vec::new());
                     }
                     let rows = bs.buf.row_count();
-                    // A tail read without following settles here, not at
-                    // `CaughtUp`.
+                    // A tail read without following settles here, not at `CaughtUp`.
                     if let Some(t) = bs.tail.as_mut() {
                         t.rows_at_open = Some(rows);
                     }
@@ -335,8 +324,7 @@ impl Editor {
                         bs.buf.push_row(Vec::new());
                     }
                     let rows = bs.buf.row_count();
-                    // The styling boundary: everything from here down arrived
-                    // after the tail was read.
+                    // The styling boundary: everything from here down arrived after the tail.
                     if let Some(t) = bs.tail.as_mut() {
                         t.rows_at_open = Some(rows);
                     }
@@ -359,8 +347,8 @@ impl Editor {
         dirty
     }
 
-    /// Whether the buffer's text is still arriving. A follower that has read
-    /// everything answers false.
+    /// Whether the buffer's text is still arriving. A follower that has read everything answers
+    /// false.
     pub fn loading(&self) -> bool {
         self.bs().load.as_ref().is_some_and(|j| !j.caught_up())
     }
@@ -379,8 +367,8 @@ impl Editor {
         ))
     }
 
-    /// The status-line text for a tail's line count, or `None`; weaker than
-    /// `loading_text`, which a flash displaces.
+    /// The status-line text for a tail's line count, or `None`; weaker than `loading_text`,
+    /// which a flash displaces.
     pub(crate) fn counting_text(&self) -> Option<String> {
         let job = self.bs().line_count.as_ref()?;
         Some(format!("Counting lines… {} so far", job.counted))
@@ -396,8 +384,7 @@ impl Editor {
         }
     }
 
-    /// Start the deferred read of a command-line file, now that its buffer is
-    /// current.
+    /// Start the deferred read of a command-line file, now that its buffer is current.
     pub(crate) fn start_pending_load(&mut self) -> bool {
         let Some(path) = self.bs_mut().pending_load.take() else {
             return false;
@@ -408,8 +395,8 @@ impl Editor {
         true
     }
 
-    /// Make the current buffer whole, synchronously: a jump into a half-arrived
-    /// buffer needs the target row to exist first.
+    /// Make the current buffer whole, synchronously: a jump into a half-arrived buffer needs
+    /// the target row to exist first.
     pub(crate) fn load_now(&mut self) {
         let pending = self.bs_mut().pending_load.take();
         let in_flight = self.bs().load.is_some();
@@ -429,8 +416,7 @@ impl Editor {
                 bs.buf = buf;
                 bs.edit_gen = bs.edit_gen.wrapping_add(1);
                 bs.wrap_extend_from = None;
-                // No longer a tail: `size_at_open` would describe a view this
-                // read replaced.
+                // No longer a tail: `size_at_open` would describe a view this read replaced.
                 bs.tail = None;
                 bs.lines_before = Some(0);
                 bs.line_count = None;
@@ -509,8 +495,7 @@ mod tests {
 
     #[test]
     fn a_loading_editor_draws_a_frame_and_says_so() {
-        // The screen is never a dead blank: a frame from the first iteration,
-        // and the status line says what is happening.
+        // The screen is never a dead blank: a frame from the first iteration, and a status line.
         let body: String = (0..300_000).map(|i| format!("row {i}\n")).collect();
         let t = Temp::new("slow.txt", body.as_bytes());
         let mut ed = ed();
@@ -585,8 +570,7 @@ mod tests {
 
     #[test]
     fn a_loading_utf16_file_falls_back_to_the_eager_path() {
-        // UTF-16 cannot be streamed: read whole, and do not leave the editor
-        // stuck loading.
+        // UTF-16 cannot be streamed: read whole, and do not leave the editor stuck loading.
         let text = "one\ntwo\nthree\n";
         let bytes = crate::encoding::encode(text, crate::encoding::Encoding::Utf16Le).unwrap();
         let t = Temp::new("u16.txt", &bytes);

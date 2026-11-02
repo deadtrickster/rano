@@ -1,14 +1,10 @@
-//! Everything that measures text goes through here: the soft-wrap table,
-//! horizontal scroll, the cursor, mouse hit-testing, the renderer's windows.
-//! CJK and most emoji take two columns; combining marks and joiners take
-//! none — so `col == display_col` is false, and wrapping must move whole
-//! clusters. The tables are by hand, not UAX #11/#29: a character outside the
-//! listed ranges is one column and its own cluster, and a miss is a line one
-//! column narrow, once. Tabs advance from the line start, not the wrap
-//! segment, so a wrapped line's width is the sum of its segments exactly.
+//! Everything that measures text goes through here: the soft-wrap table, horizontal scroll, the
+//! cursor, mouse hit-testing, the renderer's windows. CJK and most emoji take two columns,
+//! combining marks none, so wrapping must move whole clusters. The tables are by hand: a
+//! character outside the listed ranges is one column and its own cluster.
 
-// The same tables, walked over a `&str` that may carry escapes; a child
-// module so the tables stay private and stay one copy.
+// The same tables, walked over a `&str` that may carry escapes: a child module, so they stay
+// private and stay one copy.
 pub mod text;
 
 /// Columns one character claims on a terminal: 0, 1 or 2.
@@ -29,8 +25,7 @@ fn is_control(u: u32) -> bool {
     u < 0x20 || (0x7f..0xa0).contains(&u)
 }
 
-/// Marks, joiners and selectors: they attach to the character before them
-/// instead of taking a cell of their own.
+/// Marks, joiners and selectors: they attach to the character before them instead of a cell.
 fn is_zero_width(u: u32) -> bool {
     matches!(u,
         0x0300..=0x036f      // combining diacritical marks
@@ -50,15 +45,13 @@ fn is_zero_width(u: u32) -> bool {
     )
 }
 
-/// [`char_width`]'s decision for a bare codepoint, for a caller scanning
-/// bytes; two copies of the table would drift.
+/// [`char_width`]'s decision for a bare codepoint, for a caller scanning bytes.
 #[allow(dead_code)]
 pub fn is_wide_cp(u: u32) -> bool {
     is_wide(u)
 }
 
-/// East-Asian Wide and Fullwidth, plus the emoji planes terminals render
-/// double-width.
+/// East-Asian Wide and Fullwidth, plus the emoji planes terminals render double-width.
 fn is_wide(u: u32) -> bool {
     matches!(u,
         0x1100..=0x115f      // Hangul Jamo initial
@@ -95,27 +88,23 @@ fn is_wide(u: u32) -> bool {
     )
 }
 
-/// True when every character is exactly one column and no tab is present, so
-/// `display col == char index` holds — the case the fast paths assume.
+/// True when every character is one column and there is no tab, so `col == char index`.
 pub fn is_simple(chars: &[char]) -> bool {
     is_simple_prefix(chars, usize::MAX)
 }
 
-/// [`is_simple`] over at most the first `limit` characters, for rows measured
-/// in megabytes where the scan itself is the cost and the caller has a cheap
-/// fallback. The trade: a row longer than `limit` whose prefix is ordinary is
-/// assumed ordinary for its whole length.
+/// [`is_simple`] over the first `limit` characters, for rows where the scan is the cost: a row
+/// longer than `limit` whose prefix is ordinary is assumed ordinary throughout.
 pub fn is_simple_prefix(chars: &[char], limit: usize) -> bool {
-    // ASCII and not a tab: the answer `char_width(c) == 1` gives, without the
-    // range checks. A one-column non-ASCII character (é) answers false —
-    // conservative, and what makes the scan cheap.
+    // ASCII and not a tab: the answer `char_width(c) == 1` gives, without the range checks. A
+    // one-column non-ASCII character answers false — conservative, and what makes the scan
+    // cheap.
     chars[..limit.min(chars.len())]
         .iter()
         .all(|&c| c.is_ascii() && c != '\t')
 }
 
-/// One cluster: where it starts, and the display column its first cell sits
-/// at. `w` is its own width, 0/1/2.
+/// One cluster: where it starts, and the display column its first cell sits at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cluster {
     /// Char index of the base.
@@ -132,18 +121,13 @@ fn is_regional_indicator(c: char) -> bool {
     (0x1f1e6..=0x1f1ff).contains(&(c as u32))
 }
 
-/// The clusters of a line, in order, with their absolute display columns.
-/// A character joins the cluster before it when it is zero-width, when the
-/// character before it was a ZWJ (`👨‍👩‍👧` is five code points and one glyph),
-/// or as the second of two regional indicators; a tab and a zero-width
-/// character with nothing to attach to are clusters of their own. Width is a
-/// maximum over parts, never a sum.
+/// The clusters of a line, in order, with their display columns: a zero-width character, one
+/// after a ZWJ, or the second regional indicator joins the previous cluster.
 pub fn clusters(chars: &[char], tab_width: usize) -> Vec<Cluster> {
     Clusters::new(chars, tab_width).collect()
 }
 
-/// [`clusters`] as a lazy iterator, so a caller that stops early does not walk
-/// the tail; one implementation, so the forms cannot drift.
+/// [`clusters`] as a lazy iterator, so a caller that stops early does not walk the tail.
 pub struct Clusters<'a> {
     chars: &'a [char],
     tab_width: usize,
@@ -182,8 +166,8 @@ impl Iterator for Clusters<'_> {
                 w,
             });
         }
-        // Scan the whole cluster before yielding it: the parts that join are
-        // only known once seen.
+        // Scan the whole cluster before yielding it: the parts that join are only known once
+        // seen.
         let mut w = char_width(c);
         let mut end = start + 1;
         while let Some(&n) = chars.get(end) {
@@ -214,19 +198,14 @@ impl Iterator for Clusters<'_> {
     }
 }
 
-/// Rendered width of a line: the sum of its cluster widths, tabs measured
-/// from the line start. A ZWJ sequence counts as its one glyph, not its parts.
+/// Rendered width of a line: the sum of its cluster widths, tabs measured from the line start.
 pub fn width(chars: &[char], tab_width: usize) -> usize {
     clusters(chars, tab_width).iter().map(|c| c.w).sum()
 }
 
-/// Where each wrap segment of a line begins: `(char index, display column)`,
-/// always at least one entry, for a viewport `view_w` columns wide. Greedy
-/// over whole clusters — never a split wide character or a base from its
-/// marks; a cluster wider than the viewport overflows its segment rather than
-/// becoming a row per character. The display column travels with the index
-/// because a segment's start is not `seg * view_w` once characters are wider
-/// than one column.
+/// Where each wrap segment of a line begins: `(char index, display column)`, at least one entry.
+/// Greedy over whole clusters, so nothing is split; an over-wide cluster overflows rather than
+/// becoming a row per character.
 pub fn segments(chars: &[char], tab_width: usize, view_w: usize) -> Vec<(usize, usize)> {
     let vw = view_w.max(1);
     let cls = clusters(chars, tab_width);
@@ -237,8 +216,8 @@ pub fn segments(chars: &[char], tab_width: usize, view_w: usize) -> Vec<(usize, 
     let mut used = 0usize;
     for c in &cls {
         if used > 0 && used + c.w > vw && used <= vw {
-            // Start a new segment here and measure from it; a tab's width
-            // depends on the absolute column, so only the fill resets.
+            // Start a new segment here and measure from it; a tab's width depends on the
+            // absolute column, so only the fill resets.
             starts.push((c.start, c.disp));
             used = c.w;
         } else {
@@ -258,8 +237,7 @@ mod tests {
 
     #[test]
     fn lazy_and_eager_clusters_agree() {
-        // The two forms are separate code paths; an early stop must see the
-        // same clusters.
+        // The two forms are separate code paths; an early stop must see the same clusters.
         for s in [
             "",
             "abc",
@@ -392,8 +370,7 @@ mod tests {
 
     #[test]
     fn segments_agree_with_width() {
-        // Each segment fits the viewport unless it holds a cluster that
-        // cannot fit on its own.
+        // Each segment fits the viewport unless it holds a cluster that cannot fit on its own.
         for (s, vw) in [
             ("hello world this is a line", 7),
             ("中文中文中文中文", 5),

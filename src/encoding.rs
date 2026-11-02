@@ -1,6 +1,5 @@
-//! File encodings: what the bytes are, and how to keep them that way — a BOM,
-//! else valid UTF-8, else windows-1252, which maps every byte so a legacy file
-//! opens; a save re-encodes it.
+//! File encodings: what the bytes are, and how to keep them that way — a BOM, else valid
+//! UTF-8, else windows-1252, which maps every byte so a legacy file opens; a save re-encodes it.
 
 /// How a file's bytes map to characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,8 +36,7 @@ impl Encoding {
         }
     }
 
-    /// Whether the file's rows can be split on `0x0A` bytes — what makes the lazy
-    /// loader possible: UTF-16 stores `U+000A` as two bytes.
+    /// Whether the file's rows can be split on `0x0A` bytes, which is what the lazy loader needs.
     pub fn rows_split_on_byte_newlines(self) -> bool {
         matches!(self, Self::Utf8 | Self::Utf8Bom | Self::Cp1252)
     }
@@ -46,8 +44,8 @@ impl Encoding {
 
 /// The BOM a byte prefix starts with, if any. Four to six comparisons.
 pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
-    // UTF-32 before UTF-16: its `FF FE 00 00` starts with UTF-16LE's BOM, and is
-    // unsupported — refusing by name beats misreading it.
+    // UTF-32 before UTF-16: its `FF FE 00 00` starts with UTF-16LE's BOM, and is unsupported —
+    // refusing by name beats misreading it.
     if prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
         || prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
     {
@@ -68,14 +66,13 @@ pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
 /// How many bytes [`is_binary`] looks at: git's number.
 pub const BINARY_PROBE: usize = 8000;
 
-/// Whether these bytes are a binary file: a NUL in the first [`BINARY_PROBE`]
-/// bytes — without it a `.pyc` would open as mojibake and could be saved back.
+/// Whether these bytes are a binary file: a NUL in the first [`BINARY_PROBE`] bytes.
 pub fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
 }
 
-/// Whether the bytes handed to [`detect`] are the whole file or a prefix: a
-/// truncated final sequence is the reader's cut in one and the file's in the other.
+/// Whether the bytes handed to [`detect`] are the whole file or a prefix: a truncated final
+/// sequence is the reader's cut in one and the file's in the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// More bytes follow; a truncated final sequence is the reader's doing.
@@ -84,24 +81,22 @@ pub enum Scope {
     Whole,
 }
 
-/// Decide the encoding: the BOM if there is one, else UTF-8 if the bytes validate,
-/// else windows-1252.
+/// Decide the encoding: the BOM if there is one, else UTF-8 if the bytes validate, else cp1252.
 pub fn detect(bytes: &[u8], scope: Scope) -> Encoding {
     if let Some(enc) = bom_of(bytes) {
         return enc;
     }
     match std::str::from_utf8(bytes) {
         Ok(_) => Encoding::Utf8,
-        // An incomplete sequence at the very end: the reader's cut in a prefix,
-        // the file's own in a whole file.
+        // An incomplete sequence at the very end: the reader's cut in a prefix, the file's own
+        // in a whole file.
         Err(e) if e.error_len().is_none() && scope == Scope::Prefix => Encoding::Utf8,
         Err(_) => Encoding::Cp1252,
     }
 }
 
-/// The scalar a byte maps to in windows-1252: latin-1 everywhere but
-/// `0x80`–`0x9F`, where the standard's printable characters replace the C1
-/// controls. Total.
+/// The scalar a byte maps to in windows-1252: latin-1 but for `0x80`–`0x9F`, where the
+/// standard's printable characters replace the C1 controls.
 fn cp1252_char(b: u8) -> char {
     const C1: [char; 32] = [
         '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
@@ -116,8 +111,7 @@ fn cp1252_char(b: u8) -> char {
     }
 }
 
-/// The byte a windows-1252 character came from; the inverse of [`cp1252_char`],
-/// asked of it so the two cannot drift.
+/// The byte a windows-1252 character came from; the inverse of [`cp1252_char`].
 fn cp1252_byte(c: char) -> Option<u8> {
     let u = c as u32;
     if u < 0x80 || (0xA0..=0xFF).contains(&u) {
@@ -126,8 +120,8 @@ fn cp1252_byte(c: char) -> Option<u8> {
     (0x80..=0x9Fu8).find(|b| cp1252_char(*b) == c)
 }
 
-/// Decode `bytes` as `enc`, with the BOM stripped. `Err` only for a UTF-16
-/// length that cannot hold whole code units, or a lone surrogate.
+/// Decode `bytes` as `enc`, with the BOM stripped. `Err` only for a bad UTF-16 length or a lone
+/// surrogate.
 pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
     let bom = enc.bom();
     let body = bytes.strip_prefix(bom).unwrap_or(bytes);
@@ -256,8 +250,8 @@ mod tests {
         for (label, want, bytes) in shapes() {
             assert_eq!(detect(&bytes, Scope::Whole), want, "{label}");
         }
-        // Detection is a prefix operation: any prefix past the BOM, or past
-        // the first offending byte, gives the same answer.
+        // Detection is a prefix operation: any prefix past the BOM, or past the first offending
+        // byte, gives the same answer.
         for (label, want, bytes) in shapes() {
             let from = if want == Encoding::Cp1252 {
                 bytes
@@ -319,8 +313,7 @@ mod tests {
 
     #[test]
     fn a_utf8_bom_is_stripped_and_not_a_column() {
-        // Without stripping, U+FEFF would be the first character — invisible,
-        // but Home and `^`-anchored regexes see it.
+        // Without stripping, U+FEFF would be the first character, and anchors would see it.
         let bytes = [&[0xEF, 0xBB, 0xBF][..], b"hello\n"].concat();
         let enc = detect(&bytes, Scope::Whole);
         assert_eq!(enc, Encoding::Utf8Bom);
@@ -421,8 +414,7 @@ mod binary_probe {
         assert!(!is_binary(&[0xff; 64]));
     }
 
-    /// Only the first [`BINARY_PROBE`] bytes are looked at, so a stray byte
-    /// far into a log cannot reclassify it.
+    /// Only the first [`BINARY_PROBE`] bytes are looked at, so a stray byte in a log is ignored.
     #[test]
     fn only_the_first_probe_is_read() {
         let mut far = vec![b'x'; BINARY_PROBE + 100];

@@ -398,6 +398,10 @@ fn sgr_mouse(params: &[u8], release: bool) -> Option<Event> {
     Some(Event::Mouse(MouseEvent { kind, x, y, mods }))
 }
 
+/// **The modifier bits no terminal without the protocol can carry**: super, hyper and meta.
+/// The two lock bits (caps, num) are states rather than modifiers and never hide a key.
+const UNSPELLABLE: u8 = 8 | 16 | 32;
+
 /// `CSI code ; mods u` → the event it means. See the arm in [`csi`].
 fn kitty_key(params: &[u8]) -> Option<Event> {
     let (code, bits) = kitty_fields(params)?;
@@ -414,6 +418,23 @@ fn kitty_key(params: &[u8]) -> Option<Event> {
     }
     if code == 27 && bits == 0 {
         return Some(key(KeyCode::Esc, Mods::NONE));
+    }
+    // **A modifier no legacy byte can carry** — ⌘ (super), hyper, meta — must not go through
+    // the round trip below: `kitty_legacy` re-emits alt and ctrl only, so the key came back as
+    // the plain character, and ⌘C typed a `c` (the operator's report, 2026-10-27). Report the
+    // character with the modifiers it came with instead, so an app that binds the chord sees
+    // it and one that does not swallows it.
+    //
+    // A control code point is not a character anybody typed (⌘Enter is nothing, not Enter), a
+    // private-use code is not a character at all, and a modifier with no bit in [`Mods`]
+    // (hyper or meta alone) must not leave the letter looking unmodified — that is the same
+    // typed `c` again under another name.
+    if bits & UNSPELLABLE != 0 {
+        let ch = char::from_u32(code)?;
+        if ch.is_control() || mods.is_empty() || ('\u{e000}'..='\u{f8ff}').contains(&ch) {
+            return None;
+        }
+        return Some(key(KeyCode::Char(ch), mods));
     }
     let legacy = kitty_legacy(code, bits)?;
     let (events, _) = decode_prefix(&legacy, true);
@@ -833,6 +854,68 @@ mod tests {
         assert_eq!(one(b"\x1b[57441u"), Vec::<Event>::new());
         // An arrow is still the legacy CSI under flag 1.
         assert_eq!(one(b"\x1b[A"), vec![k(KeyCode::Up)]);
+    }
+
+    /// **A modifier no legacy byte can carry reaches the app as itself**, not as its plain
+    /// letter — measured 2026-10-27 from the operator's report, *"Cmd-C with a mouse selection
+    /// copies AND types a `c`"*. Two things dropped the bit: `Mods::from_bits(b & 7)` masked it
+    /// away, and `kitty_key` put the character back through the legacy bytes, which carry alt
+    /// and ctrl only. Both are fixed, so the chord arrives with its super.
+    #[test]
+    fn a_super_key_is_itself_and_not_its_legacy_letter() {
+        let one = |b: &[u8]| {
+            let (k, used) = decode_prefix(b, false);
+            assert_eq!(used, b.len(), "{b:?} not consumed whole");
+            k
+        };
+        // ⌘C — modifier 9 is `1 + 8`, bit 8 is super. The reported key.
+        assert_eq!(
+            one(b"\x1b[99;9u"),
+            vec![key(KeyCode::Char('c'), Mods::SUPER)]
+        );
+        // ⌘Z, the undo the operator reaches for.
+        assert_eq!(
+            one(b"\x1b[122;9u"),
+            vec![key(KeyCode::Char('z'), Mods::SUPER)]
+        );
+        // ⌘⌃C keeps BOTH bits: it is not a bare Ctrl-C, which is what made the chord that was
+        // meant to copy interrupt a turn instead.
+        assert_eq!(
+            one(b"\x1b[99;13u"),
+            vec![key(KeyCode::Char('c'), Mods::SUPER | Mods::CTRL)]
+        );
+        // ⌘⇧Z, in both spellings a terminal may choose: the shifted letter with shift, or the
+        // unshifted one with the bit (which is how `CSI 122;6u` reports ctrl+shift+z).
+        assert_eq!(
+            one(b"\x1b[122;10u"),
+            vec![key(KeyCode::Char('z'), Mods::SUPER | Mods::SHIFT)]
+        );
+        assert_eq!(
+            one(b"\x1b[90;10u"),
+            vec![key(KeyCode::Char('Z'), Mods::SUPER | Mods::SHIFT)]
+        );
+        // Hyper (16) and meta (32) have no bit in `Mods`, so the key is still not a typed
+        // letter — a modifier that cannot be carried must not become none.
+        assert_eq!(one(b"\x1b[99;17u"), Vec::<Event>::new());
+        assert_eq!(one(b"\x1b[99;33u"), Vec::<Event>::new());
+        // Caps lock is a state, not a modifier: a caps-locked ⌘C is still ⌘C.
+        assert_eq!(
+            one(b"\x1b[99;73u"),
+            vec![key(KeyCode::Char('c'), Mods::SUPER)]
+        );
+        // A control code point carrying one is nothing.
+        assert_eq!(one(b"\x1b[13;9u"), Vec::<Event>::new());
+        // And every arm that was here before still means what it meant.
+        assert_eq!(one(b"\x1b[99;5u"), decode(b"\x03"));
+        assert_eq!(one(b"\x1b[13;2u"), vec![key(KeyCode::Enter, Mods::SHIFT)]);
+        assert_eq!(one(b"\x1b[99u"), vec![ch('c')]);
+        assert_eq!(one(b"\x1b[57414u"), vec![k(KeyCode::Enter)]);
+        assert_eq!(
+            one(b"\x1b[57414;2u"),
+            vec![key(KeyCode::Enter, Mods::SHIFT)]
+        );
+        assert_eq!(one(b"\x1b[57399u"), vec![ch('0')]);
+        assert_eq!(one(b"\x1b[98;3u"), vec![alt(KeyCode::Char('b'))]);
     }
 
     #[test]

@@ -235,6 +235,15 @@ impl CodePaint {
         // `split` on that gives a phantom empty row in the box. The rows a
         // *fence* has is what it was written with.
         let src = self.text.strip_suffix('\n').unwrap_or(&self.text);
+        // **No lines in, no rows out.** An empty fence — the shape the harness's citation
+        // convention writes, and the shape a fence has before its first body line arrives —
+        // used to draw one blank row between `┌─` and `└─`, because `""` splits into one
+        // empty line. A block that says N lines in and draws N + 1 out is the frame lying
+        // about its contents, and the reader cannot tell an empty citation from a citation
+        // whose lines are one blank.
+        if src.is_empty() {
+            return Vec::new();
+        }
         let rows: Vec<Vec<char>> = src.split('\n').map(|l| l.chars().collect()).collect();
         let plain = |chars: &[char]| {
             let mut v = Vec::new();

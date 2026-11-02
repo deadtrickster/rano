@@ -1,7 +1,7 @@
 # Embedding
 
-The editor is a library (`rano::editor`), so another program can show it as a pane rather than
-run it as a second process. The `rano` binary is one such host.
+The editor is a library (`rano::editor`), so a program can show it as a pane. The `rano` binary
+is one such host.
 
 ```rust
 use std::path::Path;
@@ -67,8 +67,7 @@ JSON object:
 ```
 
 The binary's callback runs `send_command` with `sh -c`, the event on stdin and `RANO_FILE`,
-`RANO_LINE` and `RANO_COLUMN` in the environment. It does not wait for the command, and the
-output is discarded, because the terminal belongs to the editor.
+`RANO_LINE` and `RANO_COLUMN` set. It does not wait, and output is discarded.
 
 ## Reviewing a change
 
@@ -76,16 +75,15 @@ output is discarded, because the terminal belongs to the editor.
 on the first changed line and draws the change over the text as a diff view. `Esc` goes to the
 text, `M-p` shows the change again, and `M-s` sends the reader's place from either.
 
-The change is the host's snapshot of the edit when it was made, not a re-diff against the
-buffer.
+The change is the host's snapshot of the edit, not a re-diff against the buffer.
 
 ## Pieces without the editor
 
-The pieces a host may want on their own: `rano::buffer` (the text model), `rano::syntax`
+ `rano::buffer` (the text model), `rano::syntax`
 (language detection and highlighting, with `Highlighter::classes` for a caller that owns its
 palette), `rano::diff` / `rano::sidediff` / `rano::patch` (line diffs and patch files as
 `render` lines), `rano::render` (role-styled spans and lines, a cell buffer, widgets),
 `rano::width` (display width and wrap segments), `rano::theme` (roles and their overrides),
-`rano::term` (raw mode, the row-diffing painter, input decoding, kitty graphics, OSC 8),
-`rano::todo` (the `TODO.md` model, without the editor), and `rano::logtail` / `rano::logsearch`
-(a file's line count and byte offsets with no rows kept, and a search over a file's bytes).
+`rano::term` (raw mode, painter, input decoding, kitty graphics, OSC 8), `rano::todo` (the
+`TODO.md` model), and `rano::logtail` / `rano::logsearch` (line offsets and search over a file
+without loading it).

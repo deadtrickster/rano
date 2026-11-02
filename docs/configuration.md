@@ -34,16 +34,14 @@ capabilities = []
 | `send_command` | a shell command | What `M-s` runs (see [embedding](embedding.md)) |
 | `theme` | a name | `themes/NAME.toml` beside this file |
 | `plugin` | a path | A `.wasm` plugin (see [plugins](plugins.md)) |
-| `capabilities` | `["read-dir"]` | What the plugin may import. Empty grants nothing |
+| `capabilities` | `["read-dir", "read-file", "convert-page"]` | What the plugin may import. Empty grants nothing |
 | `color.ROLE` | a look | One role overridden on top of the theme |
-
-The todo keys need no configuration.
 
 ## Themes
 
 A theme is a set of role overrides, one `role = "look"` line each, read from
-`themes/NAME.toml` beside the config. Without one, every role draws in the terminal's own
-sixteen slots, so the terminal's theme is the theme.
+`themes/NAME.toml` beside the config. Without one, roles use the terminal's sixteen
+colours.
 
 ```toml
 # ~/.config/rano/themes/gray.toml
@@ -56,14 +54,13 @@ faint      = "fg:8"
 A role's name is its variant in snake case. A look is space-separated words:
 
 - `fg:N` / `bg:N` - a theme slot, 0 to 15.
-- `fg:#rrggbb` / `bg:#rrggbb` - an exact colour, for a theme that looks the same whatever the
-  terminal's palette.
+- `fg:#rrggbb` / `bg:#rrggbb` - an exact colour.
 - `fg:cube:N` / `bg:cube:N` - an xterm 256-colour index.
 - `bold`, `dim`, `italic`, `underline`, `reverse`.
 - `plain` - no look at all, on its own.
 
-An override replaces the role's look whole: `heading = "fg:4"` is blue and not bold. A line
-the reader cannot use is reported rather than skipped.
+An override replaces the role's look whole: `heading = "fg:4"` is blue and not bold. A bad
+line is reported.
 
 `color.ROLE = "look"` in `config.toml` does the same thing without a file, in file order.
 
@@ -87,25 +84,19 @@ unless the override says so.
 
 ## Pictures
 
-A terminal that takes inline images draws them. Ghostty does. `RANO_TERM_FEATURES=images`
-turns them on anywhere else. Without one a picture file is read as text, and `M-p` says why.
+A terminal that takes inline images (Ghostty, or any with `RANO_TERM_FEATURES=images`) draws
+them. Otherwise a picture opens as text and `M-p` says why.
 
-The protocol carries PNG, so anything else is converted first by a converter on the machine:
-ImageMagick (`magick` or `convert`), macOS's `sips`, `ffmpeg`, or Python with Pillow, in that
-order, whichever is installed. A conversion is asked to fit the box the picture will be drawn
-in and is watched while it runs: two seconds, 256 MiB of memory, 32 MiB written. A converter
-that passes any of those is killed and said to have been.
+Only PNG is drawn directly. Other formats go through the first converter found: ImageMagick
+(`magick` or `convert`), `sips`, `ffmpeg`, or Python with Pillow. A conversion is killed past
+two seconds, 256 MiB of memory or 32 MiB written.
 
 `RANO_IMAGE_CONVERT` names a converter yourself: a command line with `{in}`, `{out}`, `{w}`,
 `{h}`, `{max}`. An empty value turns conversion off.
 
 ## Updates
 
-With `autoupdate` on, rano makes one request to the GitHub releases API at startup, on a
-background thread, and compares the tag with its own version. A newer release is said so, and
-`M-v` installs it, replacing the binary in place. Nothing is downloaded until you press it. A
-failed check is silent.
-
-Downloads are HTTPS-only and certificate verification is not negotiable: curl runs with `-q`,
-so `~/.curlrc` is not read at all. Both the request and any redirect must be HTTPS.
-`install.sh` uses the same flags.
+With `autoupdate` on, rano asks the GitHub releases API once at startup, in the background.
+A newer release is announced, and `M-v` installs it in place. Nothing is downloaded until then.
+A failed check is silent. Downloads are HTTPS-only, redirects included, and curl runs with `-q`
+so `~/.curlrc` is ignored. `install.sh` uses the same flags.

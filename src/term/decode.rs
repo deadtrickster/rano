@@ -1,35 +1,13 @@
-//! **Bytes from the terminal, read as events** — the legacy encodings, the kitty keyboard,
-//! SGR mouse, focus reports and the strings a terminal sends back (OSC, APC).
+//! Bytes from the terminal, read as events: the legacy encodings, the kitty keyboard, SGR
+//! mouse, focus reports and the strings a terminal sends back (OSC, APC).
 //!
-//! Ported from letibot's `crates/tui/src/backend/decode.rs`. What changed is the output:
-//! letibot decoded straight into its app's `Key` (`0x0b` was `KillToEnd`); this decodes into
-//! [`Event`], which says what was pressed and leaves what it means to the app — see
-//! `super::event`'s header. Everything about *reading* the bytes is letibot's and kept: the
-//! incomplete-tail contract, bracketed paste first, Esc's resolution, the kitty keyboard put
-//! back into the legacy bytes it stands for.
-//!
-//! # Control bytes, and the ones a raw terminal frees
-//!
-//! A C0 byte is Ctrl plus the letter it is the control form of, with the exceptions every
-//! terminal makes: `0x08`/`0x7f` are Backspace, `0x09` Tab, `0x0d`/`0x0a` Enter, `0x1b` Esc.
-//! Several of these are tty controls in cooked mode and free in raw mode, because `cfmakeraw`
-//! clears what listens for them: Ctrl+S/Ctrl+Q (XOFF/XON, `IXON`), Ctrl+V (literal-next,
-//! `IEXTEN`), Ctrl+Z (suspend, `ISIG`), Ctrl+C (interrupt, `ISIG`). So each arrives here as a
-//! key like any other.
-//!
-//! `0x1c`–`0x1f` are Ctrl+`\`, Ctrl+`]`, Ctrl+`^`, Ctrl+`_`. letibot's decoder had no arm for
-//! `0x1c` and ate it, which its pane relied on — the way out of a full-screen program is a key
-//! the program never receives, and it is found on the raw stream (`Terminal::raw_input`),
-//! before anything is forwarded. Here it decodes to Ctrl+`\`; an app that reserves it maps it
-//! to nothing, which is where that decision belongs.
+//! Decoding stops at an incomplete tail — half a UTF-8 sequence, a CSI without its final
+//! byte, an unterminated paste — and the caller carries it into the next read.
 
 use super::event::{Event, KeyCode, KeyEvent, Mods, MouseButton, MouseEvent, MouseKind};
 
-/// Is a bracketed paste open at the end of `b`?
-///
-/// The signal that says "keep reading": a paste's terminator is the only precise
-/// evidence that more bytes are on their way, and without it a 40 KB paste is
-/// decided by a 100 ms timeout in the middle of somebody's stack trace.
+/// Is a bracketed paste open at the end of `b`? The signal to keep reading: its terminator is
+/// the only precise evidence that more bytes are coming.
 pub fn paste_open(b: &[u8]) -> bool {
     let start = rfind(b, PASTE_START);
     let end = rfind(b, PASTE_END);
@@ -52,11 +30,8 @@ fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
         .find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
-/// Decode a read buffer into events.
-///
-/// Convenience over [`decode_prefix`] for a caller with a complete buffer — a
-/// test, or a replay script. Anything trailing and incomplete is decoded as
-/// best it can be, which is what "this is all there is" means.
+/// Decode a read buffer into events, for a caller with a complete buffer: anything trailing and
+/// incomplete is decoded as best it can be.
 pub fn decode(b: &[u8]) -> Vec<Event> {
     decode_prefix(b, true).0
 }
@@ -82,25 +57,14 @@ fn byte_key(c: u8) -> Option<KeyEvent> {
     })
 }
 
-/// Decode as much of `b` as is unambiguously complete, and say how many bytes
-/// that was.
-///
-/// The returned count is the contract: everything past it is an **incomplete
-/// tail** — a UTF-8 sequence cut in half, a CSI whose final byte has not
-/// arrived, a bracketed paste still open — and the caller carries it into the
-/// next read. letibot's first decoder had no such notion, so a read that ended
-/// mid-character failed `from_utf8` and the arm dropped the bytes without a
-/// word. A person pasting an error message is not an edge case.
-///
-/// `force` decodes the tail anyway, for the last read of a stream and for the
-/// ceiling on the carry.
+/// Decode as much of `b` as is unambiguously complete, and say how many bytes that was: the
+/// rest is an incomplete tail the caller carries. `force` decodes the tail anyway.
 pub fn decode_prefix(b: &[u8], force: bool) -> (Vec<Event>, usize) {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        // Bracketed paste, first: everything inside it is content, including
-        // bytes that would otherwise be keys. This is what stops a pasted
-        // newline from submitting a prompt.
+        // Bracketed paste first: everything inside is content, including bytes that would
+        // otherwise be keys. This is what stops a pasted newline from submitting a prompt.
         if b[i..].starts_with(PASTE_START) {
             let body = i + PASTE_START.len();
             match find(&b[body..], PASTE_END) {
@@ -141,12 +105,11 @@ pub fn decode_prefix(b: &[u8], force: bool) -> (Vec<Event>, usize) {
                 out.push(Event::Key(KeyEvent::char(ch)));
                 i += n;
             }
-            // The read ended mid-character. This is the byte-losing bug: hold it,
-            // do not decode it.
+            // The read ended mid-character: hold it, do not decode it.
             Utf8::Short if !force => return (out, i),
             Utf8::Short => return (out, b.len()),
-            // Not UTF-8 at all. Skipping one byte resynchronises without stalling
-            // the stream on it forever.
+            // Not UTF-8 at all. Skipping one byte resynchronises without stalling the
+            // stream on it forever.
             Utf8::Bad => i += 1,
         }
     }
@@ -171,8 +134,7 @@ fn utf8_at(b: &[u8], i: usize) -> Utf8 {
 }
 
 enum Step {
-    /// An event — or nothing, for a sequence recognised and deliberately ignored —
-    /// and how many bytes it took.
+    /// An event — or nothing, for a sequence deliberately ignored — and how many bytes it took.
     Emit(Option<Event>, usize),
     /// The sequence has not finished arriving.
     Incomplete,
@@ -182,20 +144,17 @@ enum Step {
 fn escape(b: &[u8], force: bool) -> Step {
     let esc = Step::Emit(Some(key(KeyCode::Esc, Mods::NONE)), 1);
     if b.len() == 1 {
-        // A lone ESC is Esc. It is genuinely ambiguous — every arrow key starts
-        // this way — and it is resolved in favour of the key a person pressed on
-        // purpose: an Esc that waits for a disambiguating read is an Esc that
-        // arrives a frame late, and a double Esc (letibot's interrupt) is two.
+        // A lone ESC is Esc: every arrow key starts this way, and an Esc that waits for a
+        // disambiguating read arrives a frame late.
         return esc;
     }
     match b[1] {
-        // Two of them. At a 100 ms read they usually arrive in the same buffer —
-        // consuming both as one Alt+Esc would eat a deliberate double Esc.
+        // Two of them: at a 100 ms read they usually share a buffer, and consuming both as
+        // one Alt+Esc would eat a deliberate double Esc.
         0x1b => esc,
         b'[' => csi(b, force),
-        // **A string the terminal sent back**: OSC (`ESC ]`) for the background colour asked
-        // at enter, APC (`ESC _`) for a kitty graphics reply. Consumed whole up to its
-        // terminator — BEL or ST — and never typed: a reply is not a keystroke.
+        // A string the terminal sent back: OSC for the background colour, APC for a kitty
+        // graphics reply. Consumed whole to its terminator and never typed.
         b']' | b'_' => match string_end(&b[2..]) {
             Some((body, used)) => Step::Emit(
                 if b[1] == b']' {
@@ -208,8 +167,8 @@ fn escape(b: &[u8], force: bool) -> Step {
             None if force => esc,
             None => Step::Incomplete,
         },
-        // SS3: the application-cursor-mode arrows, which is what a terminal sends
-        // after `smkx`, and F1–F4.
+        // SS3: the application-cursor-mode arrows, which is what a terminal sends after
+        // `smkx`, and F1–F4.
         b'O' => {
             if b.len() < 3 {
                 return if force { esc } else { Step::Incomplete };
@@ -225,21 +184,15 @@ fn escape(b: &[u8], force: bool) -> Step {
                 b'Q' => Some(KeyCode::F(2)),
                 b'R' => Some(KeyCode::F(3)),
                 b'S' => Some(KeyCode::F(4)),
-                // **The application-keypad Enter.** `ESC O M` is what a keypad's Enter
-                // sends once the terminal is in keypad-transmit mode — `smkx`, which a
-                // full-screen program turns on together with the cursor keys — and it
-                // was the one SS3 sequence with no arm here. So the right-hand Enter
-                // decoded to NOTHING: not a wrong key, no key, and a person pressing it
-                // sees the head ignore them. It is the same byte a `+`-keypad's Enter
-                // sends on a full keyboard, which is where it was noticed.
+                // `ESC O M` is the right-hand Enter once the terminal is in keypad-transmit
+                // mode.
                 b'M' => Some(KeyCode::Enter),
                 _ => None,
             };
             Step::Emit(k.map(|k| key(k, Mods::NONE)), 3)
         }
-        // **Alt+key**: ESC before the key. Alt+Enter is the one that has to work — a
-        // terminal cannot report Shift+Enter at all without the kitty protocol, so it is
-        // how a newline that does not submit gets typed.
+        // Alt+key: ESC before the key. Alt+Enter matters most — without the kitty protocol a
+        // terminal cannot report Shift+Enter at all.
         c if c < 0x80 => match byte_key(c) {
             Some(k) => Step::Emit(Some(key(k.code, k.mods | Mods::ALT)), 2),
             None => Step::Emit(None, 2),
@@ -274,9 +227,8 @@ fn csi(b: &[u8], force: bool) -> Step {
         i += 1;
     }
     if i >= b.len() {
-        // The final byte has not arrived. Holding is the whole point: decoding
-        // `\x1b[` as an Esc and a `[` is how half an arrow key becomes typed
-        // punctuation in the middle of a prompt.
+        // The final byte has not arrived. Holding is the point: decoding `\x1b[` as an Esc
+        // and a `[` is how half an arrow key becomes typed punctuation mid-prompt.
         return if force {
             Step::Emit(Some(key(KeyCode::Esc, Mods::NONE)), 1)
         } else {
@@ -289,10 +241,8 @@ fn csi(b: &[u8], force: bool) -> Step {
     let mods = csi_mods(params);
     let k = |c| Some(key(c, mods));
     let e = match fin {
-        // **The kitty keyboard** (`CSI code ; mods u`), put back into the legacy bytes it
-        // stands for and decoded as those — so every binding already written for the legacy
-        // spelling means the same key under the protocol, and the only new facts are the two
-        // the protocol exists for: Shift+Enter is a key, and Esc is never half of something.
+        // The kitty keyboard: put back into the legacy bytes it stands for, so existing
+        // bindings mean the same key; the new facts are Shift+Enter and a bare Esc.
         b'u' => kitty_key(params),
         // Focus reports (`?1004`): the window gained or lost focus.
         b'I' if params.is_empty() => Some(Event::FocusGained),
@@ -330,10 +280,8 @@ fn csi(b: &[u8], force: bool) -> Step {
             b"24" => k(KeyCode::F(12)),
             _ => None,
         },
-        // SGR mouse (`?1006`): `ESC [ < b ; x ; y M` on press and motion, `m` on release.
-        // Every report is decoded — a report nobody acts on must never become typed
-        // punctuation — and the app decides which it wants. Selecting text stays the
-        // terminal's own Shift+drag, which mouse tracking does not take away.
+        // SGR mouse: every report is decoded, so one nobody acts on never becomes typed
+        // punctuation; the app picks the ones it wants.
         b'M' | b'm' if params.first() == Some(&b'<') => sgr_mouse(&params[1..], fin == b'm'),
         _ => None,
     };
@@ -350,11 +298,8 @@ fn sgr_mouse(params: &[u8], release: bool) -> Option<Event> {
     let btn = fields.next()??;
     let x = fields.next().flatten().unwrap_or(1).saturating_sub(1);
     let y = fields.next().flatten().unwrap_or(1).saturating_sub(1);
-    // **Bit 7 is the extra buttons** (back, forward — buttons 8 to 11), and a wheel report
-    // with the motion bit set is no wheel step anyone made. rano has no kind for either, so
-    // neither is anything: read through `btn & 3` they came out as a left, middle or right
-    // press, and a back button over a picker selected the row under the pointer. letibot's
-    // decoder, which this one replaced, dropped them; so does this.
+    // Bit 7 is the extra buttons, and a wheel report with the motion bit set is no wheel step:
+    // read through `btn & 3` they came out as a press over the row under the pointer.
     if btn & 128 != 0 || (btn & 64 != 0 && btn & 32 != 0) {
         return None;
     }
@@ -398,8 +343,7 @@ fn sgr_mouse(params: &[u8], release: bool) -> Option<Event> {
     Some(Event::Mouse(MouseEvent { kind, x, y, mods }))
 }
 
-/// **The modifier bits no terminal without the protocol can carry**: super, hyper and meta.
-/// The two lock bits (caps, num) are states rather than modifiers and never hide a key.
+/// The modifier bits no terminal without the protocol can carry: super, hyper and meta.
 const UNSPELLABLE: u8 = 8 | 16 | 32;
 
 /// `CSI code ; mods u` → the event it means. See the arm in [`csi`].
@@ -419,16 +363,8 @@ fn kitty_key(params: &[u8]) -> Option<Event> {
     if code == 27 && bits == 0 {
         return Some(key(KeyCode::Esc, Mods::NONE));
     }
-    // **A modifier no legacy byte can carry** — ⌘ (super), hyper, meta — must not go through
-    // the round trip below: `kitty_legacy` re-emits alt and ctrl only, so the key came back as
-    // the plain character, and ⌘C typed a `c` (the operator's report, 2026-10-27). Report the
-    // character with the modifiers it came with instead, so an app that binds the chord sees
-    // it and one that does not swallows it.
-    //
-    // A control code point is not a character anybody typed (⌘Enter is nothing, not Enter), a
-    // private-use code is not a character at all, and a modifier with no bit in [`Mods`]
-    // (hyper or meta alone) must not leave the letter looking unmodified — that is the same
-    // typed `c` again under another name.
+    // A modifier no legacy byte can carry must not go through the round trip below, which
+    // re-emits alt and ctrl only. A control code point is not a typed character either.
     if bits & UNSPELLABLE != 0 {
         let ch = char::from_u32(code)?;
         if ch.is_control() || mods.is_empty() || ('\u{e000}'..='\u{f8ff}').contains(&ch) {
@@ -441,8 +377,7 @@ fn kitty_key(params: &[u8]) -> Option<Event> {
     events.into_iter().next()
 }
 
-/// The code point and the modifier bits (shift 1, alt 2, ctrl 4) of a `CSI … u`. The wire
-/// carries `1 + bits`, and a missing modifier field is none.
+/// The code point and the modifier bits of a `CSI … u`: the wire carries `1 + bits`.
 fn kitty_fields(params: &[u8]) -> Option<(u32, u8)> {
     let text = std::str::from_utf8(params).ok()?;
     let mut fields = text.split(';');
@@ -455,15 +390,8 @@ fn kitty_fields(params: &[u8]) -> Option<(u32, u8)> {
     Some((code, mods))
 }
 
-/// **What one of the keypad's private-use codes means**, under the kitty keyboard.
-///
-/// The protocol's "disambiguate" flag — the one this terminal asks for — reports every keypad
-/// key by its own code (`57399` is `KP_0`, `57414` is `KP_ENTER`), and with no arm for them the
-/// keypad decoded to nothing at all: the right-hand Enter could not open a subagent or answer a
-/// card, and the keypad's digits typed nothing. The operator, 2026-10-11: *"the numpad enter
-/// can't enter subagent"*, *"access cards too"*. A keypad key means the key it is printed with:
-/// a digit, an operator, Enter, or — with NumLock off — an arrow, a page key, Home, End,
-/// Insert or Delete. `KP_BEGIN` (the centre key without NumLock) has no meaning and stays none.
+/// What one of the keypad's private-use codes means: a keypad key means the key it is printed
+/// with, and `KP_BEGIN` has no meaning at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Keypad {
     /// The same as this plain code point (a character, or 13 for Enter).
@@ -499,7 +427,7 @@ fn keypad(code: u32) -> Option<Keypad> {
 }
 
 /// What a terminal without the protocol sends for this key, or `None` for a key it has no
-/// spelling for (a private-use code that is not the keypad's, and the keypad's centre key).
+/// spelling for.
 fn kitty_legacy(code: u32, mods: u8) -> Option<Vec<u8>> {
     let (alt, ctrl) = (mods & 2 != 0, mods & 4 != 0);
     let code = match keypad(code) {
@@ -532,14 +460,8 @@ fn kitty_legacy(code: u32, mods: u8) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// **The raw stream with every `CSI … u` rewritten to its legacy bytes**, for a pane whose
-/// program never asked for the protocol. Everything else passes through untouched.
-///
-/// A program that owns the screen reads the bytes the terminal sent, and an [`Event`] is a
-/// lossy reading of them (`ESC [ A` and `ESC O A` are both Up; a paste has lost its markers),
-/// so re-encoding events would be a keymap in front of a terminal. Under the kitty keyboard,
-/// though, the raw stream is in a spelling the program never asked for — Ctrl-C arrives as
-/// `CSI 99;5u` — so it is put back into what a terminal without the protocol would have sent.
+/// The raw stream with every `CSI … u` rewritten to its legacy bytes, for a pane whose program
+/// never asked for the protocol. Everything else passes through untouched.
 pub fn legacy_bytes(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0;
@@ -571,8 +493,8 @@ pub fn legacy_bytes(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Where an OSC/APC string ends: its body's length and the bytes used including the
-/// terminator (BEL, or ST = `ESC \`). `None` while it has not finished arriving.
+/// Where an OSC/APC string ends: its body's length and the bytes used with the terminator.
+/// `None` while it has not finished arriving.
 fn string_end(b: &[u8]) -> Option<(usize, usize)> {
     for (i, &c) in b.iter().enumerate() {
         if c == 0x07 {
@@ -643,8 +565,7 @@ mod tests {
         assert_eq!(decode(b"\x7f"), vec![k(KeyCode::Backspace)]);
         assert_eq!(decode(b"\x1b"), vec![k(KeyCode::Esc)]);
         assert_eq!(decode(b"\x18"), vec![ctrl('x')]);
-        // `0x0e` had no arm in letibot's first decoder and was eaten silently — a key that
-        // did nothing rather than a key bound to nothing. Every C0 byte is a key here.
+        // `0x0e` had no arm in the decoder this replaced and was eaten silently.
         assert_eq!(decode(b"\x0e"), vec![ctrl('n')]);
         assert_eq!(decode(b"\x00"), vec![ctrl(' ')]);
         for c in 0x01u8..=0x1a {
@@ -657,9 +578,7 @@ mod tests {
 
     #[test]
     fn a_read_that_ends_mid_utf8_loses_nothing() {
-        // letibot's bug, as an assertion: a read that split a character failed the whole
-        // decode and the arm returned nothing, silently. Pasting a stack trace with an
-        // arrow or a box-drawing character in it lost bytes.
+        // The bug as an assertion: a split character failed the whole decode, silently.
         let whole = "héllo → wörld ⣿".as_bytes();
         for cut in 1..whole.len() {
             let (a, b) = whole.split_at(cut);
@@ -684,8 +603,8 @@ mod tests {
 
     #[test]
     fn an_escape_sequence_split_across_two_reads_is_one_key_not_typed_punctuation() {
-        // A lone ESC is the one deliberate exception: genuinely ambiguous, and resolved
-        // in favour of the key a person pressed on purpose.
+        // A lone ESC is the one deliberate exception: ambiguous, and resolved in favour of
+        // the key a person pressed on purpose.
         assert_eq!(decode_prefix(b"\x1b", false), (vec![k(KeyCode::Esc)], 1));
         assert_eq!(decode(b"\x1b\x1b"), vec![k(KeyCode::Esc), k(KeyCode::Esc)]);
 
@@ -739,8 +658,7 @@ mod tests {
         assert_eq!(decode(whole).len(), 1);
     }
 
-    /// The extra buttons (back/forward, bit 7) and a wheel code with the motion bit are not
-    /// a press or a scroll: they decode to nothing rather than to a left click.
+    /// The extra buttons and a wheel code with the motion bit are not a press or a scroll.
     #[test]
     fn extra_buttons_and_moving_wheels_are_not_clicks() {
         for wire in [
@@ -779,8 +697,7 @@ mod tests {
             (&b"\x1b[C"[..], k(KeyCode::Right)),
             (b"\x1b[D", k(KeyCode::Left)),
             (b"\x1bOC", k(KeyCode::Right)),
-            // The application-keypad Enter — the right-hand Enter on a full keyboard,
-            // which sent `ESC O M` and decoded to nothing at all until this arm existed.
+            // The application-keypad Enter, which decoded to nothing at all before this arm.
             (b"\x1bOM", k(KeyCode::Enter)),
             (b"\x1b[H", k(KeyCode::Home)),
             (b"\x1b[3~", k(KeyCode::Delete)),
@@ -818,8 +735,8 @@ mod tests {
         );
     }
 
-    /// **The kitty keyboard means the keys the legacy spelling already meant**, plus the
-    /// two it exists for: Shift+Enter is a key, and Esc is Esc.
+    /// The kitty keyboard means the keys the legacy spelling already meant, plus Shift+Enter
+    /// and a bare Esc.
     #[test]
     fn kitty_keys_decode_to_their_legacy_meaning() {
         let one = |b: &[u8]| {
@@ -834,9 +751,7 @@ mod tests {
         assert_eq!(one(b"\x1b[98;3u"), vec![alt(KeyCode::Char('b'))]);
         // A plain key the protocol chose to report anyway.
         assert_eq!(one(b"\x1b[97u"), vec![ch('a')]);
-        // **The keypad means what is printed on it** — the right-hand Enter is Enter (and keeps
-        // its shift), the digits and operators type, and with NumLock off it is the arrows and
-        // the page keys. Only the centre key (`KP_BEGIN`) means nothing.
+        // The keypad means what is printed on it, and only the centre key means nothing.
         assert_eq!(one(b"\x1b[57414u"), vec![k(KeyCode::Enter)]);
         assert_eq!(
             one(b"\x1b[57414;2u"),
@@ -856,11 +771,7 @@ mod tests {
         assert_eq!(one(b"\x1b[A"), vec![k(KeyCode::Up)]);
     }
 
-    /// **A modifier no legacy byte can carry reaches the app as itself**, not as its plain
-    /// letter — measured 2026-10-27 from the operator's report, *"Cmd-C with a mouse selection
-    /// copies AND types a `c`"*. Two things dropped the bit: `Mods::from_bits(b & 7)` masked it
-    /// away, and `kitty_key` put the character back through the legacy bytes, which carry alt
-    /// and ctrl only. Both are fixed, so the chord arrives with its super.
+    /// A modifier no legacy byte can carry reaches the app as itself, not as its plain letter.
     #[test]
     fn a_super_key_is_itself_and_not_its_legacy_letter() {
         let one = |b: &[u8]| {
@@ -868,24 +779,23 @@ mod tests {
             assert_eq!(used, b.len(), "{b:?} not consumed whole");
             k
         };
-        // ⌘C — modifier 9 is `1 + 8`, bit 8 is super. The reported key.
+        // super+C — modifier 9 is `1 + 8`, bit 8 is super.
         assert_eq!(
             one(b"\x1b[99;9u"),
             vec![key(KeyCode::Char('c'), Mods::SUPER)]
         );
-        // ⌘Z, the undo the operator reaches for.
+        // super+Z, the undo the operator reaches for.
         assert_eq!(
             one(b"\x1b[122;9u"),
             vec![key(KeyCode::Char('z'), Mods::SUPER)]
         );
-        // ⌘⌃C keeps BOTH bits: it is not a bare Ctrl-C, which is what made the chord that was
-        // meant to copy interrupt a turn instead.
+        // super+ctrl+C keeps BOTH bits: not a bare Ctrl-C, which interrupted a turn instead of
+        // copying.
         assert_eq!(
             one(b"\x1b[99;13u"),
             vec![key(KeyCode::Char('c'), Mods::SUPER | Mods::CTRL)]
         );
-        // ⌘⇧Z, in both spellings a terminal may choose: the shifted letter with shift, or the
-        // unshifted one with the bit (which is how `CSI 122;6u` reports ctrl+shift+z).
+        // super+shift+Z, in both spellings a terminal may choose.
         assert_eq!(
             one(b"\x1b[122;10u"),
             vec![key(KeyCode::Char('z'), Mods::SUPER | Mods::SHIFT)]
@@ -894,18 +804,18 @@ mod tests {
             one(b"\x1b[90;10u"),
             vec![key(KeyCode::Char('Z'), Mods::SUPER | Mods::SHIFT)]
         );
-        // Hyper (16) and meta (32) have no bit in `Mods`, so the key is still not a typed
-        // letter — a modifier that cannot be carried must not become none.
+        // Hyper and meta have no bit in `Mods`, and a modifier that cannot be carried must not
+        // become none.
         assert_eq!(one(b"\x1b[99;17u"), Vec::<Event>::new());
         assert_eq!(one(b"\x1b[99;33u"), Vec::<Event>::new());
-        // Caps lock is a state, not a modifier: a caps-locked ⌘C is still ⌘C.
+        // Caps lock is a state, not a modifier: a caps-locked super+C is still super+C.
         assert_eq!(
             one(b"\x1b[99;73u"),
             vec![key(KeyCode::Char('c'), Mods::SUPER)]
         );
         // A control code point carrying one is nothing.
         assert_eq!(one(b"\x1b[13;9u"), Vec::<Event>::new());
-        // And every arm that was here before still means what it meant.
+        // And every arm with no super bit still means what it meant.
         assert_eq!(one(b"\x1b[99;5u"), decode(b"\x03"));
         assert_eq!(one(b"\x1b[13;2u"), vec![key(KeyCode::Enter, Mods::SHIFT)]);
         assert_eq!(one(b"\x1b[99u"), vec![ch('c')]);
@@ -936,8 +846,7 @@ mod tests {
         assert!(k.is_empty(), "{k:?}");
     }
 
-    /// **A pane's program reads legacy bytes**, whatever spelling the terminal used — and
-    /// letibot's way out of a pane, `ctrl-\` (`0x1c`), is still the byte it scans for.
+    /// A pane's program reads legacy bytes, whatever spelling the terminal used.
     #[test]
     fn a_pane_gets_legacy_bytes_under_the_kitty_keyboard() {
         assert_eq!(legacy_bytes(b"ls\x1b[99;5u"), b"ls\x03".to_vec());
@@ -953,8 +862,8 @@ mod tests {
             legacy_bytes(b"\x1b[A\x1b[1;5C"),
             b"\x1b[A\x1b[1;5C".to_vec()
         );
-        // `0x1c` cannot be part of a character or the final byte of a CSI, so a raw scan
-        // for it is exact and not a guess about where a sequence ends.
+        // `0x1c` cannot be part of a character or the final byte of a CSI, so a raw scan for
+        // it is exact and not a guess about where a sequence ends.
         assert!(!(0x40..=0x7e).contains(&0x1c));
     }
 }

@@ -1,16 +1,5 @@
-//! **What the terminal said**, in rano's own vocabulary: a key and its modifiers, a paste, a
-//! mouse report, a focus change, or the answer to "is your background light?".
-//!
-//! # Why not letibot's `Key`
-//!
-//! letibot's decoder emitted its app's vocabulary directly — `0x0b` was `KillToEnd`, `ESC b`
-//! was `WordLeft`, Ctrl+X was "show the raw tool call". That is right for one app and wrong for
-//! a library: the editor binds `C-k` to something else, and a second app would have to undo the
-//! first one's meanings. So this says what was *pressed* — `k` with Ctrl — and each app keeps
-//! its own map from that to what it means. letibot's map is a `match` over these.
-//!
-//! The modifier bits are the wire's (xterm and the kitty keyboard both send `1 + bits`), so a
-//! decoder never has to translate them.
+//! What the terminal said: a key and its mods, a paste, a mouse report, a focus change, the
+//! background answer. An event says what was pressed, not what an app binds it to.
 
 /// Shift, Alt, Ctrl and Super, as the wire numbers them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -21,15 +10,10 @@ impl Mods {
     pub const SHIFT: Mods = Mods(1);
     pub const ALT: Mods = Mods(2);
     pub const CTRL: Mods = Mods(4);
-    /// ⌘ on the kitty keyboard's bit 8. No terminal without the protocol has a byte for it,
-    /// which is why a key carrying one is reported as itself and never put back into legacy
-    /// bytes — see `decode::kitty_key`. Dropped here, ⌘C arrived as a typed `c`.
+    /// ⌘, only on the kitty keyboard protocol; a key carrying it never goes back to legacy bytes.
     pub const SUPER: Mods = Mods(8);
 
-    /// From the wire's bit field (the parameter minus one). Shift, alt, ctrl and super are
-    /// kept; hyper, meta and the two lock bits are dropped, because there is no bit here to
-    /// put them in — and a key carrying one is decoded as itself rather than through the
-    /// legacy bytes, so a decoder never has to name it.
+    /// From the wire's bit field (the parameter minus one); hyper, meta and locks dropped.
     pub const fn from_bits(b: u8) -> Mods {
         Mods(b & 15)
     }
@@ -61,9 +45,6 @@ impl Mods {
 mod mods_tests {
     use super::*;
 
-    /// **A `Mods(8)` is a modifier, not none** — every helper here was written when the only
-    /// bits that existed were shift, alt and ctrl, and `is_empty` is what an app asks before
-    /// it types a letter.
     #[test]
     fn super_is_a_modifier_and_not_an_empty_one() {
         let m = Mods::from_bits(8);
@@ -77,11 +58,9 @@ mod mods_tests {
         assert!((Mods::SUPER | Mods::CTRL).ctrl() && (Mods::SUPER | Mods::CTRL).sup());
         assert_eq!(Mods::from_bits(0), Mods::NONE);
         assert!(Mods::NONE.is_empty());
-        // Hyper, meta and the lock bits have no bit of their own.
         for b in [16u8, 32, 64, 128] {
             assert_eq!(Mods::from_bits(b), Mods::NONE, "{b}");
         }
-        // And the three that always worked still do.
         assert_eq!(Mods::from_bits(5), Mods::SHIFT | Mods::CTRL);
     }
 }
@@ -93,15 +72,12 @@ impl std::ops::BitOr for Mods {
     }
 }
 
-/// Which key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyCode {
-    /// A character. A shifted letter is its upper case (the terminal already applied shift);
-    /// a control letter is its lower case with [`Mods::CTRL`].
+    /// A character; shifted letters arrive upper case, control letters with [`Mods::CTRL`].
     Char(char),
     Enter,
     Tab,
-    /// Shift+Tab, which terminals send as its own sequence (`CSI Z`).
     BackTab,
     Backspace,
     Esc,
@@ -119,7 +95,6 @@ pub enum KeyCode {
     F(u8),
 }
 
-/// A key and the modifiers held with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyEvent {
     pub code: KeyCode,
@@ -174,7 +149,6 @@ pub struct MouseEvent {
     pub mods: Mods,
 }
 
-/// One thing the terminal said.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Event {
     Key(KeyEvent),
@@ -183,8 +157,7 @@ pub enum Event {
     Mouse(MouseEvent),
     FocusGained,
     FocusLost,
-    /// The answer to the OSC 11 question asked at enter: whether the background is light,
-    /// which is what chooses `Palette::Light`.
+    /// The OSC 11 answer; a light background chooses `Palette::Light`.
     Background {
         light: bool,
     },

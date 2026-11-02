@@ -1,27 +1,13 @@
-//! Styled text: [`Span`], [`Line`], [`Text`], and the line-level [`wrap`], [`truncate`],
-//! [`ellipsise_left`] and [`fit`].
-//!
-//! The four helpers are `crate::width::text`'s string functions over styled spans
-//! instead of over strings carrying escapes. They are **the same breakpoints**, not a
-//! re-implementation: [`wrap`] hands the flattened cells to `width::text::break_cells`,
-//! the one breakpoint finder letibot's `wrap` and `wrap_ranges` already share, because
-//! two wrappers kept in sync by a comment is a bug with a schedule.
-//!
-//! What changes with the medium: a style is an attribute of the cells, not bytes in the
-//! text, so there is no SGR state to carry across a break and no reset to append — every
-//! returned line is independently paintable by construction, and a link cut by
-//! [`truncate`] is closed by the emitter where the linked cells end.
+//! Styled text: [`Span`], [`Line`], [`Text`], and [`wrap`], [`truncate`], [`ellipsise_left`],
+//! [`fit`] — `crate::width::text`'s string functions over styled spans, sharing its breakpoint
+//! finder. A style is an attribute of the cells, not bytes in the text.
 
 use super::style::Style;
 use crate::style::{Look, Palette, Role};
 use crate::width::text::{Cell, break_cells, for_each_cell};
 
-/// A run of text in one style.
-///
-/// The content is text: an escape sequence in it is **dropped** when it is measured or
-/// drawn, never passed through. Foreign text (a model's prose, a tool's output) lands in
-/// spans, and an escape that reached the terminal from there would be one the terminal
-/// executes; a style is said with [`Style`], not with bytes.
+/// A run of text in one style. An escape sequence in the content is dropped when measured or
+/// drawn: foreign text lands in spans, and a terminal would execute its escapes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Span {
     pub content: String,
@@ -67,8 +53,8 @@ impl From<String> for Span {
     }
 }
 
-/// One row's worth of spans. `style` lies under every span (a span's own style is
-/// patched over it), so a line can say "this is an added diff row" once.
+/// One row's worth of spans. `style` lies under every span, so a line can say "this is an added
+/// diff row" once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Line {
     pub spans: Vec<Span>,
@@ -115,34 +101,17 @@ impl Line {
         s
     }
 
-    /// No text at all (a line of empty spans is still empty).
     pub fn is_empty(&self) -> bool {
         self.spans.iter().all(|s| s.content.is_empty())
     }
 
-    /// Room for a row's ANSI form in one allocation: its text and a sequence and a reset
-    /// per span. A string grown push by push reallocates three or four times a row, and a
-    /// host that converts its live rows every frame pays that per row per frame.
+    /// Room for a row's ANSI form in one allocation, instead of reallocating per frame.
     fn ansi_capacity(&self) -> usize {
         self.spans.iter().map(|s| s.content.len() + 16).sum()
     }
 
-    /// **The line as one ANSI string**, for a host that prints strings rather than
-    /// drawing a [`super::Buffer`]: each span opens its own look (the line's style
-    /// patched under it) and closes with a reset.
-    ///
-    /// Per span rather than [`super::Buffer::emit`]'s minimal transitions, because
-    /// this is what letibot's string painter wrote and what its tests pin, and a
-    /// string is pasted into other strings — one that ends in a reset cannot leave
-    /// its attributes open in the next. Content escapes are dropped, as everywhere
-    /// in `render`; [`Palette::None`] writes no colour.
-    ///
-    /// Two things on a span are not colours and are written under every palette, the way
-    /// letibot's rows always carried them: a **link** (OSC 8, opened before the span and
-    /// closed after it, so a cut row never leaves one open) and the **raw** placeholder
-    /// colours of a kitty image (the id and the placement are addresses — a picture with
-    /// its colour dropped is a picture of nothing), set before the text and unset after it
-    /// with `39`/`59`, as [`crate::term::graphics::image_rows`] spells them.
+    /// The line as one ANSI string, for a host that prints strings rather than drawing a
+    /// [`super::Buffer`]: each span opens its own look and closes with a reset.
     pub fn to_ansi(&self, palette: Palette) -> String {
         let mut out = String::with_capacity(self.ansi_capacity());
         for sp in &self.spans {
@@ -152,20 +121,8 @@ impl Line {
         out
     }
 
-    /// **The line as ANSI for a host that keeps the row's own style open around it** — a
-    /// register drawn under a whole block, like letibot's reasoning, which its host opens
-    /// once at the start of the row (and resets at the end) rather than on every span.
-    ///
-    /// So a span with no style of its own is its text and nothing else: the register is
-    /// already on. A styled span opens its *own* look — not the row's patched under it, the
-    /// terminal still has the row's attributes from the host's open — and closes with a
-    /// reset **and the row's style again**, so the text after it is back in the register.
-    /// A reset alone restores the terminal default, and a heading inside dim reasoning that
-    /// closed to the default turned the rest of the row white: the defect letibot's
-    /// `Painter::inside` existed for, and the convention its rows (and its tests) still keep.
-    ///
-    /// With no row style this is [`Line::to_ansi`] exactly. [`Palette::None`] writes the
-    /// plain text and nothing else.
+    /// [`Line::to_ansi`] for a host that keeps the row's own style open: a styled span closes
+    /// with a reset and the row's style again, since a reset alone restores the terminal default.
     pub fn to_ansi_inside(&self, palette: Palette) -> String {
         let restore = self.style.look(palette);
         let mut out = String::with_capacity(self.ansi_capacity() + 8 * self.spans.len());
@@ -176,10 +133,8 @@ impl Line {
     }
 }
 
-/// One span of a row as ANSI: its link opened, its raw placeholder colours set, its look's
-/// sequence, the text (escapes in the content dropped), then — when a sequence was opened —
-/// a reset and the `restore` look, the raw colours unset and the link closed. Writes onto
-/// `out` and allocates nothing of its own: this runs per span per row per frame.
+/// One span as ANSI: link opened, raw colours set, look, text, then reset, colours unset, link
+/// closed.
 fn push_span_ansi(out: &mut String, sp: &Span, look: Look, restore: Option<Look>) {
     use std::fmt::Write;
     if let Some(url) = &sp.style.link {
@@ -284,14 +239,12 @@ impl From<Line> for Text {
     }
 }
 
-/// A line's grapheme cells, each with the index of the span it came from.
 fn flatten(line: &Line) -> (Vec<Cell<'_>>, Vec<usize>) {
     let mut cells = Vec::new();
     let mut owner = Vec::new();
     for (i, sp) in line.spans.iter().enumerate() {
         for_each_cell(&sp.content, |c| {
             if !c.text.is_empty() {
-                // The escape run is dropped here: see [`Span`].
                 cells.push(Cell { esc: "", ..c });
                 owner.push(i);
             }
@@ -300,7 +253,6 @@ fn flatten(line: &Line) -> (Vec<Cell<'_>>, Vec<usize>) {
     (cells, owner)
 }
 
-/// Rebuild a line from a run of flattened cells, one span per run of a single owner.
 fn rebuild(line: &Line, cells: &[Cell], owner: &[usize]) -> Line {
     let mut out = Line {
         spans: Vec::new(),
@@ -320,13 +272,7 @@ fn rebuild(line: &Line, cells: &[Cell], owner: &[usize]) -> Line {
     out
 }
 
-/// Wrap to `cols` columns: `width::text::wrap`'s three break rules (a space; between two
-/// wide clusters, which is what makes CJK wrap at all; anywhere, when one unbreakable run
-/// is longer than a row), with the styles kept on the cells they belong to.
-///
-/// Trailing spaces and the newline at a break are dropped: invisible, and a painter that
-/// erases to end of line would otherwise paint the row's background one column further
-/// than the text goes; a newline is worse, the terminal acts on it.
+/// Wrap to `cols` columns by `width::text::wrap`'s break rules, styles kept on their cells.
 pub fn wrap(line: &Line, cols: usize) -> Vec<Line> {
     let (cells, owner) = flatten(line);
     let rows = break_cells(&cells, cols.max(4));
@@ -340,11 +286,8 @@ pub fn wrap(line: &Line, cols: usize) -> Vec<Line> {
         .collect()
 }
 
-/// Truncate to `cols` columns, never splitting a cluster.
-///
-/// When something is dropped the last column becomes `…`, so the elision is visible
-/// rather than silent. The ellipsis takes the style of the first cell it stands for —
-/// a cut through a link leaves the `…` linked, and the emitter closes the link after it.
+/// Truncate to `cols` columns, never splitting a cluster. The last column becomes `…`, in the
+/// style of the first cell it stands for — a cut through a link leaves the `…` linked.
 pub fn truncate(line: &Line, cols: usize) -> Line {
     if line.width() <= cols {
         return line.clone();
@@ -365,9 +308,7 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     let mut out = rebuild(line, &cells[..k], &owner[..k]);
     let at = owner.get(k).copied().unwrap_or(line.spans.len() - 1);
     let style = &line.spans[at].style;
-    // **Into the run it ends, when it is the same run** — the shape a string truncate
-    // writes (`…` before the run's reset, not a second run of its own), so a host that
-    // prints rows sends the bytes it always did.
+    // Into the run it ends, when it is the same run — the shape a string truncate writes.
     match out.spans.last_mut() {
         Some(last) if &last.style == style => last.content.push('…'),
         _ => out.spans.push(Span::styled("…", style.clone())),
@@ -375,9 +316,7 @@ pub fn truncate(line: &Line, cols: usize) -> Line {
     out
 }
 
-/// [`truncate`] for a line the caller is done with: handed back as it is when it fits,
-/// which is almost every line of a frame, so a widget's last step costs no copy of its
-/// spans.
+/// [`truncate`] for a line the caller is done with: handed back as it is when it fits.
 pub fn truncate_owned(line: Line, cols: usize) -> Line {
     if line.width() <= cols {
         line
@@ -386,14 +325,8 @@ pub fn truncate_owned(line: Line, cols: usize) -> Line {
     }
 }
 
-/// **Shorten to `cols` columns by eating the LEFT, keeping the end** — the pair to
-/// [`truncate`], and the one to reach for on a path.
-///
-/// A path is recognised by where it ends: `…/src/protocol.rs` names the file, while
-/// `crates/sessionlog/src/protoco…` names only the tree it is in. The cut lands at a
-/// separator when one is within six columns, so the result reads as a path rather than as
-/// a word with a piece missing — bounded, because letibot measured the unbounded nudge
-/// eating a long command down to its last fifty columns.
+/// Shorten to `cols` columns by eating the left, keeping the end — the one to reach for on a
+/// path, landing on a separator when one is within six columns.
 pub fn ellipsise_left(line: &Line, cols: usize) -> Line {
     if line.width() <= cols {
         return line.clone();
@@ -459,8 +392,7 @@ mod tests {
         ])
     }
 
-    /// A link and a picture's placeholder colours are not colours: they are written under
-    /// every palette, and a picture's row is the bytes `image_rows` spells.
+    /// A link and a picture's placeholder colours are written under every palette.
     #[test]
     fn to_ansi_writes_links_and_placeholder_colours_under_every_palette() {
         let l = Line::new(vec![Span::styled(
@@ -481,8 +413,7 @@ mod tests {
         }
     }
 
-    /// Inside a register, a plain span is bare text and a styled one closes back to the
-    /// register; with no register it is `to_ansi`, byte for byte.
+    /// Inside a register a plain span is bare text and a styled one closes back to the register.
     #[test]
     fn to_ansi_inside_restores_the_rows_style_after_every_span() {
         let p = Palette::Colour;
@@ -502,8 +433,6 @@ mod tests {
         assert_eq!(l.to_ansi_inside(Palette::None), "a kw b");
     }
 
-    /// The styled wrap and letibot's string wrap break in the same places, because they
-    /// are the same breakpoint finder.
     #[test]
     fn wrap_breaks_where_the_string_wrap_does() {
         for s in [
@@ -548,12 +477,10 @@ mod tests {
         let t = truncate(&line, 2);
         assert_eq!(t.width(), 2);
         assert_eq!(t.plain(), "a\u{301}…");
-        // A wide character that does not fit is not halved.
         let t = truncate(&Line::raw("你好世界"), 4);
         assert_eq!(t.plain(), "你…");
         assert_eq!(truncate(&Line::raw("short"), 10).plain(), "short");
         assert_eq!(truncate(&Line::raw("short"), 0).width(), 0);
-        // The ellipsis joins the run it ends: one faint run, as a string truncate writes it.
         let t = truncate(&Line::new(vec![Span::role("abcdef", Role::Faint)]), 4);
         assert_eq!(t.spans.len(), 1);
         assert_eq!(t.to_ansi(Palette::Colour), "\x1b[2mabc…\x1b[0m");

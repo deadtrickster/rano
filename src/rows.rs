@@ -1,84 +1,33 @@
-//! The row store: a file's rows, chunked, and only decoded where they are
-//! read.
+//! The row store: a file's rows, chunked, and only decoded where they are read.
 //!
-//! Two problems, one structure, and each half is measured (TODO.md §16.0,
-//! §15):
+//! Two properties it exists to keep: a structural edit costs the same at any file size
+//! (chunking, so no memmove of the whole row vector), and reading does not load the file
+//! (a row is file-backed until edited). Lookup stays O(1).
 //!
-//! 1. **Structural edits scaled with the file.** `Vec<Vec<char>>` costs 1.5 ms
-//!    to insert a row at the top of a 2.6M-row file — a memmove of 2.6M `Vec`
-//!    headers, ~20 MB per keystroke, ~15 ms per Enter at 2 GB. Chunking makes
-//!    it **0.2 µs, flat at any size**. "Size does not influence editability" is
-//!    the principle; this is what keeps it.
-//!
-//! 2. **Reading loaded the file.** 835 MB resident for a 184 MB file, because
-//!    every row was decoded up front. A row here is **file-backed until it is
-//!    edited**: reading decodes from disk on demand and caches, editing
-//!    promotes that one row to owned. There is no "materialise now" cliff, so
-//!    typing in a row costs the same at every file size.
-//!
-//! Lookup stays **O(1)** (chunk index + offset) — which is the property
-//! §13.6a's survey found both a piece table and a rope give up, and the reason
-//! neither was needed.
-//!
-//! # The borrow problem, and how it is solved
-//!
-//! Today a reader gets `&[char]` for free because every row is materialised.
-//! With lazy decode there is nothing to borrow from until the row exists, and
-//! the naive answer — interior mutability, so `row(r)` can fill the cache on
-//! access — puts a runtime borrow check on the hottest path in the program.
-//!
-//! So the API is **prepare-then-read**: [`RowStore::ensure`] makes a range of
-//! rows resident, and [`RowStore::row`] borrows. That is the same discipline
-//! §12's highlight window and §14.6's adoption budget already use — a frame
-//! asks for what it needs, then reads — so it is a pattern this codebase has
-//! rather than a new one.
+//! A reader cannot borrow a row that does not exist yet, so the API is prepare-then-read:
+//! [`RowStore::ensure`] makes a range resident and [`RowStore::row`] borrows.
 
 use crate::encoding::{self, Encoding};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-// ===========================================================================
-// Stage B — file-backed rows, decoded on demand
-// ===========================================================================
-//
-// **Nothing constructs a `RowStore` yet.** Stage A (`Rows`, at the bottom of
-// this file) took the chunking without the lazy decode, because lazy decode is
-// the half that can blank a row: `RowStore::row` returns `&[]` for a row it has
-// not decoded, and an empty row reaches `Buffer::text()` — so a missed `ensure`
-// writes an empty line to the saved file. It waits for an API that cannot lie
-// about a missing row.
-//
-// The binary declares this module `#[allow(dead_code)]` for exactly that
-// reason; the library exports both halves, where nothing here is dead.
+// Stage B — file-backed rows, decoded on demand. Nothing constructs a `RowStore` yet, because
+// a row it has not decoded reads as empty and a save would erase that line.
 
-/// Rows per chunk.
-///
-/// The one number here that is a choice rather than a consequence. Small
-/// enough that a structural edit shifts little (an insert at row 0 measured
-/// 0.2 µs at 1,024); large enough that the chunk index does not become the
-/// memmove. 1,024 rows is 8 KiB of pointers — one cache line's worth of work
-/// beyond the copy that must happen anyway.
+/// Rows per chunk: small enough that a structural edit shifts little, large enough that the
+/// chunk index is not the memmove.
 pub const CHUNK: usize = 1_024;
 
-/// How many rows may be resident at once.
-///
-/// Derived from the viewport rather than fixed, because a frame that misses
-/// the cache is a disk read: the budget has to cover a screen several times
-/// over, or scrolling re-reads on every step. See `RowStore::with_budget`.
+/// How many rows may be resident at once: a cache miss is a disk read, so the budget covers a
+/// screen several times over.
 const DEFAULT_BUDGET: usize = 8_192;
 
-/// One row: where it is, what it is, and whether it can go back.
-///
-/// Three states, and the distinction between the last two is the whole reason
-/// eviction is safe: a DECODED row can be produced again from the file, while
-/// an EDITED row is the only copy of itself. Dropping the wrong one loses an
-/// edit; dropping the right one costs a re-read.
+/// One row: where it is, what it is, and whether it can go back. A decoded row can be produced
+/// again from the file; an edited row is the only copy of itself.
 #[derive(Debug, Clone)]
 enum Row {
-    /// Not decoded. The byte range in the file, which is all a reader needs to
-    /// produce it — and enough to know its LENGTH without producing it, which
-    /// is what lets the wrap table work without decoding a row.
+    /// Not decoded. The byte range, which is enough to produce the row and to know its length.
     File { start: u64, end: u64 },
     /// Decoded, and evictable: it remembers where it came from.
     Decoded {
@@ -86,7 +35,7 @@ enum Row {
         start: u64,
         end: u64,
     },
-    /// Edited. There is no file bytes to go back to, so this is never dropped.
+    /// Edited. There are no file bytes to go back to, so this is never dropped.
     Edited(Vec<char>),
 }
 
@@ -94,31 +43,24 @@ enum Row {
 #[derive(Debug, Clone)]
 struct Chunk {
     rows: Vec<Row>,
-    /// When this chunk was last asked for, for eviction. A monotone counter
-    /// rather than a clock: eviction only needs an order.
+    /// When this chunk was last asked for, for eviction: a monotone counter, not a clock.
     used: u64,
 }
 
 /// A file's rows, chunked, decoded on demand.
 #[derive(Debug)]
 pub struct RowStore {
-    /// The file, held open for positional reads. `None` for a scratch buffer
-    /// with no file — a new document, or one whose file has gone.
+    /// The file, held open for positional reads. `None` for a scratch buffer with no file.
     file: Option<std::fs::File>,
-    /// Where it came from. Not read yet: it is what a re-read after the file
-    /// changed underneath needs (TODO.md §15.3), and dropping it would mean
-    /// asking the caller for a path it already told us.
+    /// Where it came from: what a re-read needs if the file changed underneath.
     #[allow(dead_code)]
     path: Option<PathBuf>,
-    /// Nothing escapes this store, so it never has to describe the file's
-    /// bytes back to the outside.
+    /// Nothing escapes this store, so it never has to describe the file's bytes back.
     encoding: Encoding,
     chunks: Vec<Chunk>,
-    /// First row index of each chunk. Maintained by the mutations; see
-    /// `slot_of` for why it exists rather than `r / CHUNK`.
+    /// First row index of each chunk, maintained by the mutations; see `slot_of`.
     base: Vec<usize>,
-    /// Rows in total. Tracked rather than summed: the whole point is that
-    /// counting must not walk the chunks.
+    /// Rows in total, tracked rather than summed: counting must not walk the chunks.
     rows: usize,
     /// Monotone clock for `Chunk::used`.
     tick: u64,
@@ -147,11 +89,8 @@ impl RowStore {
         }
     }
 
-    /// A store over already-decoded text, keeping it as OWNED rows.
-    ///
-    /// The path for a scratch buffer, a test fixture, and the escape hatch
-    /// `materialize_all` uses. It does not chunk lazily from a file because
-    /// there is no file to read from — the rows are already here.
+    /// A store over already-decoded text, kept as owned rows: a scratch buffer or a test
+    /// fixture, with no file to chunk lazily from.
     pub fn from_lines(lines: Vec<Vec<char>>, encoding: Encoding) -> Self {
         let mut chunks = Vec::new();
         let mut it = lines.into_iter().peekable();
@@ -183,27 +122,13 @@ impl RowStore {
             rows,
             tick: 0,
             budget: DEFAULT_BUDGET,
-            // Owned rows are not counted against the budget: the budget is
-            // about what DECODING may hold, and there is nothing to release
-            // for a row that has been edited.
+            // Owned rows are not counted against the budget, which is about what decoding holds.
             resident: 0,
         }
     }
 
-    /// A store over `path`, **empty and ready to ingest**: the streaming open.
-    ///
-    /// [`Self::open`] indexes the whole file in one pass, which is O(bytes) at
-    /// ~2.2 GB/s — 84 ms for a 193 MB file, but ~470 ms for 1 GB and ~940 ms for
-    /// 2 GB. That is a dead screen at the sizes this editor exists for, and it is
-    /// what §14.6's scheduled loader avoids. So the two halves are separated:
-    /// this opens the file and holds it, and [`Self::ingest`] takes byte ranges as
-    /// they are found — which is what the loader is already computing when it
-    /// scans for newlines to split rows.
-    ///
-    /// The file is opened HERE rather than handed in, which is the other half of
-    /// why this exists: the loader used to own the `File` and drop it when its
-    /// reader thread ended (TODO.md §16.3, option A). Nothing has to hand it back
-    /// now — the store opened its own.
+    /// A store over `path`, empty and ready to ingest: the streaming open, because [`Self::open`]
+    /// indexes the whole file in one pass and that is a dead screen at these sizes.
     pub fn begin(path: &Path, encoding: Encoding) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         Ok(Self {
@@ -219,17 +144,8 @@ impl RowStore {
         })
     }
 
-    /// Append rows for `ranges`, in file order, as file-backed rows.
-    ///
-    /// Nothing is decoded — the ranges are the whole of what this needs, and the
-    /// byte lengths they carry are enough for the wrap table to work without
-    /// producing a row. That is the point: ingest is O(ranges) and allocates two
-    /// `u64` per row, where the loader's decode allocated a `Vec<char>` of four
-    /// bytes per character.
-    ///
-    /// Chunks fill to [`CHUNK`] before a new one starts, so the shape is the same
-    /// as [`Self::open`]'s, which is why the two cannot disagree about row
-    /// numbering.
+    /// Append rows for `ranges`, in file order, as file-backed rows: nothing is decoded, so this
+    /// costs two `u64` per row.
     pub fn ingest(&mut self, ranges: &[(u64, u64)]) {
         for &(start, end) in ranges {
             if self.chunks.last().is_none_or(|c| c.rows.len() >= CHUNK) {
@@ -247,13 +163,8 @@ impl RowStore {
         }
     }
 
-    /// A store over a file, indexed but not decoded.
-    ///
-    /// One pass over the bytes finds every newline — cheap because in UTF-8 a
-    /// `0x0A` byte is always a newline (multi-byte sequences use lead bytes
-    /// `C2`–`F4` and continuation bytes `80`–`BF`), so no decoding is needed to
-    /// find where rows begin. The same pass records each row's byte length,
-    /// which is its character count too when the row is pure ASCII.
+    /// A store over a file, indexed but not decoded: in UTF-8 a `0x0A` byte is always a newline,
+    /// so no decoding is needed. The same pass records each row's byte length.
     pub fn open(path: &Path, encoding: Encoding) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let size = file.metadata()?.len();
@@ -293,8 +204,7 @@ impl RowStore {
         self.encoding = encoding;
     }
 
-    /// The byte range of row `r`, when the file's bytes still describe it.
-    /// `None` once edited — they do not.
+    /// The byte range of row `r`, while the file's bytes still describe it.
     pub fn byte_range(&self, r: usize) -> Option<(u64, u64)> {
         match self.row_slot(r)? {
             Row::File { start, end } | Row::Decoded { start, end, .. } => Some((*start, *end)),
@@ -316,17 +226,8 @@ impl RowStore {
         }
     }
 
-    /// Make rows `[first, last]` resident, decoding from the file as needed.
-    ///
-    /// Decoding is at **chunk granularity** — the whole chunk holding the range
-    /// is decoded, not just the rows in it — because a chunk is the unit of
-    /// locality: a scroll moves by a few rows, and the rest of the chunk they
-    /// are in will be asked for next. So the return is how many rows were
-    /// decoded, which is at least the ones asked for and at most a chunk's
-    /// worth more.
-    ///
-    /// Returns zero when they were all already here, which is the common case
-    /// for a frame that did not move.
+    /// Make rows `[first, last]` resident, decoding at chunk granularity — a scroll moves by a
+    /// few rows and the rest of the chunk comes next. Returns how many were decoded.
     pub fn ensure(&mut self, first: usize, last: usize) -> io::Result<usize> {
         let last = last.min(self.rows.saturating_sub(1));
         if first > last {
@@ -341,9 +242,7 @@ impl RowStore {
             self.chunks[c].used = tick;
             let n = self.chunks[c].rows.len();
             for i in 0..n {
-                // The byte range is read out first so the borrow ends before
-                // the write; `File` is the only evictable state, and it is
-                // replaced by `Decoded` carrying the same range.
+                // The byte range is read out first so the borrow ends before the write.
                 let range = match self.chunks[c].rows[i] {
                     Row::File { start, end } => Some((start, end)),
                     _ => None,
@@ -362,17 +261,8 @@ impl RowStore {
         Ok(decoded)
     }
 
-    /// Row `r`, when it is resident. **Make it resident first** — see `ensure`.
-    ///
-    /// `None` rather than an empty slice, because an empty slice is not a
-    /// smaller answer, it is a wrong one: an un-decoded row that reads as `&[]`
-    /// reaches `Buffer::text()` as a blank line and is written to the saved
-    /// file, and reaches `begin_action` as a blank row in the undo record. A
-    /// missing row is a state a caller can see and handle; a row that silently
-    /// reads as empty is data loss waiting for a missed `ensure`.
-    ///
-    /// Use [`Self::row`] where the row is known to be resident (the frame's
-    /// path, after `ensure`) — it panics rather than lying.
+    /// Row `r`, when it is resident: `None` rather than an empty slice, which reaches a save as a
+    /// lost line. Make it resident first — see `ensure`.
     pub fn try_row(&self, r: usize) -> Option<&[char]> {
         match self.row_slot(r) {
             Some(Row::Decoded { chars, .. }) | Some(Row::Edited(chars)) => Some(chars),
@@ -380,19 +270,8 @@ impl RowStore {
         }
     }
 
-    /// Row `r`. **Panics if it is not resident**, and if it is out of range.
-    ///
-    /// The previous version returned `&[]` for both, and its comment called that
-    /// "visible and harmless (the renderer draws a blank row)". That was wrong,
-    /// and worth spelling out because the comment was the whole argument: blank
-    /// on screen is the *smallest* part of it. `Buffer::text()` maps every row to
-    /// a `String`, so an un-decoded row is a blank line **written to the file**;
-    /// `begin_action` captures rows the same way, so it is a blank row **in the
-    /// undo record**. Silent, and in the artefact rather than on the screen.
-    ///
-    /// So the contract is now enforced instead of documented. A missed `ensure`
-    /// is a loud panic naming the fix, and the panic is the *good* outcome: the
-    /// alternative is a save that quietly loses lines.
+    /// Row `r`. Panics if it is not resident, and if it is out of range: the contract is
+    /// enforced, because a missed `ensure` loses a line.
     pub fn row(&self, r: usize) -> &[char] {
         if r >= self.rows {
             panic!(
@@ -415,8 +294,7 @@ impl RowStore {
         }
     }
 
-    /// Insert `chars` as a new row `at`. **O(CHUNK), not O(rows)** — this is
-    /// the operation the whole structure exists for.
+    /// Insert `chars` as a new row `at`. O(CHUNK), not O(rows) — what the whole structure is for.
     pub fn insert(&mut self, at: usize, chars: Vec<char>) {
         let at = at.min(self.rows);
         if self.chunks.is_empty() {
@@ -429,8 +307,7 @@ impl RowStore {
             return;
         }
         if self.rows == 0 {
-            // Every row was removed: the store is empty but operable, and a
-            // new row re-seeds it rather than underflowing `self.rows - 1`.
+            // Every row was removed: a new row re-seeds the store rather than underflowing.
             self.chunks = vec![Chunk {
                 rows: vec![Row::Edited(chars)],
                 used: 0,
@@ -471,10 +348,8 @@ impl RowStore {
         out
     }
 
-    /// Every row materialised. The escape hatch for the O(document) callers —
-    /// sort, justify, replace-all, save, export, a whole-buffer search — which
-    /// are O(document) *anyway*, so making it explicit is honest rather than a
-    /// cost.
+    /// Every row materialised: the escape hatch for the O(document) callers, which are
+    /// O(document) anyway.
     pub fn materialize_all(&mut self) -> io::Result<()> {
         if self.rows > 0 {
             self.ensure(0, self.rows - 1)?;
@@ -482,11 +357,8 @@ impl RowStore {
         Ok(())
     }
 
-    /// The rows as a plain `Vec<Vec<char>>`, materialising first.
-    ///
-    /// `materialize_lines` rather than `to_lines` because it takes `&mut self`:
-    /// a `to_*` name promises a cheap conversion, and this one fills the decode
-    /// cache on the way. The name is the only thing that says so at a call site.
+    /// The rows as a plain `Vec<Vec<char>>`, materialising first. Hence `materialize_lines` and
+    /// not `to_lines`: it takes `&mut self`.
     pub fn materialize_lines(&mut self) -> io::Result<Vec<Vec<char>>> {
         self.materialize_all()?;
         Ok((0..self.rows).map(|r| self.row(r).to_vec()).collect())
@@ -494,14 +366,8 @@ impl RowStore {
 
     // ---------- internals ----------
 
-    /// Which chunk holds row `r`, and where in it.
-    ///
-    /// A binary search over `base`, not `r / CHUNK`: chunks are not uniform
-    /// once a fat one has been split or a short one has been drained, and
-    /// assuming they were was the first version's bug — it returned the wrong
-    /// row after an edit. `base` is maintained by the mutations, and its update
-    /// is arithmetic over chunk HEADERS (one `usize` each) rather than a
-    /// memmove of rows, which is the distinction the whole structure rests on.
+    /// Which chunk holds row `r`: a binary search over `base`, not `r / CHUNK`, because chunks
+    /// stop being uniform once one has been split or drained.
     fn slot_of(&self, r: usize) -> Option<(usize, usize)> {
         if r >= self.rows || self.chunks.is_empty() {
             return None;
@@ -515,8 +381,7 @@ impl RowStore {
         }
     }
 
-    /// Recompute `base` from `first` on. O(chunks after the edit) additions —
-    /// see `slot_of` for why that is the right order of work here.
+    /// Recompute `base` from `first` on: O(chunks after the edit) additions.
     fn fix_base_from(&mut self, first: usize) {
         let mut at = if first == 0 { 0 } else { self.base[first] };
         for c in first..self.chunks.len() {
@@ -530,8 +395,7 @@ impl RowStore {
         self.chunks[c].rows.get(i)
     }
 
-    /// Split a chunk that has grown past twice the target, so chunks stay
-    /// bounded by ~2×CHUNK and an insert never shifts more than that.
+    /// Split a chunk past twice the target, so chunks stay bounded by ~2×CHUNK.
     fn split_if_fat(&mut self, c: usize) {
         if self.chunks[c].rows.len() <= CHUNK * 2 {
             return;
@@ -547,8 +411,7 @@ impl RowStore {
         self.base.insert(c + 1, 0); // fixed by the caller's fix_base_from
     }
 
-    /// Decode one row from the file. The only place bytes become characters
-    /// after `open`.
+    /// Decode one row from the file: the only place bytes become characters after `open`.
     fn read_row(&self, start: u64, end: u64) -> io::Result<Vec<char>> {
         let Some(file) = self.file.as_ref() else {
             return Ok(Vec::new());
@@ -560,13 +423,8 @@ impl RowStore {
         Ok(text.chars().collect())
     }
 
-    /// Drop decoded rows until the budget is met, least-recently-asked chunk
-    /// first.
-    ///
-    /// Only a `Decoded` row is dropped — it remembers its byte range, so the
-    /// next `ensure` re-reads it. An `Edited` row is left alone: it is the only
-    /// copy of itself, and dropping it would lose the user's work. That is the
-    /// difference between a cache and a buffer.
+    /// Drop decoded rows until the budget is met, least-recently-asked chunk first. An `Edited`
+    /// row is the only copy of itself: that is the difference between a cache and a buffer.
     fn evict_if_needed(&mut self) {
         if self.resident <= self.budget {
             return;
@@ -595,9 +453,8 @@ impl RowStore {
         self.resident
     }
 
-    /// Set the resident-row budget. A frame derives it from the viewport, so a
-    /// miss during a frame — which is a disk read — cannot happen for the rows
-    /// on screen.
+    /// Set the resident-row budget. A frame derives it from the viewport, so the rows on screen
+    /// cannot become a disk read.
     pub fn set_budget(&mut self, budget: usize) {
         self.budget = budget.max(CHUNK);
         self.evict_if_needed();
@@ -610,14 +467,12 @@ impl Default for RowStore {
     }
 }
 
-/// Every row's start offset, in file order, plus the end of the last row's
-/// content.
+/// Every row's start offset, in file order, plus the end of the last row's content.
 struct Starts {
-    /// `starts[i]` is the first byte of row `i`; `starts.len()` is the row
-    /// count.
+    /// `starts[i]` is the first byte of row `i`; `starts.len()` is the row count.
     starts: Vec<u64>,
-    /// The end of the final row's content, which is not the file size when the
-    /// file ends in a newline.
+    /// The end of the final row's content, which is not the file size when the file ends in a
+    /// newline.
     last_end: u64,
     size: u64,
 }
@@ -660,9 +515,8 @@ impl Starts {
     }
 }
 
-/// One pass over the file's bytes: where each row starts and where the last one
-/// ends. No decoding — a `0x0A` byte is always a newline in UTF-8, and in
-/// cp1252 too (0x0A is a control there as well).
+/// One pass over the file's bytes: where each row starts and where the last one ends. No
+/// decoding, because a `0x0A` byte is always a newline in UTF-8 and in cp1252 too.
 fn index_starts(file: &std::fs::File, size: u64) -> io::Result<Starts> {
     use std::io::Read;
     let mut f = file;
@@ -681,8 +535,7 @@ fn index_starts(file: &std::fs::File, size: u64) -> io::Result<Starts> {
         }
         offset += n as u64;
     }
-    // `starts` holds one entry per row plus one for the row a trailing newline
-    // would begin. A file ending in a newline has no such row.
+    // `starts` holds one entry per row plus one for the row a trailing newline would begin.
     let last_end = if size == 0 {
         0
     } else if starts.last().copied() == Some(size) {
@@ -746,16 +599,12 @@ mod tests {
         let t = Temp::new("plain.txt", b"one\ntwo\nthree\n");
         let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
         assert_eq!(s.rows(), 3);
-        // **Not resident, and it says so rather than reading as empty.** This
-        // assertion used to be `assert_eq!(text(&s, 0), "", "not resident")`,
-        // which pinned the defect: an un-decoded row that reads as `&[]` is a
-        // blank line in the saved file and a blank row in the undo record. The
-        // byte lengths are known from the index alone and need no decode.
+        // Not resident, and it says so rather than reading as empty — which would be a blank
+        // line in the saved file. The byte lengths come from the index alone.
         assert_eq!(s.try_row(0), None, "not resident yet");
         assert_eq!(s.byte_len(0), 3, "but its length is known from bytes");
         assert_eq!(s.byte_len(2), 5);
-        // `ensure` decodes at CHUNK granularity — a chunk is the unit of
-        // locality, so the rows beside the one asked for come with it.
+        // `ensure` decodes at chunk granularity, so the rows beside the one asked for come too.
         assert_eq!(s.ensure(0, 0).expect("ensure"), 3, "the chunk holds 3 rows");
         assert_eq!(text(&s, 0), "one");
         assert_eq!(text(&s, 2), "three", "and the rest of the chunk is here");
@@ -764,19 +613,11 @@ mod tests {
         assert_eq!(all(&mut s), ["one", "two", "three"]);
     }
 
-    /// **The streaming open must agree with the whole-file one, row for row.**
-    ///
-    /// `open` indexes the file in one pass; `begin` + `ingest` takes ranges as a
-    /// loader finds them. They are two ways to build the same index, so they are
-    /// asserted equal on every file shape the suite already cares about —
-    /// including the ones with a trailing newline, no trailing newline, and
-    /// multibyte characters, which is where a byte range can be off by one.
+    /// The streaming open must agree with the whole-file one, row for row, on every file shape —
+    /// trailing newline or not, and multibyte, where a byte range can be off by one.
     #[test]
     fn ingesting_ranges_equals_indexing_the_whole_file() {
-        // **Not the empty file**: it is the one shape where the two paths
-        // deliberately differ, and `an_empty_file_gets_its_row_from_the_buffer`
-        // below pins where that row comes from. Every file WITH content must
-        // agree exactly.
+        // Not the empty file: it is the one shape where the two paths deliberately differ.
         for (name, body) in [
             ("s_basic.txt", b"one\ntwo\nthree\n".to_vec()),
             ("s_notrail.txt", b"a\nb".to_vec()),
@@ -796,15 +637,13 @@ mod tests {
             let t = Temp::new(name, &body);
             // The whole-file index.
             let mut whole = RowStore::open(&t.0, Encoding::Utf8).expect("open");
-            // The same index, from ranges — computed here the way the loader
-            // computes them: scan the bytes, and every newline ends a row.
+            // The same index, from ranges — computed the way the loader computes them.
             let mut ranges: Vec<(u64, u64)> = Vec::new();
             let mut start = 0u64;
             for (i, b) in body.iter().enumerate() {
                 if *b == b'\n' {
                     let mut end = i as u64;
-                    // `\r\n`: the CR is not content, which is what the loader
-                    // does too.
+                    // `\r\n`: the CR is not content, which is what the loader does too.
                     if end > start && body[end as usize - 1] == b'\r' {
                         end -= 1;
                     }
@@ -825,8 +664,7 @@ mod tests {
                 streamed.rows(),
                 whole.rows()
             );
-            // And the content agrees, read row by row through the same API a
-            // caller uses.
+            // And the content agrees, read row by row through the same API a caller uses.
             whole.materialize_all().expect("materialize");
             streamed.materialize_all().expect("materialize");
             for r in 0..whole.rows() {
@@ -839,19 +677,8 @@ mod tests {
         }
     }
 
-    /// **The one-row invariant belongs to the BUFFER, not to the store.**
-    ///
-    /// Found by this file's own equality test disagreeing on the empty file:
-    /// `open` yields 1 row (it is constructing a whole document, so it applies
-    /// the invariant) while `begin` + no ranges yields 0 — and the store cannot
-    /// know that no more ranges are coming, so it must not invent a row.
-    ///
-    /// The consumer applies it, and already did before this existed:
-    /// `load_ctrl`'s `Adopted::Finished` arm is
-    /// `if bs.buf.rows_is_empty() { bs.buf.push_row(Vec::new()) }`.
-    ///
-    /// So the seam is stated rather than papered over: a begun-but-unfed or
-    /// genuinely empty file is 0 rows from the store, and 1 row from the buffer.
+    /// The one-row invariant belongs to the buffer, not the store: `begin` + no ranges cannot
+    /// know more are not coming, so `load_ctrl`'s `Adopted::Finished` arm adds the row.
     #[test]
     fn an_empty_file_gets_its_row_from_the_buffer_not_the_store() {
         let t = Temp::new("s_empty2.txt", b"");
@@ -869,15 +696,13 @@ mod tests {
              invent a row — the buffer's `Adopted::Finished` arm adds it"
         );
 
-        // And a store that ingests an empty range list stays at zero rather than
-        // growing a phantom row.
+        // And a store that ingests an empty range list stays at zero.
         let mut fed = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
         fed.ingest(&[]);
         assert_eq!(fed.rows(), 0, "no ranges, no rows");
     }
 
-    /// Batching must not matter: the loader hands over ranges in `BATCH`-sized
-    /// pieces, and the index cannot depend on where the pieces fell.
+    /// Batching must not matter: the index cannot depend on where the pieces fell.
     #[test]
     fn the_batching_of_ranges_does_not_matter() {
         let body: Vec<u8> = (0..3_000)
@@ -916,27 +741,19 @@ mod tests {
         }
     }
 
-    /// A store that has been begun but not fed is empty and operable — the state
-    /// the first frame of a load is drawn from.
+    /// A store begun but not fed is empty and operable — the state a load's first frame draws.
     #[test]
     fn a_begun_but_unfed_store_is_an_empty_frame_not_a_panic() {
         let t = Temp::new("s_unfed.txt", b"a\nb\n");
         let s = RowStore::begin(&t.0, Encoding::Utf8).expect("begin");
         assert_eq!(s.rows(), 0, "no rows until ranges arrive");
         assert!(s.try_row(0).is_none());
-        // And reading past it is the "out of range" panic, not the "not
-        // resident" one — a caller debugging an empty first frame should be told
-        // it has no rows, not that it forgot an ensure.
+        // Reading past it is the "out of range" panic, not the "not resident" one.
         assert_eq!(s.rows(), 0);
     }
 
-    /// **A row that is not resident must not read as empty, and must not read as
-    /// wrong either.** The old contract returned `&[]`, and that empty row does
-    /// not stay on screen — `Buffer::text()` writes it to the file and
-    /// `begin_action` records it in the undo step.
-    ///
-    /// So it panics, naming the fix. A missed `ensure` is a panic for a
-    /// developer; the alternative is a save that quietly loses lines for a user.
+    /// A row that is not resident must not read as empty: `Buffer::text()` would write that to
+    /// the file, so it panics, naming the fix.
     #[test]
     #[should_panic(expected = "is not resident")]
     fn reading_an_unresident_row_panics_rather_than_lying() {
@@ -946,9 +763,7 @@ mod tests {
         let _ = s.row(0);
     }
 
-    /// The same rule for a row that does not exist at all, and the message says
-    /// which of the two it is — "not resident" and "out of range" want
-    /// different fixes, and a caller debugging one should not be told the other.
+    /// The same rule for a row that does not exist, with a message saying which of the two it is.
     #[test]
     #[should_panic(expected = "out of range")]
     fn reading_a_missing_row_panics_with_the_other_message() {
@@ -956,8 +771,7 @@ mod tests {
         let _ = s.row(7);
     }
 
-    /// `ensure` then `row` is the working path, so the panic above is only ever
-    /// reached by a mistake.
+    /// `ensure` then `row` is the working path, so the panics above are only a mistake.
     #[test]
     fn ensure_then_read_is_the_working_path() {
         let t = Temp::new("ens.txt", b"one\ntwo\n");
@@ -971,8 +785,7 @@ mod tests {
 
     #[test]
     fn every_row_matches_the_eager_decode() {
-        // THE correctness test. It is the one that found a phantom final row on
-        // the first prototype, and it is what makes the store trustworthy.
+        // The correctness test: it found a phantom final row on the first prototype.
         for (name, body) in [
             ("basic.txt", "one\ntwo\nthree\n".as_bytes().to_vec()),
             ("notrail.txt", "a\nb".as_bytes().to_vec()),
@@ -1008,8 +821,7 @@ mod tests {
 
     #[test]
     fn structural_edits_keep_the_numbering() {
-        // The half the chunked store exists for: insert and remove must leave
-        // every other row exactly where it was.
+        // The half the chunked store exists for: the other rows stay exactly where they were.
         let t = Temp::new("edits.txt", b"a\nb\nc\nd\n");
         let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
         s.insert(0, "Z".chars().collect());
@@ -1024,8 +836,7 @@ mod tests {
 
     #[test]
     fn an_insert_crosses_a_chunk_boundary_correctly() {
-        // The boundary is where an off-by-one lives: insert exactly at CHUNK,
-        // CHUNK-1 and CHUNK+1 and check the numbering each time.
+        // The boundary is where an off-by-one lives.
         let body: String = (0..(CHUNK * 3)).map(|i| format!("r{i}\n")).collect();
         let t = Temp::new("boundary.txt", body.as_bytes());
         for at in [CHUNK - 1, CHUNK, CHUNK + 1, CHUNK * 2, CHUNK * 2 + 1] {
@@ -1044,8 +855,7 @@ mod tests {
 
     #[test]
     fn an_edit_is_the_same_cost_at_any_size() {
-        // The §16.0 principle AS A TEST. On Vec<Vec<char>> this scales with the
-        // file (1.5 ms at 2.6M rows); here it must not.
+        // The "size does not influence editability" principle, as a test.
         let small: String = (0..200_000).map(|i| format!("r{i}\n")).collect();
         let large: String = (0..2_000_000).map(|i| format!("r{i}\n")).collect();
         let ts = Temp::new("cost_small.txt", small.as_bytes());
@@ -1053,8 +863,7 @@ mod tests {
 
         let time_insert = |path: &Path| {
             let mut s = RowStore::open(path, Encoding::Utf8).expect("open");
-            // Warm, then measure an insert at row 0 — the worst case for
-            // anything that shifts what follows.
+            // Warm, then measure an insert at row 0 — the worst case for shifting.
             s.insert(0, vec!['x']);
             s.remove(0);
             let t = Instant::now();
@@ -1072,16 +881,8 @@ mod tests {
             b * 1e6,
             b / a.max(f64::MIN_POSITIVE)
         );
-        // The honest bound: the cost tracks the number of CHUNKS, not the
-        // number of rows, so 10x the rows is 10x the chunks and ~10x the cost —
-        // but with a factor of CHUNK fewer things to touch than the rows
-        // themselves. On `Vec<Vec<char>>` the same insert was 1.5 ms at 2M rows
-        // (a memmove of 2.6M `Vec` headers); here it is tens of microseconds,
-        // because what shifts is one `usize` of chunk bookkeeping per chunk.
-        //
-        // Stated as a bound on the CONSTANT rather than on the ratio, because
-        // the ratio is genuinely linear in chunks: what has to hold is that a
-        // keystroke stays far inside a frame at any size this program meets.
+        // The cost tracks chunks, not rows, so what has to hold is that a keystroke stays far
+        // inside a frame at any size.
         assert!(
             b < 1e-3,
             "a structural edit took {b:.3e} s at 2M rows — a frame is 16 ms"
@@ -1090,8 +891,7 @@ mod tests {
 
     #[test]
     fn an_edited_row_survives_materialize_and_re_read() {
-        // A row that has been edited is the only copy of its content, so
-        // nothing may restore it from the file.
+        // An edited row is the only copy of its content, so nothing may restore it from the file.
         let t = Temp::new("edited.txt", b"a\nb\nc\n");
         let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
         s.ensure(0, 2).expect("ensure");
@@ -1111,17 +911,14 @@ mod tests {
         s.set_row(0, "hello".chars().collect());
         s.set_row(2, "bye".chars().collect());
         assert_eq!(all(&mut s), ["hello", "b", "bye"]);
-        // And an edited row reports no byte range: its bytes no longer
-        // describe it.
+        // And an edited row reports no byte range: its bytes no longer describe it.
         assert!(s.byte_range(0).is_none());
         assert!(s.byte_range(1).is_some(), "row 1 is still file-backed");
     }
 
     #[test]
     fn rows_split_on_byte_newlines_and_cp1252_too() {
-        // 0xE9 is 'e-acute' in cp1252 and NOT a newline, so the byte index
-        // works for that encoding as well. This is why the ladder's third rung
-        // can still be streamed.
+        // 0xE9 is 'e-acute' in cp1252 and not a newline, so the byte index works there too.
         let bytes = crate::encoding::encode("caf\u{e9}\nsecond\n", Encoding::Cp1252).unwrap();
         let t = Temp::new("cp.txt", &bytes);
         let mut s = RowStore::open(&t.0, Encoding::Cp1252).expect("open");
@@ -1130,8 +927,7 @@ mod tests {
 
     #[test]
     fn removing_every_row_leaves_an_operable_store() {
-        // Degenerate but reachable: `Buffer` keeps one row, and a store that
-        // panicked on empty would take the editor with it.
+        // Degenerate but reachable: a store that panicked on empty would take the editor down.
         let t = Temp::new("tiny.txt", b"only\n");
         let mut s = RowStore::open(&t.0, Encoding::Utf8).expect("open");
         assert_eq!(s.rows(), 1);
@@ -1161,34 +957,7 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rows: stage A — chunked, and eager
-// ---------------------------------------------------------------------------
-//
-// The same chunking as `RowStore`, without the lazy half. Every row is
-// resident, so nothing above needs an `ensure` step and **no row can be
-// silently blank**: `row(r)` is a plain borrow of real content, exactly as
-// `Vec<Vec<char>>` was.
-//
-// That is the whole point of doing this in two stages. `RowStore::row` returns
-// `&[]` for a row it has not decoded, and an empty row is not a local
-// inconvenience — `Buffer::text()` would write it to the file as a blank line
-// and `begin_action` would record it as a blank row in the undo step. Lazy
-// decode is worth having (835 MB → ~20 MB on a 184 MB file) and it is the half
-// that can lose data, so it goes second, on its own, behind an API that cannot
-// lie about a missing row.
-//
-// What this stage buys, measured (`bench_edit_scaling`): inserting a row costs
-// `O(CHUNK)` — the rows of one chunk — instead of `O(rows)`, a memmove of every
-// row header below the insert. 1.3 ms per line insert at 2.6M rows is the
-// number that goes away.
-//
-// # The index
-//
-// `base[i]` is the first row index of chunk `i`, and chunks hold between 1 and
-// `2 * CHUNK` rows. Lookup is a binary search over `base` — O(log chunks), which
-// at 2.6M rows is 12 steps — rather than `r / CHUNK`, because a chunk that has
-// been inserted into is not the same size as its neighbours.
+// Rows: stage A — chunked, and eager. Every row is resident, so no row can be silently blank.
 
 use std::ops::{Index, IndexMut, RangeBounds};
 
@@ -1209,9 +978,8 @@ impl Rows {
     /// Take ownership of a flat `Vec<Vec<char>>`, chunking it on the way in.
     pub fn from_vec(rows: Vec<Vec<char>>) -> Self {
         let mut out = Self::new();
-        // Filled by chunks directly rather than row by row: a file's worth of
-        // rows arriving at once is the common construction, and pushing one at
-        // a time would do the bookkeeping n times for no reason.
+        // Filled by chunks directly rather than row by row: per-row pushing would do the
+        // bookkeeping n times.
         let mut it = rows.into_iter().peekable();
         while it.peek().is_some() {
             let chunk: Vec<Vec<char>> = it.by_ref().take(CHUNK).collect();
@@ -1260,20 +1028,14 @@ impl Rows {
         self.chunks.iter().flatten()
     }
 
-    /// A copy of rows `[a, b)`.
-    ///
-    /// This is what a `&[Vec<char>]` slice used to give a caller that wanted a
-    /// range of rows, and it is deliberately a copy: the rows are in chunks, so
-    /// there is no contiguous range to lend out. Every caller of the old
-    /// `lines_slice()` was O(document) already, so the copy is the same order as
-    /// what it replaced.
+    /// A copy of rows `[a, b)`: deliberately a copy, since the rows are in chunks and every
+    /// caller is O(document) already.
     pub fn range(&self, a: usize, b: usize) -> Vec<Vec<char>> {
         let b = b.min(self.len);
         if a >= b {
             return Vec::new();
         }
-        // Walk by chunk rather than by row: a range of a big file is much
-        // cheaper to clone in chunk-sized pieces than one `get` per row.
+        // Walk by chunk rather than by row: much cheaper for a range of a big file.
         let mut out = Vec::with_capacity(b - a);
         let (c0, i0) = self.locate(a);
         let (c1, i1) = self.locate(b - 1);
@@ -1387,11 +1149,8 @@ impl Rows {
         }
     }
 
-    /// Remove rows `[start, end)` and return them.
-    ///
-    /// Chunk-aware: the tail of the first chunk, whole chunks in between, and
-    /// the head of the last. Doing this one `remove` per row would be
-    /// `O(rows × chunks)`, and `sort_lines`/`justify` drain real ranges.
+    /// Remove rows `[start, end)` and return them. Chunk-aware, because one `remove` per row
+    /// would be O(rows × chunks).
     pub fn drain(&mut self, start: usize, end: usize) -> Vec<Vec<char>> {
         let end = end.min(self.len);
         if start >= end {
@@ -1413,30 +1172,21 @@ impl Rows {
         out
     }
 
-    /// Replace rows `[start, end)` with `items`.
-    ///
-    /// Takes explicit bounds rather than a `RangeBounds` because callers use
-    /// both `a..b` and `a..=b`, and converting the second to the first at the
-    /// call site is one character where guessing inside would be a bug.
+    /// Replace rows `[start, end)` with `items`. Explicit bounds rather than a `RangeBounds`,
+    /// because callers use both `a..b` and `a..=b`.
     pub fn splice(&mut self, start: usize, end: usize, items: impl IntoIterator<Item = Vec<char>>) {
         let end = end.min(self.len);
         let start = start.min(end);
         let _ = self.drain(start, end);
-        // Rows are inserted one at a time, which is what `insert_lines_at`
-        // already does for a paste. Each insert costs O(CHUNK) for the chunk it
-        // lands in plus O(chunks) for the base shift, not O(rows) — so a splice
-        // of a few hundred rows into a 2.6M-row file is well under a millisecond.
+        // One insert at a time: O(CHUNK) plus O(chunks) for the base shift, so a splice of a few
+        // hundred rows stays under a millisecond.
         for (k, row) in items.into_iter().enumerate() {
             self.insert(start + k, row);
         }
     }
 
-    /// Sort rows `[a, b)` in place by `f`.
-    ///
-    /// The replacement for handing out `&mut [Vec<char>]` to `sort_by_key`: the
-    /// rows are copied out, sorted, and copied back. `sort_lines` is a
-    /// whole-region operation already, so the copy is the same order as the sort
-    /// it replaces.
+    /// Sort rows `[a, b)` in place by `f`: the rows are copied out and back, the same order as a
+    /// whole-region sort.
     pub fn sort_range_by<F>(&mut self, a: usize, b: usize, f: F)
     where
         F: FnMut(&Vec<char>, &Vec<char>) -> std::cmp::Ordering,
@@ -1547,8 +1297,7 @@ mod rows_tests {
         let r = Rows::from_vec(rows.clone());
         assert_eq!(r.len(), rows.len());
         assert_eq!(flat(&r.to_vec()), flat(&rows));
-        // And random access lands on the right row, which is what the binary
-        // search over `base` is for.
+        // And random access lands on the right row, which is what the binary search is for.
         for i in [0, 1, 1023, 1024, 1025, 2047, 2048, 4999] {
             assert_eq!(
                 r.get(i).map(|c| c.iter().collect::<String>()),
@@ -1558,14 +1307,10 @@ mod rows_tests {
         }
     }
 
-    /// **The property that matters: `Rows` behaves exactly like the
-    /// `Vec<Vec<char>>` it replaces.**
+    /// The property that matters: `Rows` behaves exactly like the `Vec<Vec<char>>` it replaces.
     ///
-    /// Driven with pseudo-random operations rather than a fixed script, because
-    /// the bugs in a chunked index live at the boundaries — an insert that lands
-    /// on a chunk edge, a drain that starts in one chunk and ends in another —
-    /// and a hand-written script tests the boundaries its author thought of.
-    /// Both are run side by side and compared after every step.
+    /// Driven with pseudo-random operations, because the bugs in a chunked index live at the
+    /// boundaries a hand-written script would not think of. Both are compared after every step.
     #[test]
     fn it_behaves_like_the_vec_it_replaces() {
         let mut rng = Rng(0x1234_5678_9abc_def0);
@@ -1614,10 +1359,7 @@ mod rows_tests {
                     rows[at] = row.clone();
                     model[at] = row;
                 }
-                // drain a random range, bounded the way real ones are: a cut
-                // line, a paragraph, a filter region — not a third of the file.
-                // Unbounded drains shrunk the model until it no longer spanned a
-                // chunk, which is the state the boundaries live in.
+                // drain a random range, bounded as real ones are: a cut line, a paragraph.
                 4 if n > 1 => {
                     let a = rng.below(n - 1);
                     let b = (a + 1 + rng.below(64)).min(n);
@@ -1640,20 +1382,15 @@ mod rows_tests {
             assert_eq!(rows.len(), model.len(), "length after step {step}");
             assert_eq!(shape(&rows), flat(&model), "content after step {step}");
 
-            // Top the document back up when the removal-heavy mix has eaten it,
-            // so every step runs against a store that spans several chunks.
-            // Without this the drains win and the model collapses to a single
-            // row, where no boundary is ever exercised — the first version of
-            // this test did exactly that and its per-step comparison passed
-            // 2,000 times on a one-row document.
+            // Top the document back up when the removal-heavy mix has eaten it: otherwise the
+            // model collapses to one row.
             while model.len() < 2 * CHUNK {
                 let row: Vec<char> = format!("t{step}.{}", model.len()).chars().collect();
                 rows.push(row.clone());
                 model.push(row);
             }
         }
-        // The model never shrank below a chunk, so every step above ran against
-        // a store whose index had to cross chunk boundaries.
+        // The model never shrank below a chunk, so every step above crossed a boundary.
         assert!(
             model.len() > CHUNK,
             "the run must still span chunks, ended at {} rows",
@@ -1661,8 +1398,7 @@ mod rows_tests {
         );
     }
 
-    /// `range` and `sort_range_by` are the two replacements for handing out a
-    /// mutable slice, and both must be exact.
+    /// `range` and `sort_range_by` replace handing out a mutable slice, and both must be exact.
     #[test]
     fn range_and_sort_match_the_model() {
         let rows: Vec<Vec<char>> = (0..3 * CHUNK)
@@ -1699,9 +1435,8 @@ mod rows_tests {
         assert_eq!(flat(&r.range(b, rows.len())), flat(&want[b..rows.len()]));
     }
 
-    /// Splitting is the one place a chunk stops being its neighbours' size, so
-    /// the index has to survive it — and so does `locate`, which is a binary
-    /// search over `base` rather than `r / CHUNK` for exactly this reason.
+    /// Splitting is the one place a chunk stops being its neighbours' size, so the index has to
+    /// survive it.
     #[test]
     fn the_index_survives_a_split() {
         let mut r = Rows::from_vec(
@@ -1715,8 +1450,7 @@ mod rows_tests {
             r.insert(0, format!("b{i}").chars().collect());
         }
         assert!(r.chunks.len() > 1, "the chunk should have split");
-        // Every row still reads back what was put there, which is the property
-        // `locate` has to preserve across a split.
+        // Every row still reads back what was put there — the property `locate` preserves.
         assert_eq!(
             r[0].iter().collect::<String>(),
             format!("b{}", 2 * CHUNK + 7)
@@ -1727,8 +1461,7 @@ mod rows_tests {
         }
     }
 
-    /// Appending a loader's batch, which is the one operation the load path
-    /// does per batch and so the one that has to be cheap and exact.
+    /// Appending a loader's batch: the one operation the load path does per batch.
     #[test]
     fn append_takes_the_batch_and_leaves_it_empty() {
         let mut r = Rows::new();
@@ -1747,8 +1480,8 @@ mod rows_tests {
         );
     }
 
-    /// `clear`, `take` and `set` — the wholesale operations, where a stale index
-    /// would show up as a row from the previous document.
+    /// `clear`, `take` and `set`: the wholesale operations, where a stale index would show up as
+    /// a row from the previous document.
     #[test]
     fn wholesale_replacement_leaves_no_trace() {
         let mut r = Rows::from_vec(

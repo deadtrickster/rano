@@ -1,8 +1,5 @@
-//! Things that draw themselves into an area of a [`Buffer`].
-//!
-//! Deliberately few: the trait, and the primitives that prove its shape — text as it
-//! is, a paragraph that wraps, and a bordered box. The editor's panes and letibot's
-//! cards are built from these by their owners, not added here.
+//! Things that draw themselves into an area of a [`Buffer`]: the trait, and
+//! the primitives that prove its shape — text, a wrapping paragraph, a box.
 
 use super::buffer::{Buffer, Rect};
 use super::style::Style;
@@ -41,9 +38,8 @@ impl Widget for Text {
     }
 }
 
-/// Text in an area: wrapped to its width or clipped at it, scrolled by whole rows, on an
-/// optional background style that covers the whole area (so a tinted block is tinted
-/// past the end of its text, which a style on the text alone cannot do).
+/// Text in an area: wrapped or clipped, scrolled by whole rows, on an optional background
+/// style that tints past the end of the text.
 #[derive(Debug, Clone, Default)]
 pub struct Paragraph {
     pub text: Text,
@@ -76,8 +72,8 @@ impl Paragraph {
         self
     }
 
-    /// The rows this paragraph is at `width` columns, before scrolling — what a caller
-    /// sizing an area for it needs.
+    /// The rows this paragraph is at `width` columns, before scrolling — what a caller sizing
+    /// an area needs.
     pub fn rows(&self, width: u16) -> Vec<Line> {
         let mut out = Vec::new();
         for l in &self.text.lines {
@@ -110,7 +106,6 @@ impl Widget for Paragraph {
             .take(area.height as usize)
             .enumerate()
         {
-            // Text drawn over a filled area keeps the fill underneath it.
             let l = match &self.style {
                 Some(s) => Line {
                     spans: l.spans.clone(),
@@ -123,17 +118,13 @@ impl Widget for Paragraph {
     }
 }
 
-/// A box drawn with the light box-drawing set, an optional title in its top edge, and
-/// whatever is put in [`Bordered::inner`] by the caller.
-///
-/// The box-drawing characters are one column on every terminal and in both width tables
-/// in this tree (letibot asserts that for its cell grid too), which is why a frame can be
+/// A box drawn with the light box-drawing set, an optional title in its top edge.
+/// Box-drawing characters are one column in both width tables in this tree, so a frame can be
 /// measured by counting them.
 #[derive(Debug, Clone, Default)]
 pub struct Bordered {
     pub title: Option<Line>,
-    /// The frame's own style; [`crate::style::Role::Faint`] is the usual one, since a
-    /// frame is structure a reader skips.
+    /// The frame's own style; [`crate::style::Role::Faint`] is the usual one.
     pub border: Style,
 }
 
@@ -152,7 +143,6 @@ impl Bordered {
         self
     }
 
-    /// Where the content goes: one cell in from every edge.
     pub fn inner(&self, area: Rect) -> Rect {
         area.inner(1)
     }
@@ -174,8 +164,6 @@ impl Widget for Bordered {
             buf.set_str(r, row, "│", st, 1);
         }
         if let Some(t) = &self.title {
-            // ` title ` in the top edge, after the corner and one rule: room for it or
-            // nothing, never a title that eats the corner.
             if inner >= 4 {
                 let room = inner - 3;
                 let t = super::text::truncate(t, room);
@@ -241,7 +229,6 @@ mod tests {
         for row in b.to_plain_lines() {
             assert_eq!(crate::width::text::width(&row), 12);
         }
-        // A title too long for the edge is truncated, not allowed to eat the corner.
         let bx = Bordered::new().title("a very long title");
         let mut b = Buffer::empty(Rect::new(0, 0, 10, 2));
         bx.render(b.area(), &mut b);

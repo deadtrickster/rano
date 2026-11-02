@@ -4,9 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// What the file looked like on disk when this buffer last read or wrote
-/// it. A save compares it with the file as it is now: a difference means
-/// something else wrote the file in between, and the save asks first.
+/// What the file looked like on disk when this buffer last read or wrote it: a save compares it
+/// with the file now, and asks first when they differ.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DiskStamp {
     pub mtime: Option<SystemTime>,
@@ -14,8 +13,7 @@ pub struct DiskStamp {
 }
 
 impl DiskStamp {
-    /// The stamp of `path` now; `None` when it cannot be read (gone, or no
-    /// permission), which a save treats as a change when it had one before.
+    /// The stamp of `path` now; `None` when it cannot be read, which a save treats as a change.
     pub fn of(path: &Path) -> Option<Self> {
         let m = fs::metadata(path).ok()?;
         Some(Self {
@@ -33,23 +31,18 @@ pub struct Pos {
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    /// The rows, in chunks: a structural edit shifts one chunk, not every row
-    /// header below it. Private so every read goes through the methods below,
-    /// which is what lets the store change without touching the callers.
+    /// The rows, in chunks: a structural edit shifts one chunk, not every row below it. Private
+    /// so every read goes through the methods below.
     lines: Rows,
     pub name: Option<PathBuf>,
     pub modified: bool,
     pub crlf: bool,
-    /// How the bytes map to these characters. Carried like `crlf` so a save
-    /// writes the file back as it was found, rather than rewriting a cp1252 file
-    /// as UTF-8 with replacement characters in it.
+    /// How the bytes map to these characters, carried so a save writes the file back as found.
     pub encoding: Encoding,
-    /// This file is not text: a NUL in its first
-    /// [`crate::encoding::BINARY_PROBE`] bytes, git's own test. Such a buffer
-    /// opens read-only and is never highlighted, since a save would corrupt it.
+    /// Not text: a NUL in its first [`crate::encoding::BINARY_PROBE`] bytes. Such a buffer is
+    /// read-only — a save would corrupt it.
     pub binary: bool,
-    /// The file as it was when last read or written; `None` for a buffer
-    /// that never was (a new file, a scratch buffer).
+    /// The file as it was when last read or written; `None` for a buffer that never was.
     pub disk: Option<DiskStamp>,
 }
 
@@ -74,12 +67,11 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    /// Read `path`, detecting its encoding: a UTF-16 or windows-1252 file opens
-    /// at all, and a UTF-8 BOM is stripped rather than becoming an invisible
-    /// first column.
+    /// Read `path`, detecting its encoding: a UTF-16 or windows-1252 file opens at all, and a
+    /// UTF-8 BOM is stripped.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
-        // Stamped BEFORE the read: a write that lands during it then shows
-        // as a change, which errs toward asking.
+        // Stamped BEFORE the read: a write landing during it then shows as a change, which
+        // errs toward asking.
         let disk = DiskStamp::of(path);
         let bytes = fs::read(path)?;
         let encoding = encoding::detect(&bytes, Scope::Whole);
@@ -87,15 +79,13 @@ impl Buffer {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut b = Self::from_text(&text, Some(path.to_path_buf()), encoding);
         b.disk = disk;
-        // From the BYTES, before any row exists: a binary decodes to something,
-        // and that something must never be written back.
+        // From the BYTES: a binary decodes to something, and that something must never be
+        // written back.
         b.binary = encoding::is_binary(&bytes);
         Ok(b)
     }
 
-    /// A buffer over already-decoded text: the rows, the CRLF decision and the
-    /// one-row invariant, in one place so `from_file`, the loader and the tests
-    /// cannot disagree about them.
+    /// A buffer over already-decoded text: the rows, the CRLF decision and the one-row invariant.
     pub fn from_text(text: &str, name: Option<PathBuf>, encoding: Encoding) -> Self {
         // Detect CRLF before `str::lines()` strips the \r.
         let crlf = text.contains("\r\n");
@@ -103,8 +93,8 @@ impl Buffer {
             .split('\n')
             .map(|l| l.strip_suffix('\r').unwrap_or(l).chars().collect())
             .collect();
-        // `split` gives a trailing empty piece for a final newline; `lines()`
-        // did not. Drop it, then apply the invariant.
+        // `split` gives a trailing empty piece for a final newline; drop it, then apply the
+        // invariant.
         if lines.len() > 1 && lines.last().is_some_and(Vec::is_empty) {
             lines.pop();
         }
@@ -134,22 +124,20 @@ impl Buffer {
         self.lines.is_empty()
     }
 
-    // ---------- row access ----------
     // Every read goes through these, so the store can change without touching
-    // callers; `&Vec<char>` derefs to `[char]`, which keeps each site a rename.
+    // callers.
 
-    /// Row `r`. Panics when out of range, like the `lines[r]` it replaced, so
-    /// migrating a call site cannot change which inputs panic.
+    /// Row `r`; panics out of range, like the `lines[r]` it replaced.
     pub fn row(&self, r: usize) -> &Vec<char> {
         &self.lines[r]
     }
 
-    /// Row `r` if it exists — the `lines.get(r)` half of the same story.
+    /// Row `r` if it exists.
     pub fn row_opt(&self, r: usize) -> Option<&Vec<char>> {
         self.lines.get(r)
     }
 
-    /// Row `r` for writing. Panics out of range, as `lines[r] = …` did.
+    /// Row `r` for writing; panics out of range, as `lines[r] = …` did.
     pub fn row_mut(&mut self, r: usize) -> &mut Vec<char> {
         &mut self.lines[r]
     }
@@ -159,21 +147,17 @@ impl Buffer {
         self.lines.iter()
     }
 
-    /// A copy of rows `[a, b)`: the rows live in chunks, so there is no
-    /// contiguous range to lend out. Every caller was O(document) already.
+    /// A copy of rows `[a, b)`: the rows live in chunks, so there is nothing to lend out.
     pub fn rows_range(&self, a: usize, b: usize) -> Vec<Vec<char>> {
         self.lines.range(a, b)
     }
 
-    /// Every row, as a flat `Vec`: for the callers that want the whole document
-    /// and never did anything but iterate it (the highlighter's error walk, the
-    /// search matcher, export).
+    /// Every row, as a flat `Vec`, for callers that want the whole document.
     pub fn rows_vec(&self) -> Vec<Vec<char>> {
         self.lines.to_vec()
     }
 
-    /// Sort rows `[a, b)` in place: a chunked store cannot lend out a
-    /// `&mut [Vec<char>]`, so the rows are copied out, sorted and copied back.
+    /// Sort rows `[a, b)` in place: a chunked store cannot lend out a `&mut [Vec<char>]`.
     pub fn sort_rows_by<F>(&mut self, a: usize, b: usize, f: F)
     where
         F: FnMut(&Vec<char>, &Vec<char>) -> std::cmp::Ordering,
@@ -181,8 +165,7 @@ impl Buffer {
         self.lines.sort_range_by(a, b, f);
     }
 
-    /// Replace row `r`. Out of range is a no-op, like every other row operation
-    /// here (`insert_char` tolerates a stale index rather than panicking).
+    /// Replace row `r`. Out of range is a no-op, like every other row operation here.
     pub fn set_row(&mut self, r: usize, chars: Vec<char>) {
         if r < self.lines.len() {
             self.lines[r] = chars;
@@ -199,8 +182,7 @@ impl Buffer {
         self.lines.push(chars);
     }
 
-    /// Append every row of `rows`, leaving it empty — `Vec::append`'s contract,
-    /// which the loader relies on so it can hand off its batch and keep going.
+    /// Append every row of `rows`, leaving it empty — `Vec::append`'s contract.
     pub fn append_rows(&mut self, rows: &mut Vec<Vec<char>>) {
         self.lines.append(rows);
     }
@@ -210,9 +192,7 @@ impl Buffer {
         self.lines.extend(rows);
     }
 
-    /// Replace rows `[start, end)` with `items`. Explicit bounds because callers
-    /// use both `start..end` and `a..=b`, and converting at the call site is one
-    /// character where guessing inside would be a bug.
+    /// Replace rows `[start, end)` with `items`; explicit bounds, since callers use both forms.
     pub fn splice_rows<I>(&mut self, start: usize, end: usize, items: I)
     where
         I: IntoIterator<Item = Vec<char>>,
@@ -220,20 +200,17 @@ impl Buffer {
         self.lines.splice(start, end, items);
     }
 
-    /// Drop every row. The buffer is momentarily not a valid buffer; every
-    /// caller refills it in the same breath.
+    /// Drop every row. The buffer is momentarily invalid; callers refill it in the same breath.
     pub fn clear_rows(&mut self) {
         self.lines.clear();
     }
 
-    /// Take the rows out, leaving this buffer empty — for handing a whole
-    /// document to another buffer without copying it.
+    /// Take the rows out, leaving this buffer empty.
     pub fn take_rows(&mut self) -> Vec<Vec<char>> {
         self.lines.to_vec()
     }
 
-    /// Replace every row outright — the "assign a whole document" operation,
-    /// which `from_text` and the test helpers use.
+    /// Replace every row outright.
     pub fn set_rows(&mut self, rows: Vec<Vec<char>>) {
         self.lines = Rows::from_vec(rows);
     }
@@ -247,9 +224,7 @@ impl Buffer {
         }
     }
 
-    /// A copy of every row. The escape hatch for the O(document) callers —
-    /// sort, justify, save, export, a whole-buffer search — which need the rows
-    /// as a plain value rather than as a view.
+    /// A copy of every row — the escape hatch for the O(document) callers.
     pub fn to_lines(&self) -> Vec<Vec<char>> {
         self.lines.to_vec()
     }
@@ -260,9 +235,8 @@ impl Buffer {
         Pos { row, col }
     }
 
-    /// Whether this buffer holds at least `cap` bytes of text, stopping as soon
-    /// as the answer is known. A predicate rather than a length: the exact size
-    /// needs a pass over every line, and the only caller compares a threshold.
+    /// Whether this buffer holds at least `cap` bytes, stopping as soon as known: a predicate,
+    /// since the exact size needs a pass over every line.
     pub fn is_at_least(&self, cap: usize) -> bool {
         let mut n = 0usize;
         for l in self.lines.iter() {
@@ -309,9 +283,8 @@ impl Buffer {
         joined
     }
 
-    /// The file's bytes: `file_text` in the buffer's own encoding, BOM included.
-    /// A character the encoding cannot represent is an error rather than a `?`,
-    /// because silently replacing one is data loss the caller could have reported.
+    /// The file's bytes: `file_text` in the buffer's own encoding, BOM included. A character
+    /// the encoding cannot represent is an error — a silent replacement is data loss.
     pub fn file_bytes(&self) -> Result<Vec<u8>, String> {
         encoding::encode(&self.file_text(), self.encoding)
     }
@@ -380,15 +353,14 @@ impl Buffer {
             out.push(first);
         }
         let first_removed = self.remove_empty_line(a.row) as usize;
-        // Whole rows strictly between a's and b's rows. `end` is exclusive and
-        // in POST-removal coordinates, so `b.row` shifts down with the rows
-        // removed above it.
+        // Whole rows strictly between a's and b's rows; `end` is exclusive and in
+        // POST-removal coordinates.
         let r = a.row + 1 - first_removed;
         let end = b.row - first_removed;
         if r < end {
             out.extend(self.lines.drain(r, end));
         }
-        // b's row now sits right after everything that remains above it.
+        // b's row now sits right after what remains above it.
         let b_row = a.row + 1 - first_removed;
         let len = self.lines[b_row].len();
         let last_end = b.col.min(len);
@@ -400,8 +372,7 @@ impl Buffer {
         out
     }
 
-    /// Copy the region [a, b) in row-major order without modifying the
-    /// buffer. Empty edge fragments are dropped.
+    /// Copy the region [a, b) in row-major order, without modifying the buffer.
     pub fn copy_range(&self, a: Pos, b: Pos) -> Vec<Vec<char>> {
         let mut out: Vec<Vec<char>> = Vec::new();
         if a.row == b.row {
@@ -554,7 +525,6 @@ mod tests {
         let mut b = buf("ab\ncd");
         assert!(b.delete_at(0, 2));
         assert_eq!(lines_of(&b), vec!["abcd"]);
-        // nothing after the last char of the last line
         assert!(!b.delete_at(0, 4));
     }
 
@@ -571,7 +541,6 @@ mod tests {
     #[test]
     fn cut_range_multi_row_keeps_endpoints() {
         let mut b = buf("aaa\nbbb\nccc\nddd");
-        // cut from (0,1) to (3,2): drops 'aaa'[1..], whole 'bbb','ccc', 'dd'
         let out = b.cut_range(Pos { row: 0, col: 1 }, Pos { row: 3, col: 2 });
         assert_eq!(
             out.iter()
@@ -579,14 +548,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["aa", "bbb", "ccc", "dd"]
         );
-        // remaining: 'a' and last char 'd' of the final line
         assert_eq!(lines_of(&b), vec!["a", "d"]);
     }
 
     #[test]
     fn cut_range_whole_lines_no_infinite_loop() {
-        // Whole rows in the middle are taken exactly once, and the loop
-        // terminates.
         let mut b = buf("111\n222\n333\n444");
         let out = b.cut_range(Pos { row: 0, col: 0 }, Pos { row: 2, col: 0 });
         assert_eq!(
@@ -601,7 +567,7 @@ mod tests {
     #[test]
     fn cut_range_first_row_removed() {
         let mut b = buf("x\naaa\nbbb\nccc");
-        // (0,0) cuts all of 'x' -> first row removed, shifts indices
+        // (0,0) cuts all of 'x': the first row is removed, shifting indices.
         let out = b.cut_range(Pos { row: 0, col: 0 }, Pos { row: 3, col: 1 });
         assert_eq!(
             out.iter()
@@ -627,14 +593,12 @@ mod tests {
         let b = buf("hello world");
         let out = b.copy_range(Pos { row: 0, col: 0 }, Pos { row: 0, col: 5 });
         assert_eq!(out, vec!["hello".chars().collect::<Vec<char>>()]);
-        // copy leaves the buffer untouched
         assert_eq!(lines_of(&b), vec!["hello world"]);
     }
 
     #[test]
     fn copy_range_multi_row_keeps_endpoints() {
         let b = buf("aaa\nbbb\nccc\nddd");
-        // copy from (0,1) to (3,2): 'aaa'[1..], whole 'bbb','ccc', 'dd'
         let out = b.copy_range(Pos { row: 0, col: 1 }, Pos { row: 3, col: 2 });
         assert_eq!(
             out.iter()
@@ -660,12 +624,10 @@ mod tests {
 
     #[test]
     fn copy_range_empty_region() {
-        // same-row a == b: the single-row branch always pushes, even empty
+        // Same-row a == b: the single-row branch always pushes, even empty.
         let b = buf("hello world");
         let out = b.copy_range(Pos { row: 0, col: 3 }, Pos { row: 0, col: 3 });
         assert_eq!(out, vec![Vec::<char>::new()]);
-        // cross-row empty: a at end of row 0, b at start of row 1 hits the
-        // out.is_empty() fallback
         let b2 = buf("abc\nd");
         let out2 = b2.copy_range(Pos { row: 0, col: 3 }, Pos { row: 1, col: 0 });
         assert_eq!(out2, vec![Vec::<char>::new()]);
@@ -850,8 +812,7 @@ mod tests {
 
     #[test]
     fn crlf_mixed_eol_detected() {
-        // Any \r\n in the file flips the flag, so LF-only rows come back with
-        // \r\n on save.
+        // Any \r\n in the file flips the flag, so LF-only rows come back with \r\n on save.
         let path = tmp_path("crlf_mixed");
         fs::write(&path, "a\nb\r\n").unwrap();
         let b = Buffer::from_file(&path).unwrap();
@@ -863,8 +824,8 @@ mod tests {
 
     #[test]
     fn crlf_file_text_trailing_rule() {
-        // file_text() mirrors text()'s trailing-newline rule exactly:
-        // it is text() with every \n swapped for \r\n
+        // file_text() mirrors text()'s trailing-newline rule exactly: it is text() with every
+        // \n swapped for \r\n.
         for c in ["a\n", "a\n\n", "", "a\nb\n\n"] {
             let mut b = buf(c);
             b.crlf = true;

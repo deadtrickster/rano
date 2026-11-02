@@ -1010,8 +1010,6 @@ fn conflict_marker_lines(src: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Each conflict's rows, `(<<<<<<<, >>>>>>>)` inclusive; one still open at the
-/// end runs to the last line.
 fn conflict_regions(parts: &[Part]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = None;
@@ -1031,9 +1029,6 @@ fn conflict_regions(parts: &[Part]) -> Vec<(usize, usize)> {
     out
 }
 
-/// `src` as the version taking `side` in every conflict: the other sides'
-/// lines blanked to spaces, so every offset stays put and each side parses as
-/// real code — reading the sides in sequence would double closing braces.
 fn version(src: &str, parts: &[Part], side: Part) -> String {
     if parts.is_empty() {
         return src.to_string();
@@ -1053,15 +1048,10 @@ fn version(src: &str, parts: &[Part], side: Part) -> String {
         .join("\n")
 }
 
-/// A conflict marker line: faint, as git and emacs's smerge leave them dim —
-/// the sides' tints are what shows where a conflict is.
 fn conflict_marker_style() -> Style {
     Style::of(Role::Faint)
 }
 
-/// The role a side of a conflict sits in, as the conflict view draws them
-/// (ours removed, theirs added). The base is faint — the role table allows
-/// exactly two backgrounds.
 fn conflict_tint(p: Part) -> Option<Role> {
     match p {
         Part::Ours => Some(Role::Removed),
@@ -1087,14 +1077,10 @@ fn window_text(buf: &Buffer, win: Window) -> (String, usize, usize) {
     (s, first, base_col)
 }
 
-/// Char count per `\n`-split line — `split('\n')`'s pieces exactly, so a trailing
-/// newline yields a final empty row rather than being invisible.
 fn line_char_counts(src: &str) -> Vec<usize> {
     src.split('\n').map(|l| l.chars().count()).collect()
 }
 
-/// Char index of byte `b` within the line that starts at `lo`: identity
-/// for ASCII, a walk otherwise.
 fn char_col(src: &str, lo: usize, b: usize, ascii: bool) -> usize {
     if ascii {
         b - lo
@@ -1103,12 +1089,6 @@ fn char_col(src: &str, lo: usize, b: usize, ascii: bool) -> usize {
     }
 }
 
-/// The inline ranges of a markdown block tree, one inner vec per `inline` /
-/// `pipe_table_cell` node. The grouping is the point: the inline grammar
-/// treats the ranges it is handed as one stream, so delimiters from different
-/// nodes would pair across paragraphs. Inside a node, its range split around
-/// the NAMED children (already parsed by the block grammar); the unnamed text
-/// between them is the inline content.
 fn markdown_inline_node_ranges(tree: &Tree) -> Vec<Vec<(usize, usize)>> {
     let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
@@ -1135,14 +1115,11 @@ fn markdown_inline_node_ranges(tree: &Tree) -> Vec<Vec<(usize, usize)>> {
             stack.push(child);
         }
     }
-    // Document order, so the captures of an earlier node are applied first
-    // (they cannot overlap, but a stable order keeps the result reproducible).
+    // Document order: the captures of an earlier node are applied first; a stable order keeps the result reproducible.
     out.sort_unstable();
     out
 }
 
-/// Every inline range of the tree, flattened and sorted — the test-side view;
-/// the engine drives [`markdown_inline_node_ranges`].
 #[cfg(test)]
 fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = markdown_inline_node_ranges(tree).concat();
@@ -1150,9 +1127,6 @@ fn markdown_inline_ranges(tree: &Tree) -> Vec<(usize, usize)> {
     out
 }
 
-/// The editor's colours for a capture name: roles, so the reader's theme
-/// decides what they look like. Names `role_for_capture` knows come from that
-/// one table; here is the vocabulary only the editor's own queries use.
 fn theme(name: &str) -> Style {
     let role = match name {
         "boolean" | "float" | "field" => Role::NumberLit,
@@ -1169,8 +1143,7 @@ fn theme(name: &str) -> Style {
         "text.uri" | "text.reference" => Role::Link,
         "text.strike" => Role::Faint,
         _ => match crate::highlight::role_for_capture(name) {
-            // A dotted name neither table matched exactly falls back to its
-            // prefix here too ("punctuation.bracket" -> "punctuation").
+            // A dotted name neither table matched falls back to its prefix.
             Role::Plain => {
                 return match name.split_once('.') {
                     Some((prefix, _)) => theme(prefix),
@@ -1185,38 +1158,14 @@ fn theme(name: &str) -> Style {
 
 pub struct Highlighter {
     parser: Parser,
-    /// Markdown only: a second parser for the inline grammar, whose tree is
-    /// parsed over the block tree's inline ranges. Kept so the inline pass
-    /// does not allocate a parser per refresh.
     inline_parser: Parser,
-    /// One entry per styled row. When `window` is set these are rows
-    /// `[window, window + len)`, because a windowed refresh parses only that
-    /// slice; the slice's own line 0 is `line_styles[0]`.
     line_styles: Vec<Vec<Style>>,
-    /// The char window the grid covers, when it covers a window rather than
-    /// the whole buffer, plus the `(row, col)` offset of the grid's first cell.
     window: Option<(Window, usize, usize)>,
-    /// The last windowed parse covered the whole buffer, so `syntax_errors`
-    /// can report. A window that happens to cover everything is still a
-    /// window, but its tree is complete.
     window_covers_whole: bool,
-    /// The last successful parse, kept so syntax errors can be surfaced
-    /// without a language server (see [`Highlighter::syntax_errors`]).
     tree: Option<Tree>,
-    /// A WHOLE-document parse, kept only for diagnostics. Separate from
-    /// `tree` because colour can be a window and errors cannot: an `ERROR`
-    /// node outside the window would go unreported. Debounced by
-    /// `Editor::diag_flush`.
     diag_tree: Option<Tree>,
-    /// The merge conflicts in the text `diag_tree` was parsed from, rows
-    /// `(<<<<<<<, >>>>>>>)` inclusive: an error inside one is an artefact of
-    /// the two-side read, and the conflict is what gets reported.
     diag_conflicts: Vec<(usize, usize)>,
-    /// How many times the style grid has been parsed — a count, because
-    /// "no re-parse on idle frames" is a fact a timing assertion flakes on.
     pub parses: u64,
-    /// This buffer's language and who decided; `Detected` until a person
-    /// overrules it.
     pub mode: Mode,
 }
 
@@ -1236,24 +1185,14 @@ impl Highlighter {
         }
     }
 
-    /// Set the mode the user chose. The CALLER invalidates the grid:
-    /// `Editor::set_mode` knows a mode change means a re-highlight.
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
     }
 
-    /// Re-parse the whole buffer and rebuild the grid; no-op for scratch
-    /// buffers. O(document) in parse and capture walk, so per-keystroke work
-    /// goes to [`Self::refresh_window`] — the export path and tests use this.
     pub fn refresh(&mut self, buf: &Buffer) {
         self.refresh_rows(buf, None);
     }
 
-    /// Highlight only a char window: cost proportional to the window, not the
-    /// document (a char range because a row can be megabytes — minified
-    /// JSON). A construct opening outside colours as though it opened inside,
-    /// and no diagnostics come of it; callers pass a margin so those edges
-    /// stay off screen.
     pub fn refresh_window(&mut self, buf: &Buffer, win: Window) {
         let last = win.rows.1.min(buf.row_count().saturating_sub(1));
         if win.rows.0 > last {
@@ -1262,20 +1201,17 @@ impl Highlighter {
         self.refresh_rows(buf, Some(win));
     }
 
-    /// The char range [`Self::style_at`] can answer for, when it is a window.
     pub fn styled_window(&self) -> Option<Window> {
         self.window.map(|(w, _, _)| w)
     }
 
     fn refresh_rows(&mut self, buf: &Buffer, win: Option<Window>) {
         let sample = sample_of(buf);
-        // Who decides: the user if they said, the ladder otherwise. A chosen
-        // language is used as is; `Plain` means do not look at all.
+        // Who decides: the user if they said, the ladder otherwise; a chosen language is used as is.
         let lang = match self.mode {
             Mode::Lang(l) => Some(l),
             Mode::Plain => None,
-            // A binary is not text; a chosen mode still wins, because that
-            // is what choosing means.
+            // A binary is not text; a chosen mode still wins.
             Mode::Detected if buf.binary => None,
             Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
         };
@@ -1284,12 +1220,9 @@ impl Highlighter {
             return;
         };
         // A refresh count rather than a clock: "no parse on an idle frame"
-        // is a fact a timing assertion can only flake on.
         self.parses += 1;
 
-        // Only the window's characters are materialised — `buf.text()` would
-        // copy the whole document per keystroke. The grid and every index
-        // below are slice-relative; `style_at` adds the offset back.
+        // Only the window's characters are materialised; `buf.text()` copies the whole document.
         let (source, base_row, base_col) = match win {
             None => (buf.text(), 0usize, 0usize),
             Some(w) => {
@@ -1297,9 +1230,7 @@ impl Highlighter {
                 (text, base_row, base_col)
             }
         };
-        // Mid-merge, the text is coloured as ours' version of the file, and
-        // the base and theirs each as their own (see `version`); the markers
-        // are bands.
+        // Mid-merge, the text is coloured as ours' version of the file; the markers are bands.
         let parts = conflict_parts(&source);
         let full = source;
         let source = version(&full, &parts, Part::Ours);
@@ -1308,11 +1239,7 @@ impl Highlighter {
             rows: (w.rows.0, w.rows.1.min(buf.row_count().saturating_sub(1))),
             cols: w.cols,
         });
-        // A language with no grammar builds its grid from the text, with no
-        // tree and no query — it must stop here, before the parse. Not shared
-        // with this function's tail: the only thing between is the
-        // conflict-tint loop, and a conflict marker in `/etc/fstab` is not a
-        // thing.
+        // A language with no grammar builds its grid from the text and stops here, before the parse.
         if let Lang::Columns(fmt) = lang {
             self.line_styles = columns::grid(&source, fmt);
             self.window = parsed.map(|w| (w, base_row, base_col));
@@ -1327,17 +1254,14 @@ impl Highlighter {
             return;
         }
 
-        // Always a fresh parse: reusing the previous tree leaks byte offsets
-        // from the old source into the new one, which panics inside
-        // tree-sitter when a line is shortened.
+        // Always a fresh parse: reusing the previous tree leaks stale byte offsets and panics in tree-sitter.
         let Some(tree) = self.parser.parse(source.as_bytes(), None) else {
             self.clear();
             return;
         };
         self.tree = Some(tree);
 
-        // Process-wide, not per instance: a `Highlighter` is built per diff
-        // excerpt. See [`highlight_query`].
+        // Process-wide, not per instance — see [`highlight_query`].
         let Some(query) = highlight_query(lang) else {
             self.clear();
             return;
@@ -1345,9 +1269,7 @@ impl Highlighter {
 
         let tree = self.tree.as_ref().unwrap();
         let mut grid = Self::build_styles(&source, tree, &query);
-        // Markdown is two grammars: the block pass coloured structure, and
-        // emphasis, code spans and links are nodes of the inline grammar,
-        // parsed over the ranges the block tree marked.
+        // Markdown is two grammars: the block pass coloured structure, the inline pass emphasis and links.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
             self.markdown_inline_pass(&source, &block, |slice, base_row, t, q| {
@@ -1385,15 +1307,13 @@ impl Highlighter {
         }
         self.line_styles = grid;
         self.window = parsed.map(|w| (w, base_row, base_col));
-        // A window covering every row is the whole document: its tree is
-        // complete and its rows are the caller's.
+        // A window covering every row is the whole document, so its tree is complete.
         self.window_covers_whole = match parsed {
             Some(w) => w.rows.0 == 0 && w.rows.1 + 1 >= buf.row_count(),
             None => false,
         };
     }
 
-    /// Drop everything this highlighter knows.
     fn clear(&mut self) {
         self.line_styles.clear();
         self.tree = None;
@@ -1401,10 +1321,6 @@ impl Highlighter {
         self.window_covers_whole = false;
     }
 
-    /// Run the inline half of markdown's highlighting: parse the inline
-    /// grammar over each inline node's ranges and hand the caller the tree.
-    /// One parse per node — the grammar reads its ranges as one stream, so a
-    /// delimiter in one node would pair with one in a later paragraph.
     fn markdown_inline_pass<F: FnMut(&str, usize, &Tree, &Query)>(
         &mut self,
         src: &str,
@@ -1421,8 +1337,7 @@ impl Highlighter {
         {
             return;
         }
-        // Line starts computed once for the whole source: the per-node row
-        // base needs them, and recomputing per node made this quadratic.
+        // Line starts computed once: recomputing them per node made this quadratic.
         let mut line_starts = vec![0usize];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
@@ -1436,11 +1351,7 @@ impl Highlighter {
         };
 
         for group in markdown_inline_node_ranges(block) {
-            // Only the node's own bytes reach the parser: passing the whole
-            // source with `set_included_ranges` is quadratic, because
-            // tree-sitter walks the excluded input to reach each range. The
-            // slice is grown to full rows so a node's columns stay aligned
-            // with the grid's.
+            // Only the node's own bytes reach the parser; the slice is grown to whole rows.
             let lo = group[0].0;
             let hi = group[group.len() - 1].1;
             let base_row = row_of(lo);
@@ -1469,18 +1380,12 @@ impl Highlighter {
         }
     }
 
-    /// Parse the whole buffer for DIAGNOSTICS only, leaving the colour grid
-    /// alone: colour is a window and an `ERROR` node outside it would go
-    /// unreported, but a whole-document parse belongs on a debounce, not the
-    /// keystroke path. False when unknown or failed; the caller keeps what it
-    /// had rather than clearing it.
     pub fn parse_for_diagnostics(&mut self, buf: &Buffer) -> bool {
         let sample = sample_of(buf);
         let lang = match self.mode {
             Mode::Lang(l) => Some(l),
             Mode::Plain => None,
-            // A binary is not text; a chosen mode still wins, because that
-            // is what choosing means.
+            // A binary is not text; a chosen mode still wins.
             Mode::Detected if buf.binary => None,
             Mode::Detected => detect_sample(buf.name.as_deref(), &sample),
         };
@@ -1488,8 +1393,7 @@ impl Highlighter {
             self.diag_tree = None;
             return false;
         };
-        // No grammar, so no tree: the columnar databases have no tree-sitter
-        // diagnostics, and there is nothing to report from.
+        // No grammar, so no tree: nothing to report from.
         if matches!(lang, Lang::Columns(_)) {
             self.diag_tree = None;
             return false;
@@ -1499,8 +1403,7 @@ impl Highlighter {
             return false;
         }
         let source = buf.text();
-        // Mid-merge, ours' version of the file is what is checked: markers
-        // and both sides together would be errors that are not there.
+        // Mid-merge, ours' version of the file is what is checked.
         let parts = conflict_parts(&source);
         self.diag_conflicts = conflict_regions(&parts);
         let source = version(&source, &parts, Part::Ours);
@@ -1516,13 +1419,8 @@ impl Highlighter {
         }
     }
 
-    /// Style for the character at `p`, if any capture colors it.
     pub fn style_at(&self, p: Pos) -> Option<Style> {
-        // A windowed grid is indexed from the window's own first character, so
-        // map the absolute position down: the row by the window's first row,
-        // and — only on that first row — the column by the window's first
-        // column. Outside the window there is no answer, which the caller
-        // reads as "uncoloured" — see [`Self::refresh_window`].
+        // A windowed grid is indexed from the window's first character; outside it there is no answer.
         let (row_idx, col_idx) = match self.window {
             Some((_, base_row, base_col)) => {
                 let row = p.row.checked_sub(base_row)?;
@@ -1544,11 +1442,6 @@ impl Highlighter {
         }
     }
 
-    /// Syntax classes for raw text that never touches an editor buffer: per
-    /// character, the tree-sitter capture name that colours it, or `None`.
-    /// The caller owns the colour mapping, so the language is explicit; the
-    /// editor's own grid is untouched (an embedder needs its own instance).
-    /// Empty on failure.
     pub fn classes(&mut self, src: &str, lang: Lang) -> Vec<Vec<Option<String>>> {
         let Some(tree) = (|| {
             self.parser.set_language(&lang.language()).ok()?;
@@ -1562,8 +1455,7 @@ impl Highlighter {
         };
         self.tree = Some(tree);
         let mut grid = Self::build_classes(src, self.tree.as_ref().unwrap(), &query);
-        // The same two-grammar split as `refresh`, so an embedder reading
-        // capture names sees the inline constructs too.
+        // The same two-grammar split as `refresh`.
         if lang == Lang::Markdown {
             let block = self.tree.clone().expect("just set");
             self.markdown_inline_pass(src, &block, |slice, base_row, t, q| {
@@ -1573,18 +1465,12 @@ impl Highlighter {
         grid
     }
 
-    /// Syntax errors from the last parse as `(line, col, end_col, message)`
-    /// in char columns, from `ERROR` nodes and missing nodes. Empty for
-    /// scratch buffers and clean parses.
     pub fn syntax_errors(&self, lines: &[Vec<char>]) -> Vec<(usize, usize, usize, String)> {
-        // The diagnostics tree, not the colour tree: colour is a window,
-        // errors need the whole document. `None` until the first debounced
-        // parse.
+        // The diagnostics tree, not the colour tree; `None` until the first debounced parse.
         let Some(tree) = self.diag_tree.as_ref() else {
             return Vec::new();
         };
-        // One diagnostic per conflict, on its `<<<<<<<` line, so the next-
-        // diagnostic key walks from conflict to conflict.
+        // One diagnostic per conflict, on its `<<<<<<<` line.
         let mut out: Vec<(usize, usize, usize, String)> = self
             .diag_conflicts
             .iter()
@@ -1606,8 +1492,7 @@ impl Highlighter {
         while let Some((node, in_error)) = stack.pop() {
             let is_error = node.is_error() && !in_error;
             if node.is_missing() {
-                // Missing nodes are zero-width insertion points; the caller
-                // widens them to one visible column.
+                // Missing nodes are zero-width insertion points; the caller widens them.
                 let (l, c) = char_pos(lines, node.start_position());
                 out.push((l, c, c, format!("missing {}", node.kind())));
                 continue;
@@ -1652,9 +1537,6 @@ impl Highlighter {
         line_styles
     }
 
-    /// Overlay one tree's captures on an existing style grid. Called twice for
-    /// markdown — the block tree, then the inline tree over the same cells —
-    /// which is what makes the second pass compose instead of fight.
     fn apply_styles(
         src: &str,
         tree: &Tree,
@@ -1673,13 +1555,6 @@ impl Highlighter {
         });
     }
 
-    /// The capture grid without a palette: one row per line, one entry per
-    /// character — the tree-sitter capture name that covers it, or `None`.
-    ///
-    /// [`Self::build_styles`] is this plus rano's [`theme`]; a caller that
-    /// owns its palette (another crate embedding the engine) wants the
-    /// names instead, because capture → colour is a decision about the
-    /// terminal, not about the grammar.
     fn build_classes(src: &str, tree: &Tree, query: &Query) -> Vec<Vec<Option<String>>> {
         let mut grid: Vec<Vec<Option<String>>> = line_char_counts(src)
             .into_iter()
@@ -1689,7 +1564,6 @@ impl Highlighter {
         grid
     }
 
-    /// Overlay one tree's captures on an existing class grid.
     fn apply_classes(
         src: &str,
         tree: &Tree,
@@ -1704,19 +1578,6 @@ impl Highlighter {
         });
     }
 
-    /// Walk every query capture and hand the caller the cells it covers as
-    /// `(row, char_range, capture_name)`. Ranges are half-open and within
-    /// the row. Later captures overwrite earlier ones cell by cell, which
-    /// is the order [`Self::build_styles`] has always had; what a capture
-    /// *means* is the callback's decision, which is why the default-styled
-    /// skip lives in [`Self::build_styles`] and not here.
-    ///
-    /// Takes `src`, **not** a per-line `Vec<Vec<char>>`. Building that was one
-    /// allocation per line per call and it dominated the walk: measured
-    /// 2026-09-20, ~1.9 µs per line against ~0.05 µs per byte, so 7.7 KB in 700
-    /// lines cost 1.34 ms per walk while 9 KB in one line cost 0.46 ms. A line
-    /// that is pure ASCII — nearly every line of source — needs no conversion
-    /// at all, because byte index and char index are the same number.
     fn for_each_capture(
         src: &str,
         tree: &Tree,
@@ -1724,8 +1585,7 @@ impl Highlighter {
         row_base: usize,
         mut f: impl FnMut(usize, std::ops::Range<usize>, &str),
     ) {
-        // Byte ranges of each line — `split('\n')`'s pieces exactly, including the
-        // empty one after a trailing newline, which is a row a caller may index.
+        // Byte ranges of each line — `split('\n')`'s pieces exactly.
         let mut bounds: Vec<(usize, usize)> = Vec::new();
         let mut start = 0usize;
         for (i, b) in src.bytes().enumerate() {
@@ -1736,29 +1596,20 @@ impl Highlighter {
         }
         bounds.push((start, src.len()));
         let starts: Vec<usize> = bounds.iter().map(|(s, _)| *s).collect();
-        // A line with no multibyte character converts byte offset to char index by
-        // subtraction, which is nearly every line of source.
+        // An ASCII line converts byte offset to char index by subtraction.
         let ascii: Vec<bool> = bounds.iter().map(|(s, e)| src[*s..*e].is_ascii()).collect();
 
         let names = query.capture_names();
         let mut cursor = QueryCursor::new();
         let mut caps = cursor.captures(query, tree.root_node(), src.as_bytes());
-        // A row cursor that only ever moves FORWARD. Captures arrive in
-        // document order, so the line holding each one is at or after the line
-        // holding the previous one — a binary search per capture was
-        // `#captures × log(#lines)` random accesses into a multi-megabyte
-        // array, and on a large file that was the whole cost of a keystroke
-        // (measured 2026-09-22: ~2.2 s of a 3.0 s keystroke on a 7 MB Rust
-        // file, ~1.8 s of 2.3 s on a 4 MB single-line one).
+        // A row cursor that only ever moves forward: captures arrive in document order.
         let mut row = 0usize;
         while let Some((m, i)) = caps.next() {
             let cap = m.captures()[*i];
             let name = names.get(cap.index as usize).copied().unwrap_or("");
             let (s, e) = (cap.node.start_byte(), cap.node.end_byte());
             if starts[row] > s {
-                // A capture that starts before its predecessor: captures
-                // within one match follow the query's order, not the bytes'.
-                // Rare, and correctness beats speed here.
+                // A capture before its predecessor: a binary search, because correctness beats speed here.
                 row = starts.partition_point(|&o| o <= s).saturating_sub(1);
             } else {
                 while row + 1 < starts.len() && starts[row + 1] <= s {
@@ -1795,178 +1646,57 @@ impl Default for Highlighter {
 }
 
 // ---------------------------------------------------------------------------
-// Stream: an append-only document, incrementally parsed
-// ---------------------------------------------------------------------------
-//
-// `dead_code` is allowed item by item across this section. It is the public
-// API of the library (`rano::syntax::Stream`) for other crates to use; the
-// allowances date from when the binary compiled this module privately as well,
-// and the editor itself still has no use for the engine.
 
-/// A node of a [`Stream`]'s tree, as plain data.
-///
-/// The engine's public surface holds no `tree-sitter` types on purpose: a
-/// consumer walks this to build its own layout model, the same way
-/// [`Highlighter::classes`] hands back capture *names* rather than nodes.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// A stable identity for this node within its tree, distinct from every other node
-    /// in it — tree-sitter's node id.
-    ///
-    /// What a consumer comparing *positions* cannot do: two nodes can share a byte range
-    /// (a zero-width `MISSING` node and the node it was inserted beside) and a parent and
-    /// child can share a `start`, so "is this the same node I saw a moment ago" needs a
-    /// identity rather than a coordinate. Found missing the day a shell reader asked
-    /// whether a child *was* the body it had already found (2026-09-20).
     pub id: usize,
-    /// Grammar node kind: `"atx_heading"`, `"fenced_code_block"`,
-    /// `"strong_emphasis"`, …
     pub kind: String,
-    /// Byte offsets into [`Stream::src`].
     pub start: usize,
     pub end: usize,
-    /// The **field** this node was found under in its parent, when it has one:
-    /// `"name"` for a definition's identifier, `"body"` for its block, `"type"` for a
-    /// declarator's type. `None` for a node reached positionally, and for the root.
-    ///
-    /// Tree-sitter hands a field out through a cursor rather than storing it on the
-    /// node, so a consumer walking [`Self::children`] cannot ask for one — and asking by
-    /// *field* is how a grammar-dependent question ("what is this declaration's name")
-    /// stays grammar-dependent instead of being re-derived by matching child kinds in
-    /// the order they happen to appear. Found missing the day an outline and a shell
-    /// reader tried to move off their own parsers (2026-09-20).
     pub field: Option<String>,
-    /// Position of `start`, zero-based, **column in bytes**.
     pub start_point: Point,
-    /// Position of `end`.
     pub end_point: Point,
     pub has_error: bool,
     pub is_missing: bool,
-    /// Tree-sitter's `is_named()`: false for anonymous tokens (punctuation,
-    /// keywords like `fn` or `|`), which are in `children` too. A consumer
-    /// doing a "split this node's range around its named children" walk —
-    /// markdown's block/inline handoff, for one — needs to tell them apart.
     pub named: bool,
     pub children: Vec<Node>,
 }
 
-/// One captured range within one line, as plain data — the unit a renderer paints.
-///
-/// Columns are **characters**, half-open, and within `row`. Later spans may overlap
-/// earlier ones: the order is the query's, and a caller deciding colours applies them
-/// in it.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
-    /// 0-based line, counted by `\n`.
     pub row: usize,
-    /// First character of the capture within the row.
     pub start: usize,
-    /// One past the last character.
     pub end: usize,
-    /// The capture name as the query writes it (`"keyword"`, `"function"`, …), which
-    /// the caller maps to a colour — rano's own [`theme`] is only one such mapping.
     pub name: String,
 }
 
-/// One query capture, as plain data.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
-    /// The capture name as the query writes it (`"keyword"`, `"string"`, …).
     pub name: String,
-    /// Byte offsets into [`Stream::src`].
     pub start: usize,
     pub end: usize,
 }
 
-/// An append-only document, incrementally parsed.
-///
-/// The editor's [`Highlighter`] full-reparses on every edit, deliberately:
-/// reusing a tree across an edit that *shortens* a line leaks byte offsets
-/// from the old source into the new tree (see [`Highlighter::refresh`]).
-/// This type is the other half of that trade. It only ever grows, and a
-/// pure-append edit cannot shorten a line, so handing the previous tree
-/// back to the parser is both sound and cheap: the unchanged prefix is
-/// reused and the per-push cost stays flat as the document grows. Feeding
-/// text through [`Highlighter::refresh`] instead would re-parse the whole
-/// document per push — O(N²) over a stream.
-///
-/// The use is "push, then read": hold one `Stream` per growing document,
-/// [`push`](Self::push) each delta as it arrives, and read
-/// [`root`](Self::root) (and/or [`captures`](Self::captures)) after each
-/// push. For a second grammar over selected parts of the document —
-/// markdown's block + inline split, HTML embedding JavaScript, C embedding
-/// asm — hold another `Stream` and give it the byte ranges to parse with
-/// [`set_included_ranges`](Self::set_included_ranges).
-///
-/// The engine is generic over [`Lang`]: no grammar-specific knowledge
-/// lives here.
-///
-/// # What the reuse is worth, measured
-///
-/// How much tree-sitter can reuse is the grammar's decision, not this
-/// crate's. Measured on this machine (release build, appending a token or two
-/// at a time, 1,000 pushes):
-///
-/// | grammar | a late push | a one-shot parse of the same text |
-/// |---|---|---|
-/// | Rust (88 KB) | ~275 µs | ~8.2 ms |
-/// | Markdown block (103 KB) | ~9.5 ms | ~12.6 ms |
-///
-/// Rust reuses nearly everything: a push costs about 3% of a full parse.
-/// Markdown's block grammar calls its external scanner in almost every block
-/// state, and tree-sitter refuses to reuse a token when the *current* state
-/// admits external tokens (`ts_parser__can_reuse_first_leaf`'s
-/// `external_lex_state == 0` condition, `parser.c`) — so a markdown push
-/// re-lexes essentially the whole document: ~100 ns per document byte, about
-/// what a full parse costs. `Tree::edit` is ~0.3 µs and never the cost.
-///
-/// Either way the per-push cost is linear in the document, so pushing N times
-/// costs O(N²) in total. This engine is a constant-factor win over reparsing,
-/// not an asymptotic one, and it is not a licence to stream a 10 MB document
-/// one token at a time. A consumer that needs better has to keep the settled
-/// prefix out of the parser's way itself (parse only the growing tail with
-/// [`set_included_ranges`](Self::set_included_ranges) and splice).
-///
-/// The measurement lives in this module's tests: `an_incremental_push_beats_a_full_reparse`
-/// runs by default, `per_push_cost_stays_flat` (ignored, slow) states the
-/// flat-cost criterion and fails on it today.
 #[allow(dead_code)]
 pub struct Stream {
     lang: Lang,
     parser: Parser,
-    /// The current parse. `None` before the first push, on an inert stream,
-    /// and after a parse that produced nothing (tree-sitter only gives up
-    /// on a timeout or a cancellation flag, neither of which is set here).
     tree: Option<Tree>,
     src: String,
-    /// Byte ranges the next parse is restricted to (empty = whole document,
-    /// tree-sitter's convention).
     ranges: Vec<(usize, usize)>,
-    /// `ranges` changed since the parser last saw them.
     ranges_dirty: bool,
     query: Option<Query>,
-    /// `(language, query text)` the cached query was compiled from.
     query_key: Option<(Lang, String)>,
     parse_calls: u64,
-    /// End of `src` as a `Point`, kept incrementally: two integer updates
-    /// per push instead of a rescan of the whole document.
     end_point: TsPoint,
-    /// False when `set_language` failed, which makes the stream inert:
-    /// `push` is a no-op and `root()` is `None`. Every `Lang` has a valid
-    /// grammar, so this is defensive — the same "empty on failure"
-    /// convention [`Highlighter::classes`] uses.
     live: bool,
 }
 
 #[allow(dead_code)]
 impl Stream {
-    /// A stream for `lang`, with no text yet.
-    ///
-    /// Infallible: every `Lang` has a valid grammar. If `set_language` ever
-    /// failed the stream would be inert — `push` a no-op, `root()` `None`.
     pub fn new(lang: Lang) -> Self {
         let mut parser = Parser::new();
         let live = parser.set_language(&lang.language()).is_ok();
@@ -1976,8 +1706,7 @@ impl Stream {
             tree: None,
             src: String::new(),
             ranges: Vec::new(),
-            // Force one `set_included_ranges` before the first parse, so the
-            // parser is known to be in the "whole document" state.
+            // Force one `set_included_ranges` before the first parse.
             ranges_dirty: true,
             query: None,
             query_key: None,
@@ -1987,13 +1716,6 @@ impl Stream {
         }
     }
 
-    /// Append `delta` and re-parse.
-    ///
-    /// With a previous tree the tree is edited for the pure-append range and
-    /// handed to the parser, so the unchanged prefix is reused; without one,
-    /// a fresh parse. An empty `delta` on a stream that already has a tree
-    /// for this source is a no-op. On an inert stream this does nothing at
-    /// all.
     pub fn push(&mut self, delta: &str) {
         if !self.live || (delta.is_empty() && self.tree.is_some()) {
             return;
@@ -2011,10 +1733,7 @@ impl Stream {
         }
         let new_len = self.src.len();
 
-        // The append is zero-width at the old end: the parser learns the
-        // source grew and where, and re-uses every subtree that does not
-        // touch the tail. `old_end` is the point before the append, so the
-        // edit is `start == old_end == new_start` in both bytes and points.
+        // The append is zero-width at the old end, so every untouched subtree is reused.
         let edit = InputEdit {
             start_byte: old_len,
             old_end_byte: old_len,
@@ -2031,27 +1750,18 @@ impl Stream {
         }
         self.parse_calls += 1;
         let parsed = self.parser.parse(self.src.as_bytes(), self.tree.as_ref());
-        // A `None` here means the parse produced nothing; drop the tree
-        // rather than hand back one that no longer matches `src`, and let
-        // the next push do a fresh full parse.
+        // A `None` parse means nothing was produced; drop the tree and let the next push start fresh.
         self.tree = parsed;
     }
 
-    /// The text pushed so far.
     pub fn src(&self) -> &str {
         &self.src
     }
 
-    /// The current tree as this crate's own type, or `None` before the first
-    /// push or on an inert stream. Built fresh per call; the trees are small.
     pub fn root(&self) -> Option<Node> {
         Some(node_of(self.tree.as_ref()?.root_node()))
     }
 
-    /// Restrict the next parse to these byte ranges (empty = whole document).
-    /// Sorted and merged here rather than trusting the caller, which is what
-    /// tree-sitter requires; applied at the next [`push`](Self::push), so
-    /// text pushed after this call is covered too.
     pub fn set_included_ranges(&mut self, ranges: &[(usize, usize)]) {
         let mut sorted: Vec<(usize, usize)> =
             ranges.iter().copied().filter(|(s, e)| s < e).collect();
@@ -2067,9 +1777,6 @@ impl Stream {
         self.ranges_dirty = true;
     }
 
-    /// Run `query` over the current tree: one [`Capture`] per capture, in
-    /// document order. The query is cached per `(language, text)`. Empty on
-    /// an inert stream, before the first push, or for a query that fails.
     pub fn captures(&mut self, query: &str) -> Vec<Capture> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -2110,18 +1817,11 @@ impl Stream {
         out
     }
 
-    /// The capture spans of the current text: one [`Span`] per captured
-    /// range — what a renderer paints, unlike [`Highlighter::refresh`]'s
-    /// per-line grid. The language's own query, compiled once per stream.
-    /// Rows and columns are characters, half-open; later captures apply in
-    /// order, not merged. Empty before the first push, on an inert stream,
-    /// or for a query that fails to compile.
     pub fn spans(&mut self) -> Vec<Span> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
         };
-        // Process-wide: compilation is expensive and the caller is one of
-        // many blocks — see [`highlight_query`].
+        // Process-wide: see [`highlight_query`].
         let Some(query) = highlight_query(self.lang) else {
             return Vec::new();
         };
@@ -2137,14 +1837,10 @@ impl Stream {
         out
     }
 
-    /// How many `parse` calls this stream has made. No "bytes re-parsed"
-    /// counter: tree-sitter does not report reuse, and whether the cost stays
-    /// flat is a question the tests measure in time.
     pub fn parse_calls(&self) -> u64 {
         self.parse_calls
     }
 
-    /// Hand the held ranges to the parser. Empty means the whole document.
     fn apply_ranges(&mut self) {
         let len = self.src.len();
         let ranges: Vec<Range> = self
@@ -2161,16 +1857,12 @@ impl Stream {
             })
             .filter(|r| r.start_byte < r.end_byte)
             .collect();
-        // Ignoring the result is safe: the ranges were sorted and merged
-        // above, so the parser accepts them or they were empty.
+        // Ignoring the result is safe: the ranges were sorted and merged above.
         let _ = self.parser.set_included_ranges(&ranges);
         self.ranges_dirty = false;
     }
 }
 
-/// Equality is a node's value, not its identity: two parses of the same
-/// text are the same tree, and `Node::id` — tree-sitter's per-tree pointer —
-/// differs between them, so it is the one field left out.
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
         // `children` compares recursively, so `id` is the only field left out.
@@ -2189,7 +1881,6 @@ impl PartialEq for Node {
 
 impl Eq for Node {}
 
-/// Deep-copy a `tree-sitter` node into this crate's own [`Node`].
 #[allow(dead_code)]
 fn node_of(n: tree_sitter::Node<'_>) -> Node {
     Node {
@@ -2208,13 +1899,8 @@ fn node_of(n: tree_sitter::Node<'_>) -> Node {
     }
 }
 
-/// A node's children, each labelled with the field it appears under.
-///
-/// Through a cursor rather than `children()`, because the cursor is the only thing that
-/// knows a child's field name.
 fn children_of(n: tree_sitter::Node<'_>) -> Vec<Node> {
-    // Navigation rather than `children()`: the cursor is the only thing
-    // that knows a child's field name.
+    // Navigation rather than `children()`: only the cursor knows a child's field name.
     let mut cursor = n.walk();
     let mut pairs: Vec<(Option<String>, tree_sitter::Node<'_>)> = Vec::new();
     if cursor.goto_first_child() {
@@ -2235,8 +1921,6 @@ fn children_of(n: tree_sitter::Node<'_>) -> Vec<Node> {
         .collect()
 }
 
-/// A position in a document: line and column, zero-based, the column in bytes.
-/// Rano's own type, so a consumer of [`Node`] need not depend on a parser.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
@@ -2262,8 +1946,6 @@ impl From<Point> for TsPoint {
     }
 }
 
-/// `(row, column)` — both zero-based, the column in BYTES — of byte offset
-/// `off` in `src`, clamped into `src` and onto a char boundary.
 #[allow(dead_code)]
 fn point_of(src: &str, off: usize) -> Point {
     let mut off = off.min(src.len());
@@ -2283,8 +1965,6 @@ fn point_of(src: &str, off: usize) -> Point {
     }
 }
 
-/// tree-sitter reports byte offsets within a row; diagnostics use char
-/// columns, so count the chars that make up the byte prefix.
 fn char_pos(lines: &[Vec<char>], p: tree_sitter::Point) -> (usize, usize) {
     let Some(line) = lines.get(p.row) else {
         return (p.row, 0);
@@ -2329,9 +2009,7 @@ mod tests {
         );
         let row = &grid[0];
         assert_eq!(row.len(), src.lines().next().unwrap().len());
-        // `let` is a keyword, `build` a function; a plain identifier is
-        // captured by nothing in the Rust query and stays `None`, which the
-        // embedder reads as "plain text".
+        // A plain identifier is captured by nothing and stays `None`.
         let class = |needle: &str| {
             let at = src.find(needle).unwrap();
             row[at].clone()
@@ -2352,13 +2030,10 @@ mod tests {
         assert!(grid[0].is_empty());
     }
 
-    /// A multi-byte character shifts nothing but its own cell: byte and char
-    /// counts are different numbers, and the grid is one cell per char.
     #[test]
     fn a_multibyte_character_shifts_nothing_but_its_own_cell() {
         let src = "let s = \"a—b\"; // dash\nlet done = build(); // tail\n";
-        // Char column of the first char of `needle` — `find` answers bytes,
-        // and the grid is one cell per char.
+        // Char column of `needle`: `find` answers bytes, the grid is one cell per char.
         let col_of = |line: &str, needle: &str| {
             let b = line.find(needle).unwrap();
             line[..b].chars().count()
@@ -2367,8 +2042,7 @@ mod tests {
         let grid = hl.classes(src, Lang::Rust);
         assert_eq!(grid.len(), 3, "one row per \\n-split line, tail included");
 
-        // The line with the dash: the closing quote must stay in the string
-        // capture.
+        // The line with the dash: the closing quote must stay in the string capture.
         let l0 = src.split('\n').next().unwrap();
         assert_eq!(grid[0][col_of(l0, "let")].as_deref(), Some("keyword"));
         assert_eq!(
@@ -2384,9 +2058,7 @@ mod tests {
         );
         assert_eq!(grid[0][col_of(l0, "// dash")].as_deref(), Some("comment"));
 
-        // The line AFTER it. The line-offset bug lived here: this line's
-        // byte start was short by the dash's two extra bytes, so every
-        // class landed two cells to the right.
+        // The line after it, where the line-offset bug lived.
         let l1 = src.split('\n').nth(1).unwrap();
         assert_eq!(grid[1][col_of(l1, "let")].as_deref(), Some("keyword"));
         assert_eq!(grid[1][col_of(l1, "build")].as_deref(), Some("function"));
@@ -2487,8 +2159,7 @@ mod tests {
             detect(Some(Path::new(".editorconfig")), None),
             Some(Lang::Ini)
         );
-        // A directory component must not count: only the file name is
-        // matched.
+        // A directory component must not count: only the file name is matched.
         assert_eq!(detect(Some(Path::new("dockerfile/x.txt")), None), None);
     }
 
@@ -2628,8 +2299,7 @@ mod tests {
         assert!(style_at(&hl, 2, line2.find("name").unwrap()).is_none()); // plain argument
     }
 
-    // The query must speak the capture vocabulary `theme` maps: a name it
-    // does not know renders uncoloured.
+    // The query must speak the vocabulary `theme` maps: a name it does not know renders uncoloured.
     #[test]
     fn commonlisp_classes_use_the_shared_vocabulary() {
         let src = "(defun greet (x) :hello)\n";
@@ -2643,7 +2313,6 @@ mod tests {
             Some("constant")
         );
         // Plain symbols are captured as "variable" for embedders; `theme`
-        // maps it to nothing, so the editor renders them uncoloured.
         assert_eq!(
             row[src.find("(x)").unwrap() + 1].as_deref(),
             Some("variable")
@@ -2678,9 +2347,7 @@ mod tests {
         assert!(style_at(&hl, 0, 9).is_some()); // number builtin type
     }
 
-    // The markdown query is rano's own; assert the capture names, not just
-    // that something is coloured. A ```rust fence is one literal run — no
-    // injection grammar re-parses it.
+    // The markdown query is rano's own; assert the capture names.
     #[test]
     fn markdown_classes_name_the_block_structure() {
         let src = "# Title\n\n- item\n\n```rust\nfn main() {}\n```\n";
@@ -2693,8 +2360,7 @@ mod tests {
         assert_eq!(grid[4][0].as_deref(), Some("punctuation.bracket")); // fence
         assert_eq!(grid[4][3].as_deref(), Some("attribute")); // rust info string
         assert_eq!(grid[5][0].as_deref(), Some("text.literal")); // fence content
-        // The whole body, not just its first character: `fn` is not a keyword
-        // here, because the fence is not parsed as Rust.
+        // The whole body is one literal run: the fence is not parsed as Rust.
         assert_eq!(grid[5][3].as_deref(), Some("text.literal"));
         assert_eq!(grid[5][0], grid[5][3]);
     }
@@ -2804,9 +2470,7 @@ mod tests {
         let b = buf_named("t.diff", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n");
         let mut hl = Highlighter::new();
         hl.refresh(&b);
-        // Git's colours, not the grammar's arbitrary ones: a deletion is red
-        // (it was the keyword violet), an addition green, the hunk cyan, and
-        // both file names one bold style (`---` was violet, `+++` green).
+        // Git's colours: a deletion is red, an addition green, the hunk cyan, file names bold.
         let role = |r: usize| style_at(&hl, r, 0).map(|s| s.top());
         assert_eq!(role(3), Some(Role::Failure), "-old");
         assert_eq!(role(4), Some(Role::Success), "+new");
@@ -2856,9 +2520,6 @@ mod tests {
         assert_eq!(conflict_regions(&parts), vec![(4, 10)]);
     }
 
-    /// A file mid-merge: the markers are dim, each side is tinted (ours red,
-    /// base yellow, theirs green) under its own syntax colours, the code after
-    /// the conflict is code again, and only the conflict is reported.
     #[test]
     fn a_file_with_conflicts_highlights_as_code_with_tinted_sides() {
         let b = buf_named("client.rs", DIFF3);
@@ -2978,8 +2639,7 @@ mod tests {
         assert!(style_at(&hl, 1, 4).is_some()); // "line"
     }
 
-    // A buffer that just shrank must not reuse the incremental tree: it
-    // still carries byte offsets from the longer source.
+    // A buffer that just shrank must not reuse the incremental tree.
     #[test]
     fn refresh_after_shrink_does_not_panic() {
         let mut b = buf_named("t.sh", "#!/usr/bin/env bash\nbogus_var=9\necho \"ok\"\n");
@@ -2996,9 +2656,6 @@ mod tests {
     }
 }
 
-/// Driver tests for [`Stream`], the append-only parse engine; the
-/// measurement in `per_push_cost_stays_flat` asserts the per-push cost does
-/// not grow with the document.
 #[cfg(test)]
 mod stream_tests {
     use super::*;
@@ -3006,8 +2663,6 @@ mod stream_tests {
 
     // ---------- helpers ----------
 
-    /// Deterministic xorshift, so the chunk boundaries are reproducible and
-    /// the suite needs no rng dependency.
     struct Rng(u64);
 
     impl Rng {
@@ -3020,7 +2675,6 @@ mod stream_tests {
             x
         }
 
-        /// A value in `0..n` (0 when `n` is 0).
         fn below(&mut self, n: usize) -> usize {
             if n == 0 {
                 0
@@ -3030,8 +2684,6 @@ mod stream_tests {
         }
     }
 
-    /// `i` clamped into `doc` and onto a char boundary — both documents carry
-    /// multibyte text, and `Point::column` is in bytes.
     fn snap(doc: &str, i: usize) -> usize {
         let mut i = i.min(doc.len());
         while !doc.is_char_boundary(i) {
@@ -3040,8 +2692,6 @@ mod stream_tests {
         i
     }
 
-    /// Cut points through `doc` for `n` pieces: char-boundary offsets, with
-    /// a deterministic jitter so the pieces are not all the same size.
     fn cut_points(doc: &str, n: usize, rng: &mut Rng) -> Vec<usize> {
         let step = (doc.len() / n.max(1)).max(1);
         let mut cuts = Vec::with_capacity(n + 1);
@@ -3055,8 +2705,6 @@ mod stream_tests {
         cuts
     }
 
-    /// Push `doc` to `s` in the pieces `cuts` delimits, and say how many
-    /// pushes that took.
     fn push_in_pieces(s: &mut Stream, doc: &str, cuts: &[usize]) -> usize {
         let mut at = 0;
         let mut n = 0;
@@ -3071,14 +2719,12 @@ mod stream_tests {
         n
     }
 
-    /// Every node of the tree, the root included.
     fn count_nodes(n: &Node) -> usize {
         1 + n.children.iter().map(count_nodes).sum::<usize>()
     }
 
     // ---------- documents ----------
 
-    /// A ≥ 2 KB Rust document, with a multibyte char in the header.
     fn rust_doc() -> String {
         let mut s = String::from(
             "//! a module — with an em dash\n\nuse std::fmt;\n\npub struct A { pub x: usize }\n\n",
@@ -3092,9 +2738,6 @@ mod stream_tests {
         s
     }
 
-    /// A ≥ 2 KB markdown document with a heading, a paragraph holding
-    /// `**bold**`, `` `code` `` and a link, a fenced block, a list and a pipe
-    /// table.
     fn md_doc() -> String {
         let mut s = String::from(MD_HEAD);
         for i in 0..24 {
@@ -3105,11 +2748,8 @@ mod stream_tests {
         s
     }
 
-    /// The fixed head every markdown document in this module starts with, at
-    /// stable offsets.
     const MD_HEAD: &str = "# Streaming\n\nA paragraph with **bold** and `code` and a [link](http://x) — here.\n\n```rust\nfn main() {}\n```\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n## Second\n\n";
 
-    /// A ~100 KB markdown document.
     fn big_md() -> String {
         let mut s = String::with_capacity(110_000);
         for i in 0..1100 {
@@ -3120,7 +2760,6 @@ mod stream_tests {
         s
     }
 
-    /// A ~100 KB Rust document.
     fn big_rust() -> String {
         let mut s = String::with_capacity(100_000);
         for i in 0..1500 {
@@ -3133,11 +2772,6 @@ mod stream_tests {
 
     // ---------- tree helpers (what a consumer would write) ----------
 
-    /// The inline-content byte ranges of a markdown block tree: every `inline`
-    /// and `pipe_table_cell` node's range, split around its NAMED children
-    /// (already parsed by the block grammar). Sorted — what
-    /// [`Stream::set_included_ranges`] wants. The consumer's job, not the
-    /// engine's: `Stream` is generic and knows nothing about markdown.
     fn inline_ranges(root: &Node) -> Vec<(usize, usize)> {
         fn walk(n: &Node, out: &mut Vec<(usize, usize)>) {
             if n.kind == "inline" || n.kind == "pipe_table_cell" {
@@ -3162,7 +2796,6 @@ mod stream_tests {
         out
     }
 
-    /// Every node of `root` below `kind`, depth first.
     fn nodes_of<'a>(n: &'a Node, kind: &str, out: &mut Vec<&'a Node>) {
         if n.kind == kind {
             out.push(n);
@@ -3178,8 +2811,6 @@ mod stream_tests {
         out
     }
 
-    /// Assert every node but the root lies inside one of `ranges` — i.e. the
-    /// parse stayed within the text it was given.
     fn assert_inside(root: &Node, ranges: &[(usize, usize)], what: &str) {
         fn check(n: &Node, ranges: &[(usize, usize)], top: bool, what: &str) {
             if !top {
@@ -3200,8 +2831,6 @@ mod stream_tests {
 
     // ---------- streaming == one push ----------
 
-    /// The property the consumer's renderer is built on: a document pushed in
-    /// random chunks parses to exactly the tree a single push gives.
     fn assert_chunked_equals_whole(lang: Lang, doc: &str, seed: u64) {
         let mut whole = Stream::new(lang);
         whole.push(doc);
@@ -3241,10 +2870,6 @@ mod stream_tests {
 
     // ---------- the two passes ----------
 
-    /// Push a markdown document through a block stream and an inline stream
-    /// fed the block tree's inline ranges on every push, checking the
-    /// invariant after each step: the inline parse never reaches outside the
-    /// ranges it was given.
     fn run_two_passes(doc: &str, chunks: usize, seed: u64) -> (Stream, Stream) {
         let mut block = Stream::new(Lang::Markdown);
         let mut inline = Stream::new(Lang::MarkdownInline);
@@ -3260,8 +2885,7 @@ mod stream_tests {
             let delta = &doc[at..cut];
             block.push(delta);
 
-            // What the previous inline parse produced must sit inside the
-            // ranges it was given, every step, all the way through.
+            // The previous inline parse must sit inside the ranges it was given.
             if let Some(tree) = inline.root() {
                 assert_inside(&tree, &pushed_ranges, "inline tree between pushes");
             }
@@ -3288,20 +2912,17 @@ mod stream_tests {
         let doc = "# Title\n\nA para with **bold** and `code` here [link](http://x).\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
         let (block, inline) = run_two_passes(doc, 5, 0xabcd_1234_5678_9f01);
 
-        // The inline stream's ranges come from the block tree, never from a
-        // path or a language guess.
+        // The inline stream's ranges come from the block tree, never from a guess.
         let ranges = inline_ranges(&block.root().unwrap());
         assert!(!ranges.is_empty());
 
-        // Its tree covers exactly the first range's start to the last
-        // range's end — nothing was parsed from outside them.
+        // Its tree covers exactly the first range's start to the last range's end.
         let root = inline.root().expect("inline tree");
         assert_eq!(root.start, ranges.first().unwrap().0);
         assert_eq!(root.end, ranges.last().unwrap().1);
         assert_inside(&root, &ranges, "final inline tree");
 
         // The inline grammar's own names for the constructs: `strong_emphasis`
-        // (`**bold**`), `code_span` (`` `code` ``) and `inline_link`.
         for (kind, want) in [
             ("strong_emphasis", "**bold**"),
             ("code_span", "`code`"),
@@ -3324,16 +2945,14 @@ mod stream_tests {
         assert!(find(&root, "fenced_code_block").is_empty());
         assert!(find(&root, "paragraph").is_empty());
 
-        // A second pass re-reads the same stream: the query cache path is
-        // exercised separately below; here the tree must simply be stable.
+        // A second pass re-reads the same stream; the tree must be stable.
         let again = inline.root().unwrap();
         assert_eq!(again, root);
     }
 
     #[test]
     fn inline_stream_stays_correct_while_ranges_grow() {
-        // The range list changes at the tail on every push while the earlier
-        // ranges are untouched; this pins the final state too.
+        // The ranges change at the tail on every push while the earlier ones are untouched.
         let doc = md_doc();
         let (block, inline) = run_two_passes(&doc, 12, 0x5555_aaaa_3333_cccc);
         let ranges = inline_ranges(&block.root().unwrap());
@@ -3359,15 +2978,12 @@ mod stream_tests {
         s.set_included_ranges(&[(8, 12), (0, 3), (10, 40), (5, 5), (4, 2)]);
         s.push(doc);
         let root = s.root().unwrap();
-        // 8..12 and 10..40 merge to 8..len; 0..3 stands alone; the empty and
-        // the inverted range are dropped by the `s < e` filter.
+        // 8..12 and 10..40 merge to 8..len; 0..3 stands alone; inverted and empty ranges drop.
         assert_eq!(root.start, 0);
         assert_eq!(root.end, doc.len());
         assert_inside(&root, &[(0, 3), (8, doc.len())], "merged ranges");
 
-        // An all-empty list is the whole document — tree-sitter's convention,
-        // and the reason a consumer with no inline content should skip the
-        // second pass instead of calling this with an empty list.
+        // An all-empty list is the whole document, tree-sitter's convention.
         let mut whole = Stream::new(Lang::MarkdownInline);
         whole.set_included_ranges(&[(5, 5)]);
         whole.push(doc);
@@ -3385,8 +3001,7 @@ mod stream_tests {
         let err = find(&broken, "ERROR");
         assert!(!err.is_empty(), "an ERROR node is expected");
 
-        // The header parsed before the error — the part incremental reuse is
-        // supposed to keep.
+        // The header parsed before the error is what incremental reuse keeps.
         let header: Vec<(String, usize, usize)> = leaves_before(&broken, 11);
 
         s.push("1; }");
@@ -3398,8 +3013,7 @@ mod stream_tests {
             header,
             "the function header must be untouched by the append"
         );
-        // And it really is one function now, not an error node holding the
-        // pieces.
+        // It really is one function now, not an error node holding the pieces.
         let f = find(&fixed, "function_item");
         assert_eq!(f.len(), 1);
         assert_eq!((f[0].start, f[0].end), (0, 24));
@@ -3424,9 +3038,7 @@ mod stream_tests {
 
     #[test]
     fn unterminated_markdown_fence_settles_then_completes() {
-        // tree-sitter-md produces no error here: CommonMark lets a fence be
-        // closed by the end of the document, so the open fence is a complete
-        // block with no trailing delimiter — pin exactly that.
+        // tree-sitter-md produces no error here: CommonMark closes a fence at end of document.
         let mut s = Stream::new(Lang::Markdown);
         s.push("text\n\n```rust\nfn f() {}\n");
         let open = s.root().expect("tree");
@@ -3442,8 +3054,7 @@ mod stream_tests {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0].end, 24, "content runs to the end of the text");
 
-        // The earlier paragraph is recorded before the append, so the append
-        // can be shown not to have moved it.
+        // The earlier paragraph is recorded before the append, which must not move it.
         let para_before: Vec<(usize, usize)> = find(&open, "paragraph")
             .iter()
             .map(|n| (n.start, n.end))
@@ -3483,8 +3094,7 @@ mod stream_tests {
         assert!(s.root().is_some());
         assert_eq!(s.parse_calls(), 1);
 
-        // An empty delta on a stream that already has a tree for this source
-        // is a no-op: no parse, same tree.
+        // An empty delta on a stream that already has a tree is a no-op.
         let before = s.root().unwrap();
         s.push("");
         assert_eq!(s.parse_calls(), 1);
@@ -3508,8 +3118,7 @@ mod stream_tests {
         assert_eq!(s.captures("(identifier) @name").len(), 2);
         // A query that does not compile is empty, not a panic.
         assert!(s.captures("(no_such_node) @x").is_empty());
-        // And the stream still works afterwards (the cache was invalidated,
-        // not poisoned).
+        // The stream still works afterwards: the cache was invalidated, not poisoned.
         assert_eq!(s.captures("(identifier) @name").len(), 2);
     }
 
@@ -3526,7 +3135,6 @@ mod stream_tests {
 
     // ---------- the measurement ----------
 
-    /// Median and p95 of per-push durations, in nanoseconds.
     fn median_p95(mut ns: Vec<u128>) -> (u128, u128) {
         ns.sort_unstable();
         let med = ns[ns.len() / 2];
@@ -3534,8 +3142,6 @@ mod stream_tests {
         (med, p95)
     }
 
-    /// Print one row of the measurement for the first and last 100 pushes and
-    /// return those two `(median, p95)` pairs, in nanoseconds.
     fn report(label: &str, times: &[u128]) -> ((u128, u128), (u128, u128)) {
         let first = median_p95(times[..100].to_vec());
         let last = median_p95(times[times.len() - 100..].to_vec());
@@ -3551,7 +3157,6 @@ mod stream_tests {
         (first, last)
     }
 
-    /// Push `doc` into `s` in `n` pieces, timing every push.
     fn timed_pushes(s: &mut Stream, doc: &str, n: usize, seed: u64) -> Vec<u128> {
         let cuts = cut_points(doc, n, &mut Rng(seed));
         let mut times = Vec::with_capacity(cuts.len());
@@ -3570,7 +3175,6 @@ mod stream_tests {
         times
     }
 
-    /// The cost of parsing `doc` from scratch, in nanoseconds.
     fn one_shot(lang: Lang, doc: &str) -> u128 {
         let mut s = Stream::new(lang);
         let t = Instant::now();
@@ -3578,17 +3182,12 @@ mod stream_tests {
         t.elapsed().as_nanos()
     }
 
-    /// The MEDIAN cost of parsing `doc` from scratch, in nanoseconds.
     fn one_shot_median(lang: Lang, doc: &str, n: usize) -> u128 {
         let mut times: Vec<u128> = (0..n).map(|_| one_shot(lang, doc)).collect();
         times.sort_unstable();
         times[times.len() / 2]
     }
 
-    /// The always-on half of the measurement: an incremental push is never
-    /// worse than parsing from scratch, and where tree-sitter can reuse
-    /// nodes it is far better. Both sides are medians — a p95 against a
-    /// single sample is a comparison the series' tail loses on noise.
     #[test]
     fn an_incremental_push_beats_a_full_reparse() {
         // Rust: reuse works, so the last pushes stay far below a full parse.
@@ -3609,9 +3208,7 @@ mod stream_tests {
             full
         );
 
-        // Markdown: reuse is refused by the grammar (see the ignored
-        // `per_push_cost_stays_flat`), so the honest assertion is weaker —
-        // an append is not *worse* than re-parsing everything.
+        // Markdown refuses reuse, so the honest assertion is weaker (see the ignored `per_push_cost_stays_flat`).
         let doc = md_doc();
         let mut s = Stream::new(Lang::Markdown);
         let times = timed_pushes(&mut s, &doc, 200, 0x5555_6666_7777_8888);
@@ -3630,11 +3227,6 @@ mod stream_tests {
         );
     }
 
-    /// Pins today's platform behaviour: per-push cost grows with the
-    /// document, so N pushes cost O(N²). The ignored `per_push_cost_stays_flat`
-    /// states the stronger criterion and fails on it; a tree-sitter or
-    /// grammar upgrade that makes appends cheap turns this red, so the good
-    /// news cannot go unnoticed.
     #[test]
     fn append_cost_is_currently_linear_in_the_document() {
         let doc = big_md();
@@ -3668,11 +3260,6 @@ mod stream_tests {
     }
 
     /// The stronger criterion at full size: a ~100 KB document in 1,000
-    /// appends, asserting p95(last 100) < 5 × median(first 100). It fails
-    /// today and that is the finding — per-push cost is linear in the
-    /// document; see `Stream`'s note. Ignored because it takes ~40 s even in
-    /// release; run with `cargo test --release --ignored --nocapture
-    /// per_push_cost`.
     #[test]
     #[ignore = "slow (~40 s in release); documented failure, run explicitly"]
     fn per_push_cost_stays_flat() {
@@ -3693,8 +3280,6 @@ mod stream_tests {
         }
     }
 
-    /// The harder half: the secondary stream whose included ranges grow with
-    /// every push.
     #[test]
     #[ignore = "slow (~30 s in release); documented failure, run explicitly"]
     fn inline_pass_cost_stays_flat() {
@@ -3757,8 +3342,6 @@ mod token_tests {
         }
     }
 
-    /// The token table and the extension table are not the same table: `mk`
-    /// is Make as an extension and not a fence token.
     #[test]
     fn the_token_table_is_not_the_extension_table() {
         assert_eq!(detect(Some(Path::new("x.mk")), None), Some(Lang::Make));
@@ -3775,9 +3358,6 @@ mod token_tests {
 mod stream_spans_tests {
     use super::*;
 
-    /// A text pushed a token at a time gives the same spans as the same text
-    /// pushed whole — the assertion that incremental reuse is not lossy for
-    /// highlighting.
     #[test]
     fn a_growing_stream_ends_at_the_same_spans() {
         let src = "fn main() {\n    let xs: Vec<u32> = (0..5).collect();\n}\n";
@@ -3791,9 +3371,6 @@ mod stream_spans_tests {
         assert!(!whole.spans().is_empty(), "nothing was captured");
     }
 
-    /// The spans say what the source says, asserted by position and by set:
-    /// a literal capture name would assert the Rust query's spelling, which
-    /// is upstream's to change.
     #[test]
     fn the_spans_cover_the_tokens_where_they_are() {
         let src = "fn main() {\n    let n = 1;\n}\n";
@@ -3823,9 +3400,6 @@ mod stream_spans_tests {
         assert!(spans.iter().all(|s| s.row < 4), "{spans:?}");
     }
 
-    /// Multi-byte text is counted in characters — what a terminal paints.
-    /// The line is 18 chars, 25 bytes; the string capture must end at char
-    /// 17, not byte 23.
     #[test]
     fn columns_are_characters_not_bytes() {
         let src = "fn main() {\n    let s = \"日本語\";\n}\n";
@@ -3845,15 +3419,12 @@ mod stream_spans_tests {
             .unwrap_or_else(|| panic!("no string span: {spans:?}"));
         assert_eq!((string.start, string.end), (12, 17), "{string:?}");
         // As byte offsets they would be 12 and 23 — the second is past the line, which
-        // is the bug this pins.
         assert!(
             spans.iter().all(|s| s.row != 1 || s.end <= chars),
             "{spans:?}"
         );
     }
 
-    /// Before a push, and for a language with no query, spans are empty rather than a
-    /// panic.
     #[test]
     fn an_empty_stream_has_no_spans() {
         let mut stream = Stream::new(Lang::Rust);
@@ -3862,9 +3433,6 @@ mod stream_spans_tests {
         assert!(stream.spans().is_empty());
     }
 
-    /// Every language nameable by token can be highlighted from a stream.
-    /// Swept, not sampled: a missing query only shows up for the languages
-    /// nobody tested.
     #[test]
     fn every_language_highlighted_from_a_stream_colours_something() {
         // A snippet per grammar that the grammar is certain to capture something in.
@@ -3932,10 +3500,7 @@ mod stream_spans_tests {
         }
     }
 
-    /// A code fence grows a token at a time and the walk runs per push; what
-    /// decides whether an embedder can afford it is whether a push stays
-    /// within a frame's budget at fence sizes. Ignored, slow; run with
-    /// `cargo test -p rano --release --lib a_per_push -- --ignored --nocapture`.
+    /// Whether a push stays within a frame's budget at fence sizes. Ignored, slow; run with
     #[test]
     #[ignore]
     fn a_per_push_cost_is_a_frames_budget() {
@@ -3981,7 +3546,6 @@ mod stream_spans_tests {
     }
 
     /// The walk itself, without the push: what a renderer pays to repaint a settled
-    /// fence. Ignored, `--ignored --nocapture`.
     #[test]
     #[ignore]
     fn a_settled_walk_is_cheap_enough_to_repaint() {
@@ -4009,8 +3573,6 @@ mod stream_spans_tests {
 mod name_tests {
     use super::*;
 
-    /// Every name a language shows is a name it answers to, so the two
-    /// tables cannot drift.
     #[test]
     fn every_name_is_a_token_the_table_knows() {
         for lang in [
@@ -4048,8 +3610,7 @@ mod name_tests {
                 "{name} does not name {lang:?}"
             );
         }
-        // And the two grammar-only members are named too, even though a fence cannot ask
-        // for them: `MarkdownInline` is driven by rano's own two-pass markdown consumer.
+        // `MarkdownInline` is named too, driven by rano's own two-pass consumer.
         assert_eq!(Lang::Markdown.name(), "markdown");
         assert_eq!(Lang::MarkdownInline.name(), "markdown-inline");
         assert_eq!(Lang::from_token("markdown-inline"), None);
@@ -4060,8 +3621,6 @@ mod name_tests {
 mod node_shape_tests {
     use super::*;
 
-    /// A node carries the field it was found under, so a grammar-dependent
-    /// question needs no re-deriving from child order.
     #[test]
     fn a_child_knows_its_field() {
         let mut stream = Stream::new(Lang::Rust);
@@ -4093,8 +3652,6 @@ mod node_shape_tests {
         assert_eq!(root.field, None);
     }
 
-    /// A node's points are its byte offsets as row/column, in bytes, zero-based — and
-    /// rano's own type, so a consumer reads a coordinate without depending on a parser.
     #[test]
     fn a_node_carries_its_position() {
         let mut stream = Stream::new(Lang::Rust);
@@ -4118,8 +3675,6 @@ mod node_shape_tests {
         assert_eq!(ts.row, 1);
     }
 
-    /// The multi-byte case: the column is bytes, matching the byte offsets
-    /// beside it.
     #[test]
     fn a_column_is_bytes_not_characters() {
         let mut stream = Stream::new(Lang::Rust);
@@ -4147,9 +3702,6 @@ mod node_shape_tests {
 mod node_equality_tests {
     use super::*;
 
-    /// Two parses of one text are the same tree. `Node::id` — tree-sitter's
-    /// per-tree pointer — differs between them, so equality deliberately
-    /// leaves it out.
     #[test]
     fn equality_is_the_value_and_not_the_identity() {
         let src = "fn main() {\n    let n = 1;\n}\n";
@@ -4173,9 +3725,6 @@ mod node_equality_tests {
 mod query_cache_tests {
     use super::*;
 
-    /// A query is compiled once per process per language. `Arc::ptr_eq` says
-    /// shared rather than fast — a timing test would pass on a fast machine
-    /// with the bug still in it.
     #[test]
     fn a_query_is_compiled_once_and_shared() {
         let a = highlight_query(Lang::Rust).expect("rust has a query");
@@ -4186,17 +3735,13 @@ mod query_cache_tests {
         let other = highlight_query(Lang::Python).expect("python has a query");
         assert!(!Arc::ptr_eq(&a, &other));
 
-        // `None` is cached too, so a language whose query does not compile
-        // does not re-parse its `.scm` per call.
+        // `None` is cached too, so a failed compile is not retried.
         assert!(highlight_query(Lang::Rust).is_some());
     }
 
-    /// The two consumers reach that one cache: a `Highlighter` and a `Stream` of the
-    /// same language share the query rather than each holding its own.
     #[test]
     fn both_consumers_share_the_one_query() {
-        // The only way to see the sharing from outside is the observable
-        // agreement of spans and classes over one query.
+        // The observable agreement of spans and classes over one query is the only outside view.
         let src = "fn main() {\n    let n = 1;\n}\n";
         let mut stream = Stream::new(Lang::Rust);
         stream.push(src);
@@ -4217,8 +3762,7 @@ mod query_cache_tests {
         }
     }
 
-    /// The measurement the fix was made against. Ignored because timing is not an
-    /// assertion; run with `--ignored --nocapture` to see it.
+    /// The measurement the fix was made against; timing is not an assertion.
     #[test]
     #[ignore]
     fn the_first_use_of_a_language_pays_and_the_rest_do_not() {
@@ -4250,16 +3794,11 @@ mod query_cache_tests {
     }
 }
 
-/// Markdown's two-grammar highlighting: the block pass does structure, the
-/// inline pass does emphasis/code/links, and they overlay one grid.
 #[cfg(test)]
 mod markdown_tests {
     use super::*;
     use std::time::Instant;
 
-    /// The two-pass highlight must be linear in the document — a wall-clock
-    /// bound flaked under the suite's own parallelism, so doubling the
-    /// document must roughly double the work, not square it.
     #[test]
     fn the_markdown_two_pass_is_linear_in_the_document() {
         let build = |paras: usize| {
@@ -4295,18 +3834,13 @@ mod markdown_tests {
             big.row_count(),
             b / a
         );
-        // 4× the document: quadratic would be 16×, so a bound of 8× separates
-        // the two by a wide margin while tolerating a loaded machine.
+        // 4× the document: quadratic would be 16×, so a bound of 8× separates them widely.
         assert!(
             b < a * 8.0,
             "the two-pass highlight looks quadratic: {a:.4} s → {b:.4} s for 4× the text"
         );
     }
 
-    /// Every parse the inline pass hands out covers exactly one node's
-    /// ranges — what keeps a delimiter from pairing across paragraphs. It
-    /// watches the trees the pass actually produces, so a change to several
-    /// nodes per parse fails here.
     fn assert_pass_is_per_node(src: &str) {
         let mut parser = Parser::new();
         parser.set_language(&Lang::Markdown.language()).unwrap();
@@ -4318,8 +3852,7 @@ mod markdown_tests {
             assert!(g.windows(2).all(|w| w[0].1 <= w[1].0), "group {i}: {g:?}");
         }
         let mut hl = Highlighter::new();
-        // What each parse was handed: its own node's bytes, and the row base
-        // the grid will offset by.
+        // What each parse was handed: its own node's bytes and the row base.
         let mut parsed: Vec<(usize, usize)> = Vec::new();
         let mut bases: Vec<usize> = Vec::new();
         hl.markdown_inline_pass(src, &block, |slice, base_row, _tree, _q| {
@@ -4331,8 +3864,7 @@ mod markdown_tests {
             groups.len(),
             "one parse per node, no more and no fewer"
         );
-        // No parse is handed more than its own node: handing it the whole
-        // source is quadratic, as tree-sitter walks the excluded input.
+        // No parse is handed more than its own node: the whole source is quadratic.
         let line_starts = {
             let mut v = vec![0usize];
             for (i, b) in src.bytes().enumerate() {
@@ -4342,20 +3874,17 @@ mod markdown_tests {
             }
             v
         };
-        // The slice is grown to whole rows, so allow the slack to the end of
-        // the node's last row; anything near the document's size is the bug.
+        // The slice is grown to whole rows, so allow slack to the node's last row.
         for (i, g) in groups.iter().enumerate() {
             let span = g.last().unwrap().1 - g.first().unwrap().0;
-            // The same upper bound the pass uses: the start of the row after
-            // the node's last row, so the slice can end on a whole line.
+            // The same upper bound the pass uses: the row after the node's last.
             let row_of = |b: usize| line_starts.partition_point(|&o| o <= b).saturating_sub(1);
             let row_end = line_starts
                 .get(row_of(g.last().unwrap().1.saturating_sub(1)) + 1)
                 .copied()
                 .unwrap_or(src.len())
                 .max(g.last().unwrap().1);
-            // The slice starts at the beginning of the node's FIRST row, not
-            // at the node, so the allowance is measured from there.
+            // The slice starts at the node's first row, not at the node.
             let allowed = row_end - line_starts[row_of(g.first().unwrap().0)];
             assert!(
                 parsed[i].0 <= allowed,
@@ -4363,8 +3892,7 @@ mod markdown_tests {
                 parsed[i].0
             );
         }
-        // Rows ascend, and the first parse starts at the document's first row
-        // when the first node does.
+        // Rows ascend, starting at the document's first row.
         assert!(
             bases.windows(2).all(|w| w[0] <= w[1]),
             "row bases: {bases:?}"
@@ -4388,19 +3916,12 @@ mod markdown_tests {
         );
     }
 
-    /// The markdown corpus: a checked-in document
-    /// (`tests/fixtures/markdown-corpus.md`), so this runs everywhere; the
-    /// construct that broke it has its own test below.
     fn corpus() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/markdown-corpus.md");
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
-    /// Whether `line` carries a fence marker once the prefixes CommonMark
-    /// allows in front of one are removed: leading spaces, any depth of
-    /// blockquote marker, a list bullet. A fence inside a blockquote is still
-    /// a fence.
     fn fence_at(line: &str) -> bool {
         let mut s = line.trim_start();
         loop {
@@ -4419,9 +3940,6 @@ mod markdown_tests {
         s.starts_with("```") || s.starts_with("~~~")
     }
 
-    /// No row is painted as one long code span outside a code block. Code
-    /// blocks are legitimate (indented and fenced), so fence state is tracked
-    /// here the way the block grammar sees it, through [`fence_at`].
     fn assert_no_runaway_code_span(src: &str) {
         let mut hl = Highlighter::new();
         let grid = hl.classes(src, Lang::Markdown);
@@ -4449,7 +3967,6 @@ mod markdown_tests {
         }
     }
 
-    /// On a real document: the inline pass stays per-node, and nothing runs away.
     #[test]
     fn a_real_document_has_no_runaway_code_span() {
         let src = corpus();
@@ -4462,9 +3979,6 @@ mod markdown_tests {
         assert_no_runaway_code_span(&src);
     }
 
-    /// A fenced block inside a blockquote — what a quoted test log looks
-    /// like — on its own. A `trim_start`-only check would miss it, so the
-    /// test and the tracker guard each other.
     #[test]
     fn a_fence_inside_a_blockquote_is_a_fence() {
         let src = "\
@@ -4495,8 +4009,7 @@ mod markdown_tests {
 
     #[test]
     fn classes_sees_the_inline_constructs_too() {
-        // The embedder's view (capture names, no palette) must agree with the
-        // editor's: both run the two passes.
+        // The embedder's view must agree with the editor's: both run the two passes.
         let mut hl = Highlighter::new();
         let grid = hl.classes(DOC, Lang::Markdown);
         let name_at = |row: usize, text: &str, off: usize| {
@@ -4512,7 +4025,6 @@ mod markdown_tests {
         assert_eq!(name_at(0, "#", 0).as_deref(), Some("keyword"));
     }
 
-    /// A document with one of each construct, at known rows.
     const DOC: &str = "\
 # Head `x`
 
@@ -4531,7 +4043,6 @@ fn main() {}
 ---
 ";
 
-    /// The style at the character `off` chars past `text` on `row`.
     fn style_in(src: &str, row: usize, text: &str, off: usize) -> Option<Style> {
         let mut buf = Buffer::new();
         buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
@@ -4545,8 +4056,7 @@ fn main() {}
 
     #[test]
     fn inline_constructs_are_coloured_and_told_apart() {
-        // The block grammar cannot see emphasis, code spans or links — the
-        // inline pass is what colours each of these.
+        // The block grammar cannot see emphasis, code spans or links.
         let strong = style_in(DOC, 2, "**bold**", 2).expect("strong text is coloured");
         let code = style_in(DOC, 2, "`code`", 1).expect("a code span is coloured");
         let emphasis = style_in(DOC, 2, "*it*", 1).expect("emphasis is coloured");
@@ -4554,8 +4064,7 @@ fn main() {}
         let url = style_in(DOC, 2, "http://x", 0).expect("a URL is coloured");
         let strike = style_in(DOC, 2, "~~strike~~", 2).expect("struck text is coloured");
 
-        // The four kinds are told apart; a link's text and its destination
-        // deliberately share the link colour, being one construct.
+        // The four kinds are told apart; a link's label and destination share one colour.
         let kinds = [
             ("strong", &strong),
             ("code", &code),
@@ -4596,9 +4105,7 @@ fn main() {}
 
     #[test]
     fn the_two_passes_overlay_instead_of_clobbering() {
-        // A heading's text is `type` yellow, but a code span inside it must
-        // still be a code span: the inline pass runs second and wins on the
-        // cells it covers, while the rest of the heading keeps its colour.
+        // A heading's text is yellow, but a code span inside it must still be code.
         let heading = style_in(DOC, 0, "Head", 0).expect("heading text is coloured");
         let inner_code = style_in(DOC, 0, "`x`", 1).expect("code inside a heading");
         assert_ne!(heading, inner_code, "the code span must not be swallowed");
@@ -4633,9 +4140,7 @@ fn main() {}
 
     #[test]
     fn block_continuation_indentation_is_not_painted() {
-        // `(block_continuation) @punctuation.bracket` is deliberately not in
-        // the query: it spans a continuation line's leading whitespace, which
-        // painted one bullet's indent and not its neighbour's.
+        // `(block_continuation) @punctuation.bracket` is not in the query: it spans indentation.
         let src = "- **A:** first line\n  continued here\n- **B:** another\n  also continued\n";
         let mut buf = Buffer::new();
         buf.set_rows(src.lines().map(|l| l.chars().collect()).collect());
@@ -4663,8 +4168,7 @@ fn main() {}
         let tree = parser.parse(DOC.as_bytes(), None).unwrap();
         let ranges = markdown_inline_ranges(&tree);
         assert!(!ranges.is_empty());
-        // Sorted and disjoint: tree-sitter's own requirement, enforced here so
-        // a caller never has to.
+        // Sorted and disjoint — tree-sitter's own requirement.
         for w in ranges.windows(2) {
             assert!(w[0].1 <= w[1].0, "unsorted or overlapping: {ranges:?}");
         }
@@ -4684,12 +4188,7 @@ fn main() {}
 
     #[test]
     fn one_nodes_backtick_never_pairs_with_another_nodes() {
-        // The inline grammar treats the ranges it is handed as one stream, so
-        // a backtick that cannot close inside its own node pairs with one in a
-        // later node and paints everything between as code. Two nodes, the
-        // first ending on a lone backtick: combined, the only closer available
-        // is the next node's, so the parse crosses the boundary; per node it
-        // cannot.
+        // One node's backtick must not pair with another node's (one stream per parse).
         let src = "Para one ends with a lone backtick `\n\nanother `code` span here.\n";
         let mut hl = Highlighter::new();
         let grid = hl.classes(src, Lang::Markdown);
@@ -4722,17 +4221,11 @@ fn main() {}
     }
 }
 
-/// Windowed highlighting for buffers big enough that a whole-document pass
-/// would be felt per keystroke: the window agrees with a full pass inside it,
-/// and its cost does not follow the document.
 #[cfg(test)]
 mod window_tests {
     use super::*;
     use std::time::Instant;
 
-    /// A windowed highlight must agree with a whole-buffer one, row for row,
-    /// for every row inside the window. The window exists to make large files
-    /// affordable; it must not make them wrong.
     #[test]
     fn a_window_matches_a_full_highlight_inside_it() {
         let mut src = String::new();
@@ -4771,8 +4264,7 @@ mod window_tests {
                 }
             }
             assert!(styled > 100, "the window actually styled something");
-            // Outside the window: no answer, which the renderer reads as
-            // uncoloured. Row `first - 1` is the interesting one.
+            // Outside the window there is no answer, which the renderer reads as uncoloured.
             if first > 0 {
                 assert_eq!(
                     win.style_at(Pos {
@@ -4792,13 +4284,8 @@ mod window_tests {
         }
     }
 
-    /// A window can start and end mid-row, which is what makes a one-line
-    /// document (minified JSON, a JS bundle) editable: a row-shaped window
-    /// over one of those is the whole file.
     #[test]
     fn a_window_can_be_part_of_a_single_enormous_row() {
-        /// Columns at each end of the window where a crossing construct may
-        /// differ from a full pass.
         const EDGE: usize = 32;
         // One row, long enough that a whole-row window would be the document.
         let row: String = (0..40_000)
@@ -4819,8 +4306,7 @@ mod window_tests {
         let mut hl = Highlighter::new();
         hl.refresh_window(&buf, win);
         assert_eq!(hl.styled_window(), Some(win));
-        // Inside the window, away from its edges, the colours are exactly a
-        // full pass's.
+        // Inside the window, away from its edges, the colours are a full pass's.
         let interior = 100_000 + EDGE..102_000 - EDGE;
         for col in interior.clone() {
             let p = Pos { row: 0, col };
@@ -4831,10 +4317,7 @@ mod window_tests {
             );
         }
         assert!(interior.count() > 1_900, "most of the window is interior");
-        // At the very edges a construct that opened outside the window is
-        // coloured as though it opened here: that is the trade, and this is
-        // the assertion that keeps it from being a surprise. The editor passes
-        // a margin so these characters are not on screen.
+        // At the very edges a construct from outside is coloured as if it opened inside.
         let edge_differs = (100_000..100_000 + EDGE)
             .chain(102_000 - EDGE..102_000)
             .filter(|c| {
@@ -4845,8 +4328,7 @@ mod window_tests {
             "{edge_differs} of {} edge columns differ (the documented trade)",
             EDGE * 2
         );
-        // And outside the window there is no answer, so the renderer leaves
-        // the rest of the row uncoloured rather than colouring it wrongly.
+        // Outside the window there is no answer; the row is left uncoloured rather than wrongly coloured.
         assert_eq!(hl.style_at(Pos { row: 0, col: 0 }), None);
         assert_eq!(
             hl.style_at(Pos {
@@ -4857,9 +4339,6 @@ mod window_tests {
         );
     }
 
-    /// The window parses only its own rows, so its cost must not track the
-    /// document's size. Stated as a comparison rather than a stopwatch: the
-    /// same 60 rows of a document four times longer must cost about the same.
     #[test]
     fn a_window_costs_the_window_not_the_document() {
         let build = |lines: usize| {
@@ -4891,8 +4370,7 @@ mod window_tests {
             a * 1e6,
             b * 1e6
         );
-        // Per row, the 20× larger buffer must not be meaningfully more
-        // expensive. A whole-document highlight would be ~20× here.
+        // Per row, the 20× larger buffer must not cost meaningfully more.
         assert!(
             b < a * 4.0 + 1e-9,
             "per-row window cost grew with the document: {a:.3e} → {b:.3e} s/row"
@@ -4900,8 +4378,6 @@ mod window_tests {
     }
 }
 
-/// The shapes a content probe accepts: each is a judgement about how a config file is
-/// written, and the files that get no language are as deliberate as the ones that do.
 #[cfg(test)]
 mod content_detection {
     use super::*;
@@ -4910,8 +4386,6 @@ mod content_detection {
         detect_sample(None, sample)
     }
 
-    /// `/etc/default/grub` has no extension and its first line is a comment, so a one-line
-    /// probe sees nothing; the sample sees `GRUB_DEFAULT=0` and reads it as sh.
     #[test]
     fn an_etc_default_shell_fragment_is_bash() {
         let grub = "# If you change this file, run 'update-grub' afterwards to update\n\
@@ -4931,8 +4405,6 @@ mod content_detection {
         );
     }
 
-    /// ini by its own shape — a section header, or a spaced `=` with no section at all
-    /// (which is what a mirrorlist looks like).
     #[test]
     fn ini_by_shape_and_not_by_name() {
         assert_eq!(
@@ -4957,8 +4429,6 @@ mod content_detection {
         assert_eq!(sniff("--- just a line of dashes\n"), None);
     }
 
-    /// The files that get nothing, deliberately: no tree-sitter grammar describes them, and
-    /// colouring one with a grammar that means something else is a confident lie, not a guess.
     #[test]
     fn columnar_config_gets_no_language() {
         for (what, sample) in [
@@ -4979,7 +4449,6 @@ mod content_detection {
         }
     }
 
-    /// A name is a statement and the contents are evidence: the name wins.
     #[test]
     fn a_name_beats_the_contents() {
         assert_eq!(
@@ -5000,7 +4469,6 @@ mod content_detection {
         }
     }
 
-    /// A shebang is line one by definition — the kernel requires it at offset zero.
     #[test]
     fn a_shebang_is_line_one_and_nothing_else() {
         assert_eq!(sniff("#!/usr/bin/env python3\nx=1\n"), Some(Lang::Python));
@@ -5008,14 +4476,11 @@ mod content_detection {
         assert_eq!(sniff("\n#!/usr/bin/env python3\n"), None);
     }
 
-    /// Contents can be wrong: an extension-less Python file whose first statement is `x=1`
-    /// reads as a shell assignment. That is a known cost of putting contents last.
     #[test]
     fn the_misfires_are_known() {
         assert_eq!(sniff("x=1\nprint(x)\n"), Some(Lang::Bash));
     }
 
-    /// The probe is bounded: it never walks a document, however long its rows are.
     #[test]
     fn the_sample_is_bounded() {
         let mut b = Buffer::new();
@@ -5026,9 +4491,6 @@ mod content_detection {
     }
 }
 
-/// The fixture is linguist's source data, not a copy of the table: a row deleted from
-/// `linguist.rs` fails here, and so does a table that has drifted. Regenerate both with
-/// `scripts/linguist-table.py <languages.yml>`.
 #[cfg(test)]
 mod linguist_table {
     use super::*;
@@ -5036,7 +4498,6 @@ mod linguist_table {
 
     const FIXTURE: &str = include_str!("../tests/fixtures/linguist/our-languages.tsv");
 
-    /// What `detect_sample` says about one row of the fixture.
     fn detects(kind: &str, value: &str) -> Option<Lang> {
         match kind {
             "ext" => detect_sample(Some(Path::new(&format!("x.{value}"))), ""),
@@ -5046,8 +4507,6 @@ mod linguist_table {
         }
     }
 
-    /// Rows where a rule answers differently on purpose. Empty: the longest-suffix rule
-    /// settles every case, so there is nothing to except.
     const OVERRIDES: &[(&str, &str, Lang)] = &[];
 
     #[test]
@@ -5094,8 +4553,6 @@ mod linguist_table {
         );
     }
 
-    /// The counts are stated in the module doc, so a regeneration that silently loses rows
-    /// (a changed YAML shape, a rename) is a failure rather than a smaller table.
     #[test]
     fn the_table_holds_the_rows_the_fixture_does() {
         let fixture = FIXTURE

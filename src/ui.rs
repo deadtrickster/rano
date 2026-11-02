@@ -357,20 +357,18 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // with the diagnostic count.
     let diags = ed.all_diags();
 
-    // (buffer row, wrap segment) of each visible VISUAL row. With wrap off,
-    // a visual row IS a buffer row and seg is 0, so this is the old
-    // `bs.scroll..bs.scroll + text_h` range.
+    // (buffer row, wrap segment) of each visible row; with wrap off a
+    // visual row is a buffer row and seg is 0.
     let vis: Vec<(usize, usize)> = if ed.wrap {
         let mut out = Vec::with_capacity(text_h);
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
         let mut first = true;
         while out.len() < text_h && r < bs.buf.row_count() {
-            // Segment count from the cached wrap table rather than
-            // re-scanning the line every frame; the fallback covers a missing
-            // table (tests that draw without the run loop).
+            // Segment count from the cached wrap table; the fallback
+            // covers a missing one (tests that draw without the run loop).
             let count = ed.seg_count(r);
             // The top line may start mid-way (seg > 0): emit only its
-            // remaining segments, or the line's end gains phantom rows.
+            // remaining segments.
             let emit = if first {
                 count.saturating_sub(seg)
             } else {
@@ -387,8 +385,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             r += 1;
             seg = 0;
         }
-        // Pad past the end of the buffer so both loops below always emit
-        // exactly text_h rows (a short buffer must not leave stale cells).
+        // Pad past the end so both loops below always emit exactly text_h
+        // rows (no stale cells).
         while out.len() < text_h {
             out.push((usize::MAX, 0));
         }
@@ -398,8 +396,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     };
 
     // Per visible row: its slice of `diags` and its most severe severity,
-    // one forward walk (`vis` rows are non-decreasing) instead of filtering
-    // per row.
+    // one forward walk instead of filtering per row.
     let mut diag_range: Vec<(usize, usize)> = Vec::with_capacity(text_h);
     let mut diag_sev: Vec<Option<u64>> = Vec::with_capacity(text_h);
     {
@@ -421,8 +418,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
 
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
-    // `VIEW` says the buffer cannot be written — the one thing a reader must
-    // know before typing — beside the mark.
+    // `VIEW` says the buffer cannot be written, beside the mark.
     let flags = match (bs.read_only, bs.mark.is_some()) {
         (true, true) => "VIEW M",
         (true, false) => "VIEW",
@@ -441,10 +437,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     if g > 0 {
         let mut nums: Vec<Line> = Vec::with_capacity(text_h);
         for (i, (r, seg)) in vis.iter().enumerate() {
-            // The number sits on the first wrap segment only; continuation
-            // rows stay blank (nano). It is the file's — and for a tail
-            // nobody has counted yet it is nothing, a blank cell rather than
-            // a guess.
+            // The number sits on the first wrap segment only; for a tail
+            // nobody has counted yet it is nothing, a blank cell.
             let s = if *r < bs.buf.row_count() && *seg == 0 {
                 match bs.line_number(*r) {
                     Some(n) => format!("{:>w$} ", n, w = g - 1),
@@ -454,7 +448,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 " ".repeat(g)
             };
             // Rows with diagnostics carry their severity's colour (most
-            // severe wins), on every wrap segment of the row.
+            // severe wins).
             let role = match diag_sev[i] {
                 Some(sev) => crate::editor::diag_role(sev),
                 None => Role::Faint,
@@ -467,17 +461,15 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- text area (rows 1..text_h) ----
-    // A wrap segment is the display range the wrap table records for it,
-    // which is `seg * view_w` only while every character is one column wide;
-    // a horizontal-scroll viewport is the same window at `scroll_x`.
+    // A wrap segment is the display range the wrap table records; a
+    // horizontal-scroll viewport is the same window at `scroll_x`.
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
     for (i, (r, seg)) in vis.iter().enumerate() {
         let (a, b) = diag_range[i];
         match bs.buf.row_opt(*r) {
             Some(chars) => {
                 let line = match ed.row_is_simple(*r) {
-                    // A simple row: display col == char index, so the
-                    // window is a slice — the common case.
+                    // A simple row: the window is a slice — the common case.
                     Some(true) => {
                         let (lo, hi) = if ed.wrap {
                             ed.seg_chars(*r, *seg)
@@ -516,8 +508,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- completion popup (LSP) ----
-    // A small unadorned block below the word being completed (above it when
-    // near the bottom); the selected row is reversed, nano-style.
+    // A small block below the word being completed (above it near the
+    // bottom); the selected row is reversed.
     if let Some(p) = &ed.completion
         && !p.items.is_empty()
     {
@@ -530,7 +522,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             .unwrap_or(0)
             .min(40);
         let w = (label_w + 6).clamp(10, (width as usize).min(60));
-        // M-\: anchor to the word's VISUAL row, not its buffer row.
+        // Anchor to the word's visual row, not its buffer row.
         let drow = if ed.wrap {
             ed.visual_pos(Pos {
                 row: p.row,
@@ -541,9 +533,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             p.row as i64 - bs.scroll as i64
         };
         let vis_i = vis as i64;
-        // Text rows start at pane row 1 (title offset): the word sits on
-        // pane row drow+1, the popup goes just below it (or above when the
-        // bottom would clip).
+        // The word sits on pane row drow+1; the popup goes just below it
+        // (or above when the bottom would clip).
         let word_pane = drow + i64::from(t0);
         let y0 = if word_pane + vis_i < i64::from(t0) + text_h as i64 {
             word_pane + 1
@@ -555,7 +546,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             let disp = display_col(line, p.col, ed.tab_width);
             let x = if ed.wrap {
                 // Offset within the word's own visual row, not modulo the
-                // viewport: a row of wide characters wraps short of it.
+                // viewport (a row of wide characters wraps short of it).
                 (g + ed.disp_in_seg(p.row, p.col)) as u16
             } else {
                 (g + disp.saturating_sub(bs.scroll_x)) as u16
@@ -587,9 +578,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- list overlay (M-L buffers, M-? usages) ----
-    // Covers the text area: a reversed header naming the list and its keys,
-    // then one row per item with the selection reversed, scrolled so the
-    // selection stays in view.
+    // A reversed header naming the list, then one row per item with the
+    // selection reversed, scrolled to stay in view.
     if let Some(p) = &ed.picker {
         let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
@@ -613,9 +603,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- external-change diff (over the text, like the list) ----
-    // A reversed header naming the file, the view and the keys, then the
-    // rendered diff lines from `top`. The lines are already styled by the
-    // library's renderers; they are drawn as they are.
+    // A reversed header, then the rendered diff lines from `top`.
     if let Some(v) = &ed.diff_view {
         let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
@@ -639,9 +627,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         rev()
     };
     if let Some(p) = &ed.prompt {
-        // The prompt owns the status row, so what goes with it is drawn
-        // above it, over the bottom text rows: the live path suggestions,
-        // or a message raised while it is open ("No match").
+        // The prompt owns the status row; what goes with it (the live path
+        // suggestions, or a message) is drawn above it.
         let flash = ed
             .status
             .as_ref()
@@ -672,13 +659,12 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
         );
     } else {
-        // The cursor position sits at the right edge (1-based); transient
-        // messages and the LSP summary center in the space left of it,
-        // reversed only when they fit with room to spare.
+        // The cursor position sits at the right edge (1-based); messages
+        // and the LSP summary center in the space left of it.
         let cur = &ed.bs().cursor;
         // `?` and not `1`: a tail's row is not the file's line until the
-        // count has said which line it is. A view's position is a row of the
-        // rendering, not a line of a file.
+        // count has said which line it is. A view's position is a row of
+        // the rendering.
         let pos_txt = if ed.bs().synthetic {
             format!("Row {}", cur.row + 1)
         } else {
@@ -740,9 +726,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                     };
                     if i < total {
                         let (k, l) = (&items[i].0, &items[i].1);
-                        // nano post_one_key: the key combo is reversed, the
-                        // separator and tag stay default; the tag is skipped
-                        // when fewer than 2 columns remain for it.
+                        // nano: the key combo reversed, the tag skipped when
+                        // fewer than 2 columns remain for it.
                         let kw = k.chars().count();
                         let key: String = k.chars().take(w).collect();
                         spans.push(Span::styled(key, rev()));
@@ -763,8 +748,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- cursor ----
-    // None over the list overlay (the selection is the reversed row) or over
-    // the diff, which has nothing to point at.
+    // No cursor over the list overlay or the diff.
     if let Some(p) = &ed.palette {
         let col = 4 + p.query.chars().count();
         cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
@@ -774,15 +758,14 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             let (_, col) = prompt_text(p, width as usize);
             cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
         } else {
-            // M-\: the cursor's pane row is its VISUAL row.
+            // The cursor's pane row is its visual row.
             let cy = if ed.wrap {
                 ed.visual_pos(bs.cursor) as i64 - bs.scroll as i64
             } else {
                 bs.cursor.row as i64 - bs.scroll as i64
             };
             if cy >= 0 && (cy as u16) < text_h as u16 {
-                // char col → display col → minus scroll_x (or the offset
-                // within the wrap segment's own row) → plus gutter
+                // char col → display col → minus scroll_x → plus gutter
                 let line = bs
                     .buf
                     .row_opt(bs.cursor.row)
@@ -859,8 +842,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 Span::role(format!("{keys:<14} "), Role::Key),
                 Span::role(c.doc.to_string(), Role::Faint),
             ]);
-            // The selected row is reversed to the pane's edge, under the key
-            // colour and the faint doc, which keep theirs.
+            // The selected row is reversed to the pane's edge; the key
+            // colour and the faint doc keep theirs.
             let style = if start + k == p.sel {
                 sel()
             } else {
@@ -992,8 +975,7 @@ mod tests {
             buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         }
         let mut ed = Editor::new(buf, crate::config::Config::default());
-        // draw() assumes the run loop has kept the soft-wrap table fresh
-        // (it calls adjust_scroll, which rebuilds it, before every frame).
+        // draw() assumes the run loop has kept the soft-wrap table fresh.
         ed.ensure_wrap_prefix();
         ed
     }
@@ -1002,16 +984,15 @@ mod tests {
         s.chars().collect()
     }
 
-    /// An editor over a NAMED buffer, so `detect` finds a language and the
-    /// highlighter runs — the draw tests need coloured cells.
+    /// An editor over a named buffer, so the highlighter runs — the draw
+    /// tests need coloured cells.
     fn ed_named(name: &str, text: &str) -> Editor {
         let mut buf = crate::buffer::Buffer::new();
         buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         buf.name = Some(std::path::PathBuf::from(name));
         let mut ed = Editor::new(buf, crate::config::Config::default());
         ed.ensure_wrap_prefix();
-        // The run loop highlights before it paints; a draw test that skipped
-        // this would be asserting on an un-highlighted editor.
+        // The run loop highlights before it paints.
         ed.ensure_highlight();
         ed
     }
@@ -1114,8 +1095,7 @@ mod tests {
     }
 
     // The draw path hands line_to_spans the row's slice of the frame's
-    // merged diagnostics (its diag_range walk); a diag on the row must
-    // underline its range.
+    // merged diagnostics; a diag on the row must underline its range.
     #[test]
     fn line_to_spans_underlines_row_diagnostic() {
         let e = ed("abc");
@@ -1127,8 +1107,7 @@ mod tests {
                 message: "m".into(),
                 severity: 1,
             },
-            // A diag on another row: draw's per-row walk never hands it to
-            // this row's slice.
+            // A diag on another row never reaches this row's slice.
             lsp::Diagnostic {
                 line: 5,
                 col: 0,
@@ -1212,8 +1191,7 @@ mod tests {
 
     #[test]
     fn title_line_left_center_right() {
-        // Against the compiled version, not a literal, so the banner and
-        // this test cannot agree with each other and no release.
+        // Against the compiled version, not a literal.
         let banner = format!("  rano {}", env!("CARGO_PKG_VERSION"));
         let t = title_line(80, "foo.rs", true, "auto");
         assert!(t.starts_with(&banner), "{t:?}");
@@ -1259,11 +1237,10 @@ mod tests {
                 .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
-        // The popup sits below the word's row (text starts at pane row 1):
-        // item 0 at y=2, item 1 at y=3.
+        // The popup sits below the word's row: item 0 at y=2, item 1 at y=3.
         assert!(row(2).contains("print!"));
         assert!(row(3).contains("println!"));
-        // The selected row carries reverse video (popup starts at x = gutter).
+        // The selected row carries reverse video.
         let cell = buf.cell((3, 3)).unwrap();
         assert_eq!(cell.style.top(), Role::Selected);
         // The fn kind tag renders at the row's right edge.
@@ -1283,7 +1260,6 @@ mod tests {
         };
         // Status row = height-3 = 21: "Ln 2, Col 4" right-aligned.
         assert!(row(21).ends_with("Ln 2, Col 4"), "row21={:?}", row(21));
-        // A transient message centers left of it; both are visible.
         e.flash("saved");
         let terminal = Screen::of(&e, terminal.buf.area().width, terminal.buf.area().height);
         let buf = &terminal;
@@ -1298,8 +1274,8 @@ mod tests {
 
     #[test]
     fn function_bar_layout_at_width_80() {
-        // nano's algorithm: total = min(29, ((80+40)/20)*2) = 12 items,
-        // per_row 6, itemw 13, column-major (item 1 lands bottom-left).
+        // nano's algorithm: total = 12 items, per_row 6, itemw 13,
+        // column-major (item 1 lands bottom-left).
         let e = ed("x");
         let terminal = Screen::of(&e, 80, 24);
         let buf = &terminal;
@@ -1451,12 +1427,12 @@ mod tests {
 
     #[test]
     fn draw_wraps_tabbed_line() {
-        // A tabbed row takes the slow text_window path (the wrap table says
-        // "has tabs"); the tab must still expand to the next multiple of
-        // tab_width and the row must wrap at the segment boundary.
+        // A tabbed row takes the slow text_window path; the tab must still
+        // expand to the next multiple of tab_width and the row must wrap at
+        // the segment boundary.
         let mut e = ed(&format!("\t{}", "a".repeat(40)));
-        // Eight columns, named rather than inherited: this test's arithmetic
-        // is about an eight-column tab.
+        // Eight columns, named: this test's arithmetic is about an
+        // eight-column tab.
         e.tab_width = 8;
         e.show_line_numbers = true;
         e.text_w = 40;
@@ -1481,8 +1457,7 @@ mod tests {
 
     #[test]
     fn draw_colours_markdown_constructs_on_screen() {
-        // Not just `style_at`: the palette has to reach the cells. A markdown
-        // buffer with one of each construct, drawn to a buffer.
+        // Not just `style_at`: the palette has to reach the cells.
         let src = "# H\n\n**bold** `code` *it*\n\n```rust\nlet x = 1;\n```\n";
         let mut e = ed_named("x.md", src);
         e.show_line_numbers = false;
@@ -1491,8 +1466,8 @@ mod tests {
         let cell = |x: u16, y: u16| buf.cell((x, y)).unwrap().style.clone();
         let want = |s: Style| s;
         use Style as S;
-        // Row 3 (pane row 3): "**bold** `code` *it*" — the inner text of each
-        // construct, and the delimiters, all distinct.
+        // Row 3: "**bold** `code` *it*" — the inner text of each construct,
+        // and the delimiters, all distinct.
         assert_eq!(cell(2, 3), want(S::of(Role::Strong)), "strong text");
         assert_eq!(cell(10, 3), want(S::of(Role::Code)), "code span");
         assert_eq!(cell(17, 3), want(S::new().italic()), "emphasis");
@@ -1504,8 +1479,7 @@ mod tests {
 
     #[test]
     fn display_width_counts_wide_characters_as_two() {
-        // A CJK line is twice as wide as its character count. Measuring one
-        // column per character is what writes half of it off the screen.
+        // A CJK line is twice as wide as its character count.
         assert_eq!(display_width(&chars("中文"), 8), 4);
         assert_eq!(display_width(&chars("こんにちは"), 8), 10);
         assert_eq!(display_width(&chars("😀"), 8), 2);
@@ -1604,8 +1578,8 @@ mod tests {
 
     // ---- drawing into a host's pane (draw_in) ----
 
-    /// The pane the tests below draw into: away from every edge, so a row or
-    /// column that ignored the origin would land visibly outside it.
+    /// The pane the tests below draw into: away from every edge, so a row
+    /// or column that ignored the origin lands visibly outside it.
     const PANE: Rect = Rect {
         x: 10,
         y: 5,
@@ -1639,9 +1613,7 @@ mod tests {
         }
     }
 
-    /// Bare chrome: no title row, no function bar, no reverse video — the
-    /// text from the pane's first row, the status row its last, and the
-    /// bar's facts handed to the host.
+    /// Bare chrome: no title row, no function bar, no reverse video.
     #[test]
     fn a_bare_pane_is_text_and_a_status_row_and_nothing_reversed() {
         let mut e = ed("aa\nbb\ncc\ndd");
@@ -1746,9 +1718,8 @@ mod tests {
 
     #[test]
     fn draw_in_keeps_overlays_inside_too() {
-        // The which-key card and the M-x list are drawn over the text from
-        // the status row upwards; both are rows a full-frame layout put at
-        // x = 0.
+        // The which-key card and the M-x list are rows a full-frame layout
+        // put at x = 0.
         let mut e = ed("text");
         e.set_area(PANE.into());
         e.handle_key(crate::term::KeyEvent::alt(crate::term::KeyCode::Char('x')));
@@ -1772,7 +1743,7 @@ mod tests {
         // Pane row 3 is buffer row 2 (the title takes pane row 0).
         assert!(e.handle_mouse(click(PANE.x + 1, PANE.y + 3)));
         assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });
-        // Outside the pane: not the editor's click, whatever lies under it.
+        // Outside the pane: not the editor's click.
         assert!(!e.handle_mouse(click(PANE.x - 1, PANE.y + 1)));
         assert!(!e.handle_mouse(click(PANE.x + 1, PANE.bottom())));
         assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });

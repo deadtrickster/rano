@@ -65,11 +65,9 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// Language for an info-string token (a fence, `lang=`, `--lang`). Its own
-    /// table, deliberately not [`detect`]'s: a token says what a person typed,
-    /// a path says what a file is. Case-insensitive, first word only (the rest
-    /// of the info string is options or a title); `None` when no grammar
-    /// matches, so the caller shows plain text rather than guessing.
+    /// Language for an info-string token (a fence, `lang=`, `--lang`): its
+    /// own table, not [`detect`]'s. Case-insensitive, first word only;
+    /// `None` when no grammar matches, so the caller shows plain text.
     pub fn from_token(token: &str) -> Option<Lang> {
         let word = token
             .split(',')
@@ -479,11 +477,7 @@ static MARKDOWN_INLINE_HIGHLIGHTS_QUERY: LazyLock<String> = LazyLock::new(|| {
 
 /// Common Lisp highlights, rano's own (the grammar crate ships none). Only
 /// predicates tree-sitter itself evaluates are used; the neovim-only ones
-/// the upstream query leans on would be silently ignored, matching everything.
-/// The diff grammar's own query names its captures for the colours of the
-/// `tree-sitter highlight` command — a deleted line came out `@keyword`,
-/// `diff --git` red. These name what the lines are, coloured the way git
-/// colours them.
+/// would be silently ignored, matching everything.
 const DIFF_HIGHLIGHTS_QUERY: &str = r#"
 (deletion) @diff.minus
 (addition) @diff.plus
@@ -744,9 +738,8 @@ pub fn detect_sample(name: Option<&Path>, sample: &str) -> Option<Lang> {
 }
 
 /// The last resort: a file's first lines, when its name said nothing. `#!`
-/// must be line one; the rest is scanned over the sample. A columnar file
-/// (`fstab`, `hosts`) gets no language — no grammar here describes it, and
-/// colouring one would be a confident lie.
+/// must be line one. A columnar file gets no language — no grammar here
+/// describes it, and colouring one would be a confident lie.
 fn detect_content(sample: &str) -> Option<Lang> {
     // 1. A shebang, on line one and nowhere else.
     if let Some(first) = sample.split('\n').next()

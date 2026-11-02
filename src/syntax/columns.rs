@@ -66,16 +66,13 @@ impl Format {
         !matches!(self, Format::Passwd | Format::Group | Format::Shadow)
     }
 
-    /// How many fields the man page documents. Used by the table's own test, and worth
-    /// keeping beside the format so a reader can check the rule against the page.
+    /// How many fields the man page documents. Used by the table's own test.
     pub fn fields(self) -> usize {
         match self {
             Format::Fstab => 6,
             Format::Passwd => 7,
             Format::Group => 4,
-            // login, password, then `lastchg`, `min`, `max`, `warn`, `inactive`, `expire`,
-            // `flag` — the tail is optional, which is exactly why it is not styled by
-            // position.
+            // The tail is optional, which is why it is not styled by position.
             Format::Shadow => 9,
             Format::Hosts => 2,
             Format::Services => 3,
@@ -85,12 +82,10 @@ impl Format {
     }
 }
 
-/// The format a file is, by its name, or `None`.
-///
-/// **By name, and only for these standards.** That is a list, which is the thing this
-/// codebase is otherwise careful about — the difference is that every entry here is a
-/// documented database (`fstab(5)`, `passwd(5)`, …) and not one machine's sample. The
-/// trailing-dash forms are the backups the tools themselves write beside the original.
+/// The format a file is, by its name, or `None`. By name, and only for
+/// these standards — every entry is a documented database (`fstab(5)`,
+/// `passwd(5)`, …); the trailing-dash forms are the backups the tools
+/// write beside the original.
 pub fn detect_format(name: &Path) -> Option<Format> {
     let file = name.file_name()?.to_str()?.to_ascii_lowercase();
     Some(match file.as_str() {
@@ -106,11 +101,8 @@ pub fn detect_format(name: &Path) -> Option<Format> {
     })
 }
 
-/// A style grid for `src`, one cell per character, in the shape [`crate::syntax`]'s
-/// windowed refresh installs.
-///
-/// The whole of the rule is here: comments in the comment role, field 0 strong,
-/// separators faint.
+/// A style grid for `src`, one cell per character. The whole of the rule:
+/// comments in the comment role, field 0 strong, separators faint.
 pub fn grid(src: &str, fmt: Format) -> Vec<Vec<Style>> {
     let faint = Style::of(Role::Faint);
     let strong = Style::of(Role::Strong);

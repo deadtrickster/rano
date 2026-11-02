@@ -1,16 +1,8 @@
-//! **The composer's frame**: the box the person types in — its edges and the facts inlaid in
-//! them, the walls around the text, the caret's place — and the completion row over it.
+//! The composer's frame: the box the person types in — its edges and the facts inlaid in them, the
+//! walls around the text, the caret's place — and the completion row over it.
 //!
-//! Ported from letibot's `crates/tui/src/ui/composer.rs` (`box_edge`, `composer_rows`,
-//! `completions_line`, `shell_completions_line`) and the two edges in `ui/screen.rs`
-//! (`box_top`, `box_bottom`). **The text editing is not here**: the host's editor lays its text
-//! out into lines and a caret, and hands both over; this puts the field around them.
-//!
-//! ```text
-//! ╭──────────────────────────────── 1 subagent running · 2 jobs running ─╮
-//! │ › why did the cache miss                                              │
-//! ╰──────────────────────────────────────────────────────── ⚠ · holding ─╯
-//! ```
+//! The text editing is not here: the host's editor lays its text out into lines and a caret and hands
+//! both over; this puts the field around them.
 
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
@@ -19,24 +11,15 @@ use super::text::{trim_to, visible_width};
 
 /// One edge of the box, with a legend inlaid at the left and one pinned to the right.
 ///
-/// `╰────────── ⚠ · holding ─╯`. A legend rather than a decoration **when there is something to
-/// say**: an edge with nothing to say renders plain, because a row of attention paid for ever
-/// for a fact read once is the mistake the composer's top border already made once. The right
-/// legend yields room to the left one, yields itself by truncation next, and is dropped before
-/// the border is allowed to wrap.
-///
-/// The legends keep their own roles (the alarm in attention, a count in pending) and the border
-/// is [`Role::Faint`] around them — in letibot a painted legend's reset restored the terminal
-/// default rather than the border's grey, so the border had to reopen itself after each one; a
-/// span cannot leak, so that defect has no place to happen here.
+/// A legend rather than a decoration when there is something to say: an edge with nothing to say
+/// renders plain. The right legend yields room to the left one, then yields itself by truncation,
+/// and is dropped before the border wraps. The legends keep their own roles and the border is
+/// [`Role::Faint`] around them.
 pub fn box_edge(w: usize, open: char, close: char, left: &Line, right: &Line) -> Line {
     let w = w.max(4);
     let inner = w - 2;
-    // **The edge is one faint register, and the legends are inlaid in it**: the frame's
-    // own glyphs are plain text under the line's faint style, and a legend's spans are its
-    // own looks over it. That is letibot's edge exactly — `p.painted(Faint, …)` around the
-    // whole edge, a legend that closes and re-opens the faint — and it is the cells a
-    // buffer draws: a legend in the pending register reads dim yellow, as the string did.
+    // The edge is one faint register with the legends inlaid in it: the frame's glyphs are plain
+    // text under the line's faint style, and a legend's spans are its own looks over it.
     let mut out = Line {
         spans: vec![Span::raw(open.to_string())],
         style: Style::of(Role::Faint),
@@ -52,8 +35,7 @@ pub fn box_edge(w: usize, open: char, close: char, left: &Line, right: &Line) ->
     let mut right_spans = Vec::new();
     let mut right_cols = 0;
     if right.width() > 0 && inner >= 10 {
-        // letibot measured `+ 2` here and spent three (` `, ` ─`), so a full legend ran one
-        // column past the edge; the frame's trim hid it. Measured exactly here.
+        // Measured exactly: a full legend must not run past the edge.
         let room = inner.saturating_sub(left_cols + 3);
         if room >= 4 {
             let r = crate::render::text::truncate(right, room);
@@ -81,9 +63,8 @@ fn spans_of(l: &Line) -> Vec<Span> {
         .collect()
 }
 
-/// The jobs fact on the top edge: `2 jobs running · 1 to a file`, or nothing while none runs.
-/// `running` counts running jobs and `to_a_file` the running ones redirected to a file — the
-/// unwatchable one is named before the reader opens the pane.
+/// The jobs fact on the top edge, or nothing while none runs. `to_a_file` counts the running ones
+/// redirected to a file — the unwatchable one is named before the reader opens the pane.
 pub fn jobs_fact(running: usize, to_a_file: usize) -> Option<String> {
     if running == 0 {
         return None;
@@ -98,22 +79,15 @@ pub fn jobs_fact(running: usize, to_a_file: usize) -> Option<String> {
     Some(out)
 }
 
-/// **The composer box's top edge**, carrying what this session has running: its live subagents
-/// and its background jobs.
-///
-/// letibot fills it from: `subagents_running` ← subagents that are not `is_finished()` (the one
-/// lifecycle predicate the subagents pane's active group is built from, so the edge and the pane
-/// cannot disagree — *"an agent is alive from spawn until it has finished"*); `jobs_running` /
-/// `jobs_to_a_file` ← the job table's running rows and those with a `redirect`; `monitors_live`
-/// ← the monitors still watching (the same table's monitor rows that are `live`).
+/// The composer box's top edge, carrying what this session has running: its live subagents, its
+/// background jobs and its monitors still watching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BoxTop {
     pub subagents_running: usize,
     pub jobs_running: usize,
     pub jobs_to_a_file: usize,
-    /// **Monitors still watching** — a watch armed and not yet fired, expired or retired. Until
-    /// this a monitor was seen only when it fired: one that was waiting was on no screen at all,
-    /// and it keeps the session's daemon up.
+    /// Monitors still watching — armed and not yet fired, expired or retired. A monitor used to be
+    /// seen only when it fired, while it held the session's daemon up.
     pub monitors_live: usize,
 }
 
@@ -146,28 +120,23 @@ impl BoxTop {
     }
 }
 
-/// **The composer box's bottom edge**, carrying the alarm, where the reader is in the
-/// conversation, and the visibility rung.
-///
-/// letibot fills it from: `alarmed` ← `alarmed()`; `holding` ← `!following()`; `rung` ←
-/// `rung_state()`.
+/// The composer box's bottom edge, carrying the alarm, where the reader is in the conversation, and
+/// the visibility rung.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoxBottom {
     pub alarmed: bool,
-    /// **The viewport's state, where the reader's eye already crosses** (R36). Drawn **only when
-    /// it is holding**, because following is the ordinary state and owes the reader nothing — a
+    /// The viewport's state, drawn only when it is holding: following is the ordinary state, and a
     /// marker that is always on is furniture.
     pub holding: bool,
-    /// **The rung, when it is the one that hides things** (R37): drawn only when it is news.
-    /// What it buys is the reader who switched and then forgot.
+    /// The rung, drawn only when it is the one that hides things, for the reader who switched and
+    /// then forgot.
     pub rung: Option<String>,
 }
 
 impl BoxBottom {
     pub fn line(&self, w: usize) -> Line {
         let mut right = Line::default();
-        // The separator is the edge's own text: it sits in the edge's faint register (a
-        // string host writes it bare between the pieces, as letibot's edge did).
+        // The separator is the edge's own text, in the edge's faint register.
         let sep = |l: &mut Line| {
             if l.width() > 0 {
                 l.push(Span::raw(" · "));
@@ -188,20 +157,15 @@ impl BoxBottom {
     }
 }
 
-/// A masked field's one line: a dot per character, and the caret after the last one. The text
-/// itself is never handed over, not even to compute a width — the host passes the count. A
-/// secret and a provider key are both drawn this way; a prompt card's line for a program's
-/// stdin is drawn **in the open**, through the ordinary editor, and that difference is the
-/// whole of what keeps the two channels apart.
+/// A masked field's one line: a dot per character and the caret after the last one. The text is
+/// never handed over, not even to compute a width — the host passes the count. A prompt card's line
+/// for a program's stdin is drawn in the open instead, and that difference keeps the channels apart.
 pub fn masked(chars: usize) -> (Vec<Line>, (usize, usize)) {
     (vec![Line::raw("•".repeat(chars))], (0, chars))
 }
 
-/// **The field**: the editor's laid-out lines, inside the walls, scrolled to the caret.
-///
-/// The host's editor lays out the text at [`ComposerField::inner`] columns and passes the lines
-/// and the caret's `(row, col)` within them. This puts a wall on each side and pads to the full
-/// width, so the row is a *field* and not a line of text that happens to be at the bottom.
+/// The field: the editor's laid-out lines, inside the walls, scrolled to the caret. A wall on each
+/// side and padding to the full width, so the row is a field and not a line at the bottom.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComposerField {
     pub lines: Vec<Line>,
@@ -214,22 +178,18 @@ impl ComposerField {
         w.saturating_sub(4)
     }
 
-    /// The rows to draw (at most `max_rows`, at least one) and the caret's `(row, col)` within
-    /// them — **the host places the terminal's caret from this**, offset by the row the field
-    /// is drawn at (computed once, after every row above the box is laid out: leticl added a
-    /// status row above the box and its caret stayed one row up — *"cursor now goes above the
-    /// text i type lol"*).
-    ///
-    /// Scrolled to the row being edited, never to the top: a composer taller than the rows it
-    /// was given must still show the caret, or the person is typing somewhere they cannot see.
+    /// The rows to draw (at most `max_rows`, at least one) and the caret's `(row, col)` within them.
+    /// The host places the terminal's caret from this, offset by the row the field is drawn at, which
+    /// has to be computed after every row above the box. Scrolled to the row being edited, never to
+    /// the top: a composer taller than the rows it was given must still show the caret.
     pub fn rows(&self, w: usize, max_rows: usize, boxed: bool) -> (Vec<Line>, usize, usize) {
         let inner = Self::inner(w);
         let (crow, ccol) = self.caret;
         let n = self.lines.len().max(1);
         let show = max_rows.clamp(1, n);
         let start = crow.saturating_sub(show - 1).min(n - show);
-        // `Role::Faint`, not a grey: bright black lands within a hair of the background on
-        // several light themes; the attribute de-emphasises whatever the reader has chosen.
+        // `Role::Faint`, not a grey: bright black lands within a hair of the background on several
+        // light themes.
         let wall = Span::role("│", Role::Faint);
         let mut out = Vec::with_capacity(show);
         for i in start..start + show {
@@ -253,24 +213,19 @@ impl ComposerField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub text: String,
-    /// **A proposal, not a fact** — the model's suggestion rather than a command this session
-    /// ran. Drawn with a leading `~`, because a line that looks like the operator typed it and
-    /// did not is the same class of lie as an unattributed quote. The mark is display-only: a
-    /// Tab fills the composer with the line itself, never the marked form.
+    /// A proposal, not a fact — the model's suggestion rather than a command this session ran. Drawn
+    /// with a leading `~`, since a line that looks like the operator typed it and did not is the same
+    /// class of lie as an unattributed quote. The mark is display-only.
     pub proposed: bool,
 }
 
 /// The columns the row puts between two candidates — `  ·  `.
 pub const SEPARATOR_COLS: usize = 5;
 
-/// **The live completion row** shown above the composer while a `/command` or a `!` line is
-/// being typed. letibot fills it with the `/` command matches (`/name hint`), or for a `!`
-/// line: the file names a Tab found, else the history's candidates (plain, a fact) then the
-/// model's for this prefix and position (`proposed`). Empty: no row content — the row itself is
-/// a slot the fit ladder reserves, so its height does not follow its content.
-///
-/// **Only as many candidates as fit are joined.** Measured at 10 ms a frame on a history of two
-/// thousand matching commands when every one was cloned and joined and then trimmed away.
+/// The live completion row shown above the composer while a `/command` or a `!` line is being typed:
+/// the matches, then the history's candidates (a fact) and the model's (proposed). Empty leaves no
+/// row content, since the row is a slot the fit ladder reserves. Only as many as fit are joined —
+/// cloning and trimming two thousand matches a frame was 10 ms.
 pub fn completions_line(items: &[Candidate], w: usize) -> Option<Line> {
     let mut parts: Vec<String> = Vec::new();
     let mut used = 2usize; // the row's own leading indent
@@ -310,8 +265,7 @@ mod tests {
         }
     }
 
-    /// letibot `app/tests/subagents.rs::a_running_subagent_is_counted_on_the_top_border_and_a_done_one_is_not`
-    /// and `app/tests/jobs.rs` (`jobs_line` and its place on the top edge).
+    /// A running subagent and a running job are counted on the top border, and a done one is not.
     #[test]
     fn running_work_is_counted_on_the_top_edge() {
         let top = BoxTop {
@@ -352,7 +306,7 @@ mod tests {
         assert!(!BoxTop::default().line(100).plain().contains("running"));
     }
 
-    /// letibot's bytes: one faint run, the legend closing and re-opening it.
+    /// One faint run, the legend closing and re-opening it.
     #[test]
     fn an_edge_is_one_faint_register_with_its_legend_inlaid() {
         let l = BoxTop {

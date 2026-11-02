@@ -1,8 +1,6 @@
-//! **What the head says about itself**: the `/status` page of its counters, each with what
-//! it means, and the three rows that interrupt the frame when something is wrong — the link
-//! down, a stop being waited on, an alarm.
-//!
-//! Ported from letibot's `ui/status.rs`. The facts are the host's; this lays them out.
+//! What the head says about itself: the `/status` page of its counters, each with what it
+//! means, and the rows that interrupt the frame when something is wrong — the link down, a
+//! stop being waited on, an alarm. The facts are the host's; this lays them out.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -17,10 +15,8 @@ pub struct Fact {
     pub why: String,
 }
 
-/// **A page of facts**: a title, an optional note under it, and each fact as its name in a
-/// twelve-column faint field, its value at full strength, and its meaning wrapped faint under
-/// it — **every counter says what it counts**, because a number a reader has to look up is a
-/// number they will not.
+/// A page of facts: a title, an optional note under it, and each fact as its name in a
+/// twelve-column faint field, its value at full strength, and what it counts wrapped under it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FactsPane {
     pub title: String,
@@ -57,8 +53,7 @@ impl FactsPane {
 
 super::lines_widget!(FactsPane);
 
-/// **A warning that takes rows of the frame** — the daemon connection down, a stop still
-/// being waited on: `⚠` and the sentence, wrapped, in the notice register.
+/// A warning that takes rows of the frame — the daemon link down, a stop still waited on.
 pub fn warning(text: &str, w: usize) -> Vec<Line> {
     wrap(&format!("⚠ {text}"), w)
         .into_iter()
@@ -66,8 +61,7 @@ pub fn warning(text: &str, w: usize) -> Vec<Line> {
         .collect()
 }
 
-/// **The alarm row**: the counters that moved, in the attention register, on one row cut to
-/// the width.
+/// The alarm row: the counters that moved, in the attention register, cut to the width.
 pub fn alarm(text: &str, w: usize) -> Line {
     Line::new(vec![Span::role(trim_to(text, w), Role::Attention)])
 }

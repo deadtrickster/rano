@@ -1,35 +1,17 @@
-//! **Themes: the role table, overridden by name.**
+//! Themes: the role table, overridden by name.
 //!
-//! Everything rano and its hosts draw is a [`Role`], and [`Palette::look`] is the one table
-//! that says what a role looks like — by default in the terminal's own sixteen slots, so the
-//! terminal's theme is the theme. A [`Theme`] is a set of overrides on that table, read from
-//! a file of one `role = "look"` line each (the same flat `key = "value"` subset every config
-//! here is written in):
+//! Everything rano draws is a [`Role`], and [`Palette::look`] is the one table that says what a
+//! role looks like — by default in the terminal's own sixteen slots. A [`Theme`] is a set of
+//! overrides on that table, read from a file of `role = "look"` lines
+//! (`~/.config/letibot/themes/gray.toml`).
 //!
-//! ```text
-//! # ~/.config/letibot/themes/gray.toml
-//! user_block = "bg:#2f363b"
-//! heading    = "fg:#6fbcbf bold"
-//! added      = "bg:cube:22"
-//! faint      = "fg:8"
-//! ```
+//! A look is space-separated words: `fg:N` / `bg:N` (a slot, `0`–`15`), `fg:#rrggbb`,
+//! `fg:cube:N`, `bold`, `dim`, `italic`, `underline`, `reverse`, or `plain` on its own. An
+//! override replaces the role's look whole, so `heading = "fg:4"` is blue and not bold.
 //!
-//! A role's name is its variant in snake case (`UserBlock` → `user_block`), so the list of
-//! names cannot drift from the list of roles. A look is space-separated words:
-//!
-//! - `fg:N` / `bg:N` — a theme slot, `0`–`15`;
-//! - `fg:#rrggbb` / `bg:#rrggbb` — an exact colour (truecolor), for a theme that should look
-//!   the same whatever the terminal's palette;
-//! - `fg:cube:N` / `bg:cube:N` — an xterm 256-colour index;
-//! - `bold`, `dim`, `italic`, `underline`, `reverse`;
-//! - `plain` — no look at all (only on its own).
-//!
-//! An override replaces the role's look whole: `heading = "fg:4"` is blue and NOT bold.
 //! A line the reader cannot use is reported, never silently skipped — a typo and a deliberate
-//! default must not draw the same screen.
-//!
-//! One theme is active per process ([`set_active`]); [`Palette::None`] ignores it, so a replay
-//! diff and a CI log stay plain whatever is installed.
+//! default must not draw the same screen. [`Palette::None`] ignores the theme, so a replay diff
+//! and a CI log stay plain whatever is installed.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -45,9 +27,8 @@ pub struct Theme {
 
 /// The theme every [`Palette::look`] consults first. `None`: the default table.
 ///
-/// One per process — except in this crate's own tests, where it is one per THREAD: tests run
-/// in parallel, and one that activated a theme would otherwise recolour every other test's
-/// assertions for as long as it held it.
+/// One per process, except in tests: one per thread, so a test that activates a theme cannot
+/// recolour a test running beside it.
 #[cfg(not(test))]
 static ACTIVE: RwLock<Option<Theme>> = RwLock::new(None);
 #[cfg(test)]
@@ -94,7 +75,7 @@ pub(crate) fn override_for(r: Role) -> Option<Look> {
 }
 
 impl Role {
-    /// **The role's name in a theme file**: its variant in snake case.
+    /// The role's name in a theme file: its variant in snake case.
     pub fn name(self) -> String {
         let debug = format!("{self:?}");
         let mut out = String::with_capacity(debug.len() + 4);
@@ -119,8 +100,8 @@ impl Role {
 }
 
 impl Look {
-    /// **A look from its spelling in a theme file** — see the module header. `Err` says
-    /// which word could not be read and why.
+    /// A look from its spelling in a theme file — see the module header. `Err` says which
+    /// word could not be read and why.
     pub fn parse(spec: &str) -> Result<Look, String> {
         let words: Vec<&str> = spec.split_whitespace().collect();
         if words.is_empty() {
@@ -154,7 +135,7 @@ impl Look {
         Ok(look)
     }
 
-    /// **The look as a theme file spells it** — the inverse of [`Look::parse`].
+    /// The look as a theme file spells it — the inverse of [`Look::parse`].
     pub fn spec(&self) -> String {
         let mut words = Vec::new();
         for (side, hue) in [("fg", self.fg), ("bg", self.bg)] {
@@ -210,8 +191,7 @@ fn hue_spec(h: Hue) -> String {
 }
 
 impl Theme {
-    /// **A theme from its file's text**, and a sentence for every line it could not use.
-    /// Comments (`#` to the end of a line outside quotes) and blank lines are skipped.
+    /// A theme from its file's text, and a sentence for every line it could not use.
     pub fn parse(name: &str, text: &str) -> (Theme, Vec<String>) {
         let mut theme = Theme {
             name: name.to_string(),
@@ -242,7 +222,7 @@ impl Theme {
         (theme, problems)
     }
 
-    /// **The theme named `name` in `dir`** (`dir/NAME.toml`), or why there is none.
+    /// The theme named `name` in `dir` (`dir/NAME.toml`), or why there is none.
     pub fn load(dir: &Path, name: &str) -> Result<(Theme, Vec<String>), String> {
         let path = theme_path(dir, name);
         let text = std::fs::read_to_string(&path)
@@ -268,10 +248,9 @@ impl Theme {
     }
 }
 
-/// **The theme a config asks for**: the named file's roles (when `name` is given), then the
-/// config's own `color.ROLE` lines on top, in order — and a sentence for everything that
-/// could not be used, prefixed with where it was. `None` when neither says anything, which
-/// leaves the default table in charge.
+/// The theme a config asks for: the named file's roles, then the config's own `color.ROLE`
+/// lines on top, in order. `None` when neither says anything, leaving the default table in
+/// charge; problems are prefixed with where they were.
 pub fn resolve(
     dir: &Path,
     name: Option<&str>,
@@ -416,8 +395,8 @@ mod tests {
         }
     }
 
-    /// A named theme, then the config's own `color.` lines on top; `terminal` is the
-    /// default table by name; and what cannot be used is said with where it was.
+    /// A named theme, then the config's own `color.` lines on top; `terminal` is the default
+    /// table by name.
     #[test]
     fn a_config_resolves_its_theme_then_its_own_colour_lines() {
         let d = std::env::temp_dir().join(format!("rano-theme-{}", std::process::id()));

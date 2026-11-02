@@ -1,14 +1,9 @@
-//! **The help screen**: a title, every key and command with what it does, and how to close
-//! it — drawn in place of the conversation.
+//! The help screen: a title, every key and command with what it does, and how to close it —
+//! drawn in place of the conversation.
 //!
-//! Ported from letibot's `ui/panes/help.rs`. The rows are the host's (a host knows its own
-//! keys and verbs; this module knows how a list of them is laid out), so the view model is
-//! the list and nothing else.
-//!
-//! The shape: each name in a sixteen-column field, in the key register, and its sentence
-//! wrapped in the columns that are left, its continuation rows under the sentence and not
-//! under the name — so the names read as one column down the left however long a
-//! sentence runs.
+//! The rows are the host's (a host knows its own keys and verbs); this lays them out: each name
+//! in a sixteen-column key-register field and its sentence wrapped after it, so a wrapped tail
+//! continues under the sentence and the names still read as one column down the left.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -73,8 +68,7 @@ mod tests {
         }
     }
 
-    /// The names are one column down the left, and a wrapped sentence continues under the
-    /// sentence, not under the name.
+    /// The names are one column down the left, and a wrapped sentence continues under itself.
     #[test]
     fn a_wrapped_sentence_continues_under_itself() {
         let rows = plain(&pane().lines(44));
@@ -85,7 +79,7 @@ mod tests {
         assert_eq!(rows.last().unwrap(), "  /help or esc closes this");
     }
 
-    /// letibot's bytes: the name field painted in the key register and the sentence plain.
+    /// The name field is the key register and the sentence is plain.
     #[test]
     fn the_name_is_the_key_register_and_the_sentence_is_plain() {
         let l = &pane().lines(80)[2];

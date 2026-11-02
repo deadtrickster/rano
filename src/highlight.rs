@@ -1,29 +1,15 @@
-//! Syntax roles: **[`crate::syntax`]'s captures, [`crate::style`]'s roles.**
+//! Syntax roles: [`crate::syntax`]'s captures, [`crate::style`]'s roles.
 //!
-//! Ported from letibot's `crates/ui/src/highlight.rs`. The engine is
-//! [`crate::syntax`]; what lives here is the other half, `capture name → Role`,
-//! for everything that paints syntax: the diffs in [`crate::diff`] and
-//! [`crate::sidediff`], rendered markdown's fences, and the editor's own theme,
-//! which adds only the names its queries use beyond these. One table: two copies
-//! would drift, and the drift would be invisible — the same Rust coloured
-//! differently in two panes of one screen.
+//! One table for everything that paints syntax — the diffs, rendered markdown's fences, the
+//! editor's own theme. Two copies would drift, and the drift would be invisible: the same Rust
+//! coloured differently in two panes of one screen.
 
 use crate::style::Role;
 use crate::syntax::{Highlighter, Lang};
 
-/// Capture names onto the six syntax roles.
-///
-/// A name the table does not list falls back to its prefix (`type.builtin` →
-/// `type`), and only a name with no known prefix at all (`variable`,
-/// `punctuation.bracket`) is plain — which is honest, because those are the
-/// tokens a reader does not need coloured.
-///
-/// # Why six
-///
-/// A terminal has expensive colour and cheap structure, and six roles is what a
-/// reader holds: a keyword, a type, a function name, a string, a number, a
-/// comment. What is not mapped is not lost: [`Role::Plain`] is the reader's own
-/// foreground, which is the right colour for punctuation.
+/// Capture names onto the six syntax roles — a keyword, a type, a function name, a string, a
+/// number, a comment — which is what a reader holds in a terminal. A name the table does not
+/// list falls back to its prefix (`type.builtin` → `type`); no known prefix at all is plain.
 pub fn role_for_capture(name: &str) -> Role {
     match name {
         "comment" => Role::Comment,
@@ -32,12 +18,9 @@ pub fn role_for_capture(name: &str) -> Role {
         "type" | "constructor" | "label" => Role::TypeName,
         "keyword" | "include" | "preproc" | "variable.builtin" => Role::Keyword,
         "function" => Role::FuncName,
-        // A diff file's own lines (`syntax`'s diff query names them for what they
-        // are rather than borrowing `@keyword`). Without these a ```diff fence
-        // in rendered markdown came out plain: every name here starts `diff.`,
-        // and `diff` is no role. Green and red are the sign colours the diff
-        // renderers already give `+` and `-`; a hunk header is cyan, as the
-        // editor's theme draws it; a file header anchors a scan.
+        // A diff file's own lines: `syntax`'s diff query names them rather than borrowing
+        // `@keyword`, and without these a ```diff fence comes out plain, since `diff` is no
+        // role. Green and red are the signs' colours; cyan and strong anchor a scan.
         "diff.plus" => Role::Success,
         "diff.minus" => Role::Failure,
         "diff.hunk" => Role::Code,
@@ -49,13 +32,9 @@ pub fn role_for_capture(name: &str) -> Role {
     }
 }
 
-/// One role per character, one row per line, for `lines` read as one text in
-/// `lang`; rows of nothing (plain) when there is no language. The whole text is
-/// parsed at once, so a construct spanning lines keeps its scope.
-///
-/// The grid can come back shorter than `lines` — [`Highlighter::classes`] is
-/// empty when a parser will not take the language — so callers index it with
-/// `get` and read a missing row as plain.
+/// One role per character, one row per line, for `lines` read as one text in `lang`; plain rows
+/// when there is no language. The whole text is parsed at once, so a construct spanning lines
+/// keeps its scope — and the grid can come back shorter, so callers read a missing row as plain.
 pub fn role_grid(lines: &[&str], lang: Option<Lang>) -> Vec<Vec<Role>> {
     let Some(lang) = lang else {
         return vec![Vec::new(); lines.len()];
@@ -108,8 +87,8 @@ mod tests {
         assert_eq!(g[4].first(), Some(&Role::Success), "{g:?}");
     }
 
-    /// A dotted name falls back to its prefix, one level at a time — which is what
-    /// keeps a grammar's new sub-capture from rendering plain the day it appears.
+    /// A dotted name falls back to its prefix, one level at a time, so a grammar's new
+    /// sub-capture is not plain the day it appears.
     #[test]
     fn a_dotted_name_falls_back_to_its_prefix() {
         assert_eq!(role_for_capture("type.builtin"), Role::TypeName);

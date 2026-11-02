@@ -1,26 +1,13 @@
-//! What the painter produces: [`crate::render`] lines whose spans say what their
-//! text means, and the two ways of turning them back into bytes.
+//! What the painter produces: [`crate::render`] lines whose spans say what
+//! their text means, and the two ways of turning them back into bytes.
 //!
-//! # Why roles, not colours
-//!
-//! letibot painted ANSI strings, and every defect class its `Painter` existed to
-//! repair came from that: a span closed with a reset, the reset ended the colour
-//! of the block it sat in, and a heading inside dim reasoning turned white for
-//! the rest of the row. A concrete style baked into the output repeats the
-//! mistake one level up — it decides the colours before the host has said what
-//! its palette is.
-//!
-//! So a span here says what its text **means** — a [`Role`] in its
-//! [`Style`], plus the inline attributes markdown has (bold, italic, struck) —
-//! and nothing about what that looks like. The meaning composes instead of being
-//! restored: the register a whole reply is drawn in (letibot's reasoning) is the
-//! line's own style, under every span, not a sequence re-opened after every
-//! span. A palette is applied once, at the edge: by [`to_ansi`], or by a
-//! [`crate::render::Buffer`] the host draws the lines into and emits.
-//!
-//! The markdown-only `MdLine`/`MdSpan` this module used to define are gone: they
-//! were [`Line`] and [`Span`] with the style spelled differently, and two
-//! vocabularies for one thing is one too many for a host drawing both.
+//! A span says what its text means — a [`Role`] in its [`Style`], plus the
+//! inline attributes markdown has — and nothing about what that looks
+//! like. letibot's ANSI painter had a defect class (a span's reset ended the
+//! colour of the block it sat in) that came precisely from baking concrete
+//! styles into the output. The register a whole reply is drawn in is the
+//! line's own style, under every span, and a palette is applied once, at
+//! the edge: by [`to_ansi`], or by a host's own buffer.
 
 use crate::render::{Line, Span, Style};
 use crate::style::{Attrs, Palette, Role};
@@ -30,14 +17,12 @@ pub fn span(text: impl Into<String>, role: Role) -> Span {
     Span::role(text, role)
 }
 
-/// `~~struck~~` text's attribute. Drawn **dim**, not crossed out: crossed-out is
-/// an attribute half the terminals in use do not carry, and one a reader who has
-/// turned colour off would not see at all. Dim reads as "this was struck" next
-/// to the same sentence undimmed, and it is the weight the frames use.
+/// `~~struck~~` text's attribute. Drawn dim, not crossed out: crossed-out
+/// is an attribute half the terminals in use do not carry; dim reads as
+/// "this was struck" beside the same sentence undimmed.
 pub const STRUCK: Attrs = Attrs::DIM;
 
-/// The row's register, as the role at the bottom of its style: `Some` for
-/// letibot's reasoning, `None` at the top level.
+/// The row's register: the role at the bottom of its style.
 pub fn base(l: &Line) -> Option<Role> {
     l.style.roles().next()
 }
@@ -81,13 +66,9 @@ pub fn to_plain(lines: &[Line]) -> String {
     lines.iter().map(Line::plain).collect::<Vec<_>>().join("\n")
 }
 
-/// Every row as ANSI-escaped text under `palette`, joined with newlines: each
-/// row is [`Line::to_ansi`].
-///
-/// For a host that still prints strings rather than drawing cells, and for
-/// tests that pin what a terminal is sent. Under [`Palette::None`] there are no
-/// escapes at all: the output is byte-identical to [`to_plain`], which is what a
-/// replay, a pipe and CI read.
+/// Every row as ANSI-escaped text under `palette`, joined with newlines.
+/// Under [`Palette::None`] the output is byte-identical to [`to_plain`],
+/// which is what a replay, a pipe and CI read.
 pub fn to_ansi(lines: &[Line], palette: Palette) -> String {
     lines
         .iter()
@@ -132,8 +113,8 @@ mod tests {
         assert_eq!(to_ansi(&lines, Palette::None), to_plain(&lines));
     }
 
-    /// The sequences a heading, a code span and bold come out as are the ones
-    /// letibot's palette emitted, so a host switching over sees the same bytes.
+    /// The sequences a heading, a code span and bold come out as are the
+    /// palette's own, so a host switching over sees the same bytes.
     #[test]
     fn roles_emit_theme_slot_sequences() {
         let l = Line::new(vec![
@@ -149,8 +130,7 @@ mod tests {
         );
     }
 
-    /// A span inside a register keeps the register: the defect letibot's
-    /// `Painter` was written to repair cannot be expressed here.
+    /// A span inside a register keeps the register.
     #[test]
     fn a_span_inside_reasoning_composes_with_it() {
         let l = based_line(

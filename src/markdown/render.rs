@@ -1,25 +1,11 @@
 //! Blocks to terminal rows.
 //!
-//! Ported from letibot's `crates/tui/src/ui/render.rs`. The shapes are the same
-//! — a code fence in a frame with the grammar's name on it, a list indented by
+//! The shapes are the same as the letibot renderer this was ported from — a
+//! code fence in a frame with the grammar's name on it, a list indented by
 //! the column the model wrote it at, a table whose columns give way widest
-//! first — and so is the reasoning for each, kept beside the code it explains.
-//! What changed is the output: role-tagged [`Line`]s instead of ANSI strings
-//! (see [`super::line`] for why), so every `paint(role, …)` there is a span with
-//! that role here, and every reset that used to end a block's colour early has
-//! nothing to correspond to.
-//!
-//! # Bounded body
-//!
-//! > There is a matching known-good shape from that same work: render the head of
-//! > a long block as a title and the tail as a bounded body, with the buffer size
-//! > configurable rather than hardcoded.
-//!
-//! [`RenderOptions::max_block_lines`] is that size, and it is a value the host
-//! passes, not a constant in the middle of a function. A long block shows its
-//! first line as a title, a count of what was elided, and its last N lines —
-//! which is what a reader of a streaming model actually wants, because the
-//! interesting end is the end.
+//! first — but the output is role-tagged [`Line`]s instead of ANSI strings.
+//! [`RenderOptions::max_block_lines`] bounds a long block as a title, an
+//! elision count and its last N lines, a size the host passes.
 
 use crate::style::Role;
 use crate::syntax::{Lang, Stream};
@@ -37,16 +23,10 @@ use super::wrap::{truncate, wrap};
 /// host decides something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
-    /// The register the whole reply is drawn in: every row's own style, under
-    /// its spans (see [`super::line::base`]).
-    ///
-    /// `None` is the top level. `Some(Role::Reasoning)` is a model's
-    /// working-out, and it is the whole reason the field exists: in letibot a
-    /// heading or an inline code span inside a themed block used to close to the
-    /// *terminal default*, so the reasoning "tries to be grey, then goes green
-    /// and becomes white for several rows and then grey again" — the operator's
-    /// words, from looking at the screen. Here the register is under every span
-    /// rather than re-opened after each, so that cannot happen.
+    /// The register the whole reply is drawn in, under every span (see
+    /// [`super::line::base`]); `None` is the top level. Sits under every
+    /// span rather than being re-opened after each, so a themed block
+    /// cannot fall back to the terminal default mid-way.
     pub base: Option<Role>,
     /// Rows one block may occupy before it is summarised as a title, an elision
     /// count and its tail. `usize::MAX` disables the bound, and is the default:
@@ -72,26 +52,10 @@ const MIN_WIDTH: usize = 20;
 /// four deep in a diff is not eight deep in a reply.
 const TAB_STOP: usize = crate::diff::TAB_STOP;
 
-/// A code block's highlighter: a tree-sitter parse of the fence, painted with
-/// [`crate::highlight`]'s syntax roles.
-///
-/// # The decision this encodes
-///
-/// A fence grows at its end, a few characters at a time, and the naive thing —
-/// re-parse and repaint the whole block per frame — is the O(N²) letibot's old
-/// hand-written lexer was built to avoid. That lexer paid for its incrementality
-/// with coverage: ten languages, and heuristics (`Vec` is a type because it is
-/// capitalised) that were wrong often enough to be a known cost. A [`Stream`]
-/// parses the block with a grammar instead, which is 28 languages and no
-/// guessing.
-///
-/// What it costs is a capture walk per repaint rather than per new line:
-/// measured 2026-09-20 at ~0.1 µs per byte and ~1.1 µs per line, so ~470 µs for
-/// a 5.4 KB Rust block. That is a frame's budget at fence sizes and it is why
-/// this is a `Stream` fed the *delta* rather than a fresh parse — the parse is
-/// incremental even though the walk is not. A fence long enough for the walk to
-/// matter would need the same window discipline [`super::parse`] uses for the
-/// conversation.
+/// A code block's highlighter: a tree-sitter parse of the fence, painted
+/// with [`crate::highlight`]'s syntax roles. A fence grows at its end, so
+/// this is a [`Stream`] fed the delta — the parse is incremental even
+/// though the capture walk is not.
 pub(crate) struct CodePaint {
     /// `None` when the fence named no language, or one there is no grammar for.
     /// The block is then drawn plain — a wrong colour is worse than none,
@@ -123,11 +87,12 @@ impl std::fmt::Debug for CodePaint {
     }
 }
 
-/// **A fence labelled with a file and a line range** — `path:N` or `path:N-M` as the label's first
-/// word, the rest a note — answered as the path and the first line. Such a block is a CITATION:
-/// its lines are the file's own, so they are drawn with the file's line numbers and coloured by
-/// the file's extension rather than by a language name. The path must look like one (a `/` or a
-/// `.` in it), so `rust:2` stays a language.
+/// A fence labelled with a file and a line range — `path:N` or `path:N-M` as
+/// the label's first word, the rest a note — answered as the path and the
+/// first line. Such a block is a citation: its lines are the file's own, so
+/// they carry the file's line numbers and are coloured by the file's
+/// extension. The path must look like one (a `/` or a `.` in it), so
+/// `rust:2` stays a language.
 pub fn citation(info: &str) -> Option<(&str, u32)> {
     let word = info.split_whitespace().next()?;
     let (path, range) = word.rsplit_once(':')?;
@@ -162,27 +127,13 @@ impl CodePaint {
 
     /// Hand over whatever is new.
     ///
-    /// **Tabs become spaces HERE, before anything parses or measures.** A raw
-    /// tab handed to the terminal is expanded at THAT terminal's stop —
-    /// conventionally eight — while the width layer counts it as one column, so
-    /// the row on the glass and the host's model of it were two different
-    /// lines. The stop is the one both diff renderers use: a Go body indented
-    /// four deep in the diff view must not be eight deep in a fence.
-    ///
-    /// Per LINE, and that is not a detail. `expand_tabs` computes each stop
-    /// from the column the tab lands on, and a column carried across the `\n`
-    /// would make the first tab of line 2 depend on how wide line 1 was.
-    ///
-    /// Here rather than in `lines()` is what covers every branch. The stream
-    /// parses expanded text, so its spans are in the same coordinates as the
-    /// rows painted from them; and the no-grammar fallback, which returns the
-    /// text untouched, gets expanded text too. Fixing only the highlighted path
-    /// is precisely how the unhighlightable fence stayed broken in letibot.
-    ///
-    /// The text only ever grows at its end while the fence is open, so the
-    /// delta `pushed` tracks stays a prefix: expansion is a left-to-right fold,
-    /// so the expansion of a prefix is a prefix of the expansion, whatever a
-    /// later line adds.
+    /// Tabs become spaces here, before anything parses or measures (a raw
+    /// tab is expanded at the terminal's stop while the width layer counts
+    /// one column), per line, and in this one place so every branch — the
+    /// no-grammar fallback included — gets expanded text. The text only
+    /// grows at its end while the fence is open, so the delta `pushed`
+    /// tracks stays a prefix: expansion of a prefix is a prefix of the
+    /// expansion.
     fn feed(&mut self, lines: &[String], closed: bool) {
         let mut src = lines
             .iter()
@@ -192,11 +143,10 @@ impl CodePaint {
         if closed {
             src.push('\n');
         }
-        // The delta is only a delta if what was pushed is still a prefix of the
-        // fence. It is, for a fence growing at its end; it is not when the
-        // parse window has moved a different fence under this block's index.
-        // Then the parse starts again rather than appending one fence to
-        // another and colouring the rows by a document nobody wrote.
+        // The delta is only a delta if what was pushed is still a prefix of
+        // the fence; when the parse window has moved a different fence under
+        // this block's index, the parse starts again rather than appending
+        // one fence to another.
         if !src.starts_with(&self.text[..self.pushed.min(self.text.len())]) {
             self.stream = self.lang.map(Stream::new);
             self.pushed = 0;
@@ -212,35 +162,23 @@ impl CodePaint {
     }
 
     /// Whether this highlighter was built for a fence with this info string.
-    ///
-    /// **Found while porting, and present in letibot:** the cache kept the
-    /// highlighter it built on the first frame a fence appeared, and on that
-    /// frame the model had usually written only the backticks. So the fence was
-    /// highlighted as "no language" — plain — for the rest of its life,
-    /// including after it settled, since the settled render reuses the same
-    /// highlighter. A one-shot render of the same text was coloured, which is
-    /// how a test comparing the two found it.
+    /// A fence's info string arrives a few bytes at a time — "```" first,
+    /// then "```rust" — so a highlighter kept from the first frame was built
+    /// for the wrong language and the fence stayed plain for its life.
     pub(crate) fn is_for(&self, info: &str) -> bool {
         self.info == info
     }
 
-    /// The fence's rows, as spans.
-    ///
-    /// The captures are character ranges, so a row is cut by character and each
-    /// run is tagged with the role its capture name maps to. A run with no
-    /// capture is plain: what is not drawn is the reader's own foreground, which
-    /// is right for punctuation.
+    /// The fence's rows, as spans: cut by character, each run tagged with
+    /// the role its capture name maps to. A run with no capture is plain.
     fn lines(&mut self) -> Vec<Vec<Span>> {
         // A closed fence's text ends with the newline `feed` appended, and a
         // `split` on that gives a phantom empty row in the box. The rows a
         // *fence* has is what it was written with.
         let src = self.text.strip_suffix('\n').unwrap_or(&self.text);
-        // **No lines in, no rows out.** An empty fence — the shape the harness's citation
-        // convention writes, and the shape a fence has before its first body line arrives —
-        // used to draw one blank row between `┌─` and `└─`, because `""` splits into one
-        // empty line. A block that says N lines in and draws N + 1 out is the frame lying
-        // about its contents, and the reader cannot tell an empty citation from a citation
-        // whose lines are one blank.
+        // No lines in, no rows out: an empty fence — the shape the citation
+        // convention writes — must not draw a blank row, because a block
+        // that says N lines in and draws N + 1 out lies about its contents.
         if src.is_empty() {
             return Vec::new();
         }
@@ -274,11 +212,9 @@ impl CodePaint {
                 if cursor < start {
                     push_span(&mut painted, plain_text(&chars[cursor..start]));
                 }
-                // **Each capture its own span**, even beside one of the same role:
-                // `assert_eq` and `!` are two captures and a host printing strings
-                // writes them as two painted runs, which is what letibot's rows
-                // always were. Coalescing them changes no cell, only the bytes a
-                // string host emits, and those are what its frames are compared by.
+                // Each capture its own span, even beside one of the same
+                // role: a host printing strings writes them as two painted
+                // runs, and those bytes are what its frames are compared by.
                 let text: String = chars[start..end].iter().collect();
                 if !text.is_empty() {
                     painted.push(span(text, crate::highlight::role_for_capture(&s.name)));
@@ -303,13 +239,10 @@ fn plain_text(chars: &[char]) -> Span {
     Span::raw(chars.iter().collect::<String>())
 }
 
-/// Render one block to rows, unbounded.
-///
-/// One-shot: a fresh highlighter per call, which is right for a block that is
-/// rendered once (a settled transcript row, a frozen prefix) and wrong for one
-/// that is rendered every frame. [`super::view::MarkdownView`] is the second
-/// case and keeps the highlighter between frames; the output of the two paths is
-/// identical, because it is the same parser fed the same bytes in the same order.
+/// Render one block to rows, unbounded. One-shot: a fresh highlighter per
+/// call, right for a block rendered once; [`super::view::MarkdownView`]
+/// keeps the highlighter between frames. The output of the two paths is
+/// identical — the same parser fed the same bytes in the same order.
 pub fn render_block(b: &Block, width: usize, opts: &RenderOptions) -> Vec<Line> {
     let mut paint = code_paint_for(b);
     based(render_block_with(b, width, paint.as_mut()), opts)
@@ -395,13 +328,10 @@ fn faint(s: impl Into<String>) -> Line {
 fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> Vec<Line> {
     let w = width.max(MIN_WIDTH);
     match b {
-        // Coloured by level, with the hashes kept and de-emphasised.
-        //
-        // Both heads letibot surveyed drop the hashes and colour the text; that
-        // is right while there is colour and wrong without it, because the level
-        // is then unrecoverable — and no colour is a replay, a pipe and CI, not a
-        // theme. So the hashes stay, faint, and carry the level for the
-        // monochrome reader; the colour carries it for everyone else.
+        // Both heads letibot surveyed drop the hashes and colour the text;
+        // that is wrong without colour, because the level is then
+        // unrecoverable — and no colour is a replay, a pipe, CI. So the
+        // hashes stay, faint, and carry the level for the monochrome reader.
         Block::Heading { level, runs } => {
             let role = match level {
                 1 => Role::Heading,
@@ -434,22 +364,11 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
             paint.feed(lines, *closed);
             let painted = paint.lines();
             let mut out = Vec::with_capacity(painted.len() + 2);
-            // The fence's own info string when there is no grammar for it: naming
-            // a language we are not colouring is honest, and inventing one we are
-            // is not. A *recognised* one is named by the grammar that actually
-            // ran, so the header cannot claim TypeScript over a fence that was
-            // parsed as TSX.
-            //
-            // **And a fence the model did not label gets NO label at all** (R51
-            // item 12). It used to say `code`, which is the head inventing a word
-            // the author never wrote. Every other head surveyed names a language
-            // it is not colouring; none of them manufactures one. The frame is
-            // still drawn, so a bare block is visibly a block: `┌─` and `└─` with
-            // nothing between them but the code.
-            // **A citation names its file and range, and its lines carry their numbers** — the
-            // label is the header as written (a note after the range included), and each line
-            // the file's own number, so `pgdump_schema.go:242-248` reads as lines 242 to 248 of
-            // that file rather than as seven anonymous lines.
+            // The fence's own info string when there is no grammar for it:
+            // naming a language we are not colouring is honest, inventing
+            // one is not, and a recognised one is named by the grammar that
+            // ran. An unlabelled fence gets no label; a citation names its
+            // file and range, and its lines carry the file's own numbers.
             let cited = citation(lang);
             let head = match (cited, paint.lang) {
                 (Some(_), _) => format!("┌─ {}", lang.trim()),
@@ -492,28 +411,21 @@ fn render_block_with(b: &Block, width: usize, code: Option<&mut CodePaint>) -> V
                 // nested list has to say. `0` when `indents` is short, which is a
                 // block built by hand rather than by the parser.
                 let nest = indents.get(i).copied().unwrap_or(0);
-                // `·` rather than `•`, from grok-build: a bullet the same weight
-                // as the prose competes with it down a long list, and what the
-                // marker has to do is mark the indent, not be seen.
-                // An ordered list's number is content — it is what the prose
-                // refers back to — so it is not de-emphasised. A bullet is pure
-                // structure and is.
+                // `·` rather than `•`: a bullet the same weight as the prose
+                // competes with it down a long list. An ordered list's number
+                // is content — it is what the prose refers back to — so it is
+                // not de-emphasised; a bullet is pure structure and is.
                 let (marker, marker_role) = if *ordered {
-                    // `start + i`, not `i + 1`. A loose list — one whose items
-                    // are separated by blank lines, which is what a model writes
-                    // as soon as an item runs past a sentence — used to arrive as
-                    // one block per item, and numbering from the index inside the
-                    // block made every item of a six-point answer read `1.`.
+                    // `start + i`, not `i + 1`: numbering from the index
+                    // inside the block made every item of a six-point answer
+                    // read `1.`.
                     (format!("{}. ", start + i), Role::Plain)
                 } else {
                     ("· ".to_string(), Role::Faint)
                 };
-                // Columns, not bytes. `"· "` is two columns and three bytes, and
-                // indenting a wrapped bullet by its byte length put every
-                // continuation line a column too far right. The nest goes inside
-                // this arithmetic rather than being prepended to the output row,
-                // so a wrapped sub-item's continuation lines line up under its own
-                // text instead of under its parent's.
+                // Columns, not bytes — `"· "` is two columns and three — and
+                // the nest goes inside this arithmetic so a wrapped
+                // sub-item's continuation lines line up under its own text.
                 let pad = nest + spans_width(&[Span::raw(marker.as_str())]);
                 let body = wrap(&runs_spans(it, Role::Plain), w.saturating_sub(pad));
                 for (j, line) in body.into_iter().enumerate() {
@@ -556,23 +468,10 @@ fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
     v.into_iter().map(Line::new).collect()
 }
 
-/// A pipe table, at the width the terminal actually has.
-///
-/// The operator, 2026-09-17: *"table rendering is broken"*. It was not rendered
-/// at all — a table lexed as a paragraph, joined with spaces and wrapped as
-/// prose. What a table owes its reader is the column, so:
-///
-/// - **Columns are as wide as their content wants, until they do not fit.** Then
-///   the wide ones give way first (water-filling): a table of three short
-///   columns and one long one shrinks the long one and leaves the others alone,
-///   rather than taking an equal slice off each and truncating the short ones to
-///   nothing.
-/// - **A cell too narrow wraps, it does not get cut.** A row is as tall as its
-///   tallest cell. Truncation would lose bytes the model wrote and a table is
-///   most often where the numbers are.
-/// - **No outer box.** The frame is one faint rule under the header and a faint
-///   `│` between columns — the same weight as the quote rail and the code fence,
-///   so a table sits in a turn rather than shouting from it.
+/// A pipe table, at the width the terminal actually has. Columns are as
+/// wide as their content wants until they do not fit, then the wide ones
+/// give way first; a cell too narrow wraps rather than getting cut; and
+/// there is no outer box — one faint rule and a faint `│` between columns.
 fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to
@@ -660,14 +559,11 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     out
 }
 
-/// Give each column its natural width if they all fit; otherwise let the wide
-/// ones give way first.
-///
-/// Water-filling: every column narrower than an equal share keeps what it
-/// wants, and the slack they leave is shared again among the rest. An equal cut
-/// instead would take the same columns off a two-character `n` column as off a
-/// sixty-character `status` one, and the short columns are the ones that cannot
-/// spare it.
+/// Give each column its natural width if they all fit; otherwise let the
+/// wide ones give way first. Water-filling: every column narrower than an
+/// equal share keeps what it wants and the slack is shared among the rest —
+/// an equal cut would take as much off a two-character `n` as off a
+/// sixty-character `status`.
 fn fit_columns(natural: &[usize], available: usize) -> Vec<usize> {
     let n = natural.len();
     if n == 0 {
@@ -740,19 +636,12 @@ fn trim_end(row: &mut Vec<Span>) {
     }
 }
 
-/// Inline runs as spans inside a container drawn as `container`.
-///
-/// There is nothing to scan for here. The markdown projection parsed the inline
-/// grammar, so `**bold**` arrived as a [`Run`] whose text is `bold` and whose
-/// style is [`InlineStyle::Bold`] — the asterisks are already gone, and a `*`
-/// that is not emphasis stays literal because the grammar said so. What is left
-/// is the mapping from inline style to meaning.
-///
-/// The container's role is kept under the run's own: bold text in a quote is
-/// still faint, bold in a heading is still the heading. A code span takes the
-/// code role — its colour is what says "this is code" — and keeps the weight of
-/// a heading or a table header it sits in, so it does not read as a dip in the
-/// middle of one.
+/// Inline runs as spans inside a container drawn as `container`. Nothing to
+/// scan for here — the inline grammar already parsed the markers away; what
+/// is left is the mapping from inline style to role. The container's role
+/// stays under the run's own: bold in a quote is still faint, bold in a
+/// heading is still the heading. A code span takes the code role and keeps
+/// the weight of the container it sits in.
 pub fn runs_spans(runs: &[Run], container: Role) -> Vec<Span> {
     let heavy = matches!(container, Role::Heading | Role::Subheading | Role::Strong);
     let mut out = Vec::new();
@@ -786,11 +675,9 @@ pub fn runs_spans(runs: &[Run], container: Role) -> Vec<Span> {
     out
 }
 
-/// One block's lines as one run list, joined with a plain space.
-///
-/// A paragraph's source lines are one paragraph; the renderer wraps the whole
-/// thing to the display width, so the source's newlines are a wrap the model
-/// did not mean.
+/// One block's lines as one run list, joined with a plain space: the
+/// renderer wraps the whole thing to the display width, so the source's
+/// newlines are a wrap the model did not mean.
 pub fn joined_runs(lines: &[Vec<Run>]) -> Vec<Run> {
     let mut out: Vec<Run> = Vec::new();
     for (i, line) in lines.iter().enumerate() {

@@ -1,33 +1,21 @@
-//! **The notes**: the disclosures a head shows in the conversation — a guard that fired, a
-//! decision that settled, a sentence the daemon interrupted with, a pane that ended — and
-//! the `/notes` listing that holds all of them.
+//! The notes: the disclosures a head shows in the conversation — a guard that fired, a decision that
+//! settled, a sentence the daemon interrupted with, a pane that ended — and the `/notes` listing.
 //!
-//! Ported from letibot's `ui/panes/notes.rs`. One renderer for the transcript row and for
-//! the listing, so the listing cannot disagree with the screen about the text: the row is
-//! the listing's text folded to [`NOTE_LINES`].
-//!
-//! # §3.1: a note carries text from elsewhere
-//!
-//! A warning's detail is the daemon's or a guard's sentence, a decision's summary and basis
-//! are the ask and the decider's own words, a pane's rows are whatever its program last
-//! drew. All of it is cleaned before it is wrapped.
+//! One renderer for the transcript row and for the listing, so the listing cannot disagree with the
+//! screen: the row is the listing's text folded to [`NOTE_LINES`]. Everything a note carries came from
+//! elsewhere, and is cleaned before it is wrapped.
 
 use crate::render::Line;
 use crate::style::Role;
 
 use super::text::{clean, one, wrap};
 
-/// **How many lines of a note the conversation shows before it is a wall.**
-///
-/// The number comes from the operator's own screen rather than from taste: two gate timeouts
-/// rendered **27 red lines** (*"how to remove this red wall?"*), around thirteen lines each — a
-/// `denied:` detail with the whole rule in it. Three lines keeps the code, the first sentence
-/// and the fact that there is more, and puts the rest one verb away; the listing prints the
+/// How many lines of a note the conversation shows before it is a wall. Three keeps the code, the first
+/// sentence and the fact that there is more, and puts the rest one verb away; the listing prints the
 /// whole thing, so this is a disclosure decision and never a cap on the record.
 pub const NOTE_LINES: usize = 3;
 
-/// **The register a warning's code was classified into** — letibot's
-/// `letibot_sessionlog::warning::Class`, the log's vocabulary rather than the head's.
+/// The register a warning's code was classified into — the log's vocabulary rather than the head's.
 ///
 /// ```text
 ///   · code — sentence      faint    housekeeping: nothing to do
@@ -35,18 +23,10 @@ pub const NOTE_LINES: usize = 3;
 ///   ! code — sentence      red      the session is in trouble; stop and look
 /// ```
 ///
-/// The mark goes with the colour, because colour is a no-op under a replay, a pipe and a
-/// light theme, and three registers that collapse to one appearance in half the terminals
-/// they are read in are one register with extra steps.
-///
-/// **Routine is not failure** — letibot's R19, the operator's ruling of 2026-09-22: *"routine
-/// is painted as failure"* — `compacted`, `auto_compact`, `daemon_stopping` and a fourth
-/// arrived on a head that had just attached, all four in the red a denial gets, and four
-/// notes read as a wall. A housekeeping notice and a refused call must not look alike, and
-/// the argument is not taste: a person met by a red block on every restart learns to skip
-/// it, and the block is where a real denial lives. So routine is a `·` and faint, and the
-/// code is kept, because it is the word a reader greps the log for. Which codes are routine
-/// is the host's log's table, not this widget's opinion.
+/// The mark goes with the colour, because colour is a no-op under a replay, a pipe and a light theme.
+/// Routine is not failure: housekeeping painted like a denial teaches a person to skip the block that
+/// holds the real ones. The code is kept, because it is the word a reader greps the log for, and which
+/// codes are routine is the host's table, not this widget's opinion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteClass {
     Routine,
@@ -78,10 +58,9 @@ pub enum Note {
     /// A call that did not run. No `!`, no red, no request id: nothing here is answerable,
     /// and the detail that was cut is in the model's own tool result, folded, one row above.
     NotRun { detail: String },
-    /// A pane that ended: the line that ran it, why it ended, its program's last rows, and
-    /// whether the person ended it themselves (`closed`) — housekeeping then, faint and a
-    /// `·`; ended without them it is the answer to what they typed, the notice register and
-    /// a `×`.
+    /// A pane that ended: the line that ran it, why it ended, its program's last rows, and whether the
+    /// person ended it themselves — housekeeping then, faint and a `·`; ended without them it is the
+    /// notice register and a `×`.
     Pane {
         line: String,
         said: Vec<String>,
@@ -101,8 +80,7 @@ pub enum Note {
 }
 
 impl Note {
-    /// **The whole note, with no fold** — what the listing prints and what the transcript
-    /// shows the head of.
+    /// The whole note, with no fold — what the listing prints and what the transcript shows the head of.
     pub fn unfolded(&self, w: usize) -> Vec<Line> {
         match self {
             Note::Warned {
@@ -177,13 +155,12 @@ impl Note {
         }
     }
 
-    /// **One note, as the conversation draws it**: at most [`NOTE_LINES`] lines and a seam
-    /// naming where the rest is.
+    /// One note, as the conversation draws it: at most [`NOTE_LINES`] lines and a seam naming where the
+    /// rest is.
     ///
-    /// **A pane's ending is the one note that is not folded**, and the reason is the tail:
-    /// what a program says as it dies is the *last* thing it printed, so a fold that kept the
-    /// first three lines would keep the least useful three. Its length is bounded where it is
-    /// captured instead (letibot's `PANE_LAST_LINES`).
+    /// A pane's ending is the one note that is not folded, and the reason is the tail: what a program says
+    /// as it dies is the last thing it printed, so a fold keeping the first three lines would keep the
+    /// least useful three. Its length is bounded where it is captured instead.
     pub fn lines(&self, w: usize) -> Vec<Line> {
         let all = self.unfolded(w);
         if matches!(self, Note::Pane { .. }) || all.len() <= NOTE_LINES {
@@ -210,17 +187,14 @@ pub struct Listed {
     pub note: Note,
     /// Retired (`/notes dismiss`): hidden, still counted.
     pub retired: bool,
-    /// From before the conversation's window: a fact the head holds and has chosen not to
-    /// plant in the conversation.
+    /// From before the conversation's window: a fact the head holds and has chosen not to plant in the
+    /// conversation.
     pub before: bool,
 }
 
-/// **The `/notes` listing**: every note the head holds, in the order the conversation has
-/// them, numbered for `/notes dismiss N`.
-///
-/// **Including the ones it is not drawing.** A retired note and a note from before the
-/// window are both marked, and marked differently: two different reasons for an absence must
-/// not look like one.
+/// The `/notes` listing: every note the head holds, in the order the conversation has them, numbered for
+/// `/notes dismiss N` — including the ones it is not drawing, since a retired note and one from before
+/// the window are two different reasons for an absence and must not look like one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NotesList {
     pub notes: Vec<Listed>,
@@ -262,8 +236,8 @@ impl NotesList {
                 format!("[{}]", marks.join(", "))
             };
             out.push(Line::raw(format!("{:>3}  {mark}", i + 1)));
-            // **The same renderer the transcript uses, unfolded.** A listing that hid the
-            // tail of the very thing it exists to make findable would be the defect again.
+            // The same renderer the transcript uses, unfolded: a listing that hid the tail of the very
+            // thing it exists to make findable would be the defect again.
             out.extend(l.note.unfolded(w));
         }
         if n > 0 {
@@ -304,8 +278,8 @@ mod tests {
         }
     }
 
-    /// A long note folds to three lines and a seam in the conversation, and is whole in the
-    /// listing; a pane's ending is never folded.
+    /// A long note folds to three lines and a seam in the conversation, and is whole in the listing; a
+    /// pane's ending is never folded.
     #[test]
     fn a_long_note_folds_and_the_listing_keeps_it_whole() {
         let long = warned(NoteClass::Failure, &"the rule says no. ".repeat(20));

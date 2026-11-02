@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn a_result_block_replaces_the_text() {
-        // The block {1024, 5} points at the input's own bytes, so the save
-        // returns its text by the block path rather than the sentinel.
+        // The block points at the input's own bytes, so the save returns its
+        // text by the block path rather than the sentinel.
         let p = plugin(&format!(
             r#"{BASE}
             (func (export "on_save") (param i32 i32) (result i32)
@@ -812,8 +812,6 @@ mod tests {
         assert!(e.contains("cap"), "{e}");
     }
 
-    /// The example module loads and transforms, so an ABI change that breaks
-    /// real modules is caught here.
     #[test]
     fn the_example_module_loads_and_uppercases() {
         let p = Plugin::from_bytes(
@@ -829,12 +827,9 @@ mod tests {
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
-    /// The dired example through the ABI: refused without the grant, and with
-    /// it `provider_open` answers the host's own listing.
     #[test]
     fn the_dired_example_needs_read_dir_and_then_lists_a_folder() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-dired/plugin.wasm");
-        // Ungranted: refused at load, and the sentence names the import, not the plugin's wishes.
         let e = Plugin::from_bytes_with(wasm, PathBuf::from("dired.wasm"), Capabilities::default())
             .unwrap_err();
         assert!(e.contains("imports are not granted"), "{e}");
@@ -861,7 +856,7 @@ mod tests {
             listing,
             format!("{}\n", crate::dirview::rows(&dir).unwrap().join("\n"))
         );
-        // A file is not claimed: `provider_open` answers the sentinel, which is `None` here.
+        // A file is not claimed: `provider_open` answers the sentinel.
         assert_eq!(
             p.provider_open(&dir.join("a.txt").to_string_lossy(), 80, 24)
                 .unwrap(),
@@ -870,7 +865,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **What a hook call costs after the module is compiled** — the number the save path pays.
     #[test]
     fn a_hook_call_is_cheap_once_the_module_is_compiled() {
         let p = Plugin::from_bytes_with(
@@ -879,7 +873,7 @@ mod tests {
             Capabilities::default(),
         )
         .expect("loads");
-        // Warm: one call to register, then time a run of them.
+        // Warm: one call to register, then a run of them.
         p.save("hello").unwrap();
         let n = 20;
         let t = std::time::Instant::now();
@@ -894,7 +888,6 @@ mod tests {
         );
     }
 
-    /// The TypeScript (AssemblyScript) example: same plugin, same ABI.
     #[test]
     fn the_typescript_example_loads_and_uppercases() {
         let p = Plugin::from_bytes(
@@ -910,7 +903,6 @@ mod tests {
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
-    /// The TypeScript dired: the same as the Rust one.
     #[test]
     fn the_typescript_dired_needs_read_dir_and_then_lists_a_folder() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-dired-as/plugin.wasm");
@@ -975,8 +967,6 @@ mod tests {
         );
     }
 
-    /// A pane hook: `(i32, i32) -> i32` answering `"pane:x"` (not the input,
-    /// so the test can tell them apart).
     const PANE: &str = r#"
         (memory (export "memory") 4)
         (func (export "rano_abi") (result i32) i32.const 1)
@@ -988,7 +978,6 @@ mod tests {
           i32.const 8192)
     "#;
 
-    /// **A prefix is the host's claim, not the module's.**
     #[test]
     fn a_prefixed_export_is_a_hook_only_when_the_host_names_the_prefix() {
         let p = plugin(PANE);
@@ -1009,7 +998,6 @@ mod tests {
         );
     }
 
-    /// The prefixes are added beside the two the ABI already defines, and hide neither.
     #[test]
     fn prefixes_are_added_beside_on_and_provider() {
         let src = format!(
@@ -1030,8 +1018,6 @@ mod tests {
         );
     }
 
-    /// Refused at load, naming it — the same rule `on_` has: a hook that
-    /// fails on every call is a plugin that fails at the first frame.
     #[test]
     fn a_prefixed_export_with_the_wrong_signature_is_refused_naming_it() {
         let src = r#"(module
@@ -1046,7 +1032,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("pane_x") && e.contains("signature"), "{e}");
-        // The same module without the prefix names nothing to check, so it loads.
         Plugin::from_bytes_hooks(
             &wat(src),
             PathBuf::from("pane.wasm"),
@@ -1069,8 +1054,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// `last_fuel` is the call's cost; a hook that was not called reports
-    /// nothing rather than the previous call's number.
     #[test]
     fn last_fuel_is_what_the_last_call_burned() {
         let p = plugin(&format!(
@@ -1085,10 +1068,6 @@ mod tests {
         assert_eq!(p.last_fuel(), 0, "a hook it does not export is not a call");
     }
 
-    // -- `read_file`, and what it will not read ----------------------------------------------
-
-    /// The `read_file` import and two answers, `ok` and `no`, so a test reads
-    /// the host's decision rather than a plugin's opinion.
     const READ_FILE: &str = r#"
         (import "rano" "read_file" (func $read_file (param i32 i32 i32 i32) (result i32)))
         (memory (export "memory") 4)
@@ -1105,7 +1084,6 @@ mod tests {
         }
     }
 
-    /// A fresh directory for a test, named so two runs cannot collide.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rano_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1113,8 +1091,6 @@ mod tests {
         dir
     }
 
-    /// A provider that reads the path it was handed and answers those bytes,
-    /// or `no` when the host refused.
     fn self_reader() -> Plugin {
         let src = format!(
             r#"{READ_FILE}
@@ -1139,7 +1115,6 @@ mod tests {
         .expect("loads with the grant")
     }
 
-    /// A provider that reads one path compiled into it, whatever path the call was about.
     fn other_reader(path: &str) -> Plugin {
         let src = format!(
             r#"{READ_FILE}
@@ -1176,10 +1151,6 @@ mod tests {
         );
     }
 
-    /// **The grant is the file the call is about, not a filesystem door.** The
-    /// same module, called the same way, is answered for that path and refused
-    /// for every other one — a sibling, `/etc/shadow`, or a path a text hook
-    /// would have liked to read.
     #[test]
     fn read_file_answers_only_for_the_file_the_call_was_about() {
         let dir = temp_dir("read_file_scope");
@@ -1196,7 +1167,7 @@ mod tests {
             Some("A\n")
         );
 
-        // A sibling in the same folder: refused, because it is not the file that was asked about.
+        // A sibling in the same folder: refused.
         let p = other_reader(&b.to_string_lossy());
         assert_eq!(
             p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
@@ -1258,7 +1229,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file above [`MAX_HOOK_BYTES`] is refused, not handed over in pieces.
     #[test]
     fn read_file_will_not_answer_a_file_above_the_cap() {
         let dir = temp_dir("read_file_cap");
@@ -1274,9 +1244,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- `provider_picture` ------------------------------------------------------------------
-
-    /// The fixture, from the crate root, so the test does not depend on the working directory.
     fn stl_fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("examples/plugin-stl/fixtures")
@@ -1292,9 +1259,6 @@ mod tests {
         .expect("the STL example loads with read-file")
     }
 
-    /// **The Zig example, through both new capabilities**: refused without
-    /// `read-file`; with it a `.stl` path is a picture, or a character ramp
-    /// for a terminal with no graphics protocol.
     #[test]
     fn the_stl_example_needs_read_file_and_then_renders() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-stl/plugin.wasm");
@@ -1311,7 +1275,7 @@ mod tests {
             vec!["provider_open".to_string(), "provider_picture".to_string()]
         );
 
-        // Not an STL: not mine, either way.
+        // Not an STL: not mine.
         let txt = stl_fixture("cube.stl").with_extension("txt");
         assert_eq!(
             p.provider_picture(&txt.to_string_lossy(), 80, 24).unwrap(),
@@ -1375,8 +1339,6 @@ mod tests {
         eprintln!("provider_open fuel: {}", p.last_fuel());
     }
 
-    /// A `provider_picture` answering a header and nothing else, so the bounds
-    /// can be tested without a renderer.
     fn picture_answer(width: u32, height: u32, out_len: u32) -> Plugin {
         plugin(&format!(
             r#"{BASE}
@@ -1389,7 +1351,6 @@ mod tests {
         ))
     }
 
-    /// **Refused, never clipped**: 4096×4096 is 48 MiB of RGB, and the header alone says so.
     #[test]
     fn an_oversized_picture_is_refused_rather_than_clipped() {
         let p = picture_answer(4096, 4096, 12);
@@ -1397,8 +1358,6 @@ mod tests {
         assert!(e.contains("cap") && e.contains("4096x4096"), "{e}");
     }
 
-    /// A header is a claim about the bytes that follow; a claim that does not
-    /// hold is an error, not a picture to guess the shape of.
     #[test]
     fn a_picture_header_that_disagrees_with_its_bytes_is_refused() {
         let p = picture_answer(2, 2, 12);
@@ -1427,9 +1386,6 @@ mod tests {
         assert!(e.contains("0x4"), "{e}");
     }
 
-    /// **The example's picture buffer is three bytes a pixel**: `rgb:
-    /// [max_pixels]u8` bounds BYTES where `fits()` bounds PIXELS, and the
-    /// overflow is silent in `ReleaseSmall`, so this is a source check.
     #[test]
     fn the_stl_examples_rgb_buffer_is_three_bytes_a_pixel() {
         let src = include_str!("../examples/plugin-stl/src/main.zig");
@@ -1440,7 +1396,6 @@ mod tests {
         );
     }
 
-    /// A plugin that answers no picture claims nothing — the hook is found by name like any other.
     #[test]
     fn a_plugin_with_no_picture_hook_claims_nothing() {
         let p = Plugin::from_bytes(
@@ -1451,8 +1406,6 @@ mod tests {
         assert_eq!(p.provider_picture("/tmp/model.stl", 80, 24).unwrap(), None);
     }
 
-    /// The fuel budget is the call's, whatever the hook: a picture that never
-    /// finishes ends in `OutOfFuel`, and the whole budget is what it burnt.
     #[test]
     fn a_picture_that_never_finishes_runs_out_of_fuel() {
         let p = plugin(&format!(
@@ -1467,8 +1420,6 @@ mod tests {
         assert_eq!(p.last_fuel(), HOOK_FUEL, "the whole budget was burnt");
     }
 
-    /// The memory cap is the call's too: the guest tries to grow 125 MiB and
-    /// answers a 1×1 picture when the limiter says no.
     #[test]
     fn a_picture_hook_cannot_grow_past_the_memory_cap() {
         let p = plugin(&format!(
@@ -1495,9 +1446,6 @@ mod tests {
 mod convert_page_tests {
     use super::*;
 
-    /// A module that merely IMPORTS the hook: the grant is decided at
-    /// instantiation, so an import with no call tells a refusal from an
-    /// admission.
     fn importer(import: &str, params: &str) -> Vec<u8> {
         wat::parse_str(format!(
             r#"(module
@@ -1511,8 +1459,6 @@ mod convert_page_tests {
         .to_vec()
     }
 
-    /// **A grant is a capability, not a default**: a module importing
-    /// `convert_page` is refused at instantiation without it.
     #[test]
     fn the_grant_is_required_to_import_it() {
         let wasm = importer("convert_page", "i32 i32 i32 i32");

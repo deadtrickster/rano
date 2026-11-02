@@ -1,10 +1,6 @@
-//! **The config pane**: every setting the head and the session hold, grouped by where it
-//! lives, with the one under the cursor saying where its value came from.
-//!
-//! Ported from letibot's `ui/panes/config.rs`. A row is marked `✎` when it changes now and
-//! is kept, and blank when it shows its source and takes a restart — the mark is the whole
-//! of the difference, so a reader scanning the list sees which rows are worth pressing
-//! Enter on before reading any of them.
+//! The config pane: every setting the head and the session hold, grouped by where it lives,
+//! with the one under the cursor saying where its value came from. A row marked `✎` changes now
+//! and is kept; an unmarked one takes a restart, so the marks say what is worth pressing.
 
 use crate::render::Line;
 use crate::style::Role;
@@ -21,8 +17,7 @@ pub struct ConfigRow {
     pub value: String,
     /// It changes now and is kept (`✎`), rather than taking a restart.
     pub editable: bool,
-    /// Where the value came from, shown under the row the cursor is on. Empty draws
-    /// nothing.
+    /// Where the value came from, shown under the row the cursor is on.
     pub source: String,
 }
 
@@ -31,8 +26,8 @@ pub struct ConfigRow {
 pub struct ConfigPane {
     pub rows: Vec<ConfigRow>,
     pub selected: usize,
-    /// A sentence for a session that has nothing to list yet (not attached, or asked and
-    /// not answered), drawn under the rows. `None` when the session's rows are there.
+    /// A sentence for a session with nothing to list yet (not attached, or asked and not
+    /// answered), drawn under the rows.
     pub session_note: Option<String>,
 }
 
@@ -42,11 +37,9 @@ impl ConfigPane {
         self.layout(w).0
     }
 
-    /// **The pane line each setting was drawn on**, for mouse hit-testing and for keeping the
-    /// cursor in view: entry `i` is the index into [`ConfigPane::lines`] (at the same `w`) of
-    /// `rows[i]`'s line. A section header, the blank before it, and the selected row's
-    /// `from …` line are not stops, and the rows after the selected one are pushed down by
-    /// that line when it is drawn.
+    /// The pane line each setting was drawn on, for hit-testing and for keeping the cursor in
+    /// view: entry `i` is the line of `rows[i]`, with the section headers, the blank before them
+    /// and the selected row's `from …` line not counted as stops.
     pub fn stop_rows(&self, w: usize) -> Vec<usize> {
         self.layout(w).1
     }
@@ -54,8 +47,8 @@ impl ConfigPane {
     fn layout(&self, w: usize) -> (Vec<Line>, Vec<usize>) {
         let mut stops = Vec::with_capacity(self.rows.len());
         let mut out = vec![pane::title("config"), Line::default()];
-        // The key column is as wide as the longest key, up to a cap: a key past it is cut
-        // by the row's own trim rather than pushing every value right.
+        // The key column is as wide as the longest key, up to a cap: a key past it is cut by
+        // the row's own trim rather than pushing every value right.
         let keyw = self
             .rows
             .iter()
@@ -122,8 +115,7 @@ mod tests {
         }
     }
 
-    /// Grouped by section, the editable rows marked, and only the row under the cursor
-    /// says where its value came from.
+    /// Grouped by section, the editable rows marked, and only the cursor's row naming its source.
     #[test]
     fn the_rows_are_grouped_and_the_cursors_row_names_its_source() {
         let p = ConfigPane {
@@ -146,9 +138,8 @@ mod tests {
         assert!(!rows.iter().any(|l| l.contains("diff.toml")), "{rows:#?}");
     }
 
-    /// **The row map is where the rows were drawn**: each stop is the line carrying its key,
-    /// the selected one is the `▸` line, and the `from …` line under it pushes the rest down —
-    /// across sections, cursors and widths, including ones that cut the rows.
+    /// The row map is where the rows were drawn: each stop is the line carrying its key, and the
+    /// `from …` line under the selected one pushes the rest down.
     #[test]
     fn the_stop_rows_are_the_lines_the_rows_were_drawn_on() {
         let rows = vec![
@@ -189,8 +180,8 @@ mod tests {
                 }
             }
         }
-        // The first-shape case, spelled out: title, blank, header, two rows, the source line,
-        // blank, the next header.
+        // The first shape, spelled out: title, blank, header, two rows, the source line, blank,
+        // the next header.
         let p = ConfigPane {
             rows: rows[..3].to_vec(),
             selected: 1,
@@ -200,7 +191,7 @@ mod tests {
         assert_eq!(ConfigPane::default().stop_rows(80), Vec::<usize>::new());
     }
 
-    /// The highlighted row is one inverse run, as letibot drew it.
+    /// The highlighted row is one inverse run.
     #[test]
     fn the_highlighted_row_is_inverse() {
         let p = ConfigPane {

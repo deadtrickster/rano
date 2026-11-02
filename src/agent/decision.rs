@@ -1,7 +1,5 @@
-//! **The permission card**: a call waiting on the person, its ladder of options, and what
-//! a call's row says about how it was decided once it has been.
-//!
-//! Ported from letibot's `crates/tui/src/ui/cards/decision.rs`.
+//! The permission card: a call waiting on the person, its ladder of options, and what a call's row
+//! says about how it was decided once it has been.
 
 use crate::render::Line;
 use crate::style::Role;
@@ -20,8 +18,8 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// An option the person (or a policy) selected, by its id: an `allow…` option allowed,
-    /// anything else refused — letibot's reading of `DecisionOutcome::Selected`.
+    /// An option the person (or a policy) selected, by its id: an `allow…` option allowed, anything
+    /// else refused.
     pub fn of_option(option_id: &str) -> Verdict {
         if option_id.starts_with("allow") {
             Verdict::Allowed
@@ -40,12 +38,12 @@ impl Verdict {
     }
 }
 
-/// What a guard model said about a call, when one was asked — or layer A's own answer
-/// arriving through the same door, when `consulted` is false.
+/// What a guard model said about a call, when one was asked — or layer A's own answer through the
+/// same door, when `consulted` is false.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Advice {
-    /// Whether a model was actually asked. An oracle that was NOT consulted did not say
-    /// anything, and the card must not claim it did.
+    /// Whether a model was actually asked: an oracle not consulted said nothing, and the card must
+    /// not claim it did.
     pub consulted: bool,
     /// Who answered: `oracle-local`, a model name.
     pub by: String,
@@ -56,9 +54,8 @@ pub struct Advice {
     pub basis: String,
     /// The operator's own phrases it grounded the verdict in.
     pub cites: Vec<String>,
-    /// Why a consulted guard did not decide, as the daemon's token: `out_of_room`,
-    /// `unreadable`, `could_not_decide`, `between_thresholds`, or one this build does not
-    /// know (shown, not swallowed).
+    /// Why a consulted guard did not decide, as the daemon's token — or one this build does not
+    /// know, which is shown rather than swallowed.
     pub unsure: Option<String>,
 }
 
@@ -92,11 +89,8 @@ impl SettledDecision {
     }
 }
 
-/// The decision a settled call was gated by, in the dim register: the approval is
-/// a fact about the call, not a stray note. Folded it is one line — who decided
-/// and how; open it adds what the oracle was shown and what it said back. Shared
-/// by the one-line (inline) and the folded arms of a tool row, because a gated call
-/// whose result fit on the header is no less gated for it.
+/// The decision a settled call was gated by, in the dim register: a fact about the call, not a
+/// stray note. Folded it is one line; open it adds what the oracle was shown and what it said back.
 pub fn decision_lines(d: &SettledDecision, tools: Fold, w: usize) -> Vec<Line> {
     let mut out = vec![one(format!("  {}", d.headline()), Role::Faint)];
     if tools.is_open() {
@@ -107,27 +101,20 @@ pub fn decision_lines(d: &SettledDecision, tools: Fold, w: usize) -> Vec<Line> {
     out
 }
 
-/// **The two reasons a settled decision carries, labelled as whose they are.**
+/// The two reasons a settled decision carries, labelled as whose they are: `basis` is the
+/// decider's, `advice` the guard model's and only when one was consulted. They used to be one line,
+/// which printed the operator's own words under the oracle's name.
 ///
-/// `basis` is the DECIDER's — for an operator answer, `dead chose `allow_once` at
-/// the head`. `advice` is the guard model's, and only exists when one was
-/// consulted. They used to be one line, rendered as `oracle: {basis}`, which under
-/// `/supervise` printed the operator's own words under the oracle's name.
-///
-/// One function so the card and the settled row cannot label them differently.
 /// Returns wrapped, unpainted lines; each caller indents and paints its own way.
 pub fn decision_detail(d: &SettledDecision, w: usize) -> Vec<String> {
     let mut out = Vec::new();
-    // **§3.1, and this is the last of the untrusted free text on a row.** Three
-    // sentences here are somebody else's: the ask the daemon wrote, the DECIDER's
-    // basis (a person's words, or a policy rule), and the guard model's verdict with
-    // the operator's phrases it cites. All of them are cleaned before they are wrapped.
+    // The last untrusted free text on a row: the ask, the decider's basis and the guard's verdict
+    // with the phrases it cites. All of them are cleaned before they are wrapped.
     if !d.summary.is_empty() {
         out.extend(wrap(&clean(&format!("asked: {}", d.summary)), w));
     }
     if !d.basis.is_empty() {
-        // Named by the decider's own kind, so "decided:" never stands in for a
-        // model when a person chose, or the reverse.
+        // Named by the decider's own kind, so a person's words never print under a model's name.
         let who = if d.by_kind.is_empty() {
             "decided"
         } else {
@@ -137,8 +124,7 @@ pub fn decision_detail(d: &SettledDecision, w: usize) -> Vec<String> {
     }
     match &d.advice {
         Some(a) => {
-            // **The same distinction the card draws**: a verdict from an oracle that was
-            // asked, and layer A's answer from one that was not.
+            // A verdict from an oracle that was asked, and layer A's answer from one that was not.
             out.extend(wrap(
                 &clean(&if a.consulted {
                     format!(
@@ -150,10 +136,8 @@ pub fn decision_detail(d: &SettledDecision, w: usize) -> Vec<String> {
                 }),
                 w,
             ));
-            // **Empty cites is loud.** An authorisation the oracle could not ground
-            // in anything the operator said is a different fact from one it grounded
-            // in four utterances, and rendering nothing for the first makes them
-            // look the same.
+            // Empty cites is loud: an authorisation the oracle could not ground in anything the
+            // operator said is its own fact, and rendering nothing makes the two look alike.
             if a.cites.is_empty() {
                 out.extend(wrap(
                     "oracle cited: nothing — it could not ground this in anything you said",
@@ -165,9 +149,8 @@ pub fn decision_detail(d: &SettledDecision, w: usize) -> Vec<String> {
                 }
             }
         }
-        // Said out loud rather than left blank: "no oracle was asked" and "an
-        // oracle was asked and said nothing" are different, and a blank looks
-        // like the second.
+        // Said out loud rather than left blank: "no oracle was asked" and "an oracle was asked and
+        // said nothing" are different, and a blank looks like the second.
         None => out.extend(wrap("no oracle was consulted for this one", w)),
     }
     out
@@ -183,8 +166,8 @@ pub struct DecisionOption {
     pub kind: OptionKind,
 }
 
-/// The kinds of answer a permission offers. Two of them change the card: an
-/// always-allow is offered with a glob to edit, and a reject-always asks for words.
+/// The kinds of answer a permission offers: an always-allow is offered with a glob to edit, and a
+/// reject-always asks for words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionKind {
     AllowOnce,
@@ -194,7 +177,7 @@ pub enum OptionKind {
     RejectAlways,
 }
 
-/// **What silence does**, in the daemon's own three words (§1.6).
+/// What silence does, in the daemon's own three words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnTimeout {
     #[default]
@@ -204,15 +187,8 @@ pub enum OnTimeout {
 }
 
 impl OnTimeout {
-    /// The order a person reads a card in is the question, the choices, then what happens
-    /// if they do nothing — and until this existed the third of those was unanswerable
-    /// from the screen. The operator: *"two gate cards timed out unanswered at 300 seconds
-    /// with `not_run by gate:timeout` — nothing on the card had said that was coming."*
-    ///
-    /// **The upper case on `RUNS` is the point of the line.** It is the only one of the
-    /// three that does something nobody asked for, and an operator who walked away
-    /// believing the default was `deny` when it was `allow` has been told nothing at all by
-    /// a clock.
+    /// The order a person reads a card in is the question, the choices, then what happens if they do
+    /// nothing — and the upper case is the point: `RUNS` does something nobody asked for.
     pub fn clause(self) -> &'static str {
         match self {
             OnTimeout::Deny => "if nobody answers, nothing runs",
@@ -237,13 +213,10 @@ pub struct SubagentAsk {
     pub task: String,
 }
 
-/// **An open decision: a call waiting on the person.** The view model of letibot's
-/// `OpenDecision` plus the two things the head kept beside it — the selected rung and the
-/// clock.
+/// An open decision: a call waiting on the person.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionCard {
-    /// `permission`, `question`, … — drawn in brackets after the ask, and `question`
-    /// changes the card (its ladder is `choices`, nothing is consulted for it).
+    /// `permission`, `question`, … — drawn in brackets after the ask; `question` changes the card.
     pub kind: String,
     /// The ask as the daemon wrote it: `` `bash` wants exec access to `cargo test` ``.
     pub summary: String,
@@ -253,8 +226,7 @@ pub struct DecisionCard {
     pub write_targets: Vec<WriteTarget>,
     /// Layer A's deterministic reading.
     pub detail: String,
-    /// The tool's declared access: `exec`, `read`, … Empty from a daemon older than the
-    /// field.
+    /// The tool's declared access: `exec`, `read`, … Empty from a daemon that did not say.
     pub access: String,
     /// Why it is asking, in the words of whoever is stuck (on a question, the model's).
     pub because: String,
@@ -265,8 +237,8 @@ pub struct DecisionCard {
     pub choices: Vec<String>,
     /// The highlighted rung (clamped to the ladder).
     pub selected: usize,
-    /// When the gate gives up, on the same clock as `now_ms`. `None` is §11.5's *wait
-    /// forever*: a policy, so nothing is drawn.
+    /// When the gate gives up, on the same clock as `now_ms`. `None`: it waits forever, and nothing
+    /// is drawn.
     pub deadline_ms: Option<u64>,
     pub now_ms: u64,
     pub on_timeout: OnTimeout,
@@ -277,9 +249,7 @@ impl DecisionCard {
         self.kind == "question"
     }
 
-    /// The rows the ladder walks: a question's are its `choices`, a permission's its
-    /// `options` (letibot's `decision_rows`). Drawing `options` for a question is what
-    /// left a card with an empty ladder under a question.
+    /// The rows the ladder walks: a question's `choices`, a permission's `options`.
     pub fn rows(&self) -> usize {
         if self.is_question() {
             self.choices.len()
@@ -288,74 +258,37 @@ impl DecisionCard {
         }
     }
 
-    /// **The card, split where R20 says the split is.**
-    ///
-    /// R20, ruled on a permission card carrying a giant replace or a commit message: *"I'm
-    /// shown a permission prompt and I just cant see the selector."* The screen-fit loop
-    /// shrank the card from the end, and the card was built headline, target, intents,
-    /// because, advice, options, hint — so the loop ate the hint, then the options
-    /// bottom-up, and kept the wall. **A card that has dropped its choices is a question
-    /// with no way to answer it.**
-    ///
-    /// So the card has two halves and only one of them gives way:
-    ///
-    /// * **`content`** — the question, what it is about, and the evidence. A viewport over
-    ///   this ([`card_window`]) shrinks to the room that is left, and scrolls, so the whole
-    ///   diff or message can still be read;
-    /// * **`choices`** — the ladder and what pressing it means: the deadline, the hint, the
-    ///   `deny_and_tell` line. **Never trimmed and never scrolled**, because this half is
-    ///   the answer.
+    /// The card, split where it must be: `content` — the question, what it is about, the evidence —
+    /// shrinks to the room left and scrolls, while `choices` — the ladder, the deadline, the hints —
+    /// is never trimmed, because a card that dropped its choices is a question with no way to
+    /// answer it.
     pub fn split(&self, w: usize) -> (Vec<Line>, Vec<Line>) {
         let (content, choices, _) = self.layout(w);
         (content, choices)
     }
 
-    /// **Where each rung of the ladder was drawn**, for mouse hit-testing: rung `i` (an index
-    /// into `choices` for a question, `options` otherwise — the order Up/Down walks) occupies
-    /// the rows `choice_rows(w)[i]` of the **`choices` half** that [`DecisionCard::split`]
-    /// returns at the same `w`, wrapped lines included. Row 0 is the first row of that half
-    /// (the ladder opens it), so a host adds the row it drew the half at.
-    ///
-    /// The same shape of answer as [`super::quit::QuitCard::choice_rows`], as ranges because
-    /// a rung wraps: a host that re-wraps the ladder to find them repeats a layout it does not
-    /// own, and drifts the day the marker or the id's spelling changes.
+    /// Where each rung of the ladder was drawn, in the `choices` half [`DecisionCard::split`] returns
+    /// at the same `w`: ranges, because a rung wraps — a host that re-wrapped to find them would
+    /// repeat a layout it does not own, and drift.
     pub fn choice_rows(&self, w: usize) -> Vec<std::ops::Range<usize>> {
         self.layout(w).2
     }
 
     fn layout(&self, w: usize) -> (Vec<Line>, Vec<Line>, Vec<std::ops::Range<usize>>) {
         let dim = |s: &str| wrap(&clean(s), w).into_iter().map(|l| one(l, Role::Faint));
-        // **The question, then the thing itself, then the evidence.**
-        //
-        // One line used to carry all three — the sentence with the target interpolated
-        // into it, layer A's verdict and intent list, and the kind — and the operator's
-        // reading of it was *"no possible to see wtf was the command i supposed to
-        // approve"*. A permission an operator cannot evaluate is one they approve out of
-        // fatigue, which is the whole mechanism this gate exists to interrupt.
-        //
-        // So: the ask in the attention register, the target alone and indented under it,
-        // the deterministic reading faint below that.
+        // The question, then the thing itself, then the evidence. One line used to carry all three,
+        // and a permission an operator cannot evaluate is one they approve out of fatigue.
         let headline =
             ask_without_target(&self.summary, &self.target).unwrap_or_else(|| self.summary.clone());
-        // letibot's colours, as roles: YELLOW → Attention, BOLD → Strong, DIM → Faint,
-        // REVERSE → the reverse attribute.
-        // Wrapped rather than left to the frame's trim: the question is the one line on the
-        // card that may not lose its end.
-        // **One row, cut rather than wrapped** — letibot's card drew the question as one row
-        // and its frame cut it to the width, so a long ask never pushed the target down.
-        // **Yellow, not the bold attention register** — the card's own colour in letibot,
-        // where the question and its ladder are the same plain yellow and the highlighted
-        // row is the one thing that stands out.
+        // The question is one row, cut rather than wrapped, in yellow: the ladder's own plain
+        // colour, so the highlighted rung is the one thing that stands out.
         let mut out: Vec<Line> = vec![one(
             super::text::trim_to(&clean_one(&format!("? {headline} [{}]", self.kind)), w),
             Role::Pending,
         )];
-        // **Whose call this is, when it is not this session's own.** A subagent's gate posts
-        // its card to the root — *"who asks subagents permissions? i think they should
-        // surface to the parent head all the way to the root obviously"* — and without this
-        // clause the card is indistinguishable from one this session's own model raised. A
-        // card answered for the wrong thing is the defect. **Directly under the question**:
-        // it changes what is being decided.
+        // Whose call this is, directly under the question, because it changes what is being
+        // decided: a subagent's gate posts its card to the root, and one answered for the wrong
+        // thing is the defect.
         if let Some(s) = &self.subagent {
             let said = if s.task.is_empty() {
                 format!("    a subagent's call — {}", s.handle)
@@ -365,22 +298,15 @@ impl DecisionCard {
             out.extend(dim(&said));
         }
         if !self.target.is_empty() {
-            // Strong rather than attention: the question is in attention, and the thing
-            // being asked about is not a second question.
+            // Strong rather than attention: the question is in attention, and this is not a second
+            // question.
             for l in wrap(&clean(&format!("    {}", self.target)), w) {
                 out.push(one(l, Role::Strong));
             }
         }
-        // **AND THE FILES THIS ACTION WOULD WRITE** — R35. The operator: *"it cant catch
-        // those pesky python edits"*. It could; nothing showed them. At the place and in the
-        // style the single target has, so an `edit` card and a script card read alike.
-        //
-        // **The count goes ABOVE the names**, because the names are content and content
-        // elides to the card's viewport while the number must not. One path gets no header.
-        // **An unresolved path is drawn in the attention register**, never as a path: a
-        // write whose target could not be read is the case a person most needs to see.
-        // **Nothing is drawn when the list is empty**: empty means *no write the scanner
-        // could place*, and *writes nothing* would claim a negative it cannot support.
+        // The files this action would write, at the place and in the style the single target has.
+        // The count goes above the names (the names elide, the number must not), an unresolved path
+        // is drawn in the attention register, and an empty list draws nothing.
         if !self.write_targets.is_empty() {
             let unresolved = self.write_targets.iter().filter(|t| t.unresolved).count();
             if self.write_targets.len() > 1 {
@@ -397,8 +323,8 @@ impl DecisionCard {
                 };
                 out.push(one(format!("    {}", clean_one(&t.path)), r));
             }
-            // The count of unresolved ones is a SENTENCE: one says *a write whose target
-            // could not be read* and two say *2 writes whose targets could not be read*.
+            // The count of unresolved ones is a sentence: "a write whose target could not be read",
+            // or "2 writes whose targets could not be read".
             if unresolved > 0 {
                 out.push(one(
                     format!(
@@ -416,33 +342,25 @@ impl DecisionCard {
         if !self.detail.is_empty() {
             out.extend(dim(&format!("  {}", self.detail)));
         }
-        // **§11.7: the one sentence that joins the two statements above.** The headline says
-        // what the tool **declares** and the line above is layer A's reading of the
-        // **action**, and nothing joined them, so *"the classifier decided this needed no
-        // asking"* read as being argued with by the card going up anyway — which cost three
-        // 300-second refusals in one night. **Said only where the declaration is what
-        // asks**: on a `read` call it would be false on the very card carrying it, and an
-        // empty `access` is a daemon that did not say.
+        // The sentence that joins the headline's declared access to the line above, layer A's
+        // reading of the action: without it the card read as arguing with itself. Said only where
+        // the declaration is what asks — on a `read` call it would be false.
         const ACCESS_ASKS: &str = "the access is what asks: a tool declared to `exec` is \
                                    asked about on its declaration, and the line above is a \
                                    reading of this action";
         if self.access == "exec" && !self.is_question() {
             out.extend(dim(&format!("  {ACCESS_ASKS}")));
         }
-        // **Why it is asking, in the words of whoever is stuck**, labelled with its speaker
-        // like every other borrowed sentence on this card: a reader who cannot tell whose
-        // sentence it is cannot weigh it against their own knowledge.
+        // Why it is asking, labelled with its speaker: a reader who cannot tell whose sentence it
+        // is cannot weigh it against what they know.
         if !self.because.is_empty() {
             out.extend(dim(&format!("  because: {}", self.because)));
         }
-        // **The model's verdict, above the ladder.** At `/mode supervised` the question is
-        // *do you agree with the model*, and a person cannot agree with something they were
-        // not shown. Nothing here preselects an option: the verdict informs the answer and
-        // must never supply it.
+        // The model's verdict, above the ladder: at `/mode supervised` a person cannot agree with
+        // what they were not shown, and nothing here preselects an option.
         if let Some(a) = &self.advice {
-            // **R12's four non-answers, and the fifth fact that is an answer.** Without the
-            // `unsure` token all five reached the glass as one line, for facts whose remedies
-            // differ. The card AUTHORS the classification; the daemon's prose follows it.
+            // The four non-answers and the fifth fact that is one: without `unsure` all five
+            // reached the screen as one line, for facts whose remedies differ.
             let said = if a.consulted {
                 match a.unsure.as_deref() {
                     Some("out_of_room") => format!(
@@ -460,21 +378,18 @@ impl DecisionCard {
                         "  the guard's two scores fell between the thresholds — {}",
                         a.basis
                     ),
-                    // **A token this card does not know is SHOWN, not swallowed.**
+                    // A token this card does not know is shown, not swallowed.
                     Some(other) => format!("  the guard did not decide ({other}) — {}", a.basis),
                     // The fifth fact: a consulted oracle that answered.
                     None => format!("  model says {}: {}", a.would, a.basis),
                 }
             } else {
-                // **An oracle that was NOT consulted did not say anything.**
+                // An oracle that was not consulted did not say anything.
                 format!("  no model verdict — {}", a.basis)
             };
             out.extend(dim(&said));
-            // **Said out loud when it is a fact, omitted when it is not one.** An oracle that
-            // AUTHORISED something while citing none of your words is the case most worth a
-            // second look. Printed unconditionally it contradicted the line above it: *"it
-            // also told that i didnt mention anything while it was clear that i instructed
-            // the model to use worktrees"*.
+            // Said when it is a fact, omitted when it is not: an oracle that authorised something
+            // while citing none of your words is the case most worth a second look.
             let grounds = if !a.cites.is_empty() {
                 Some(format!("cites {}", a.cites.join(" · ")))
             } else if a.would == "admit" {
@@ -488,21 +403,16 @@ impl DecisionCard {
             };
             out.extend(dim(&tail));
         } else if !self.is_question() {
-            // **And when nobody was asked, the card says that too.** *No oracle was
-            // consulted* and *the oracle was asked and said nothing* must not be the same
-            // screen. **Only where a gate is**: nothing is consulted for a question by
-            // construction.
+            // And when nobody was asked, the card says that too: "no oracle consulted" and "the
+            // oracle said nothing" must not be the same screen. Only where a gate is.
             out.extend(dim(
                 "  no oracle was consulted for this one — the judgement is yours alone",
             ));
         }
-        // **R20: here the card stops being content and becomes the answer.**
+        // Here the card stops being content and becomes the answer.
         let mut choices: Vec<Line> = Vec::new();
-        // **One row per answer, with the highlighted one marked.** They used to be joined
-        // with `·` onto one wrapped line, which is readable but is not a control. A ladder
-        // the eye can walk is also a ladder Up/Down can walk, and the two have to agree —
-        // the marker IS the thing Enter takes. A question's rows have no ids: they are the
-        // model's prose, offered back to it as an index.
+        // One row per answer, the picked one marked: a ladder the eye can walk is also one Up/Down
+        // can walk, and the marker is the thing Enter takes. A question's rows carry no ids.
         let rows: Vec<String> = if self.is_question() {
             self.choices.iter().map(|c| clean_one(c)).collect()
         } else {
@@ -516,13 +426,12 @@ impl DecisionCard {
         for (i, body) in rows.iter().enumerate() {
             let picked = i == sel;
             let first = choices.len();
-            // The id stays on the line. Typing it still works, a script still uses it, and
-            // a reader learning the ladder sees both spellings of the same choice.
+            // The id stays on the line: typing it still works, and a reader learning the ladder sees
+            // both spellings of one choice.
             for l in wrap(&format!("  {} {body}", if picked { "▸" } else { " " }), w) {
                 choices.push(if picked {
-                    // Reverse video rather than another colour: the prompt is already in
-                    // attention, and a highlight that is a second hue reads as a second kind
-                    // of thing rather than as "this one".
+                    // Reverse video rather than another colour: the prompt is already in attention,
+                    // and a second hue reads as a second kind of thing rather than "this one".
                     super::text::styled(l, crate::render::Style::new().reverse())
                 } else {
                     one(l, Role::Pending)
@@ -530,17 +439,14 @@ impl DecisionCard {
             }
             spans.push(first..choices.len());
         }
-        // **§1.6: how long there is, and what silence will do.** Both facts were on the
-        // wire and neither was drawn; the operator was bitten by exactly that. Below the
-        // options, because that is the order a person reads. Drawn only where there is a
-        // deadline.
+        // How long there is, and what silence will do — below the options, because that is the order
+        // a person reads, and only where there is a deadline.
         if let Some(deadline) = self.deadline_ms {
             let mut said: Vec<String> = Vec::new();
             said.push(match deadline.checked_sub(self.now_ms) {
                 Some(left) => super::text::countdown(left),
-                // **A card still on the screen after its own deadline**: one the daemon has
-                // settled without telling this head. It must **never count into negative
-                // seconds**, which reads as a rendering fault.
+                // Past its deadline: the daemon settled it without telling this head, and it must
+                // never count into negative seconds, which reads as a rendering fault.
                 None => format!(
                     "past its deadline by {}s; the daemon has not said what became of it",
                     (self.now_ms - deadline) / 1000
@@ -551,10 +457,8 @@ impl DecisionCard {
                 choices.push(one(l, Role::Faint));
             }
         }
-        // The glob line is only shown when an *always allow* is actually on offer. A hint for
-        // an option this request does not have is an affordance that does nothing, which
-        // teaches the operator to stop reading the hints. **A question's hints are its own**:
-        // *"or type the id"* names something a question does not have.
+        // The glob line only when an always-allow is actually on offer: a hint for an option this
+        // request does not have teaches the operator to stop reading. A question's hints are its own.
         let hint = if self.is_question() {
             "  ↑↓ to choose · Enter to answer · or type your own answer"
         } else if self
@@ -562,21 +466,18 @@ impl DecisionCard {
             .iter()
             .any(|o| o.kind == OptionKind::AllowAlways)
         {
-            // The rule the *Always allow* answer will write is in the option's own label, so
-            // the hint points at editing it: a pattern they cannot see is a pattern they
-            // cannot adjust.
-            // The run of spaces is letibot's own, byte for byte: its card has always
-            // drawn this hint with them, and its frames are compared by the bytes.
+            // The rule the always-allow writes is in the option's own label, so the hint points at
+            // editing it: a pattern they cannot see is one they cannot adjust. The run of spaces is
+            // its own, byte for byte.
             "  ↑↓ to choose · Enter to answer · or type the id ·              `allow_always <glob>` to widen or narrow the rule shown above"
         } else {
             "  ↑↓ to choose · Enter to answer · or type the id"
         };
-        // The hints are trimmed to the card rather than wrapped (the frame trimmed them in
-        // letibot): they are the least of the card, and a wrapped hint is a row the
-        // content's window pays for.
+        // The hints are trimmed to the card rather than wrapped: they are the least of it, and a
+        // wrapped hint is a row the content's window pays for.
         choices.push(one(super::text::trim_to(hint, w), Role::Pending));
-        // **The option that asks for words says where to type them.** Its label promised
-        // *"tell the model why"* and the card never said how.
+        // The option that asks for words says where to type them: its label promised "tell the model
+        // why" and the card never said how.
         if self
             .options
             .iter()
@@ -593,8 +494,8 @@ impl DecisionCard {
         (out, choices, spans)
     }
 
-    /// The whole card as one list (the transcript's shape and the tests' entry point;
-    /// a screen that has to fit the card uses [`DecisionCard::split`] and [`card_window`]).
+    /// The whole card as one list (the transcript's shape); a screen that has to fit it uses
+    /// [`DecisionCard::split`] and [`card_window`].
     pub fn lines(&self, w: usize) -> Vec<Line> {
         let (mut content, choices) = self.split(w);
         content.extend(choices);
@@ -609,20 +510,15 @@ fn clean_one(s: &str) -> String {
 }
 
 /// The ask with its target taken off the end: `` `bash` wants exec access `` from
-/// `` `bash` wants exec access to `cargo test` ``.
-///
-/// The daemon sends both the sentence and the target, and the sentence is the one
-/// every other reader of the log already has. Rather than change what that sentence is,
-/// the card that lays the two out separately takes the target back off. `None` when the
-/// sentence does not end in the target: then the whole sentence is shown and nothing is
-/// lost.
+/// `` `bash` wants exec access to `cargo test` ``. `None` when the sentence does not end in the
+/// target — then the whole sentence is shown and nothing is lost.
 pub fn ask_without_target(summary: &str, target: &str) -> Option<String> {
     if target.is_empty() {
         return None;
     }
     let head = summary.strip_suffix(&format!("`{target}`"))?;
-    // " to " is the joint in every sentence the daemon writes; trimming it is what makes
-    // the remainder read as a heading rather than as a clipped sentence.
+    // " to " is the joint in every sentence the daemon writes; trimming it makes the rest read as a
+    // heading rather than as a clipped sentence.
     let head = head.trim_end();
     Some(head.strip_suffix(" to").unwrap_or(head).to_string())
 }
@@ -640,19 +536,10 @@ pub struct CardWindow {
     pub len: usize,
 }
 
-/// **The card's content as a window** (R20).
-///
-/// `room` is how many rows the viewport may occupy, seam included. The seam is the whole
-/// of the disclosure, so it is written as one: **how many lines are out of view** and which
-/// key moves toward them — never "there is more", because a reader has to know whether one
-/// line or four hundred are missing before deciding whether to scroll at all.
-///
-/// **The window starts at the head**, where a card is read from, and `pgdn` walks down into
-/// the wall. The seam changes ends with the scroll — above the window once there is nothing
-/// left below it — so the sentence is always the boundary the reader is looking at.
-///
-/// The scroll is clamped here rather than in a key handler: the drawn length is a function
-/// of the width, and the key handler knows neither.
+/// The card's content as a window: `room` rows, seam included. The seam says how many lines are out
+/// of view and which key moves toward them — never "there is more", since a reader must know
+/// whether one line or four hundred are missing. It starts at the head and its seam changes ends
+/// with the scroll, and the scroll is clamped here because the drawn length is the width's.
 pub fn card_window(content: &[Line], room: usize, scroll: usize) -> CardWindow {
     let len = content.len();
     if content.is_empty() || room == 0 {
@@ -671,9 +558,8 @@ pub fn card_window(content: &[Line], room: usize, scroll: usize) -> CardWindow {
             len,
         };
     }
-    // One row of the viewport is the seam, and it is spent even at `room == 1` — a
-    // viewport whose whole height is the sentence saying how much is missing is the
-    // honest shape of a screen with nowhere to put the content.
+    // One row of the viewport is the seam, and it is spent even at `room == 1`: a viewport whose
+    // whole height says how much is missing is the honest shape of a screen with nowhere for it.
     let shown = room - 1;
     let at = scroll.min(len - shown);
     let above = at;
@@ -704,9 +590,8 @@ pub fn card_window(content: &[Line], room: usize, scroll: usize) -> CardWindow {
     }
 }
 
-/// **A permission card fitted to `room` rows** (R20): the choices whole, the content
-/// windowed into what is left. The host owns `scroll` and stores [`CardWindow::scroll`]
-/// back.
+/// A permission card fitted to `room` rows: the choices whole, the content windowed into what is
+/// left. The host owns `scroll` and stores [`CardWindow::scroll`] back.
 pub fn fitted(
     card: &DecisionCard,
     w: usize,
@@ -793,8 +678,6 @@ mod tests {
         assert_eq!(Verdict::Cancelled.word(), "cancelled");
         assert_eq!(Verdict::NotAnswered.word(), "not answered");
     }
-
-    // ---- the open card: letibot `app/tests/decisions.rs`, at the card ----
 
     fn decision_with(kinds: &[OptionKind]) -> DecisionCard {
         DecisionCard {
@@ -1005,11 +888,8 @@ mod tests {
         assert!(plain(&d.split(100).1)[2].starts_with("  ▸"));
     }
 
-    /// **The ladder's row map is the rows the card drew** — letibot
-    /// `the_decision_ladder_rows_are_the_rows_the_card_drew`, at the card. Each rung's range
-    /// starts on the row carrying its marker column, the ranges tile the ladder from row 0
-    /// with no gap, and the rows of a range hold that rung's words and no other's — at widths
-    /// where the long rungs wrap onto two and three rows and where nothing wraps.
+    /// The ladder's row map is the rows the card drew: each rung's range starts on its marker
+    /// column, the ranges tile the ladder from row 0 with no gap, and each holds that rung's words.
     #[test]
     fn the_ladder_rows_are_the_rows_the_card_drew() {
         let mut perm = decision_with(&[
@@ -1046,8 +926,8 @@ mod tests {
                         }
                         let mark = if i == sel { "  ▸ " } else { "    " };
                         assert!(text[r.start].starts_with(mark), "w={w} {i}: {text:#?}");
-                        // Every row of the range belongs to rung i: the reverse run is on
-                        // exactly the picked rung's rows.
+                        // Every row of the range belongs to rung i: the reverse run is on exactly
+                        // the picked rung's rows.
                         for row in r.clone() {
                             let reversed = choices[row]
                                 .spans

@@ -1,103 +1,49 @@
-//! What a piece of text *means*, and the one place that meaning gets a look.
+//! What a piece of text means, and the one place that meaning gets a look.
 //!
-//! # Provenance
+//! A caller asks for [`Role::Failure`], not for red; a [`Palette`] maps roles to [`Look`]s, and each
+//! medium spells a look its own way ([`Palette::open`] as SGR for painted strings, [`Palette::style`]
+//! for renderers that build lines, the emitter for a cell buffer). The no-colour palette is not a
+//! theme: it is the `--replay`, pipe-to-a-file and CI case, which must be byte-identical everywhere.
 //!
-//! Two copies of this file existed: letibot's `crates/ui/src/style.rs`, which maps a
-//! role to an SGR string, and an earlier port of it here that mapped a role to a
-//! ratatui `Style`. They had already drifted — letibot had grown [`Palette::Light`]
-//! and this copy had not. Now there is one table, [`Palette::look`], in a
-//! representation that belongs to neither medium ([`Look`]: two colours and a set
-//! of attributes), and each medium reads it:
+//! Every look is a basic attribute or one of the terminal's sixteen slots. The xterm cube is absolute
+//! RGB, so a role painted `38;5;167` is the same salmon under every theme — beside the theme rather
+//! than within it. Roles that had to be told apart differ by an attribute instead of a second shade,
+//! which is stronger: two shades are indistinguishable under half the themes on this box.
 //!
-//! - [`Palette::open`] / [`Palette::paint`] — letibot's SGR strings, spelled from
-//!   the look, for text painted as a string.
-//! - `crate::render`'s emitter — a cell buffer's rows, with minimal SGR transitions
-//!   between cells.
-//! - [`Palette::style`] — a role as a `crate::render` style, for the renderers that
-//!   build lines (the diff views, markdown); the look is the emitter's business.
-//!
-//! # Name the roles, not the colours
-//!
-//! A caller asks for [`Role::Failure`], not for red. A [`Palette`] maps roles to
-//! looks, and the no-colour one is not a theme: it is the `--replay`, pipe-to-a-file
-//! and CI case that must produce byte-identical output on every machine, and carry the
-//! meaning in the text alone (a diff's `+`/`-` glyph, a heading's hashes).
-//!
-//! # The ANSI 16, not the 256-colour cube
-//!
-//! Every look below is a basic attribute or one of the sixteen named colours. That is
-//! not a downgrade for its own sake, it is the only way a role can mean anything to the
-//! person looking at it.
-//!
-//! **Colours 16–255 of the xterm cube are absolute RGB.** A terminal theme defines
-//! slots 0–15 and nothing else, so a role painted `38;5;167` is the same salmon on
-//! Solarized Light, Gruvbox and Nord — it paints *beside* the theme rather than within
-//! it. letibot's table used to be entirely cube indices and the operator's report was
-//! the predictable one: "colors not matching theme". Now `Role::Failure` is `31`, which
-//! is whatever the reader calls red.
-//!
-//! The roles that looked like they needed more precision — the two heading levels,
-//! `Attention` against `Pending`, `Reasoning` against `Faint` — are separated by an
-//! **attribute** instead of by a second shade, which is stronger: two shades of one hue
-//! are indistinguishable under half the themes on this box, and bold-vs-plain is not.
-//! Truecolour is not an option either: it is not universally forwarded through `tmux`,
-//! `screen` or `ssh` with an old `TERM`.
-//!
-//! **The exceptions are the diff tints** ([`Role::Added`] / [`Role::Removed`]), which
-//! are the cube's darkest green and red as a **background only** — the theme's own
-//! slots were bands rather than tints, and a tinted foreground turned every plain run
-//! green-on-green. The text keeps its own foreground; the `+`/`-` sign carries the green
-//! and red through [`Role::foreground`]. Under [`Palette::Light`] the two swap to the
-//! cube's palest, which is the only difference between the two colour palettes.
-//!
-//! # There is no light-mode and no dark-mode for anything else
-//!
-//! [`Role::UserBlock`] is reverse video, the reader's own pair swapped, which is
-//! legible under any theme by construction. letibot's earlier table named a dark grey
-//! behind a near-white for it, which on a light terminal is a black bar across the
-//! transcript.
+//! The exceptions are the diff tints ([`Role::Added`], [`Role::Removed`]): the cube's darkest green
+//! and red as a background only, so the text keeps its foreground and the sign carries the colour.
 
-/// What a piece of text means. Callers name these; only [`Palette`] knows what
-/// they look like.
+/// What a piece of text means. Callers name these; only [`Palette`] knows what they look like.
 ///
-/// **A role has a wire name** (`kebab-case`: `plain`, `faint`, `user-accent`, …) because a
-/// pane plugin answers with data and its rows carry the roles they mean — a row deserialised
-/// from a hook's JSON is the same [`crate::agent::tree_list::Row`] a built-in pane builds, and
-/// the alternative was a second vocabulary of role names on the host's side of the boundary.
+/// A role has a wire name (`kebab-case`: `plain`, `faint`, `user-accent`, …) because a pane plugin's
+/// rows carry the roles they mean, and a second vocabulary of names on the host's side of the
+/// boundary was the alternative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
-    /// Ordinary body text. No style at all.
     Plain,
     /// Structure a reader skips: frame lines, counts, ids, a diff's gutter.
     Faint,
     /// Anything that anchors a scan.
     Strong,
-    /// A top-level heading in rendered markdown.
-    ///
-    /// letibot painted every heading bold-and-nothing-else, which is why a long answer
-    /// read as one slab: `## Findings` and `### Why` are constant in a model's output and
-    /// bold alone does not separate them from the emphasis inside a paragraph.
+    /// A top-level heading in rendered markdown: bold alone would leave `## Findings` and a bold
+    /// phrase inside a paragraph looking the same.
     Heading,
-    /// A second-level heading: a different hue rather than a dimmer one, since two
-    /// shades of one hue are indistinguishable under half the terminal themes.
+    /// A second-level heading: a different hue rather than a dimmer one, since two shades of one
+    /// hue are indistinguishable under half the terminal themes.
     Subheading,
     /// The bar down the left of a user's own message.
     UserAccent,
-    /// The user's own words, on a raised block: reverse video. Nothing at all under
-    /// [`Palette::None`], where the accent glyph is what survives.
+    /// The user's own words, on a band of the theme's background. Under [`Palette::None`] the
+    /// accent glyph is what survives.
     UserBlock,
-    /// Something completed successfully.
     Success,
-    /// Something in flight.
     Pending,
-    /// Something that failed, was refused, or was interrupted.
     Failure,
     /// Something that needs a person: a decision request, a warning.
     Attention,
     /// A model's own reasoning, which must never read like its answer.
     Reasoning,
-    /// A code span or a code block's body.
     Code,
     /// A diff line that was added. Background only.
     Added,
@@ -105,43 +51,31 @@ pub enum Role {
     Removed,
     /// The changed run *inside* an added or removed line.
     Emphasis,
-    /// Syntax: a language keyword.
     Keyword,
-    /// Syntax: a string literal.
     StringLit,
-    /// Syntax: a numeric literal.
     NumberLit,
-    /// Syntax: a comment.
     Comment,
-    /// Syntax: a type or a constructor.
     TypeName,
-    /// Syntax: a function name at its definition or call site.
     FuncName,
-    /// Syntax: an operator or punctuation. Named so a delimiter is told from the
-    /// text it delimits (markdown's `**`, a quote's `>`), but drawn in the reader's
-    /// own foreground: the editor's grey for it was a hair off the default text
-    /// colour, and no theme slot is that close.
+    /// Syntax: an operator or punctuation, drawn in the reader's own foreground. Named so a delimiter
+    /// is told from the text it delimits.
     Punctuation,
-    /// A link or a reference in prose (a markdown URL), where it is text rather
-    /// than an OSC 8 hyperlink.
+    /// A link or a reference in prose (a markdown URL), where it is text rather than an OSC 8
+    /// hyperlink.
     Link,
-    /// A key as the reader would press it: a card's `C-x`, which-key's entries,
-    /// the keys column of `M-x`.
+    /// A key as the reader would press it: a card's `C-x`, which-key's entries, `M-x`'s keys column.
     Key,
-    /// The editor's chrome, nano's way: the title, prompt and function bars and
-    /// an overlay's header row, in reverse video (what nano itself emits).
+    /// The editor's chrome: the title, prompt and function bars and an overlay's header row, in
+    /// reverse video, which is what nano emits.
     Bar,
-    /// The current row of a list or a popup, in reverse video like nano's.
     Selected,
     /// The search match the cursor is on: nano's black on yellow.
     Match,
-    /// The marked region. Two explicit theme colours rather than reverse, so the
-    /// selection is visible on terminals whose reverse comes out white on white.
+    /// The marked region: two explicit theme colours rather than reverse, so the selection is
+    /// visible on terminals whose reverse comes out white on white.
     Selection,
-    /// A diagnostic of error severity: the gutter number, and (underlined) the
-    /// code it is about.
+    /// A diagnostic of error severity: the gutter number, and (underlined) the code it is about.
     DiagError,
-    /// A diagnostic of warning severity.
     DiagWarning,
     /// A diagnostic of any lesser severity (information, hint).
     DiagNote,
@@ -184,13 +118,8 @@ impl Role {
         Role::DiagNote,
     ];
 
-    /// The role whose **foreground** this role stands for.
-    ///
-    /// The operator, on the first cube tint: *"please keep original foregrounds"* — a
-    /// cell opened with `32;48;5;22` and every plain run in it inherited the green, so
-    /// the diff read as green text on green. The diff roles now spend their look on a
-    /// background only and the text keeps its own foreground; what still wants green
-    /// and red is the sign glyph and the line number, and they paint through this.
+    /// The role whose foreground this role stands for: a diff tint spends its look on a background,
+    /// and the sign glyph and line number paint green and red through this.
     pub fn foreground(self) -> Role {
         match self {
             Role::Added => Role::Success,
@@ -203,13 +132,11 @@ impl Role {
 /// A terminal colour, as this crate is willing to name one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hue {
-    /// One of the theme's sixteen slots, `0`–`15`: 0–7 the normal eight, 8–15 the
-    /// bright eight. What the reader's theme says it is.
+    /// One of the theme's sixteen slots, `0`–`15`: 0–7 the normal eight, 8–15 the bright eight.
     Slot(u8),
-    /// An absolute xterm-cube index. Only the diff tints use one; see the module
-    /// header, and the test that holds them to it.
+    /// An absolute xterm-cube index. Only the diff tints use one.
     Cube(u8),
-    /// An exact colour, written as truecolor. The default table never uses one; a
+    /// An exact colour, written as truecolor: the default table never uses one, and a
     /// [`crate::theme::Theme`] may, to look the same whatever the terminal's palette.
     Rgb(u8, u8, u8),
 }
@@ -247,8 +174,8 @@ impl Attrs {
     pub const UNDERLINE: Attrs = Attrs(8);
     pub const REVERSE: Attrs = Attrs(16);
 
-    /// In SGR order, with each one's on and off parameter. Bold and dim share an off
-    /// (`22`), which the emitter has to know.
+    /// In SGR order, with each one's on and off parameter. Bold and dim share an off (`22`), which
+    /// the emitter has to know.
     pub(crate) const TABLE: [(Attrs, u8, u8); 5] = [
         (Attrs::BOLD, 1, 22),
         (Attrs::DIM, 2, 22),
@@ -278,8 +205,8 @@ impl std::ops::BitOr for Attrs {
     }
 }
 
-/// What a role looks like under a palette: medium-neutral, so a string painter, a
-/// cell emitter and an export all read the same table.
+/// What a role looks like under a palette: medium-neutral, so a string painter, a cell emitter and
+/// an export all read one table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Look {
     pub fg: Option<Hue>,
@@ -316,10 +243,8 @@ impl Look {
         }
     }
 
-    /// `over` laid on top of `self`: its colours where it has them, attributes added.
-    /// This is how a span inside a block keeps the block — a syntax colour over a diff
-    /// row's tint keeps the tint — which is what letibot's `Painter` existed to repair
-    /// when the medium was strings closed with a reset.
+    /// `over` laid on top of `self`: its colours where it has them, attributes added. This is how a
+    /// syntax colour over a diff row's tint keeps the tint.
     pub fn patch(self, over: Look) -> Look {
         Look {
             fg: over.fg.or(self.fg),
@@ -332,8 +257,8 @@ impl Look {
         *self == Look::PLAIN
     }
 
-    /// The SGR parameters (no `ESC [`, no `m`) that turn this on from a reset:
-    /// attributes first, then foreground, then background — letibot's spelling.
+    /// The SGR parameters (no `ESC [`, no `m`) that turn this on from a reset: attributes first,
+    /// then foreground, then background.
     pub fn sgr_params(&self) -> String {
         let mut s = String::new();
         for (a, on, _) in Attrs::TABLE {
@@ -362,10 +287,8 @@ impl Look {
         s
     }
 
-    /// [`Look::sgr`] written onto the end of `out`, allocating nothing of its own — the
-    /// form a string emitter uses per span. A frame converts every row it shows, and a
-    /// `String` per styled span per row per frame is what letibot's `frame_allocations`
-    /// test exists to catch (its painter cached these sequences for the same reason).
+    /// [`Look::sgr`] written onto the end of `out`, allocating nothing of its own — the form a string
+    /// emitter uses per span, and a frame converts every row it shows.
     pub fn write_sgr(&self, out: &mut String) {
         if self.is_plain() {
             return;
@@ -410,20 +333,17 @@ fn push_u8(out: &mut String, n: u8) {
 pub enum Palette {
     /// A colour terminal.
     Colour,
-    /// **The same, on a terminal that said its background is light** (OSC 11). Every
-    /// role but two is a theme slot or an attribute and needs no change; the two that
-    /// name an absolute colour — the diff's backgrounds — swap the cube's darkest green
-    /// and red, which are dark bands under dark text on a light theme, for its palest.
+    /// The same, on a terminal that said its background is light (OSC 11): every role but three is a
+    /// theme slot or an attribute and needs no change, and the diff's backgrounds swap to the cube's
+    /// palest.
     Light,
-    /// No look at all: the output is plain text, which is what a replay diff and a CI
-    /// log need.
+    /// No look at all: the output is plain text, which is what a replay diff and a CI log need.
     None,
 }
 
 impl Palette {
-    /// **What `r` looks like**: the active [`crate::theme::Theme`]'s look when it names
-    /// the role, the default table ([`Palette::base_look`]) otherwise. [`Look::PLAIN`] for
-    /// [`Palette::None`] whatever is installed, so a replay diff and a CI log stay plain.
+    /// What `r` looks like: the active [`crate::theme::Theme`]'s look when it names the role, the
+    /// default table otherwise — and [`Look::PLAIN`] for [`Palette::None`], whatever is installed.
     pub fn look(self, r: Role) -> Look {
         if self == Palette::None {
             return Look::PLAIN;
@@ -431,9 +351,8 @@ impl Palette {
         crate::theme::override_for(r).unwrap_or_else(|| self.base_look(r))
     }
 
-    /// The one table: what `r` looks like with no theme. [`Look::PLAIN`] for
-    /// [`Palette::None`] and for [`Role::Plain`], so patching either over something
-    /// changes nothing.
+    /// The one table: what `r` looks like with no theme. [`Look::PLAIN`] for [`Palette::None`] and
+    /// for [`Role::Plain`], so patching either over something changes nothing.
     pub fn base_look(self, r: Role) -> Look {
         use Attrs as A;
         use Hue::Slot;
@@ -443,23 +362,18 @@ impl Palette {
         let light = self == Palette::Light;
         match r {
             Role::Plain => Look::PLAIN,
-            // Dim, not a grey: "bright black" sits within a hair of the background in
-            // several light themes; the attribute de-emphasises whatever the foreground
-            // already is.
+            // Dim, not a grey: "bright black" sits within a hair of the background in several light
+            // themes, and the attribute de-emphasises whatever the foreground already is.
             Role::Faint => Look::attrs(A::DIM),
             Role::Strong => Look::attrs(A::BOLD),
-            // The two levels differ by **hue** — cyan and blue are both theme slots —
-            // and the level is carried by the hashes too, for the monochrome reader.
+            // The two levels differ by hue — cyan and blue are both theme slots — and the level is
+            // carried by the hashes too, for the monochrome reader.
             Role::Heading => Look::fg(Slot(6)).with(A::BOLD),
             Role::Subheading => Look::fg(Slot(4)).with(A::BOLD),
             Role::UserAccent => Look::fg(Slot(4)),
-            // **A band, not an inverse.** Reverse video painted the operator's rows as a
-            // bar of the theme's foreground — on a gray base the loudest thing on the
-            // screen (the operator, 2026-10-08, building a theme on the title bar's gray).
-            // The band is the theme's slot 0 behind the text as it is: on a dark theme a
-            // lift a hair above the background; on a light one slot 7, since a light
-            // theme's slot 0 is black. The `▌` accent beside it says *whose* row this is
-            // even on a theme whose slot 0 is the background itself.
+            // A band, not an inverse: reverse would paint the operator's rows as a bar of the
+            // theme's foreground, the loudest thing on the screen. Slot 0 behind the text as it is,
+            // or slot 7 on a light theme, whose slot 0 is black.
             Role::UserBlock => Look {
                 bg: Some(Slot(if light { 7 } else { 0 })),
                 ..Look::PLAIN
@@ -467,19 +381,16 @@ impl Palette {
             Role::Success => Look::fg(Slot(2)),
             Role::Pending => Look::fg(Slot(3)),
             Role::Failure => Look::fg(Slot(1)),
-            // Bold yellow against `Pending`'s plain yellow: "needs a person" and "is
-            // happening" are close enough that a *weight* is the right distinction; a
-            // second orange was never one, since the cube's orange is no theme's slot.
+            // Bold yellow against `Pending`'s plain yellow: "needs a person" and "is happening" are
+            // close enough that weight is the right distinction.
             Role::Attention => Look::fg(Slot(3)).with(A::BOLD),
-            // Dim italic: de-emphasis by colour is a no-op under a terminal-native
-            // palette, so the attribute is what actually carries it.
+            // Dim italic: de-emphasis by colour is a no-op under a terminal-native palette, so the
+            // attribute is what carries it.
             Role::Reasoning => Look::attrs(A::DIM.union(A::ITALIC)),
             Role::Code => Look::fg(Slot(6)),
-            // Background only — see the module header. The trial ran three times: the
-            // theme's slots (`42`/`41`) were bands, *"too much color, the diff is
-            // unreadable"*; the cube tint beside the role's own foreground turned every
-            // plain run green-on-green; what remains is the cube's darkest green and
-            // red alone, under whatever foreground the text already had.
+            // Background only: the theme's own slots were bands rather than tints, and a tinted
+            // foreground turned every plain run green-on-green. The cube's darkest green and red,
+            // under whatever foreground the text already had.
             Role::Added => Look {
                 bg: Some(Hue::Cube(if light { 194 } else { 22 })),
                 ..Look::PLAIN
@@ -492,25 +403,23 @@ impl Palette {
             Role::Keyword => Look::fg(Slot(5)),
             Role::StringLit => Look::fg(Slot(2)),
             Role::NumberLit => Look::fg(Slot(3)),
-            // The same attribute as `Faint`, for the same reason: a comment is
-            // structure the reader skips. Two roles may look alike; one role may not
-            // mean two things.
+            // The same attribute as `Faint`, and for the same reason: a comment is structure the
+            // reader skips. Two roles may look alike; one role may not mean two things.
             Role::Comment => Look::attrs(A::DIM),
             Role::TypeName => Look::fg(Slot(6)),
             Role::FuncName => Look::fg(Slot(4)),
             Role::Punctuation => Look::PLAIN,
             Role::Link => Look::fg(Slot(4)),
             Role::Key => Look::fg(Slot(6)),
-            // The editor's reverse video is the terminal's one reverse, the same
-            // look as `UserBlock` and `reverse_look`: legible on any theme.
+            // The editor's reverse video is the terminal's one reverse, legible on any theme.
             Role::Bar | Role::Selected => Look::attrs(A::REVERSE),
             Role::Match => Look {
                 fg: Some(Slot(0)),
                 bg: Some(Slot(3)),
                 attrs: A::NONE,
             },
-            // Bright white on bright black: the editor's selection was
-            // `White`-on-`DarkGray`, and those are the theme's slots 15 and 8.
+            // Bright white on bright black: the editor's selection was `White`-on-`DarkGray`, which
+            // are the theme's slots 15 and 8.
             Role::Selection => Look {
                 fg: Some(Slot(15)),
                 bg: Some(Slot(8)),
@@ -526,14 +435,9 @@ impl Palette {
         matches!(self, Palette::Colour | Palette::Light)
     }
 
-    /// **A role as a [`crate::render::Style`] under this palette**: the role
-    /// itself on a colour palette, and nothing at all under [`Palette::None`].
-    ///
-    /// A render style names a meaning, and its look is chosen only when a buffer
-    /// is emitted — so `Colour` and `Light` give the same style here. `None` is the
-    /// one palette a renderer has to know about at build time: a diff handed
-    /// `Palette::None` promises plain lines (the `+`/`-` glyph carries the change),
-    /// and they stay plain whatever buffer, palette or host they end up in.
+    /// A role as a [`crate::render::Style`] under this palette: the role itself on a colour palette,
+    /// and nothing at all under [`Palette::None`], which promises plain lines (the `+`/`-` glyph
+    /// carries the change) whatever buffer or host they end up in.
     pub fn style(self, r: Role) -> crate::render::Style {
         if self == Palette::None {
             crate::render::Style::new()
@@ -542,14 +446,11 @@ impl Palette {
         }
     }
 
-    /// **A program's own background slot**, `0`–`15`, as a look: plain for
-    /// [`Palette::None`] and for a slot above the sixteen.
+    /// A program's own background slot, `0`–`15`, as a look: plain for [`Palette::None`] and for a
+    /// slot above the sixteen.
     ///
-    /// Not a [`Role`], deliberately. A role is a meaning the caller has; a full-screen
-    /// program's panel (`mc`'s blue, `nano`'s status bar) is the program's own drawing,
-    /// and the job is to put it on the glass rather than re-mean it. So what passes
-    /// through is the **theme position** the program asked for, and the reader's theme
-    /// supplies the colour. Not for a payload row: text that already sits on a block
+    /// Not a [`Role`], deliberately: a full-screen program's panel is its own drawing, and what
+    /// passes through is the theme position it asked for. Not for a payload row — text on a block
     /// the caller chose should not carry a foreign program's background beside it.
     pub fn background_look(self, slot: u8) -> Look {
         if self == Palette::None || slot > 15 {
@@ -561,17 +462,13 @@ impl Palette {
         }
     }
 
-    /// **Reverse video** as a look: plain for [`Palette::None`].
-    ///
-    /// The program's reverse (`mc`'s selected row, a pane's highlighted entry) — the
-    /// same look as [`Role::Selected`]. [`Role::UserBlock`] used to be this too, and is a
-    /// band now: the operator's own rows are not a selection.
+    /// Reverse video as a look: plain for [`Palette::None`]. The program's reverse (`mc`'s selected
+    /// row, a pane's highlighted entry) and the same look as [`Role::Selected`].
     pub fn reverse_look(self) -> Look {
         self.look(Role::Selected)
     }
 
-    /// The opening SGR sequence for a role — letibot's `Palette::open`. Empty for
-    /// [`Palette::None`] and [`Role::Plain`].
+    /// The opening SGR sequence for a role. Empty for [`Palette::None`] and [`Role::Plain`].
     pub fn open(self, r: Role) -> String {
         self.look(r).sgr()
     }
@@ -579,12 +476,9 @@ impl Palette {
     /// Wrap `s` in the role, closed with a reset. A no-op for [`Palette::None`] and for
     /// [`Role::Plain`], so neither costs bytes.
     ///
-    /// **It deliberately does NOT sanitise `s`** (letibot §3.1, and the regression
-    /// `81990b3` shipped there): this is called on the caller's own composed text,
-    /// including strings it composed *by calling this*, and sanitising here stripped the
-    /// caller's own colour and left the body of the escape behind. The guard belongs
-    /// where **foreign** text enters. A cell buffer has no such hazard: `render` drops
-    /// escapes from span content, since a style there is an attribute and not bytes.
+    /// It deliberately does not sanitise `s`: this is called on the caller's own composed text,
+    /// including strings it composed by calling this, and stripping here removes the caller's own
+    /// colour. The guard belongs where foreign text enters — and a cell buffer has no such hazard.
     pub fn paint(self, r: Role, s: &str) -> String {
         let o = self.open(r);
         if o.is_empty() {
@@ -607,10 +501,9 @@ mod tests {
         }
     }
 
-    /// **The port's parity check**: the sequences spelled from the look are letibot's
-    /// table, byte for byte, so a letibot caller moving to this file sees no change.
-    /// The rows from `Punctuation` on are the editor's own roles, which letibot never had:
-    /// the colours its ratatui code named, as the theme slots they always were.
+    /// The port's parity check: the sequences spelled from the look are letibot's table, byte for
+    /// byte, so a caller moving here sees no change. The rows from `Punctuation` on are the editor's
+    /// own roles, which letibot never had.
     #[test]
     fn the_spelled_sequences_are_letibots_table() {
         let table: [(Role, &str); 32] = [
@@ -663,12 +556,11 @@ mod tests {
         }
     }
 
-    /// The operator's report: *"colors not matching theme."* Settled by the sequences,
-    /// since a screenshot on one theme looks fine either way.
+    /// Colors that do not match the theme are settled by the sequences, since a screenshot on one
+    /// theme looks fine either way.
     ///
-    /// **One exception, by name.** The diff roles' backgrounds are cube colours, exactly
-    /// two roles and exactly a background: no foreground may leave the sixteen, and no
-    /// third role may follow, so the loophole is a named pair rather than a door.
+    /// One exception, by name: the diff roles' backgrounds are cube colours, exactly two roles and
+    /// exactly a background, so the loophole is a named pair rather than a door.
     #[test]
     fn no_role_paints_outside_the_sixteen_colours_a_theme_defines() {
         const CUBE_EXCEPTIONS: &[(Role, &str)] = &[
@@ -743,8 +635,8 @@ mod tests {
         assert_eq!(Palette::Colour.look(Role::Failure).fg, Some(Hue::Slot(1)));
     }
 
-    /// Roles that mean different things have to *look* different, or moving to sixteen
-    /// slots would have traded one defect for another.
+    /// Roles that mean different things have to look different, or moving to sixteen slots would
+    /// have traded one defect for another.
     #[test]
     fn roles_a_reader_has_to_tell_apart_still_differ() {
         for (a, b) in [
@@ -768,8 +660,8 @@ mod tests {
         }
     }
 
-    /// **A light theme changes the two absolute colours and the user band, and nothing
-    /// else.** The band is slot 7 there, because a light theme's slot 0 is black.
+    /// A light theme changes the two absolute colours and the user band, and nothing else. The band
+    /// is slot 7 there, because a light theme's slot 0 is black.
     #[test]
     fn the_light_palette_differs_only_in_the_diff_backgrounds_and_the_band() {
         assert_eq!(Palette::Light.open(Role::UserBlock), "\x1b[47m");

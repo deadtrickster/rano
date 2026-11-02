@@ -1,8 +1,7 @@
-//! **The waits that have a size**: a snapshot's rows filling in, a compaction reading its
-//! half of the conversation — a bar, the counts, and the cat that says the head is alive.
+//! The waits that have a size: a snapshot's rows filling in, a compaction reading its half of
+//! the conversation — a bar, the counts, and the cat that says the head is alive.
 //!
-//! Ported from letibot's `ui/loading.rs`. The bar is the prefill bar
-//! ([`super::turn_status::bar`]): one instrument for every wait the head can measure.
+//! The bar is the prefill bar ([`super::turn_status::bar`]): one instrument for every wait.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -10,9 +9,9 @@ use crate::style::Role;
 use super::header::thousands;
 use super::turn_status::{Prefill, bar};
 
-/// **The cat**, one frame every 120 ms. Eight frames, two of them with a tail: a thing on
-/// the screen that moves is the difference between *it is working* and *it is stuck*, and
-/// a spinner beside a bar that is not moving reads as the second.
+/// The cat, one frame every 120 ms, two of them with a tail: something that moves is the
+/// difference between working and stuck, and a spinner beside a bar that is not moving reads as
+/// the second.
 pub const CAT_FRAMES: [&str; 8] = [
     "(=^.^=) ", "(=^-^=) ", "(=^o^=) ", "(=^-^=) ", "(=^.^=)~", "(=^-^=)~", "(=^o^=)~", "(=^-^=)~",
 ];
@@ -48,7 +47,7 @@ pub fn centred(text: &str, w: usize) -> Line {
 }
 
 /// The bar row: two columns in, the bar, the counts and the cat after it — the bar as wide
-/// as what is left, between eight and forty columns.
+/// as is left, between eight and forty columns.
 fn bar_row(p: &Prefill, counts: String, now_ms: u64, w: usize) -> Line {
     let used = CAT_SLOT + counts.chars().count() + 6;
     let bar_cols = w.saturating_sub(used).clamp(8, 40);
@@ -64,7 +63,7 @@ fn bar_row(p: &Prefill, counts: String, now_ms: u64, w: usize) -> Line {
     l
 }
 
-/// **A snapshot's rows filling in**: `done` of `total` `unit`, what is filling, and the cat.
+/// A snapshot's rows filling in: `done` of `total` `unit`, what is filling, and the cat.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filling {
     pub what: String,
@@ -97,7 +96,7 @@ impl Filling {
     }
 }
 
-/// **A compaction under way**: which half, how far it has read, or how much it has written.
+/// A compaction under way: which half, how far it has read, or how much it has written.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Compacting {
     pub half: u64,
@@ -114,9 +113,9 @@ pub struct Compacting {
 impl Compacting {
     pub fn lines(&self, w: usize) -> Vec<Line> {
         let where_ = format!("half {} of {}", self.half, self.halves);
-        // **Reading, then writing**: while the half's prompt is being read the bar measures
-        // it; once the model writes, the count of what it has written is the only number
-        // there is, and a bar over it would be a bar to a total nobody knows.
+        // Reading, then writing: while the half's prompt is read the bar measures it; once the
+        // model writes, a count is the only number there is, and a bar over it would point at a
+        // total nobody knows.
         if self.processed > 0 && self.processed < self.prompt_tokens {
             let p = Prefill {
                 total: self.prompt_tokens,

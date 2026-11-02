@@ -1,9 +1,7 @@
-//! **The turn's status row**: what the model is doing — green while it goes, yellow when slow.
+//! The turn's status row: what the model is doing — green while it goes, yellow when slow.
 //!
-//! Ported from letibot's `crates/tui/src/ui/turn_status.rs` (`turn_status`) and
-//! the prefill half of `letibot_ui::progress` (`Prefill`, `bar`, `prefill_line`), which nothing
-//! else draws. Whether a turn is busy or generating, and the clocks, are the host's; this row
-//! is a pure function of them — no clock is read here, so a replay draws what the live head did.
+//! Whether a turn is busy or generating, and the clocks, are the host's; this row is a pure function of
+//! them, so a replay draws what the live head did.
 
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
@@ -13,17 +11,9 @@ use super::text::{duration, spinner, trim_to};
 
 /// The server's prefill progress, as it arrives.
 ///
-/// # What the three numbers mean, because getting this wrong is easy
-///
-/// - `total` — tokens in the prompt.
-/// - `cache` — tokens reused from the slot's KV cache. **Free.**
-/// - `processed` — tokens now resident in the slot, **including** `cache`. So the fraction
-///   complete is `processed / total`, and the work actually done this turn is
-///   `processed - cache`.
-/// - `time_ms` — cumulative prefill milliseconds.
-///
-/// Reading `processed` as "processed *since* the cache" would show a 90%-cached prompt as 10%
-/// done and then jump to 100%, which is the classic progress-bar lie.
+/// `processed` counts every token resident in the slot, `cache` included, so the fraction done is
+/// `processed / total` and the work this turn is `processed - cache`. Reading `processed` as "since the
+/// cache" shows a 90%-cached prompt as 10% done and then jumps to 100% — the classic progress-bar lie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Prefill {
     pub total: u64,
@@ -54,10 +44,8 @@ impl Prefill {
         self.processed.saturating_sub(self.cache)
     }
 
-    /// Prefill throughput in tokens per second, or `None` before there is enough to divide by.
-    ///
-    /// Measured over `computed()`, not `processed`: dividing the cache hit by the wall clock
-    /// produces a number in the hundreds of thousands and it is not a speed, it is an artefact.
+    /// Prefill throughput in tokens per second, or `None` before there is enough to divide by. Measured
+    /// over `computed()`, not `processed`: dividing the cache hit by the clock is an artefact, not a speed.
     pub fn rate(&self) -> Option<f64> {
         if self.time_ms < 50 || self.computed() == 0 {
             return None;
@@ -65,8 +53,8 @@ impl Prefill {
         Some(self.computed() as f64 * 1000.0 / self.time_ms as f64)
     }
 
-    /// Estimated milliseconds to the end of the prefill; everything past `processed` is by
-    /// definition not in the cache, so it all has to be computed.
+    /// Estimated milliseconds to the end of the prefill; everything past `processed` is by definition not
+    /// in the cache, so it all has to be computed.
     pub fn eta_ms(&self) -> Option<u64> {
         let r = self.rate()?;
         let left = self.total.saturating_sub(self.processed);
@@ -77,20 +65,13 @@ impl Prefill {
     }
 }
 
-/// Eighth-of-a-cell fill, from empty to full (grok-build's `progress_bar.rs`). A 20-column bar
-/// over a 40,000-token prompt advances one cell per 2,000 tokens, so at whole-cell resolution a
-/// bar that is genuinely moving looks frozen for seconds at a time.
+/// Eighth-of-a-cell fill, from empty to full. A 20-column bar over a 40,000-token prompt advances one cell
+/// per 2,000 tokens, so at whole-cell resolution a bar that is genuinely moving looks frozen.
 const EIGHTHS: [&str; 9] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
 
-/// A three-segment bar `cols` columns wide: cached, computed this turn, remaining.
-///
-/// ```text
-/// ▐████████▓▓▓▓▍░░░░░▌
-/// ```
-///
-/// The cached run is drawn differently from the computed run on purpose: a two-colour bar
-/// answers "how far along"; this one also answers "how much of this did the prefix cache save
-/// me". With no colour the three runs are still three different glyphs.
+/// A three-segment bar `cols` columns wide: cached, computed this turn, remaining. The cached run is drawn
+/// apart from the computed one on purpose, so the bar answers "how much did the prefix cache save me" as
+/// well as "how far along" — and with no colour the three runs are still three glyphs.
 pub fn bar(p: &Prefill, cols: usize) -> Vec<Span> {
     let cols = cols.max(4);
     let inner = cols.saturating_sub(2);
@@ -177,9 +158,8 @@ pub struct TurnStatus {
     /// It used to be keyed off the last event's timestamp, and a spinner that only moves when a
     /// token arrives is a snapshot of one — a tool running thirty silent seconds froze it.
     pub now_ms: u64,
-    /// **The turn is slow**: generating and silent past [`SLOW_AFTER_MS`]. The host decides —
-    /// only it knows whether the turn should be emitting (a silent `cargo test` is a call, not
-    /// a stall). It turns the row yellow; it adds no words.
+    /// The turn is slow: generating and silent past [`SLOW_AFTER_MS`]. The host decides, since only it knows
+    /// whether the turn should be emitting. It turns the row yellow and adds no words.
     pub slow: bool,
 }
 
@@ -189,20 +169,11 @@ pub const SLOW_AFTER_MS: u64 = 15_000;
 impl TurnStatus {
     /// The row; empty when nothing is running (the row is reserved by the fit ladder either way).
     ///
-    /// **The word is `Responding` for the whole turn** — including the wait on a call, and the
-    /// silence before the first token. Ruled by the operator, 2026-09-27: *"responding spans
-    /// entire turn"*. What says *which* call is running is the transcript, not this line.
-    ///
-    /// **No count on this row.** *"i dont care about those chars"* / *"just dont show me
-    /// them"*: a row whose job is to say the turn is alive needs the spinner and the clock, and
-    /// a figure the reader has to interpret is the row asking to be studied.
-    ///
-    /// **Green while it is going, yellow when it is slow** — and nothing more. Ruled by the
-    /// operator, 2026-10-08: *"we have Responding in yellow which is a warning color … I dont
-    /// want notification that it is slow yet we continue … let usual Responding be green and
-    /// when we detect delays - yellow it"*. A turn that has really failed ends with
-    /// `TurnFailed` and stops this row; a slow one only changes its colour, so there is no
-    /// sentence about it (the `stuck_line` that said *"nothing received for 17s"* is gone).
+    /// The word is `Responding` for the whole turn — the wait on a call and the silence before the first
+    /// token included — because what says which call is running is the transcript. No count on this row: it
+    /// needs the spinner and the clock, and a figure to interpret is the row asking to be studied. Green
+    /// while it goes and yellow when it is slow, and nothing more: a slow turn only changes colour, so there
+    /// is no sentence about it.
     pub fn line(&self, w: usize) -> Line {
         if !self.busy {
             return Line::default();
@@ -220,17 +191,14 @@ impl TurnStatus {
                 crate::render::text::truncate_owned(l, w)
             }
             _ => {
-                // `started_ms == 0` means the turn came out of a snapshot, which has no
-                // timestamps — the line once read `Responding · 496940h16m`. Never a number
-                // nobody took.
+                // `started_ms == 0` means the turn came out of a snapshot, which has no timestamps: never a
+                // number nobody took.
                 let since = match self.elapsed_ms {
                     None => " · started before this head attached".to_string(),
                     Some(ms) => format!(" · {}", duration(ms)),
                 };
-                // **The spinner inside the pending row**, as letibot drew it: the row painted
-                // pending with a painted spinner in it. The cells are one pending run either
-                // way; the stack is what lets a host that prints strings write the row as
-                // the nesting it always was.
+                // The spinner inside the pending row: the cells are one pending run either way, and the
+                // stack is what lets a host that prints strings write the row as the nesting it was.
                 let l = Line::new(vec![
                     Span::styled(spinner(self.now_ms).to_string(), Style::of(tone).role(tone)),
                     Span::role(format!(" Responding{since}"), tone),
@@ -259,7 +227,6 @@ mod tests {
         Line::new(bar(p, cols)).plain()
     }
 
-    /// letibot `progress::there_is_no_rate_before_there_is_evidence_for_one`.
     #[test]
     fn there_is_no_rate_before_there_is_evidence_for_one() {
         assert!(
@@ -284,9 +251,8 @@ mod tests {
         );
     }
 
-    /// letibot `progress::the_moving_edge_has_sub_cell_resolution`: a 20-cell bar over a 40k
-    /// prompt moves one cell per 2k tokens, and at whole-cell resolution a bar that is
-    /// genuinely advancing looks frozen.
+    /// A 20-cell bar over a 40k prompt moves one cell per 2k tokens, and at whole-cell resolution a bar
+    /// that is genuinely advancing looks frozen.
     #[test]
     fn the_moving_edge_has_sub_cell_resolution() {
         let mk = |processed| Prefill {
@@ -370,8 +336,7 @@ mod tests {
         assert_eq!(role_of(&second, "Responding"), Some(Role::Success));
     }
 
-    /// letibot `app/tests/turn.rs` — a busy turn counts from the prompt through its calls, and
-    /// a turn that is not busy draws nothing (the row stands down with the work).
+    /// A busy turn counts from the prompt through its calls, and a turn that is not busy draws nothing.
     #[test]
     fn the_row_stands_down_with_the_work() {
         assert!(busy(4_000, 5_000).line(120).plain().contains("4.0s"));
@@ -393,7 +358,6 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/turn.rs::the_prefill_line_reads_as_nearly_done_when_the_prompt_was_mostly_cached`.
     #[test]
     fn the_prefill_line_reads_as_nearly_done_when_the_prompt_was_mostly_cached() {
         let mut t = busy(0, 0);
@@ -413,7 +377,6 @@ mod tests {
         }
     }
 
-    /// letibot `letibot_ui::progress` tests, on lines.
     #[test]
     fn a_mostly_cached_prompt_reads_as_nearly_done_not_nearly_undone() {
         let p = Prefill {

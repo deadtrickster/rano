@@ -1,10 +1,7 @@
-//! **The merge queue**: what is waiting to land, and one entry opened whole.
+//! The merge queue: what is waiting to land, and one entry opened whole.
 //!
-//! Ported from letibot's `ui/panes/queue.rs`. The words are the daemon's — the state, the
-//! evidence, the reviewer's verdict — and the marks are the head's reading of them; the
-//! order is the daemon's too, and is not sorted here: the queue is the queue's own
-//! scheduling, and a pane that re-sorted it would be a second opinion about what should
-//! land next.
+//! The words and the order are the daemon's, and the order is not sorted here: a pane that
+//! re-sorted it would be a second opinion about what should land next.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -12,10 +9,8 @@ use crate::style::Role;
 use super::pane::{self, PaneLines};
 use super::text::{clean_line, one, trim_to, wrap};
 
-/// The head's reading of an entry's state, for its mark.
-///
-/// `waiting` is not a problem, `taken` is work in progress, `landed` is done, and the three
-/// that park an entry for a person (failed, conflict, stale) are the loud ones.
+/// The head's reading of an entry's state, for its mark: `waiting`, `taken` and `landed` are not
+/// problems; failed, conflict and stale park an entry for a person and are the loud ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MergeMark {
     #[default]
@@ -36,8 +31,7 @@ impl MergeMark {
     }
 }
 
-/// Where an entry's review is. *No verdict yet* and *nobody has asked* are different facts,
-/// and the pane tells them apart.
+/// Where an entry's review is: no verdict yet and nobody has asked are different facts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReviewState {
     #[default]
@@ -70,12 +64,9 @@ pub struct QueuePane {
 }
 
 impl QueuePane {
-    /// **The merge queue, as rows** — one entry per row plus its state and reason beneath
-    /// it.
-    ///
-    /// Two lines an entry, like the jobs pane's rows and for the same reason: the facts a
-    /// reader needs are (what is it) and (why is it where it is), and a single line would
-    /// truncate the second to make room for the first. Each entry's first row is a stop.
+    /// The merge queue, as rows — one entry per row plus its state and reason beneath it, since
+    /// (what is it) and (why is it where it is) will not both fit on one. Each entry's first row
+    /// is a stop.
     pub fn content(&self, w: usize) -> PaneLines {
         let mut out = PaneLines::new();
         out.push(pane::title("merge queue"));
@@ -139,17 +130,14 @@ pub struct ReviewRecord {
     pub commands: Vec<String>,
 }
 
-/// **One entry, whole** — the overlay the queue pane's Enter opens.
-///
-/// Everything is a row the host already holds: the entry's own fields, the evidence (the
-/// gate's captured words when the gate failed, the reviewer's verdict when the review
-/// refused it), and the review record.
+/// One entry, whole — the overlay the queue pane's Enter opens, of everything the host already
+/// holds: the entry's own fields, the evidence and the review record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueEntryView {
     /// The id the overlay was opened on.
     pub id: String,
-    /// `None` when the queue no longer holds it (a `recover` moved it, or the host switched
-    /// and took a fresh snapshot): said, rather than drawing an empty overlay.
+    /// `None` when the queue no longer holds it (a `recover` moved it, or the host switched and
+    /// took a fresh snapshot): said, rather than drawing an empty overlay.
     pub entry: Option<OpenedEntry>,
 }
 
@@ -171,8 +159,8 @@ pub struct OpenedEntry {
     pub review: Option<ReviewRecord>,
 }
 
-/// A label in the faint register, nine columns, then its value on the same row: one row
-/// rather than two, because a label alone on a line reads as a heading.
+/// A label in the faint register, nine columns, then its value on the same row: a label alone on
+/// a line reads as a heading.
 fn labelled(k: &str, v: &str) -> Line {
     Line::new(vec![
         Span::raw("  "),
@@ -233,9 +221,8 @@ impl QueueEntryView {
         if e.evidence.is_empty() {
             out.push(one("  (nothing yet)", Role::Faint));
         } else {
-            // **Not trimmed to one line.** The gate's failure is up to four kilobytes of the
-            // CI command's own output, and this overlay is the only place it is readable at
-            // all, so it is wrapped rather than elided and the pane scrolls.
+            // Not trimmed to one line: the gate's failure is up to four kilobytes of the CI
+            // command's own output, and this overlay is the only place it is readable at all.
             for l in e.evidence.lines() {
                 for wrapped in wrap(l, w.saturating_sub(4)) {
                     out.push(Line::raw(format!("  {}", clean_line(&wrapped))));
@@ -256,9 +243,8 @@ impl QueueEntryView {
                     r.decision.as_deref().unwrap_or("(asked, no answer yet)"),
                 ));
                 out.push(labelled("asked", &r.asked));
-                // **Where the argument is.** A verdict is a summary of a review, and the
-                // review itself is a conversation — the person can attach to it with the
-                // session's own id, which is why the reviewer is a session and not a call.
+                // Where the argument is: a verdict summarises a review, and a review is a
+                // conversation the person can attach to by the session's own id.
                 out.push(labelled(
                     "session",
                     &format!("{} — attach to it to read the argument", r.session_id),
@@ -315,8 +301,7 @@ mod tests {
         }
     }
 
-    /// Two rows an entry, the first a stop; nobody-asked and asked-not-answered read
-    /// differently.
+    /// Two rows an entry, the first a stop; nobody-asked and asked-not-answered read differently.
     #[test]
     fn an_entry_is_two_rows_and_its_review_says_where_it_is() {
         let p = QueuePane {
@@ -348,8 +333,8 @@ mod tests {
         assert!(plain(&c.lines)[2].contains("A branch lands here"));
     }
 
-    /// An entry the queue no longer holds is said, not drawn empty; one it holds names
-    /// where the reviewer's argument is.
+    /// An entry the queue no longer holds is said, not drawn empty; one it holds names where the
+    /// reviewer's argument is.
     #[test]
     fn an_opened_entry_is_whole_or_says_it_has_gone() {
         let gone = QueueEntryView {

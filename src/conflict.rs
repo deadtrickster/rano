@@ -1,19 +1,9 @@
 //! Merge conflicts, side by side.
 //!
-//! An inline conflict is two versions of a region interleaved with markers,
-//! and reading it means holding one side in your head while scanning the
-//! other. This module takes the markers apart: it rebuilds the file as it would
-//! be with **ours** taken in every conflict and as it would be with **theirs**,
-//! and diffs those two with the ordinary renderers ([`crate::sidediff`],
-//! [`crate::diff`]). Everything outside the conflicts is the same in both, so
-//! the diff *is* the conflicts — each one aligned line against line, the
-//! changed words emphasised, with real context around it, syntax-coloured in
-//! the file's own language and numbered by each side's version of the file.
-//!
-//! Markers are git's: `<<<<<<< label`, an optional `||||||| label` (the merge
-//! base, from `merge.conflictStyle = diff3` / `zdiff3`), `=======`, and
-//! `>>>>>>> label`. A conflict that never closes is kept as ordinary text, so
-//! nothing in the file is dropped.
+//! An inline conflict is two versions of a region interleaved with markers, and reading one means
+//! holding a side in your head. This rebuilds the file as ours-in-every-conflict and as theirs and
+//! diffs those two, so the diff is the conflicts, in context. A conflict that never closes is kept
+//! as ordinary text, so nothing in the file is dropped.
 
 use crate::render::{Line, Span};
 
@@ -24,7 +14,6 @@ use crate::style::Role;
 /// One region of a file with conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
-    /// Lines both sides agree on.
     Common(Vec<String>),
     Conflict(Conflict),
 }
@@ -34,18 +23,17 @@ pub struct Conflict {
     /// What follows `<<<<<<<`: usually `HEAD`.
     pub ours_label: String,
     pub ours: Vec<String>,
-    /// The merge base, when the conflict style records it.
+    /// The merge base, when the conflict style records it (`merge.conflictStyle = diff3`).
     pub base: Option<Vec<String>>,
     /// What follows `>>>>>>>`: usually the branch or commit merged in.
     pub theirs_label: String,
     pub theirs: Vec<String>,
-    /// The `<<<<<<<` line's index in the text, and one past the `>>>>>>>`
-    /// line's: the rows a resolution replaces.
+    /// The `<<<<<<<` line's index in the text, and one past the `>>>>>>>` line's: the rows a
+    /// resolution replaces.
     pub start: usize,
     pub end: usize,
 }
 
-/// A marker line: seven of `c`, then the end of the line or a space and a label.
 fn marker(line: &str, c: char) -> Option<&str> {
     let rest = line.strip_prefix(&c.to_string().repeat(7) as &str)?;
     if rest.is_empty() {
@@ -54,7 +42,6 @@ fn marker(line: &str, c: char) -> Option<&str> {
     rest.strip_prefix(' ').map(str::trim_end)
 }
 
-/// Split a file into common text and conflicts.
 pub fn parse(text: &str) -> Vec<Segment> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<Segment> = Vec::new();
@@ -81,8 +68,8 @@ pub fn parse(text: &str) -> Vec<Segment> {
     out
 }
 
-/// The body of a conflict whose `<<<<<<<` was the line before `i`, and the
-/// line after its `>>>>>>>`; `None` when it never closes.
+/// The body of a conflict whose `<<<<<<<` was the line before `i`, and the line after its
+/// `>>>>>>>`; `None` when it never closes.
 fn read_conflict(lines: &[&str], mut i: usize, label: &str) -> Option<(Conflict, usize)> {
     let mut c = Conflict {
         ours_label: label.to_string(),
@@ -116,9 +103,8 @@ fn read_conflict(lines: &[&str], mut i: usize, label: &str) -> Option<(Conflict,
     None
 }
 
-/// The file as it would be with every conflict resolved one way: `(ours,
-/// theirs)`, and the labels of the first conflict. `None` when there is no
-/// conflict.
+/// The file as it would be with every conflict resolved one way: `(ours, theirs)`, the first
+/// conflict's labels, and how many there were. `None` when there is no conflict.
 pub struct Sides {
     pub ours: String,
     pub theirs: String,
@@ -156,7 +142,6 @@ pub fn sides(segments: &[Segment]) -> Option<Sides> {
     })
 }
 
-/// Whether `text` has at least one complete conflict.
 pub fn has_conflicts(text: &str) -> bool {
     parse(text)
         .iter()
@@ -175,7 +160,6 @@ pub enum Compare {
 }
 
 impl Compare {
-    /// The next comparison, wrapping.
     pub fn next(self) -> Compare {
         match self {
             Compare::OursTheirs => Compare::BaseOurs,
@@ -190,22 +174,17 @@ pub struct View {
     pub lines: Vec<Line>,
     /// Index into `lines` of each conflict's header row, in file order.
     pub sections: Vec<usize>,
-    /// Each conflict's rows in the text: its `<<<<<<<` line to one past its
-    /// `>>>>>>>` line.
+    /// Each conflict's rows in the text: its `<<<<<<<` line to one past its `>>>>>>>` line.
     pub rows: Vec<(usize, usize)>,
 }
 
 /// Unchanged lines shown either side of a conflict.
 const CONTEXT: usize = 3;
 
-/// Draw `path`'s conflicts one section each: a header naming the conflict, its
-/// lines and which version is on which side, then the two versions in `view`
-/// with up to three lines of the file around them. `current` is the conflict
-/// whose header is marked. `None` when the text has no conflict.
-///
-/// Each side is numbered by its own version of the file — the file with every
-/// conflict resolved that side's way — so a number says where the line will be
-/// once that side is taken.
+/// Draw `path`'s conflicts one section each: a header naming the sides, then both versions with up
+/// to three lines of the file around them. `current` is the conflict whose header is marked; `None`
+/// when the text has no conflict. Each side is numbered by its own version of the file, so a number
+/// says where the line will be once that side is taken.
 pub fn render_view(
     path: &str,
     text: &str,
@@ -263,8 +242,8 @@ pub fn render_view(
         };
         let ours = (label(&c.ours_label, "ours"), &c.ours, ours_at);
         let theirs = (label(&c.theirs_label, "theirs"), &c.theirs, theirs_at);
-        // A base comparison needs the base: without it (the default conflict
-        // style records none) the section says so and shows the conflict.
+        // A base comparison needs the base: without it (the default conflict style records none)
+        // the section says so and shows the conflict.
         let (mut note, base) = (None, c.base.as_ref());
         let (left, right) = match (compare, base) {
             (Compare::OursTheirs, _) => (ours, theirs),
@@ -343,15 +322,13 @@ pub fn render_view(
     Some(out)
 }
 
-/// [`render_view`] ours against theirs, the first conflict current: just the
-/// lines.
+/// [`render_view`] ours against theirs, the first conflict current: just the lines.
 pub fn render(path: &str, text: &str, cfg: &DiffConfig, view: EditView) -> Option<Vec<Line>> {
     render_view(path, text, cfg, view, Compare::OursTheirs, 0).map(|v| v.lines)
 }
 
-/// `text` with conflict `k` (0-based, file order) replaced by `lines`: the rows
-/// it spans and what goes there, for the caller to apply as one edit. `None`
-/// when there is no such conflict.
+/// `text` with conflict `k` (0-based, file order) resolved one way: the rows it spans and what
+/// goes there, for the caller to apply as one edit. `None` when there is no such conflict.
 pub fn resolution(text: &str, k: usize, take: Take) -> Option<(usize, usize, Vec<String>)> {
     let c = parse(text)
         .into_iter()
@@ -451,8 +428,8 @@ fn other() {
         assert!(s.ours.contains("report();") && s.theirs.contains("report();"));
     }
 
-    /// An unterminated conflict, or a marker-looking line with no conflict, is
-    /// text: nothing in the file is dropped.
+    /// An unterminated conflict, or a marker-looking line with no conflict, is text: nothing in the
+    /// file is dropped.
     #[test]
     fn a_conflict_that_never_closes_is_ordinary_text() {
         let t = "a\n<<<<<<< HEAD\nb\n=======\nc\n";
@@ -538,8 +515,8 @@ fn other() {
             rows[v.sections[1]].starts_with("▶ Conflict 2 of 2"),
             "{rows:?}"
         );
-        // Each side numbered by its own version: in ours, `one();` is line 8
-        // (the first conflict is one line there, not five); in theirs `two();` too.
+        // Each side numbered by its own version: in ours, `one();` is line 8 (the first conflict
+        // is one line there, not five); in theirs `two();` too.
         assert!(
             rows.iter().any(|r| r.ends_with(" 8 -    one();")),
             "{rows:?}"

@@ -1,18 +1,10 @@
-//! **The subagents pane**: the children a session spawned, their state and what each was
-//! asked — and the frame of a child's output view.
+//! The subagents pane: the children a session spawned, their state and what each was asked — and the
+//! frame of a child's output view.
 //!
-//! Ported from letibot's `ui/panes/subagents.rs` and the enumeration in its `app/panes.rs`.
-//!
-//! # One enumeration, two groups
-//!
-//! The rows come from [`SubagentsPane::stops`] — the same list a host's arrows, Enter and
-//! `p` read — so the drawn `▸` and the key that acts cannot disagree about which row is
-//! selected (the defect leticl's `todos-stops` docstring names). The children still going
-//! are drawn first; the finished ones live under a `finished (N)` row that stays folded
-//! unless the person unfolded it. The operator, 2026-10-06: *"i went to subagents panel and
-//! dont see it here"* — a child just started, and the pane drew the finished ones and pushed
-//! the running one off the bottom; and then *"please group finished separately in the
-//! finished group which will be collapsed"*.
+//! The rows come from [`SubagentsPane::stops`], the same list a host's arrows, Enter and `p` read, so the
+//! drawn `▸` and the key that acts cannot disagree about which row is selected. Running children are
+//! drawn first; the finished ones live under a `finished (N)` row that stays folded: a pane that drew
+//! the finished ones pushed a child that had just started off the bottom.
 
 use crate::render::Line;
 use crate::style::Role;
@@ -24,8 +16,8 @@ use super::tree_list::{Action, Cell, Row, TreeList};
 /// One child, as the pane draws it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubagentRow {
-    /// The child's own word — `opening`, `running`, `done`, `failed` — or empty for a row
-    /// rebuilt from the daemon's session list, which says nothing about how a child ended.
+    /// The child's own word — `opening`, `running`, `done`, `failed` — or empty for a row rebuilt from
+    /// the daemon's session list, which says nothing about how a child ended.
     pub state: String,
     /// What it was asked, as one line (letibot's `subagent_asked`).
     pub asked: String,
@@ -47,14 +39,13 @@ impl SubagentRow {
     }
 }
 
-/// **One row of the subagents pane** — the one enumeration a host's keys and the pane both
-/// read.
+/// One row of the subagents pane — the one enumeration a host's keys and the pane both read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubStop {
     /// A child, by index.
     Agent(usize),
-    /// **The `finished` group row.** The finished children live under it, collapsed by
-    /// default; Enter unfolds them.
+    /// The `finished` group row: the finished children live under it, collapsed by default; Enter unfolds
+    /// them.
     Finished,
 }
 
@@ -67,10 +58,9 @@ pub struct SubagentsPane {
 }
 
 impl SubagentsPane {
-    /// **The children still going first, then one `finished (N)` row, then — only when it
-    /// is unfolded — the finished children themselves.** The active half is never empty for
-    /// a live spawn, which is the whole point: the row the person opened the pane to see is
-    /// at the top.
+    /// The children still going first, then one `finished (N)` row, then — only when it is unfolded — the
+    /// finished children. The active half is never empty for a live spawn, which is the point: the row the
+    /// person opened the pane to see is at the top.
     pub fn stops(&self) -> Vec<SubStop> {
         let mut out = Vec::with_capacity(self.agents.len() + 1);
         for (i, s) in self.agents.iter().enumerate() {
@@ -96,25 +86,20 @@ impl SubagentsPane {
         self.tree().content(w)
     }
 
-    /// **The hint row [`SubagentsPane::content`] draws** — the selected row's own keys, then the
-    /// pane's — so a host that draws the hint in its own [`HintBar`](crate::agent::hint_bar)
-    /// reads rano's words instead of spelling a second copy that can drift.
+    /// The hint row [`SubagentsPane::content`] draws — the selected row's own keys, then the pane's — so a
+    /// host that draws the hint in its own bar reads rano's words instead of a second copy that can drift.
     pub fn hint_line(&self) -> Option<String> {
         self.tree().hint_line()
     }
 
-    /// The same sentence **without the pane's left margin**, which is what
-    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes.
+    /// The same sentence without the pane's left margin, which is what a bar takes.
     pub fn hint_text(&self) -> Option<String> {
         self.tree().hint_text()
     }
 
-    /// **The pane, as data**: the same enumeration the arrows read, one [`Row`] each.
-    ///
-    /// The group's `[+]`/`[-]` stays a CELL and not the list's fold column — this list is flat
-    /// (no row is nested in another), and its group marker has been three columns wide since
-    /// the operator asked for the finished children to be grouped, so the column the primitive
-    /// would reserve would be a column of nothing. Its second line sits at 7 and its hint at 4.
+    /// The pane, as data: the same enumeration the arrows read, one [`Row`] each. The group's `[+]`/`[-]`
+    /// stays a cell and not the list's fold column — this list is flat, so the column the primitive would
+    /// reserve would be a column of nothing. Its second line sits at 7 and its hint at 4.
     fn tree(&self) -> TreeList {
         TreeList {
             title: "subagents".into(),
@@ -135,8 +120,8 @@ impl SubagentsPane {
     /// One stop, as a row: a child, or the `finished` group.
     fn row(&self, stop: SubStop) -> Row {
         let i = match stop {
-            // **The `finished` fold.** A group row and not a child: there is nobody to switch
-            // into, and Enter folds or unfolds.
+            // The `finished` fold: a group row and not a child — there is nobody to switch into, and Enter
+            // folds or unfolds.
             SubStop::Finished => {
                 let n = self.agents.iter().filter(|s| s.is_finished()).count();
                 let fold = if self.finished_open { "[-]" } else { "[+]" };
@@ -172,33 +157,28 @@ impl SubagentsPane {
             "running" => ("[~]", Role::Pending),
             "done" => ("[x]", Role::Success),
             "failed" => ("[!]", Role::Failure),
-            // **No state word, which is the honest reading for a row rebuilt from the
-            // daemon's session list.** That list says whether a turn is generating and
-            // nothing about how a settled child ended, so `[?]` means *the host was not
-            // watching when it happened* — `done` or `failed` would be an invention.
+            // No state word, which is the honest reading for a row rebuilt from the daemon's session list:
+            // `done` or `failed` would be an invention.
             _ => ("[?]", Role::Plain),
         };
-        // **The row's own facts, as clauses that VANISH when the daemon did not say
-        // them.** A row rebuilt from the session list carries a child's name and its
-        // model and no role and no state, so a fixed `role {role} · {state}` would draw
-        // `role · ` with two holes in it on every rebuilt row.
+        // The row's own facts, as clauses that vanish when the daemon did not say them: a rebuilt row
+        // carries a name and a model and no role and no state, so a fixed sentence would draw two holes.
         let mut facts: Vec<String> = vec![clean_line(&s.session)];
         if !s.role.is_empty() {
             facts.push(format!("role {}", clean_line(&s.role)));
         }
-        // **The child's own model, when it has one** — the operator's ask, 2026-10-05: a
-        // tree of children on different models is a fact the pane has to show.
+        // The child's own model, when it has one: a tree of children on different models is a fact the
+        // pane has to show.
         if !s.model.is_empty() {
             facts.push(format!("on {}", clean_line(&s.model)));
         }
-        // **The state word, or the word for not having one**, and the second is a fact
-        // about the host rather than about the child — so it says which.
+        // The state word, or the word for not having one — and the second is a fact about the host, so it
+        // says which.
         if s.state.is_empty() {
             facts.push("state unknown".into());
         } else if s.state == "running" && !s.generating {
-            // **A child that is up with no turn generating this instant** — parked on its
-            // own background job, or between two rounds: alive, and not generating, and
-            // the row says both rather than `running` for a child that is not.
+            // A child that is up with no turn generating this instant — parked on its own background job,
+            // or between two rounds: alive, not generating, and the row says both.
             facts.push("waiting".into());
         } else {
             facts.push(clean_line(&s.state));
@@ -226,20 +206,17 @@ impl SubagentsPane {
     }
 }
 
-/// **The frame of a child's output view**: its title and notes above, the footer below,
-/// and which of the host's rows show between them.
-///
-/// The rows are the host's, already drawn (they are the child's own transcript rows, through
-/// the host's renderer), so this lays out the window over them rather than drawing them.
+/// The frame of a child's output view: its title and notes above, the footer below, and which of the
+/// host's rows show between them. The rows are the host's, already drawn, so this lays out the window
+/// over them rather than drawing them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubagentOutput {
     /// The child's session, as the host shortens an id.
     pub session: String,
     /// Earlier events that fell off the daemon's scrollback before this read.
     pub dropped: u64,
-    /// **The daemon answered with its event ring, not the session's rows**, so what follows
-    /// is drawn plainly. A reader who cannot tell the two apart cannot tell a session from a
-    /// list of its events, and the sentence names the way to get the real one.
+    /// The daemon answered with its event ring, not the session's rows, so what follows is drawn plainly:
+    /// a sentence that names the way to get the real one.
     pub degraded: bool,
     /// Where the full output was written, if it was.
     pub spill: Option<String>,
@@ -404,9 +381,9 @@ mod tests {
         assert!(short.footer.plain().ends_with("full: not written"));
     }
 
-    /// **The hint under the list is the selected row's own keys.** Moving onto the `finished`
-    /// group changed the sentence from what Enter does to a child to what it does to the group —
-    /// one renderer, two rows, no hard-coded footer to be wrong about either.
+    /// The hint under the list is the selected row's own keys: moving onto the `finished` group changes the
+    /// sentence from what Enter does to a child to what it does to the group — one renderer, no hard-coded
+    /// footer to be wrong about either.
     #[test]
     fn the_hint_is_the_selected_rows_own_keys() {
         let p = SubagentsPane {
@@ -439,8 +416,8 @@ mod tests {
         );
     }
 
-    /// **The pane's hint leaves as data**: a host's bar reads the sentence the pane draws
-    /// rather than a second copy that can name the wrong key when the cursor moves.
+    /// The pane's hint leaves as data: a host's bar reads the sentence the pane draws rather than a second
+    /// copy that can name the wrong key when the cursor moves.
     #[test]
     fn the_panes_hint_is_the_hint_it_draws() {
         let p = SubagentsPane {
@@ -467,8 +444,8 @@ mod tests {
         );
     }
 
-    /// The fixture the golden pin below draws: one child still running, one that is still
-    /// opening, and one that has ended and so lives under the `finished` group.
+    /// The fixture the golden pin below draws: one child still running, one still opening, and one that has
+    /// ended and lives under the `finished` group.
     fn golden_fixture() -> SubagentsPane {
         let mut done = child("done", "scout the docs");
         done.answer = Some("twelve files".into());
@@ -492,10 +469,8 @@ mod tests {
         }
     }
 
-    /// **The body the subagents pane drew before the tree-list port** (R1a), pinned first:
-    /// everything above the frame's last blank row, which is the title, each child's row and
-    /// its facts, and the `finished` group with its legend. The hint under it is expected to
-    /// change — it now follows the cursor.
+    /// The body the pane drew before the tree-list port, pinned first: the frame's rows up to the last
+    /// blank. The hint under it now follows the cursor.
     const GOLDEN_BODY: &[&str] = &[
         "subagents",
         "",

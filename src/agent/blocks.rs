@@ -1,24 +1,18 @@
-//! **The conversation's own rows**: what the person said, what the session said to the
-//! model on its behalf, how a turn ended, and the marker that stands in for a run of rows a
-//! rung hides.
+//! The conversation's own rows: what the person said, what the session said to the model on its
+//! behalf, how a turn ended, and the marker that stands in for a run of rows a rung hides.
 //!
-//! Ported from letibot's `ui/transcript/blocks.rs`, `turn.rs` and the painting half of
-//! `markers.rs`. The rows are facts the host holds — the text, a clock time it formatted,
-//! the counts it took — and this lays them out; deciding *which* rows a run hides, or how
-//! many lines a reasoning block is, stays with the host.
+//! The rows are facts the host holds — the text, a clock time it formatted, the counts it took — and
+//! this lays them out; deciding which rows a run hides stays with the host.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
 
 use super::text::{clean, one, visible_width, wrap};
 
-/// **The person's own words**: the `▌` bar in the user-accent register and the text in the
-/// user block (reverse video, to the full width, so the question is the brightest band on
-/// the screen), the clock time at the right of its first row.
-///
-/// Three signals, because each is lost somewhere: the bar is a glyph (it survives a pipe and
-/// a copy), the band is reverse video (it survives a terminal-native palette), and the row
-/// sits at the body's own column, where the conversation is.
+/// The person's own words: the `▌` bar in the user-accent register and the text in the user block,
+/// to the full width so the question is the brightest band on the screen, with the clock time at the
+/// right of its first row. The bar is a glyph, so it survives a pipe and a copy; the band survives a
+/// terminal-native palette.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserBlock {
     /// What they said, as the host folded it (a pasted block already shortened).
@@ -58,17 +52,13 @@ impl UserBlock {
     }
 }
 
-/// **A line the person sent that the conversation has not taken yet** — queued behind a
-/// running turn, or sent and not yet confirmed: the bar, the mark (`queued`, `unconfirmed`)
-/// in the notice register, and the text faint.
+/// A line the person sent that the conversation has not taken yet — queued behind a running turn, or
+/// sent and not yet confirmed: the bar, the mark (`queued`, `unconfirmed`) in the notice register, and
+/// the text faint.
 ///
-/// **R33: it is a thing WAITING, not content to read — so folded it is ONE elided headline.**
-/// The operator, looking at three of their own messages queued: *"three giant messages
-/// queued"* — a 63-row pane filled with the reader's own words. They typed it; they do not
-/// need it read back. The seam counts **screen rows**, the cost on the terminal.
-///
-/// **A row that has landed carries no mark**, and is drawn in the shape the settled row has —
-/// bar and text, no label — not with a bare ` · ` where the mark would be.
+/// It is a thing waiting, not content to read, so folded it is one elided headline: the person typed
+/// it and does not need it read back. A row that has landed carries no mark and is drawn in the shape
+/// the settled row has.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueuedBlock {
     pub text: String,
@@ -119,8 +109,7 @@ impl QueuedBlock {
                     Span::role(seam, Role::Faint),
                 ])];
             }
-            // **A terminal too narrow for the seam still gets one row**: the headline alone,
-            // elided by the bar's own width.
+            // A terminal too narrow for the seam still gets one row: the headline alone.
             return vec![Line::new(vec![
                 bar(),
                 Span::raw(" "),
@@ -150,9 +139,9 @@ impl QueuedBlock {
 /// The label a session row carries, and the columns it takes.
 const SESSION: &str = "session · ";
 
-/// **What the session said to the model**, on the person's behalf — a completion notice, a
-/// reminder: `session · ` faint at the left, the text faint after it, the clock time at the
-/// end of its last row. Not the person's bar: these are not their words.
+/// What the session said to the model on the person's behalf — a completion notice, a reminder:
+/// `session · ` faint at the left, the text faint after it, the clock time at the end of its last
+/// row. Not the person's bar: these are not their words.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionBlock {
     pub text: String,
@@ -160,8 +149,7 @@ pub struct SessionBlock {
 }
 
 impl SessionBlock {
-    /// The columns the text is wrapped at, for a host that cuts its own lines first (a folded
-    /// notice, one settlement a line).
+    /// The columns the text is wrapped at, for a host that cuts its own lines first.
     pub fn text_cols(stamp: &str, w: usize) -> usize {
         w.max(20)
             .saturating_sub(visible_width(SESSION) + visible_width(stamp) + 2)
@@ -202,8 +190,8 @@ impl SessionBlock {
     }
 }
 
-/// **How a turn ended, when the ending is news.** An ordinary ending (the model stopped, or
-/// a stop word) draws nothing: the answer is the ending.
+/// How a turn ended, when the ending is news. An ordinary ending draws nothing: the answer is the
+/// ending.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEnd {
     /// Still running, or ended the ordinary way: no row.
@@ -241,8 +229,7 @@ impl TurnEnd {
                     "nothing kept"
                 }
             )),
-            // The one ending in the failure register, and wrapped: an error is read, not
-            // glanced at.
+            // The one ending in the failure register, and wrapped: an error is read, not glanced at.
             TurnEnd::Failed { error, kept } => {
                 let kept = if *kept {
                     "what it had written is kept"
@@ -258,14 +245,12 @@ impl TurnEnd {
     }
 }
 
-/// **The line that stands in for a run of rows the rung hides** — `[2 tool calls, 3 thinking
-/// lines] · ctrl-v opens it`.
+/// The line that stands in for a run of rows the rung hides — `[2 tool calls, 3 thinking lines] ·
+/// ctrl-v opens it`.
 ///
-/// **The number goes pending and its noun does not** — the operator: *"yellow <count> not
-/// entire <Count> tool call"*, twice, the second time correcting the first fix. The digits are
-/// the thing that moves (the calls still running); `tool call` is what they count, and a
-/// phrase in yellow on a line whose job is to be punctuation inside the model's sentence reads
-/// as a highlight rather than a signal. The thinking count is never coloured.
+/// The number goes pending and its noun does not: the digits are the thing that moves, and a whole
+/// phrase in yellow on a line whose job is punctuation inside the model's sentence reads as a
+/// highlight rather than a signal. The thinking count is never coloured.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunMarker {
     /// `("2", " tool calls")`, the number and its noun apart.
@@ -308,7 +293,7 @@ impl RunMarker {
             }
         }
         l.push(Span::raw("]"));
-        // Painted even when empty, as letibot's marker always carried its seam's run.
+        // Painted even when empty, so the seam's run is always there.
         l.push(Span::role(self.seam.clone(), Role::Faint));
         l
     }

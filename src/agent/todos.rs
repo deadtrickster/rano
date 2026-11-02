@@ -1,13 +1,9 @@
-//! **The todos pane** — the session's plan and who wrote each line, beside the repository's
-//! `TODO.md` read-only — and **the new-todo card**.
+//! The todos pane — the session's plan and who wrote each line, beside the repository's
+//! `TODO.md` read-only — and the new-todo card.
 //!
-//! Ported from letibot's `ui/panes/todos.rs` and `ui/cards/todo.rs`. The plan is the
-//! session's; the file is the project's, and the pane says which is which on the screen,
-//! because the model is reminded of the first and never told about the second.
-//!
-//! The cursor walks the rows that can be acted on — the `[+]` row, the person's own rows,
-//! and the file's items — and the pane records where each landed ([`PaneLines`]), so a click
-//! and the arrows read the same record (letibot's *"mouse doesnt click"*).
+//! The plan is the session's and the file is the project's, and the pane says which is which: the
+//! model is reminded of the first and never told about the second. The cursor walks the rows that
+//! can be acted on, and each is recorded where it landed so a click and the arrows agree.
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -25,8 +21,8 @@ pub enum TodoMark {
 }
 
 impl TodoMark {
-    /// A markdown checklist line's mark and text: `- [ ] text`, `* [x] text`. `[~]` and `[-]`
-    /// are both *doing*, and `[X]` is *done*: the spellings people write.
+    /// A markdown checklist line's mark and text: `- [ ] text`. `[~]` and `[-]` are both doing,
+    /// and `[X]` is done: the spellings people write.
     pub fn of(line: &str) -> Option<(TodoMark, &str)> {
         let t = line.trim_start();
         let rest = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))?;
@@ -66,8 +62,8 @@ impl TodoMark {
 pub struct TodoLine {
     pub mark: TodoMark,
     pub content: String,
-    /// The person wrote it (`you`), rather than the model: it is numbered for `/todo` and it
-    /// is a stop.
+    /// The person wrote it (`you`), rather than the model: it is numbered for `/todo` and is a
+    /// stop.
     pub mine: bool,
     /// Its number among the person's rows, for `/todo postpone N`.
     pub number: usize,
@@ -148,8 +144,8 @@ impl TodosPane {
                 t.mark.span(),
                 Span::raw(format!(" {}  ", clean_line(&t.content))),
                 Span::role(format!("— {who}"), Role::Faint),
-                // Painted even when empty: the faint run's open and close are on the row
-                // whether or not the row waits on anything, as letibot's row always had.
+                // Painted even when empty: the faint run's open and close are on the row whether
+                // or not the row waits on anything.
                 Span::role(waiting, Role::Faint),
             ]);
             if t.mine {
@@ -230,10 +226,8 @@ pub enum TodoField {
     When,
 }
 
-/// **The new-todo card**: the three fields, which one is being typed into, and the keys.
-///
-/// The field with the keyboard shows what is being typed (the host passes the live text in
-/// its place), in the strong register; the others are faint.
+/// The new-todo card: the three fields, which one is being typed into (strong; the rest faint)
+/// and the keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TodoCard {
     pub title: String,
@@ -346,7 +340,7 @@ mod tests {
         assert_eq!(role_of(&c.lines[4], "[~]"), Some(Role::Pending));
     }
 
-    /// letibot's bytes: the empty `waits on` run is still painted.
+    /// The empty `waits on` run is still painted.
     #[test]
     fn a_row_waiting_on_nothing_keeps_its_empty_run() {
         let p = TodosPane {

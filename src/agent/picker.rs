@@ -1,9 +1,7 @@
-//! **The pickers**: the sessions a daemon holds, and a setting's values.
+//! The pickers: the sessions a daemon holds, and a setting's values.
 //!
-//! Ported from letibot's `ui/panes/picker.rs` (`picker_lines`, `setting_picker_lines`). The
-//! host does the enumeration — which sessions are listed, in which order, at which depth,
-//! and which families are unfolded is session logic — and hands the rows over in drawing
-//! order; this draws them.
+//! The host does the enumeration — which sessions are listed, in which order, at which depth, which
+//! families are unfolded — and hands the rows over in drawing order; this draws them.
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::clean_line;
@@ -39,23 +37,18 @@ pub struct SessionRow {
     pub workspace: String,
 }
 
-/// **A row that is not a session**: a group header — how many rows it holds, how it folds, and
-/// the sentence under it that says what Enter does.
+/// A row that is not a session: a group header — how many rows it holds, how it folds, and the
+/// sentence under it that says what Enter does.
 ///
-/// It exists because rano had no such row, so letibot faked one as a [`SessionRow`] with an
-/// empty `session_id` — and the picker's footer then said *enter switches* about a row where
-/// Enter folds. A group is a stop (Enter acts on it) and it carries no number: a group line
-/// is not a number anyone can type.
+/// A group is a stop and carries no number: a group line is not a number anyone can type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionGroup {
     /// What the group holds, in a word: `finished`, `on disk`, `mine`.
     pub name: String,
     /// How many rows it holds, for the `(N)` after its name.
     pub count: usize,
-    /// **How it folds** — [`Fold::Fixed`] for a group that is always open (letibot's `mine`):
-    /// no glyph, no fold key, and a hint that never says *folds*. Two states forced that group
-    /// to say `open: true` and rano then drew a `-` and wrote *enter folds it away* on a row
-    /// where Enter does nothing.
+    /// How it folds — [`Fold::Fixed`] for a group that is always open: no glyph, no fold key, and a
+    /// hint that never says folds.
     pub fold: Fold,
     /// The faint line under the row, saying what Enter will do to it — or, for a fixed group,
     /// what the group is. Empty draws none.
@@ -90,19 +83,11 @@ pub struct SessionPicker {
 }
 
 impl SessionPicker {
-    /// **The picker, as data**: every row is a [`Row`] and the list draws it.
+    /// The picker, as data: every row is a [`Row`] and the list draws it. The fold column is reserved
+    /// at every depth (so a name's column is a function of depth, not of having children), the number
+    /// field is as wide as the list is long, and the hint is the selected row's own words.
     ///
-    /// The measurements the hand-written renderer used to carry are now the primitive's own
-    /// rules (`crate::agent::tree_list`): the fold column is reserved at every depth — dropping
-    /// it for a leaf put two siblings at ONE depth one column apart, so the name column was a
-    /// function of *has children* rather than of *depth* — the number field is as wide as the
-    /// list is long (`{:>2}` is right for nine rows and wrong for a box whose header reads
-    /// `1/106`: MEASURED, rows 3–99 at column 6, rows 100–104 at column 7), and the hint under
-    /// the list is the selected row's own words.
-    ///
-    /// The depth is capped at three indents: a session tree is a conversation and its
-    /// subagents, and a row four levels in would be a name pushed off the right edge to say
-    /// where it is.
+    /// The depth is capped at three indents: a session tree is a conversation and its subagents.
     fn tree(&self) -> TreeList {
         let mut sessions = 0usize;
         let rows = self
@@ -142,24 +127,20 @@ impl SessionPicker {
         }
     }
 
-    /// Every row, each session a stop. letibot truncates this to the room rather than
-    /// windowing it; a host may do either with the result.
+    /// Every row, each session a stop. A host may truncate or window the result.
     pub fn content(&self, w: usize) -> PaneLines {
         self.tree().content(w)
     }
 
-    /// **The hint row [`SessionPicker::content`] draws** — the selected row's own keys and then
-    /// the picker's, margin and all. A host that puts the picker's hint somewhere else (its
-    /// [`HintBar`](crate::agent::hint_bar::HintBar), or a pane of its own that opens the
-    /// picker) reads it here rather than spelling the same cursor-dependent sentence a second
-    /// time, which is how the two drift.
+    /// The hint row [`SessionPicker::content`] draws — the selected row's own keys and then the
+    /// picker's, margin and all. A host with its own bar reads it here rather than spelling the same
+    /// cursor-dependent sentence a second time, which is how the two drift.
     pub fn hint_line(&self) -> Option<String> {
         self.tree().hint_line()
     }
 
-    /// The same sentence **without the pane's left margin**, which is what
-    /// [`HintBar::line_with_tail`](crate::agent::hint_bar::HintBar::line_with_tail) takes: a
-    /// bar centres its own text, and a margin carried into it reads as a layout bug.
+    /// The same sentence without the pane's left margin, which is what a bar takes: a bar centres its
+    /// own text, and a margin carried into it reads as a layout bug.
     pub fn hint_text(&self) -> Option<String> {
         self.tree().hint_text()
     }
@@ -168,15 +149,14 @@ impl SessionPicker {
 /// One session, as a row: the number you type, its fold, its name, its facts, and its full id
 /// underneath.
 fn session_row(s: &SessionRow, number: usize) -> Row {
-    // Busy is the fact a picker exists to show: switching away from a running turn is fine —
-    // the daemon keeps generating — and switching *into* one is how you go back and watch it.
+    // Busy is the fact a picker exists to show: switching away from a running turn is fine, and
+    // switching into one is how you watch it.
     let mut facts: Vec<String> = Vec::new();
     if s.generating {
         facts.push("generating".into());
     }
     if !s.live {
-        // The whole difference between a row that costs one keystroke and a row that costs a
-        // resume. Said in a word rather than implied by an absent "generating".
+        // The whole difference between a row that costs one keystroke and a row that costs a resume.
         facts.push("on disk".into());
     }
     if s.rows > 0 {
@@ -192,10 +172,9 @@ fn session_row(s: &SessionRow, number: usize) -> Row {
     if !s.model.is_empty() {
         facts.push(clean_line(&s.model));
     }
-    // The full id under **every** row, not only the named ones: the sessions whose id you
-    // might actually need to type — the unnamed ones — were the ones showing a truncation. The
-    // workspace goes on the same line: for a stored session it is the only thing on the row
-    // that says what the conversation was *about*.
+    // The full id under every row, not only the named ones: the unnamed sessions are the ones whose id
+    // you might need to type. The workspace goes on the same line, the only thing that says what a
+    // stored conversation was about.
     let under = if s.workspace.is_empty() {
         clean_line(&s.session_id)
     } else {
@@ -206,11 +185,11 @@ fn session_row(s: &SessionRow, number: usize) -> Row {
         )
     };
     Row {
-        // Every session is a stop, even one the host has no id for: the row is still a place
-        // Enter takes you, and today it always was.
+        // Every session is a stop, even one the host has no id for: the row is still a place Enter
+        // takes you.
         id: Some(s.session_id.clone()),
-        // The name's column is a function of its depth and nothing else — the fold column is
-        // reserved for a leaf too, and the picture in this file's history is why.
+        // The name's column is a function of its depth and nothing else: the fold column is reserved
+        // for a leaf too.
         depth: s.depth.min(3),
         number: Some(number),
         // A session with children folds, and a session whose children are held back says so.
@@ -237,9 +216,8 @@ fn session_row(s: &SessionRow, number: usize) -> Row {
 
 /// One group header, as a row: what it holds and how many, its fold, and what Enter does to it.
 fn group_row(g: &SessionGroup) -> Row {
-    // **A group's fold is the group's own data.** `Fixed` is a group that is always open: it
-    // carries no fold action, so the hint under it cannot name one — the sentence is the
-    // picker's fixed half alone, which is what a row with no keys is entitled to say.
+    // A group's fold is the group's own data: `Fixed` carries no fold action, so the hint under it
+    // cannot name one.
     let (open, actions) = match g.fold {
         Fold::Open => (
             Some(Fold::Open),
@@ -269,16 +247,15 @@ fn group_row(g: &SessionGroup) -> Row {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingValue {
     pub name: String,
-    /// What it means, one fact per line — or empty, for a daemon's setting whose meaning
-    /// the host does not know (a gloss it invented would be documentation written wrongly).
+    /// What it means, one fact per line — or empty, for a daemon's setting whose meaning the host does
+    /// not know, since a gloss it invented would be documentation written wrongly.
     pub why: String,
     /// This box can take it as it is (the model card: a key is held for it). Drawn green.
     pub ready: bool,
 }
 
-/// **The setting card** — one renderer for every setting a reader chooses from (R38):
-/// letibot's `/mode`, `/models`, `/verbosity` and `/diff` are four questions of one kind,
-/// so they get one card.
+/// The setting card — one renderer for every setting a reader chooses from: `/mode`, `/models`,
+/// `/verbosity` and `/diff` are four questions of one kind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingPicker {
     pub title: String,
@@ -296,16 +273,11 @@ pub struct SettingPicker {
 }
 
 impl SettingPicker {
-    /// The card. The title is one row and the first value is the next one; each value is a
-    /// stop, so a click is read off the record rather than off that arithmetic.
+    /// The card: the title is one row and the first value the next, and each value is a stop, so a click
+    /// is read off the record rather than off that arithmetic.
     ///
-    /// * **Every value, the current one marked.** `← now` in the faint register and the value
-    ///   itself bold — the split the session picker draws between its bold row and its
-    ///   inverse one: *where am I* and *what does Enter take* stay two readable facts.
-    /// * **What each value MEANS**, wrapped and indented under it. One fact per line: these
-    ///   are not trimmed, so a sentence carrying two facts would lose the second — measured
-    ///   at 110 columns, where a two-fact version read "It also become…".
-    /// * **`esc` is a real answer** — it closes the card and leaves the setting alone.
+    /// Every value is drawn with the one in force marked (`← now` faint, the value bold), what it means
+    /// wrapped under it one fact per line, and `esc` as a real answer that leaves the setting alone.
     pub fn content(&self, w: usize) -> PaneLines {
         let mut out = PaneLines::new();
         out.push(pane::title(self.title.clone()));
@@ -316,7 +288,7 @@ impl SettingPicker {
         for (i, v) in self.values.iter().enumerate() {
             let here = v.name == self.current;
             let picked = i == cursor;
-            // **Greened when this box can actually take the row** — the operator's ask.
+            // Greened when this box can actually take the row.
             let role = if v.ready {
                 Role::Success
             } else if here {
@@ -346,8 +318,7 @@ impl SettingPicker {
         out.push(pane::faint(
             "  ↑↓ moves · enter takes · or type a name or the row number · esc leaves it alone",
         ));
-        // **What the colour means, in words** — because `Palette::None` is not a monochrome
-        // theme but the `--replay`, pipe and CI case, and there a colour says nothing at all.
+        // What the colour means, in words: under `Palette::None` a colour says nothing at all.
         if let Some(l) = &self.legend {
             out.push(pane::faint(format!("  {l}")));
         }
@@ -374,8 +345,7 @@ mod tests {
         }
     }
 
-    /// The column rule letibot's `show_the_sessions_pane_tree` instrument measured: a name's
-    /// column is a function of its DEPTH alone, whatever its fold and however many rows the
+    /// A name's column is a function of its depth alone, whatever its fold and however many rows the
     /// list has.
     #[test]
     fn a_names_column_is_its_depth_and_not_its_children() {
@@ -415,8 +385,8 @@ mod tests {
         assert!(first.starts_with("▸-   1  "), "{first:?}");
     }
 
-    /// The facts a picker exists to show: busy, on disk, length, heads, model — and the full
-    /// id under every row (letibot `session.rs` assertions on `generating`).
+    /// The facts a picker exists to show: busy, on disk, length, heads, model — and the full id under
+    /// every row.
     #[test]
     fn a_session_row_says_whether_it_is_busy_and_where_it_lives() {
         let p = SessionPicker {
@@ -491,8 +461,7 @@ mod tests {
         }
     }
 
-    /// letibot `app/tests/session.rs` (the `/models` card: `← now` on the value in force)
-    /// and `app/tests/scroll.rs` (the green rows and the legend that says what green means).
+    /// The `/models` card marks the value in force and says what green means.
     #[test]
     fn the_setting_card_marks_the_value_in_force_and_says_what_green_means() {
         let c = models().content(110);
@@ -537,10 +506,8 @@ mod tests {
         assert!(p.content(140).stop_rows.is_empty());
     }
 
-    /// **A group header is a row of its own**: a fold, a count, a sentence under it, no number
-    /// (a group line is not a number anyone can type) — and a hint that says what Enter does to
-    /// *it*. letibot faked this row as a session with an empty id, and the footer then said
-    /// "enter switches" about a row where Enter folds.
+    /// A group header is a row of its own: a fold, a count, a sentence under it, no number — and a hint
+    /// that says what Enter does to it.
     #[test]
     fn a_group_header_folds_and_says_so_in_the_hint() {
         let mut p = SessionPicker {

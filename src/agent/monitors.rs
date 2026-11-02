@@ -1,11 +1,5 @@
-//! **The monitors pane**: what this session is watching across turns, and what it stopped
-//! watching and why.
-//!
-//! A monitor is a watch the model armed with `monitor` — a timer, a job, a file, a port, a
-//! process or a command — that wakes the session when it fires. Until this pane one was seen
-//! only when it fired: a watch that was still waiting was on no screen at all, while it held
-//! the session's daemon up. Every field is the daemon's answer; the widget decides colour and
-//! layout and nothing else.
+//! The monitors pane: what this session is watching across turns, and what it stopped watching
+//! and why. Every field is the daemon's answer; the widget decides colour and layout.
 
 use crate::agent::pane::{self, PaneLines};
 use crate::agent::text::{clean_line, duration, wrap};
@@ -31,8 +25,7 @@ pub struct MonitorRow {
     pub ends_at_ms: u64,
     /// How many times it has fired.
     pub fired: u32,
-    /// How it ended, in the daemon's words: `FIRED after 3.0s — …`, `expired after 300s
-    /// WITHOUT firing; …`, `retired by the operator after 12s`. Empty while live.
+    /// How it ended, in the daemon's words: `FIRED after 3.0s — …`. Empty while live.
     pub ended: String,
 }
 
@@ -40,16 +33,16 @@ pub struct MonitorRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MonitorsPane {
     pub monitors: Vec<MonitorRow>,
-    /// Now, in unix milliseconds — what the time left is counted against. The host's clock,
-    /// passed in so the drawing is a function of its inputs.
+    /// Now, in unix milliseconds — the host's clock, passed in so drawing is a function of its
+    /// inputs.
     pub now_ms: u64,
     /// The cursor, an index into [`MonitorsPane::stops`]; clamped when drawn.
     pub selected: usize,
 }
 
 impl MonitorsPane {
-    /// **What the cursor can rest on**: the live monitors, by index into
-    /// [`MonitorsPane::monitors`]. An ended one is a record to read, not a thing to act on.
+    /// What the cursor can rest on: the live monitors, by index. An ended one is a record to
+    /// read, not a thing to act on.
     pub fn stops(&self) -> Vec<usize> {
         (0..self.monitors.len())
             .filter(|&i| self.monitors[i].live)
@@ -89,9 +82,8 @@ impl MonitorsPane {
                 Span::raw(format!(" {}", clean_line(&m.name))),
             ]);
             out.push_stop(pane::picked(left, picked));
-            // **What it watches, whole** — the operator: *"i want to see monitor command in the
-            // details"*. A command is the one thing a person reads a monitor for, and it used to
-            // ride the row's first line, cut at the pane's edge.
+            // The command, whole: it is the one thing a person reads a monitor for, and cut at
+            // the pane's edge it was unreadable.
             for l in watching_lines(&m.watching, "watching", w) {
                 out.push(Line::raw(l));
             }
@@ -179,9 +171,8 @@ mod tests {
         }
     }
 
-    /// **A waiting monitor is a row, with what it watches and how long it has** — the thing that
-    /// was on no screen before; an ended one is listed below with how it ended, and is not a
-    /// stop.
+    /// A waiting monitor is a row, with what it watches and how long it has; an ended one is
+    /// listed below with how it ended, and is not a stop.
     #[test]
     fn live_monitors_are_rows_and_ended_ones_say_how_they_ended() {
         let p = MonitorsPane {
@@ -227,7 +218,7 @@ mod tests {
         assert!(rows.last().unwrap().contains("x retires"), "{rows:#?}");
     }
 
-    /// **A long command reads whole, wrapped under its row** — not cut at the pane's edge.
+    /// A long command reads whole, wrapped under its row, not cut at the pane's edge.
     #[test]
     fn a_monitors_command_is_shown_whole() {
         let cmd = "command `curl -sf http://127.0.0.1:8080/health --max-time 5 -o /dev/null -w %{http_code}` exiting";

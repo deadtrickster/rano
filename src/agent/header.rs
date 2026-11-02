@@ -1,26 +1,16 @@
-//! **The header**: the session, the model, the context, the clock.
+//! The header: the session, the model, the context, the clock.
 //!
-//! Ported from letibot's `crates/tui/src/ui/header.rs` (`header_line`) and the fitting half of
-//! `crates/tui/src/gitfield.rs` (`git_fit`, the per-segment colours). Which model the header
-//! names, which usage it reads and whether a turn is running are the host's decisions (letibot's
-//! comments on those live with the code that decides them); this draws what it is handed.
-//!
-//! ```text
-//!   the cache question  ~/Projects/letibot (main⇡2!1)   2/4 · glm-5.3-flash · 41.2k ctx · 92% cached · 45 tok/s · 12.3s · 1.2k out
-//! ```
+//! Which model it names, which usage it reads and whether a turn is running are the host's
+//! decisions; this draws what it is handed.
 
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
 
 use super::text::{clean_line, ellipsise_left, visible_width};
 
-/// **The style a git segment is painted with** — one per segment, chosen to say what the
-/// segment SAYS rather than to be pretty (leticl's `+git-styles+`, via letibot's `GitRole`).
-///
-/// A branch is green when the tree is clean and yellow when it is not — the one fact a person
-/// reads at a glance — staged work is green, unstaged is yellow, conflicts are red and bold
-/// because nothing else on that row is a demand, and untracked files are dim because they are
-/// usually noise.
+/// The style a git segment is painted with, chosen to say what the segment says: a clean branch is
+/// green, a dirty one yellow, conflicts red and bold because nothing else on the row is a demand,
+/// and untracked files dim because they are usually noise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitMark {
     BranchClean,
@@ -36,11 +26,9 @@ pub enum GitMark {
 }
 
 impl GitMark {
-    /// letibot painted these with raw SGR (`git_paint`); here each is the role whose look is
-    /// that colour, so a palette still decides: green = [`Role::Success`], yellow =
-    /// [`Role::Pending`] (plain yellow, not `Attention`'s bold), cyan = [`Role::Code`],
-    /// magenta = [`Role::Keyword`], red = [`Role::Failure`], dim = [`Role::Faint`]. The two
-    /// bold ones (action, conflicts) add the attribute, as letibot spelled a second SGR.
+    /// Each is the role whose look is that colour, so a palette still decides — green
+    /// [`Role::Success`], yellow [`Role::Pending`], cyan [`Role::Code`], magenta [`Role::Keyword`],
+    /// red [`Role::Failure`], dim [`Role::Faint`] — and the two bold ones add the attribute.
     pub fn style(self) -> Style {
         match self {
             GitMark::BranchClean | GitMark::Staged => Style::of(Role::Success),
@@ -70,14 +58,9 @@ const DROP_RATE: u8 = 5;
 const DROP_SPEND: u8 = 6;
 const DROP_CTX: u8 = 7;
 
-/// **The longest PREFIX of the pieces that fits in ROOM columns** — leticl's `%git-fit`.
-///
-/// ROOM is the whole field's budget, wrapping included: a field of pieces `p` is exactly
-/// `" (" + p + ")"`, so it is drawn when `3 + width(p) <= room` and not one column later.
-///
-/// The field degrades by DELETION, like every other thing on this row: the branch is the floor
-/// and the marks fall off its right in gitstatus's own order, so a narrow screen loses `?4` and
-/// not the branch. A field dropped whole is the behaviour this replaces.
+/// The longest prefix of the pieces that fits in room columns: the field is `" (" + p + ")"`, so
+/// it is drawn when `3 + width(p) <= room`. It degrades by deletion like the rest of the row — the
+/// branch is the floor and the marks fall off its right in gitstatus's own order.
 pub fn git_fit(pieces: &[(String, GitMark)], room: usize) -> &[(String, GitMark)] {
     let mut used = GIT_WRAP;
     let mut n = 0;
@@ -99,29 +82,22 @@ pub struct Context {
     pub tokens: u64,
     /// Of those, cached.
     pub cached: u64,
-    /// Whether `cached` is a measurement. A row that carries the size but not the fraction
-    /// shows the size and says nothing about the cache.
+    /// Whether `cached` is a measurement: a row carrying the size but not the fraction shows the size
+    /// and says nothing about the cache.
     pub cache_measured: bool,
 }
 
-/// The header's view model.
-///
-/// letibot fills it from: `name` ← `session_label(session_id)`; `subagent_of` ←
-/// `parent_session().map(session_label)`; `workspace` ← `tilde(wiring.workspace)`; `git` ← the
-/// pieces `apply_git_format` rendered (`App::git`); `position` ← (the current root's index + 1,
-/// the number of root sessions); `model` ← whichever of the settings row and the turn was
-/// heard later; `spent_micros` ← `spent_micros` when `spent_seen`; `context` ← the live
-/// prefill when a turn has one, else the last usage; `tok_per_s`, `out_tokens` ← the last
-/// round's usage and timings; `duration_ms` ← the running turn's elapsed, else the last
-/// round's `wall_ms`.
+/// The header's view model, filled by the host: the workspace as it should read, the repository's
+/// rendered segments, the position in the session list, the money meter, the last round's rate and
+/// the live prefill or last usage.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Header {
     pub name: String,
     pub subagent_of: Option<String>,
     /// The workspace as it should read (`~` for `$HOME` already applied). Empty: none.
     pub workspace: String,
-    /// The repository's segments, already rendered through the format in force. Empty: no
-    /// reading, and nothing is drawn — never a blank that reads like a clean tree.
+    /// The repository's segments, already rendered through the format in force. Empty draws nothing,
+    /// never a blank that reads like a clean tree.
     pub git: Vec<(String, GitMark)>,
     /// (this conversation, of how many). `at` 0 when the current one is not in the list.
     pub position: (usize, usize),
@@ -135,10 +111,8 @@ pub struct Header {
     pub out_tokens: Option<u64>,
 }
 
-/// `1234567` becomes `1.23M`, `12345` becomes `12.3k`.
-///
-/// Not a thousands separator: a status line has no room for one, and `40.1k` is
-/// read faster than `40,132` when the digits past the first three are noise.
+/// `1234567` becomes `1.23M`, `12345` becomes `12.3k` — not a thousands separator, since a status
+/// line has no room for one and `40.1k` is read faster than `40,132`.
 pub fn thousands(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
@@ -147,8 +121,7 @@ pub fn thousands(n: u64) -> String {
     }
 }
 
-/// A duration as the header has always written it: `412 ms`, `4.2s`, `3m07s`
-/// (letibot's `dur_human`, which differs from the cards' `duration` by its space).
+/// A duration as the header has always written it: `412 ms`, `4.2s`, `3m07s`.
 pub fn dur_human(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms} ms")
@@ -159,8 +132,8 @@ pub fn dur_human(ms: u64) -> String {
     }
 }
 
-/// The `model` settings row, as the header shows it: `local (glm-5.3-flash)` is
-/// `glm-5.3-flash`, and anything else (a provider pair) is itself.
+/// The `model` settings row, as the header shows it: `local (glm-5.3-flash)` is `glm-5.3-flash`, and
+/// anything else (a provider pair) is itself.
 pub fn header_model(value: &str) -> String {
     match value
         .strip_prefix("local (")
@@ -172,16 +145,13 @@ pub fn header_model(value: &str) -> String {
 }
 
 impl Header {
-    /// The right-hand facts in DISPLAY order, each with the rank it is dropped in, lowest first.
-    ///
-    /// The operator's ruling: the out count goes first, *"hide session counter too"*, *"and %
-    /// cached"*, *"hide model too, the most important part is path and git"*. So the order is
-    /// `N out`, the position counter, `N% cached`, the model, the duration, `tok/s`, the spend,
-    /// and last `N ctx` — every one of them before the path or the git field gives a column.
+    /// The right-hand facts in display order, each with the rank it is dropped in, lowest first: `N
+    /// out`, the position counter, `N% cached`, the model, the duration, `tok/s`, the spend, and last
+    /// `N ctx` — every one of them before the path or the git field gives a column.
     fn facts(&self) -> Vec<(String, u8)> {
         let mut right = Vec::new();
-        // Shown for one session too: "1/1" is a fact — this daemon holds one session and you
-        // are in it — and the one untitled session is otherwise the case with no identity at all.
+        // Shown for one session too: "1/1" is a fact, and the one untitled session is otherwise the
+        // case with no identity at all.
         right.push((
             format!("{}/{}", self.position.0, self.position.1.max(1)),
             DROP_POSITION,
@@ -189,8 +159,8 @@ impl Header {
         if !self.model.is_empty() {
             right.push((clean_line(&self.model), DROP_MODEL));
         }
-        // **The meter.** Beside the token count, because that is where the question "what is
-        // this costing me" is already being asked.
+        // The meter, beside the token count, where the question "what is this costing me" is already
+        // being asked.
         if let Some(m) = self.spent_micros {
             right.push((format!("${:.4}", m as f64 / 1_000_000.0), DROP_SPEND));
         }
@@ -208,12 +178,8 @@ impl Header {
         if let Some(r) = self.tok_per_s {
             right.push((format!("{r:.0} tok/s"), DROP_RATE));
         }
-        // **While a turn runs the duration is the turn's, and only the duration** — the host
-        // decides which (letibot: two clocks for one turn, `Responding · 151s` beside `4.5s`,
-        // read as a clock). This draws what it is given.
-        // The host decides whether there is a duration: a running turn's elapsed is shown
-        // from its first millisecond (`0 ms`), and an idle head's last wall time only when
-        // one was measured.
+        // While a turn runs the duration is the turn's, and only the duration: two clocks for one
+        // turn read as a clock. The host decides whether there is one at all.
         if let Some(ms) = self.duration_ms {
             right.push((dur_human(ms), DROP_DURATION));
         }
@@ -225,32 +191,13 @@ impl Header {
 
     /// The header row.
     ///
-    /// # It degrades by deletion, one field at a time
-    ///
-    /// The first version dropped the **whole** right half when the two halves did not both
-    /// fit, with nothing to say it had. Every field now goes on its own, in an order the
-    /// operator set: *"the most important part is path and git"*.
-    ///
-    /// 1. The tail's facts go by rank, not by position: `N out`, the position counter
-    ///    (`1/130`), `N% cached`, the model, the duration, `tok/s`, the spend, and last
-    ///    `N ctx`. The survivors keep their display order.
-    /// 2. Only once the tail is empty does the path shorten, from its left (the end of a path
-    ///    is the part that identifies it), and below its floor of 8 columns it goes.
-    /// 3. Only once the path is gone do the git marks fall off the right, then the branch. A
-    ///    git field with no path beside it opens with two spaces, not one.
-    /// 4. Past that the row is truncated. It is never wider than `w`; the name is never
-    ///    dropped by fitting.
-    ///
-    /// Measured at 156 columns: a 7-column name, a 25-column path and a 95-column tail left 27
-    /// columns of padding, and the 23-column `(fix-main-pgx-timeout)` was not drawn — the room
-    /// sum counted the gap twice and the wrap's `)` twice. Every width below is exactly what is
-    /// pushed into the line: the left half, one [`GAP`] of two columns, the tail.
+    /// It degrades by deletion, one field at a time: the tail's facts go by rank, then the path
+    /// shortens from its left and goes below its floor of eight columns, then the git marks fall off
+    /// the right and then the branch, and past that the row is truncated. The name is never dropped.
     pub fn line(&self, w: usize) -> Line {
         let name = clean_line(&self.name);
-        // **One label, and only for a subagent: `subagent of <parent>`.** A screen showing
-        // somebody else's conversation looked like a screen showing one's own: *"when I
-        // \"Enter\" Subagent it is like completely switching session with just one piece of
-        // info - a Label that it is a subagent"*. Same faint register, same field.
+        // One label, and only for a subagent: a screen showing somebody else's conversation looked
+        // like a screen showing one's own. Same faint register, same field.
         let of = self
             .subagent_of
             .as_ref()
@@ -292,30 +239,19 @@ impl Header {
             .collect::<Vec<_>>()
             .join(" · ");
 
-        // **The header is FACTS, and neither half of it is a sentence** (R51 item 10).
-        //
-        // The name used to open with `▌` in the user-accent register, and that glyph is how both
-        // heads say *a person said this* — so on the row the reader crosses on every return to
-        // the field, the session's own name read as somebody's message. The operator: *"the
-        // project directory and session name are pinned in the first row with the same blue bar
-        // we use for my messages. very confusing. just make both gray and remove the bar."*
-        // **Deleted, not recoloured**: a grey bar is still a bar and still makes the claim. And
-        // the name loses `Strong` as well — one quiet register for the header.
+        // The header is facts, and neither half of it is a sentence. The name used to open with `▌`,
+        // the glyph both heads use for a person's own message, on the row the reader crosses every
+        // time — so it read as somebody's message. Deleted rather than recoloured, since a grey bar is
+        // still a bar, and the name loses `Strong` too: one quiet register.
         let mut line = Line::default();
         line.push(Span::role(name, Role::Faint));
         if let Some(of) = of {
             line.push(Span::role(of, Role::Faint));
         }
         let mut left_cols = head_cols;
-        // **The workspace's repository, in gitstatus's own segments and colours**, beside the
-        // path it is a fact about. The parens are the row's own faint, so the field still reads
-        // as one thing. Beside the path it opens with one space (the path and its repository
-        // are one fact); with no path it opens with the left half's own two, as the operator
-        // approved at 34 columns: `pg-noop  (fix-main-pgx-timeout !2)`.
-        //
-        // The path shortens first, from its *left* (the end of a path is the part that
-        // identifies it), and goes below its floor of 8 while the whole git field is kept;
-        // only then do the marks fall off the right, then the branch.
+        // The repository in gitstatus's own segments and colours, beside the path it is a fact about;
+        // the parens are the row's own faint. Beside a path it opens with one space, and with no path,
+        // two.
         let mut fit = git;
         let mut shown = None;
         if let Some(path) = &path {
@@ -370,10 +306,9 @@ impl crate::render::Widget for Header {
     }
 }
 
-/// **What the terminal's window title says**: the session's name and the folder, so a tab is
-/// told apart by the conversation in it. `titled` says whether `label` is a title rather than a
-/// short id: a name leads; a short id does not — before the first message the folder is the
-/// more useful word to find a tab by. No session yet: the program's own name.
+/// What the terminal's window title says: the session's name and the folder, so a tab is told apart
+/// by the conversation in it. A name leads; before the first message the folder is the more useful
+/// word to find a tab by.
 pub fn window_title(label: Option<&str>, titled: bool, folder: &str) -> String {
     let Some(label) = label else {
         return "letibot".to_string();
@@ -418,7 +353,7 @@ mod tests {
         assert_eq!(role_of(&l, "main"), Some(Role::Pending));
         assert_eq!(role_of(&l, "⇡2"), Some(Role::Code));
 
-        // **Absent draws nothing at all**: no marks, no placeholder.
+        // Absent draws nothing at all: no marks, no placeholder.
         let mut b = h.clone();
         b.git.clear();
         assert!(
@@ -436,8 +371,7 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/screen.rs::a_metered_turn_puts_its_cost_on_the_header_and_the_total_accumulates`
-    /// (the drawing half: the host sums; free and unpriced are both no number).
+    /// The drawing half: the host sums, and free and unpriced are both no number.
     #[test]
     fn a_metered_session_puts_its_cost_on_the_header() {
         let mut h = base();
@@ -450,10 +384,8 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/turn.rs` — the header degrades by deletion. It used to keep `1/2`
-    /// longest and `41.2k ctx` from 80 columns up; by the operator's ruling the path and the
-    /// git field now outrank every tail fact, so the 80-column left half keeps its path whole
-    /// and the tail goes first, by rank.
+    /// The header degrades by deletion: the path and the git field outrank every tail fact, so at 80
+    /// columns the left half keeps its path whole and the tail goes first, by rank.
     #[test]
     fn a_narrow_header_drops_its_tail_before_its_path() {
         let mut h = base();
@@ -483,7 +415,6 @@ mod tests {
         );
     }
 
-    /// letibot `app/tests/turn.rs::the_turns_numbers_live_in_the_header_and_an_ordinary_ending_has_no_footer`
     /// (the header half): 1200 tokens over 2000 ms is 600 tok/s.
     #[test]
     fn the_turns_numbers_live_in_the_header() {
@@ -554,8 +485,8 @@ mod tests {
         assert_eq!(git_fit(&p, 4).len(), 0);
     }
 
-    /// The header measured live at 156 columns, where 27 columns of padding sat beside a
-    /// 23-column branch field that was not drawn.
+    /// The header measured live at 156 columns, where padding sat beside a branch field that was not
+    /// drawn.
     fn measured() -> Header {
         Header {
             name: "pg-noop".into(),
@@ -592,8 +523,7 @@ mod tests {
     fn the_measured_header_draws_its_branch_at_156_columns() {
         let mut h = measured();
         assert_eq!(visible_width(&tail_of(&h)), 95, "the tail as measured");
-        // As measured: the branch, 23 columns wrapped, beside the whole path and the whole tail
-        // (7 + 27 + 23 + 2 + 95 = 154).
+        // As measured: 7 + 27 + 23 + 2 + 95 = 154.
         h.git.truncate(1);
         let l = h.line(156);
         let s = l.plain();
@@ -633,17 +563,15 @@ mod tests {
         assert_eq!(h.line(20).plain(), "n  ~/abcdef (main?4)");
         // Then the path, below its floor of 8.
         assert_eq!(h.line(19).plain(), "n  (main?4)        ");
-        // With no path the field opens with two spaces: the whole of it in exactly its 10
-        // columns, `?4` off the right at 9, the branch alone in exactly 8, nothing at 7.
+        // With no path the field opens with two spaces, and `?4` goes at 9.
         assert_eq!(h.line(11).plain(), "n  (main?4)");
         assert_eq!(h.line(10).plain(), "n  (main) ");
         assert_eq!(h.line(9).plain(), "n  (main)");
         assert_eq!(h.line(8).plain(), "n       ");
     }
 
-    /// The operator's order: out, position, cached, model, duration, tok/s, spend, ctx — and
-    /// only then the path, the marks, the branch. The left half, whole, is
-    /// 7 + 27 + 27 = 61 columns.
+    /// The operator's order — out, position, cached, model, duration, tok/s, spend, ctx — and only
+    /// then the path, the marks, the branch. The left half, whole, is 7 + 27 + 27 = 61 columns.
     #[test]
     fn the_header_drops_its_facts_in_the_operators_order() {
         let h = measured();
@@ -690,8 +618,8 @@ mod tests {
             s.starts_with("pg-noop  …/dbtest/pg-noop (fix-main-pgx-timeout!3?2)"),
             "{s}"
         );
-        // 7 + 2 + 8 + 27 = 44 is the path's floor; at 43 it is gone and git is whole, now
-        // opening with two spaces.
+        // 7 + 2 + 8 + 27 = 44 is the path's floor; at 43 it is gone and git is whole, now opening
+        // with two spaces.
         assert!(
             h.line(44).plain().starts_with("pg-noop  …"),
             "{}",
@@ -712,8 +640,8 @@ mod tests {
         assert_eq!(h.line(30).plain(), "pg-noop  …/dbtest/pg-noop     ");
     }
 
-    /// The operator's approved example at 34 columns: the tail is gone, the path is gone, and
-    /// the git field, branch and mark both, is whole.
+    /// The approved example at 34 columns: the tail is gone, the path is gone, and the git field,
+    /// branch and mark both, is whole.
     #[test]
     fn git_marks_outlast_the_path() {
         let mut h = measured();

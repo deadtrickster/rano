@@ -1,24 +1,8 @@
-//! Counting a file's lines without reading them into anything.
-//!
-//! A tail starts at row 0 of *what we read* (TODO.md §20.1's idea 3), so its
-//! row 1 is a screenful near the end of a file whose size nobody has measured.
-//! The number that fixes it is one integer: **how many newlines there are in
-//! the bytes before the tail begins**. One pass over those bytes gets it — the
-//! same pass at the same ~2 GB/s §20.9 measured, so about a second for a 2 GiB
-//! log — and nothing is decoded, nothing is held, and nothing is allocated per
-//! row.
-//!
-//! That last part is the whole reason this is a separate job rather than a
-//! second [`crate::loader::LoadJob`]. The loader would answer the same question
-//! by delivering every row of the file as `Vec<char>` — four bytes per
-//! character, one heap allocation per row, which is exactly the per-row cost
-//! §20.4's budget exists to refuse. A tail that is not being looked at must not
-//! pay 8× a 2 GiB file to learn how many lines it has.
-//!
-//! It is also the beginning of the sparse line index §16.3 wants, which is why
-//! it is written as a scan over bytes from a byte offset rather than as a
-//! "count the lines" helper: the next caller wants the same walk with the row
-//! *starts* kept.
+//! Counting a file's lines without reading them into anything: one pass over
+//! the bytes before a tail begins, counting newlines — nothing decoded, held,
+//! or allocated per row. A separate job from the loader, which would answer by
+//! building every row; a scan from a byte offset because a future line index
+//! wants the same walk.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -27,34 +11,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-/// Read granularity. One page-cache-friendly read, as [`crate::loader::CHUNK`]
-/// is, and for the same reason.
+/// Read granularity: one page-cache-friendly read, as [`crate::loader::CHUNK`].
 const CHUNK: usize = 64 * 1024;
 
-/// How many bytes between progress reports. Eight of the 64 KiB chunks, so the
-/// channel carries one message per half megabyte: often enough that a status
-/// line counting up looks alive, rare enough that the sending is not the cost.
+/// Bytes between progress reports: one message per half megabyte.
 const PROGRESS_EVERY: u64 = 8 * CHUNK as u64;
 
 /// What one [`LineCountJob::poll`] found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Counted {
-    /// Nothing has arrived since the last poll.
     Nothing,
-    /// The count so far; the scan is still going.
     Progress(u64),
     /// The scan finished: this many newlines in the bytes it was given.
     Done(u64),
-    /// The scan ended without an answer — it was cancelled, or its owner went
-    /// away. **Deliberately not a count**: a partial count is not the file's
-    /// number of lines, and a caller that installed it would be stating a
-    /// wrong number as a fact.
+    /// The scan ended without an answer — cancelled, or its owner went away.
+    /// Deliberately not a partial count.
     Stopped,
     /// The file could not be read. The string is for a status line.
     Failed(String),
 }
 
-/// One message from the counting thread.
 enum Msg {
     Progress(u64),
     Done(u64),
@@ -65,24 +41,15 @@ enum Msg {
 pub struct LineCountJob {
     rx: Receiver<Msg>,
     cancel: Arc<AtomicBool>,
-    /// Set when `Done`, `Stopped` or `Failed` has been seen, so `poll` stops
-    /// asking.
     done: bool,
-    /// Newlines counted so far, as of the last `poll`. Starts at 0 and reaches
-    /// the answer when `poll` reports `Done`.
+    /// Newlines counted so far; reaches the answer when `poll` reports `Done`.
     pub counted: u64,
 }
 
 impl LineCountJob {
-    /// Count the newlines in `path[0..upto)` on a worker.
-    ///
-    /// The open happens here, on the caller's thread, so an unreadable file
-    /// fails now rather than turning into a job that silently never answers.
-    /// `upto == 0` is a legitimate request with the answer zero — a tail that
-    /// began at the file's start — and is not a case the caller has to avoid.
-    ///
-    /// `upto` past the end of the file is answered with the count of what is
-    /// there, which is what a reader of a file being written wants.
+    /// Count the newlines in `path[0..upto)` on a worker. The open happens
+    /// here, on the caller's thread, so an unreadable file fails now. `upto` of
+    /// 0 is legitimate; past the end, the count of what is there.
     pub fn spawn(path: PathBuf, upto: u64) -> io::Result<Self> {
         let file = File::open(&path)?;
         let (tx, rx) = mpsc::channel();
@@ -97,10 +64,7 @@ impl LineCountJob {
         })
     }
 
-    /// Take whatever the worker has said. **Never blocks.**
-    ///
-    /// `Progress` is returned rather than swallowed so its caller can redraw
-    /// the counting number; `self.counted` already holds it either way.
+    /// Take whatever the worker has said; never blocks.
     pub fn poll(&mut self) -> Counted {
         if self.done {
             return Counted::Nothing;
@@ -122,9 +86,8 @@ impl LineCountJob {
                     return Counted::Failed(e);
                 }
                 Err(TryRecvError::Empty) => break,
-                // The worker went away without answering. It was cancelled, or
-                // its sender was dropped; either way there is no number, and
-                // the partial one is not the answer.
+                // Cancelled, or the sender dropped: the partial count is not
+                // the answer.
                 Err(TryRecvError::Disconnected) => {
                     self.done = true;
                     return Counted::Stopped;
@@ -134,21 +97,14 @@ impl LineCountJob {
         out
     }
 
-    /// Stop the scan at the next chunk boundary. Idempotent, and safe to call
-    /// while the worker is mid-read.
+    /// Stop the scan at the next chunk boundary; idempotent.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
 
-/// The worker: one pass over `[0, upto)`, counting newlines.
-///
-/// It never seeks, never re-reads, and holds one [`CHUNK`] buffer for the whole
-/// run — so its footprint is the same on a 10 KiB file and a 2 GiB one, which
-/// is the property `linecount_allocates_nothing_per_row` pins.
-///
-/// A cancellation sends nothing at all: the caller cancelled because it is not
-/// waiting any more, and a message would only race with whatever replaced it.
+/// The worker: one pass over `[0, upto)`, one buffer for the whole run, so its
+/// footprint is the same on a 10 KiB file and a 2 GiB one.
 fn count_prefix(mut file: File, upto: u64, tx: &mpsc::Sender<Msg>, cancel: &AtomicBool) {
     let mut buf = vec![0u8; CHUNK];
     let mut total: u64 = 0;
@@ -158,8 +114,7 @@ fn count_prefix(mut file: File, upto: u64, tx: &mpsc::Sender<Msg>, cancel: &Atom
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        // Never past `upto`: the whole point is to scan a prefix, and reading
-        // the rest would be work whose answer nobody asked for.
+        // Never past `upto`: reading the rest would be work nobody asked for.
         let want = ((upto - read) as usize).min(CHUNK);
         let n = match file.read(&mut buf[..want]) {
             // A short file answers with what it has.
@@ -189,11 +144,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    /// A scratch file that removes itself.
-    ///
-    /// The name carries a counter: these tests run beside each other in one
-    /// process, and two of them writing `rano_linecount_c.txt` at once is a
-    /// fixture one test reads as the other's.
+    /// A scratch file that removes itself; the counter keeps parallel tests apart.
     struct Temp(PathBuf);
     impl Temp {
         fn new(name: &str, contents: &[u8]) -> Self {
@@ -241,9 +192,8 @@ mod tests {
         assert_eq!(counted(b"one\ntwo\nthree\n", 14), 3);
     }
 
-    /// No trailing newline: the last row is still a row, but it has no newline
-    /// of its own. This is the off-by-one worth pinning, because the caller
-    /// adds 1 to get a 1-based line number.
+    /// No trailing newline: the last row has no newline of its own; the caller
+    /// adds 1.
     #[test]
     fn a_file_without_a_trailing_newline_counts_its_rows() {
         assert_eq!(counted(b"one\ntwo\nthree", 13), 2);
@@ -254,9 +204,7 @@ mod tests {
         assert_eq!(counted(b"", 0), 0);
     }
 
-    /// **Only the prefix is scanned.** The caller asks for the bytes before the
-    /// tail, and the rows after it are already in the buffer — scanning them
-    /// would be reading the file twice.
+    /// Only the prefix: the rows after it are already in the buffer.
     #[test]
     fn only_the_prefix_is_counted() {
         let body = b"a\nb\nc\nd\ne\n";
@@ -266,12 +214,11 @@ mod tests {
         assert_eq!(counted(body, body.len() as u64), 5);
     }
 
-    /// A tail offset is always one past a newline, so the bytes it is given end
-    /// with one — and the count is then exactly the rows above the tail.
+    /// A tail offset is one past a newline, so the count is exactly the rows
+    /// above the tail.
     #[test]
     fn a_prefix_ending_in_a_newline_counts_whole_rows() {
         let body = b"a\nb\nc\n";
-        // Offset 4 is the start of the third row; two rows are above it.
         assert_eq!(counted(body, 4), 2);
     }
 
@@ -280,8 +227,7 @@ mod tests {
         assert_eq!(counted(b"one\r\ntwo\r\n", 10), 2);
     }
 
-    /// `upto` past the end is not an error: it answers for what is there, which
-    /// is what a reader of a file somebody is still writing needs.
+    /// `upto` past the end answers for what is there.
     #[test]
     fn a_prefix_longer_than_the_file_answers_for_the_file() {
         assert_eq!(counted(b"a\nb\n", 1_000_000), 2);
@@ -294,11 +240,8 @@ mod tests {
         assert!(LineCountJob::spawn(missing, 10).is_err());
     }
 
-    /// **A cancelled scan never reports a partial count.** `Stopped` if the cancel was seen
-    /// during the scan, and the *whole* count if the scan had already finished by the time anyone
-    /// asked - both are honest, and a partial number stated as the file's line count is not. Which
-    /// of the two happens is a race, so asserting only `Stopped` failed on a loaded macOS runner
-    /// where the job was done before `cancel()` was ever read.
+    /// A cancelled scan answers `Stopped` or the whole count (a race), never a
+    /// partial one.
     #[test]
     fn a_cancelled_scan_answers_stopped_or_a_whole_count_and_never_a_partial_one() {
         let body = b"a line of about forty bytes, give or take\n".repeat(40_000);
@@ -324,17 +267,8 @@ mod tests {
         }
     }
 
-    /// **The footprint does not depend on the file.**
-    ///
-    /// What this test pins is the behaviour: a log of 200 000 rows is counted
-    /// correctly in one forward pass. What it does NOT pin is the memory, and
-    /// saying otherwise would be worse than saying nothing — the property is
-    /// *structural* (`count_prefix` allocates one [`CHUNK`] buffer, once, for
-    /// the whole run), and a memory assertion in a test binary would have to
-    /// measure the whole process, which every test running beside this one
-    /// also allocates into. An 8-byte-per-character implementation of this
-    /// would fail the count above on no machine, so the shape is the argument
-    /// and the comment is where it is written down.
+    /// Pins the behaviour — a 200k-row log counted in one pass — not the
+    /// memory: the footprint is structural (one buffer, once).
     #[test]
     fn a_large_file_is_counted_in_one_pass() {
         let body = b"2026-10-09T12:00:00 INFO a row of a log\n".repeat(200_000);
@@ -346,9 +280,7 @@ mod tests {
         let outcome = drain(&mut job);
         let dt = t0.elapsed();
         assert_eq!(outcome, Counted::Done(200_000));
-        // Generous, and stated as what it is: this is 6 MiB read through the
-        // page cache, and the point is the order — seconds, not minutes, for a
-        // file whose rows are never built.
+        // 6 MiB through the page cache; the point is the order, not the number.
         assert!(dt.as_secs() < 5, "counting 6 MiB took {dt:?}");
     }
 }

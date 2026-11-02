@@ -1,29 +1,23 @@
-//! File encodings: what the bytes are, and how to keep them that way.
-//!
-//! Cheapest evidence first: a BOM, else valid UTF-8, else windows-1252, which maps every
-//! byte so a legacy file opens rather than being refused; a save then re-encodes it.
+//! File encodings: what the bytes are, and how to keep them that way — a BOM,
+//! else valid UTF-8, else windows-1252, which maps every byte so a legacy file
+//! opens; a save re-encodes it.
 
 /// How a file's bytes map to characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
-    /// UTF-8 with no BOM. The overwhelming majority of files.
     Utf8,
-    /// UTF-8 preceded by `EF BB BF`. The BOM is stripped on read and put back
-    /// on write, so it is never a column.
+    /// UTF-8 preceded by `EF BB BF`; stripped on read, put back on write.
     Utf8Bom,
-    /// `FF FE`, little-endian. Also covers UTF-32LE's first two bytes, which is
-    /// why UTF-32 is checked first.
+    /// `FF FE`, little-endian; also UTF-32LE's first two bytes, so UTF-32 is checked first.
     Utf16Le,
     /// `FE FF`, big-endian.
     Utf16Be,
-    /// windows-1252: every byte is a character, so any byte sequence decodes.
-    /// The last rung, and therefore what "not valid UTF-8" means.
+    /// windows-1252: every byte is a character — the last rung.
     Cp1252,
 }
 
 impl Encoding {
-    /// The bytes this encoding's BOM is, or an empty slice for the two that
-    /// have none.
+    /// This encoding's BOM, or empty for the two that have none.
     pub fn bom(self) -> &'static [u8] {
         match self {
             Self::Utf8Bom => &[0xEF, 0xBB, 0xBF],
@@ -33,7 +27,6 @@ impl Encoding {
         }
     }
 
-    /// A short name for the status line and for tests.
     pub fn name(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",
@@ -44,9 +37,8 @@ impl Encoding {
         }
     }
 
-    /// Whether the file's rows can be split on `0x0A` BYTES, which is what makes
-    /// the lazy loader possible: in UTF-8 a `0x0A` is always a newline, while
-    /// UTF-16 stores `U+000A` as two bytes and has to be decoded to find rows.
+    /// Whether the file's rows can be split on `0x0A` bytes — what makes the lazy
+    /// loader possible: UTF-16 stores `U+000A` as two bytes.
     pub fn rows_split_on_byte_newlines(self) -> bool {
         matches!(self, Self::Utf8 | Self::Utf8Bom | Self::Cp1252)
     }
@@ -54,13 +46,11 @@ impl Encoding {
 
 /// The BOM a byte prefix starts with, if any. Four to six comparisons.
 pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
-    // UTF-32 before UTF-16: `FF FE 00 00` starts with UTF-16LE's `FF FE`, and
-    // `00 00 FE FF` would otherwise be read as neither.
+    // UTF-32 before UTF-16: its `FF FE 00 00` starts with UTF-16LE's BOM, and is
+    // unsupported — refusing by name beats misreading it.
     if prefix.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
         || prefix.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
     {
-        // UTF-32 is not supported and saying so beats misreading it as UTF-16:
-        // the caller refuses the file by name instead of opening nonsense.
         return None;
     }
     if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -75,20 +65,17 @@ pub fn bom_of(prefix: &[u8]) -> Option<Encoding> {
     None
 }
 
-/// How many bytes [`is_binary`] looks at: 8000, git's number, which checks for a
-/// zero byte in exactly this many.
+/// How many bytes [`is_binary`] looks at: git's number.
 pub const BINARY_PROBE: usize = 8000;
 
-/// Whether these bytes are a binary file rather than text: a NUL byte in the
-/// first [`BINARY_PROBE`] bytes. UTF-16 has NULs too and is decoded before this
-/// matters; without it a `.pyc` would open as mojibake and could be saved back.
+/// Whether these bytes are a binary file: a NUL in the first [`BINARY_PROBE`]
+/// bytes — without it a `.pyc` would open as mojibake and could be saved back.
 pub fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
 }
 
 /// Whether the bytes handed to [`detect`] are the whole file or a prefix: a
-/// sequence cut off at the end is the reader's doing in one case and the file's
-/// in the other, and only the caller knows which it read.
+/// truncated final sequence is the reader's cut in one and the file's in the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// More bytes follow; a truncated final sequence is the reader's doing.
@@ -98,25 +85,23 @@ pub enum Scope {
 }
 
 /// Decide the encoding: the BOM if there is one, else UTF-8 if the bytes validate,
-/// else windows-1252. A truncated final sequence is the reader's cut in a prefix and
-/// the file's own in a whole file, so a prefix must hold a whole offending sequence.
+/// else windows-1252.
 pub fn detect(bytes: &[u8], scope: Scope) -> Encoding {
     if let Some(enc) = bom_of(bytes) {
         return enc;
     }
     match std::str::from_utf8(bytes) {
         Ok(_) => Encoding::Utf8,
-        // An incomplete sequence at the very end. If the reader cut it, the
-        // bytes are still UTF-8; if this IS the file, it ended mid-character
-        // and the file is not UTF-8 at all.
+        // An incomplete sequence at the very end: the reader's cut in a prefix,
+        // the file's own in a whole file.
         Err(e) if e.error_len().is_none() && scope == Scope::Prefix => Encoding::Utf8,
         Err(_) => Encoding::Cp1252,
     }
 }
 
-/// The scalar a byte maps to in windows-1252: latin-1 everywhere but `0x80`–`0x9F`,
-/// where the standard's printable characters (curly quotes, dashes, the euro sign)
-/// replace the control codes. The five undefined bytes stay controls, keeping it total.
+/// The scalar a byte maps to in windows-1252: latin-1 everywhere but
+/// `0x80`–`0x9F`, where the standard's printable characters replace the C1
+/// controls. Total.
 fn cp1252_char(b: u8) -> char {
     const C1: [char; 32] = [
         '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
@@ -131,20 +116,18 @@ fn cp1252_char(b: u8) -> char {
     }
 }
 
-/// The byte a windows-1252 character came from, or `None` when it did not.
-/// The inverse of [`cp1252_char`], asked of it so the two cannot drift.
+/// The byte a windows-1252 character came from; the inverse of [`cp1252_char`],
+/// asked of it so the two cannot drift.
 fn cp1252_byte(c: char) -> Option<u8> {
     let u = c as u32;
     if u < 0x80 || (0xA0..=0xFF).contains(&u) {
         return Some(u as u8);
     }
-    // The C1 range is the only part that is not latin-1.
     (0x80..=0x9Fu8).find(|b| cp1252_char(*b) == c)
 }
 
-/// Decode `bytes` as `enc`, with the BOM stripped. `Err` for the two cases that
-/// are genuinely unreadable: a UTF-16 byte length that cannot hold whole code
-/// units, or a lone surrogate.
+/// Decode `bytes` as `enc`, with the BOM stripped. `Err` only for a UTF-16
+/// length that cannot hold whole code units, or a lone surrogate.
 pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, String> {
     let bom = enc.bom();
     let body = bytes.strip_prefix(bom).unwrap_or(bytes);
@@ -176,7 +159,6 @@ fn decode_utf16(body: &[u8], big_endian: bool) -> Result<String, String> {
     while i < body.len() {
         let u = unit(i);
         i += 2;
-        // A surrogate pair is two units and one scalar.
         if (0xD800..0xDC00).contains(&u) {
             if i + 1 >= body.len() {
                 return Err("UTF-16 ends with a lone high surrogate".into());
@@ -197,8 +179,7 @@ fn decode_utf16(body: &[u8], big_endian: bool) -> Result<String, String> {
     Ok(out)
 }
 
-/// Encode `text` as `enc`, BOM included. The inverse of [`decode`], so a file
-/// read and written back unchanged produces the same bytes.
+/// Encode `text` as `enc`, BOM included — the inverse of [`decode`].
 pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(text.len() + enc.bom().len());
     out.extend_from_slice(enc.bom());
@@ -233,9 +214,7 @@ pub fn encode(text: &str, enc: Encoding) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
-    /// Every shape a file arrives in, as bytes. Two texts, because cp1252 cannot
-    /// hold CJK: the western shape is what such a file really contains, latin-1
-    /// letters and the C1 range's curly quotes.
+    /// cp1252 cannot hold CJK, so the western shape is a second text.
     fn shapes() -> Vec<(&'static str, Encoding, Vec<u8>)> {
         let text = "hello caf\u{e9} \u{4e2d}\u{6587} line\nsecond line\n";
         let western = "hello caf\u{e9} \u{201C}quoted\u{201D} line\nsecond line\n";
@@ -277,21 +256,16 @@ mod tests {
         for (label, want, bytes) in shapes() {
             assert_eq!(detect(&bytes, Scope::Whole), want, "{label}");
         }
-        // Detection is a PREFIX operation: any prefix past the BOM, or past the
-        // first offending byte, gives the whole file's answer. A legacy file
-        // before that byte IS valid UTF-8 — see the note on `detect`.
+        // Detection is a prefix operation: any prefix past the BOM, or past
+        // the first offending byte, gives the same answer.
         for (label, want, bytes) in shapes() {
             let from = if want == Encoding::Cp1252 {
-                // One byte past the first invalid one: that byte alone is an
-                // incomplete sequence and needs the next to show it is not a
-                // continuation.
                 bytes
                     .iter()
                     .position(|b| *b >= 0x80)
                     .map(|i| (i + 2).min(bytes.len()))
                     .unwrap_or(bytes.len())
             } else {
-                // A BOM is enough on its own.
                 want.bom().len().max(1)
             };
             for cut in from..=bytes.len() {
@@ -301,8 +275,6 @@ mod tests {
                     "{label} cut at {cut}"
                 );
             }
-            // Shorter than that, only a BOM case is knowable: a legacy file has
-            // no BOM, so a short prefix of one is evidence of nothing.
             if !want.bom().is_empty() {
                 for cut in want.bom().len()..from {
                     assert_eq!(
@@ -317,8 +289,6 @@ mod tests {
 
     #[test]
     fn a_short_prefix_of_a_legacy_file_reads_as_utf8_and_that_is_why_size_matters() {
-        // Pins the limitation `detect` documents: the first bytes of a cp1252
-        // file are ASCII, and ASCII is valid UTF-8.
         let bytes = encode("hello caf\u{e9}", Encoding::Cp1252).unwrap();
         assert_eq!(
             detect(&bytes[..5], Scope::Prefix),
@@ -334,26 +304,23 @@ mod tests {
 
     #[test]
     fn a_file_ending_mid_sequence_is_not_utf8_but_a_prefix_is() {
-        // What `Scope` exists for: the same bytes, and the answer differs.
-        let bytes = b"hello caf\xe9"; // cp1252 'é', and an incomplete UTF-8 lead
+        let bytes = b"hello caf\xe9"; // cp1252 'é', an incomplete UTF-8 lead
         assert_eq!(detect(bytes, Scope::Whole), Encoding::Cp1252);
         assert_eq!(detect(bytes, Scope::Prefix), Encoding::Utf8);
     }
 
     #[test]
     fn a_prefix_cut_mid_sequence_is_still_utf8() {
-        // A 3-byte character split across the 64 KiB a caller happens to read.
         let text = "a".repeat(64) + "\u{4e2d}";
         let bytes = text.as_bytes();
-        let cut = bytes.len() - 1; // one byte into the character
+        let cut = bytes.len() - 1;
         assert_eq!(detect(&bytes[..cut], Scope::Prefix), Encoding::Utf8);
     }
 
     #[test]
     fn a_utf8_bom_is_stripped_and_not_a_column() {
-        // A BOM validates, so without stripping it the file opens with U+FEFF as
-        // its first character: invisible, but Home and `^`-anchored regexes see
-        // it.
+        // Without stripping, U+FEFF would be the first character — invisible,
+        // but Home and `^`-anchored regexes see it.
         let bytes = [&[0xEF, 0xBB, 0xBF][..], b"hello\n"].concat();
         let enc = detect(&bytes, Scope::Whole);
         assert_eq!(enc, Encoding::Utf8Bom);
@@ -364,7 +331,6 @@ mod tests {
 
     #[test]
     fn round_trips_every_encoding() {
-        // Read, write, read: a file must not be corrupted by being opened.
         for (label, enc, bytes) in shapes() {
             let text = decode(&bytes, enc).expect(label);
             let again = encode(&text, enc).expect(label);
@@ -375,46 +341,34 @@ mod tests {
 
     #[test]
     fn utf16_decodes_including_a_surrogate_pair() {
-        // U+1F600 is a surrogate pair: two units, one scalar.
         let text = "a\u{1F600}b\n";
         for enc in [Encoding::Utf16Le, Encoding::Utf16Be] {
             let bytes = encode(text, enc).unwrap();
             assert_eq!(decode(&bytes, enc).unwrap(), text, "{}", enc.name());
-            // And detection finds it from the BOM.
             assert_eq!(detect(&bytes, Scope::Whole), enc);
         }
     }
 
     #[test]
     fn utf16_failures_are_reported_not_guessed() {
-        // Odd length: cannot hold whole code units.
         let odd = [0xFF, 0xFE, 0x41];
         assert!(decode(&odd, Encoding::Utf16Le).is_err());
-        // A lone high surrogate.
         let lone = [0xFF, 0xFE, 0x00, 0xD8];
         assert!(decode(&lone, Encoding::Utf16Le).is_err());
-        // A lone low surrogate.
         let lone = [0xFF, 0xFE, 0x00, 0xDC];
         assert!(decode(&lone, Encoding::Utf16Le).is_err());
     }
 
     #[test]
     fn cp1252_maps_the_c1_range_to_printable_characters() {
-        // 0x93/0x94 are curly quotes in windows-1252 and C1 controls in latin-1:
-        // this is the difference between a file reading correctly and a file
-        // full of \u{93}.
         assert_eq!(
             decode(&[0x93, b'x', 0x94], Encoding::Cp1252).unwrap(),
             "\u{201C}x\u{201D}"
         );
-        // Outside that range it is latin-1.
         assert_eq!(decode(&[0xE9], Encoding::Cp1252).unwrap(), "\u{e9}");
-        // And every byte decodes: the mapping is total, which is what lets this
-        // be the last rung.
         for b in 0u8..=255 {
             let s = decode(&[b], Encoding::Cp1252).unwrap();
             assert_eq!(s.chars().count(), 1, "byte {b:#04x} is one character");
-            // And it round-trips, including the five undefined C1 codes.
             assert_eq!(
                 encode(&s, Encoding::Cp1252).unwrap(),
                 vec![b],
@@ -425,15 +379,11 @@ mod tests {
 
     #[test]
     fn a_character_outside_cp1252_is_refused_rather_than_mangled() {
-        // Saving a CJK character to a cp1252 file cannot be done. Refusing is
-        // the only honest answer: a '?' would be silent data loss.
         assert!(encode("\u{4e2d}", Encoding::Cp1252).is_err());
     }
 
     #[test]
     fn bytes_split_on_newlines_only_for_the_utf8_family() {
-        // The property the lazy loader needs. UTF-16 stores U+000A as two
-        // bytes, so its rows cannot be found without decoding.
         assert!(Encoding::Utf8.rows_split_on_byte_newlines());
         assert!(Encoding::Utf8Bom.rows_split_on_byte_newlines());
         assert!(Encoding::Cp1252.rows_split_on_byte_newlines());
@@ -443,8 +393,6 @@ mod tests {
 
     #[test]
     fn utf32_is_not_pretended_about() {
-        // Its BOM overlaps UTF-16LE's, which is why it is checked first and
-        // deliberately declined rather than misread as UTF-16.
         assert_eq!(bom_of(&[0xFF, 0xFE, 0x00, 0x00]), None);
         assert_eq!(bom_of(&[0x00, 0x00, 0xFE, 0xFF]), None);
     }
@@ -460,25 +408,21 @@ mod binary_probe {
         assert!(is_binary(b"\x7fELF\x00\x00\x00\x00"));
         assert!(is_binary(b"\x00"));
         assert!(is_binary(b"plain text, then a NUL: \x00"));
-        // A real shape: a Python bytecode header is `\r\r\n` + a NUL and a version word.
         assert!(is_binary(b"\x0d\x0d\x0a\x00"));
     }
 
-    /// Text of every kind rano decodes has no NUL in it, so the rule never fires
-    /// on a text file — the cp1252 fallback included, which exists for bytes that
-    /// are not UTF-8 but are still text.
+    /// No NUL occurs in any text rano decodes — cp1252 included.
     #[test]
     fn text_is_not_a_binary() {
         assert!(!is_binary(b""));
         assert!(!is_binary("fn main() {}\n".as_bytes()));
         assert!(!is_binary("héllo wörld 日本語 🙂\n".as_bytes()));
-        // cp1252: 0xE9 is `é` there and not `\0`, so this is text, not binary.
         assert!(!is_binary(b"caf\xe9 au lait\n"));
         assert!(!is_binary(&[0xff; 64]));
     }
 
-    /// Only the first [`BINARY_PROBE`] bytes are looked at, which keeps the rule
-    /// cheap and stops one stray byte 2 GB into a log from reclassifying it.
+    /// Only the first [`BINARY_PROBE`] bytes are looked at, so a stray byte
+    /// far into a log cannot reclassify it.
     #[test]
     fn only_the_first_probe_is_read() {
         let mut far = vec![b'x'; BINARY_PROBE + 100];

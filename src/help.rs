@@ -1,16 +1,6 @@
-//! Finding a command: `M-x` (the palette), the help pages, `describe-key`, and
-//! the cards a prefix key shows.
-//!
-//! Everything here reads the command table and the keymaps
-//! (`commands.rs`); none of it lists a key of its own.
-//!
-//! - **`M-x`** runs any command by name. Type words in any order — each must
-//!   match the title, the name or the doc — and the best matches come first,
-//!   recently run ones ahead; every row shows the command's key, so the palette
-//!   teaches the keys it saves you from needing.
-//! - **Help pages** (`C-g ?`, `C-g b`): every key in effect, as cards grouped
-//!   by what they do.
-//! - **`describe-key`** (`C-g k`): press a key, read what it runs.
+//! Finding a command: `M-x` (the palette), the help pages (`C-g ?`, `C-g b`)
+//! and `describe-key` (`C-g k`). Everything here reads the command table and
+//! the keymaps (`commands.rs`); none of it lists a key of its own.
 
 use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
 use crate::render::{Line, Span, Style};

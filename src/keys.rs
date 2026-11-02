@@ -8,14 +8,8 @@ use crate::term::{KeyCode, KeyEvent};
 use crate::editor::Editor;
 
 /// What became of a key, for a host that routes keys between the editor and
-/// itself.
-///
-/// The editor does not know what else is on the screen, so a key it has no
-/// use for is handed back rather than swallowed: a host that sends every key
-/// to its focused pane can then try the key on its own bindings. Keys a host
-/// wants to take *before* the editor — a chord that must work whatever the
-/// editor would do with it — go in a host keymap instead
-/// ([`Editor::push_keymap`]), and come back as [`KeyOutcome::Host`].
+/// itself. A key the editor has no use for is handed back, not swallowed; keys
+/// a host wants before the editor go in a host keymap ([`Editor::push_keymap`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyOutcome {
     /// The editor used the key: it ran a command, typed a character, edited
@@ -30,10 +24,8 @@ pub enum KeyOutcome {
     Host(String),
 }
 
-/// A key as the text a plugin reads: `n`, `g`, `M-x`, `C-a`, `S-Tab`, `Enter`, `Esc`, `Left`.
-///
-/// The grammar is deliberately narrow — a plugin reads a key, it does not parse a notation — and
-/// modifiers are prefixed in the order a person writes them.
+/// A key as the text a plugin reads: `n`, `M-x`, `C-a`, `S-Tab`, `Enter`, `Left`.
+/// Deliberately narrow — a plugin reads a key, it does not parse a notation.
 fn key_text(key: &crate::term::event::KeyEvent) -> String {
     use crate::term::event::{KeyCode, Mods};
     let mut out = String::new();
@@ -70,12 +62,9 @@ fn key_text(key: &crate::term::event::KeyEvent) -> String {
 impl Editor {
     // ---------- key dispatch ----------
 
-    /// **Hand a key to a provider's view**, if one claims it: `true` when a plugin answered and
-    /// the answer was opened.
-    ///
-    /// The key goes as `<path>\n<key>` — the same two-part text every other hook takes, with the
-    /// path the view was opened for, so the plugin needs no state between calls. Modifiers are
-    /// spelled `C-`, `M-`, `S-`; a named key is its own name, lowercased.
+    /// Hand a key to a provider's view, if one claims it; `true` when a
+    /// plugin answered and the answer was opened. The key goes as
+    /// `<path>\n<key>`, the same two-part text every other hook takes.
     fn on_key_to_plugin(&mut self, key: &crate::term::event::KeyEvent) -> bool {
         if !self.bs().synthetic {
             return false;
@@ -121,10 +110,8 @@ impl Editor {
         // Keep the soft-wrap visual-row table fresh (M-\): a resize or the
         // M-\ toggle itself may have changed the wrap width.
         self.ensure_wrap_prefix();
-        // **A provider's view can own its keys.** A plugin that drew the buffer — a document
-        // reader, a listing — is asked about the key before any map is consulted, and answers
-        // with the path to open next. One plugin cannot take a key a map answers for, because
-        // the ask happens only in a synthetic view and only when a plugin answers `on_key`.
+        // A provider's view can own its keys: a plugin that drew the buffer
+        // is asked before any map, and answers with the path to open next.
         if self.on_key_to_plugin(&key) {
             return KeyOutcome::Handled;
         }
@@ -169,13 +156,9 @@ impl Editor {
                 _ => self.completion_close(),
             }
         }
-        // **A host's own chord reaches the host even over a prompt.** A prompt takes
-        // every key for its line of text, and it used to take the host's keys too: a
-        // pane embedded in letibot could not be closed while a search was being typed.
-        // So a single key a host map binds to a *host* command (not an editor one,
-        // the same test dispatch makes) goes back to the host, and the prompt stays
-        // open for when the host hands the keyboard back. Everything else — typing,
-        // the prompt's own keys, an editor command a host rebound — is the prompt's.
+        // A host's own chord reaches the host even over a prompt: a key a
+        // host map binds to a host-only command goes back and the prompt
+        // stays open. Everything else is the prompt's.
         if self.prompt.is_some() && !self.host_keymaps.is_empty() {
             let host: Vec<&crate::keymap::Keymap> = self.host_keymaps.iter().rev().collect();
             if let crate::keymap::Lookup::Command(name) =
@@ -204,8 +187,7 @@ mod key_text_tests {
         crate::term::event::KeyEvent { code, mods }
     }
 
-    /// The grammar a plugin reads: a bare character is itself, modifiers are prefixes, and a
-    /// named key keeps its name.
+    /// The grammar a plugin reads: bare characters, modifier prefixes, named keys.
     #[test]
     fn a_key_is_the_text_a_plugin_reads() {
         assert_eq!(key_text(&k(KeyCode::Char('n'), Mods::NONE)), "n");

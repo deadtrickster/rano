@@ -1,17 +1,14 @@
-//! **Docker's `json-file` log driver**: one JSON record a line, and the container's own text inside
-//! it. `rano <id>-json.log` should show what the container said, not the envelope around it.
+//! **Docker's `json-file` log driver**: one JSON record a line, and the
+//! container's own text inside it. Two facts about the format, both measured:
 //!
-//! Two facts about the format that are not in its name, both measured on a real file:
+//! * **A record is not a line** — the driver splits long output at 16 KiB, so
+//!   one line of a container's text arrives as several records and only the
+//!   last ends in `\n`.
+//! * **The file is not in time order** — stderr can land before stdout with a
+//!   later `time`; the order shown is the file's.
 //!
-//! * **A record is not a line.** The driver splits long output at 16 KiB, so one line of a
-//!   container's text arrives as several records and only the last of them ends in `\n`. A reader
-//!   that treats a record as a row turns a 40 KB line into three rows of nothing.
-//! * **The file is not in time order.** Records are written as the writer emits them, and stderr
-//!   can land before stdout with a later `time`. The order is the file's, and that is what a
-//!   reader shows.
-//!
-//! Nothing here decides anything about a *log*: a docker log is a log like any other, so this is
-//! the unwrap the loader applies while a record becomes a row.
+//! Nothing here decides anything about a *log*: this is the unwrap the loader
+//! applies while a record becomes a row.
 
 /// Which stream a record carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +24,9 @@ pub struct Record {
     pub stream: Stream,
 }
 
-/// **Whether a file is a docker log**, decided from its first bytes: the driver writes
-/// `{"log":"…","stream":"…","time":"…"}` with no space after the colon, and nothing else that
-/// rano reads opens with that.
+/// **Whether a file is a docker log**, from its first bytes: the driver writes
+/// `{"log":"…","stream":"…","time":"…"}` and nothing else rano reads
+/// opens with that.
 pub fn looks_like(prefix: &[u8]) -> bool {
     let at = prefix
         .iter()
@@ -38,8 +35,8 @@ pub fn looks_like(prefix: &[u8]) -> bool {
     prefix[at..].starts_with(br#"{"log":"#)
 }
 
-/// **One record, or `None`** for a line that is not one — a file with a stray line in it is not a
-/// reason to throw the file away, so the caller passes those through untouched.
+/// **One record, or `None`** for a line that is not one — a stray line is not a
+/// reason to throw the file away, so the caller passes those through.
 pub fn record(line: &[u8]) -> Option<Record> {
     let value: serde_json::Value = serde_json::from_slice(line).ok()?;
     let text = value.get("log")?.as_str()?.to_string();
@@ -50,8 +47,8 @@ pub fn record(line: &[u8]) -> Option<Record> {
     Some(Record { text, stream })
 }
 
-/// **Records into lines.** Feed it each record's text in file order and it hands back the lines
-/// that are complete; a chunk that does not end in `\n` is held until the rest of its line arrives.
+/// **Records into lines**: feed each record's text in file order; a chunk not
+/// ending in `\n` is held until the rest of its line arrives.
 #[derive(Debug, Default)]
 pub struct Unwrap {
     pending: String,
@@ -145,8 +142,8 @@ mod tests {
         assert_eq!(u.flush(), None, "and nothing twice");
     }
 
-    /// **The file's order is the reader's order**: stderr before stdout is what was written, so
-    /// it is what is shown. Sorting by `time` would rewrite the file.
+    /// **The file's order is the reader's order**: sorting by `time` would
+    /// rewrite the file.
     #[test]
     fn the_order_is_the_files_and_not_the_clock() {
         let lines: [&[u8]; 2] = [

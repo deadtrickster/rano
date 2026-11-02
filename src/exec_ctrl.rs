@@ -1,4 +1,4 @@
-//! Execute (^T, D7) and filter (M-|, F6): run external commands and splice
+//! Execute (^T) and filter (M-|, F6): run external commands and splice
 //! their output back as undoable edits, on top of exec::ExecJob.
 
 use crate::buffer::Pos;
@@ -35,7 +35,7 @@ impl Editor {
     }
 
     /// Poll the active exec job. On completion, insert the stdout below the
-    /// spawn row as ONE undo step, or flash the failure (no undo step, no
+    /// spawn row as one undo step, or flash the failure (no undo step, no
     /// edit invalidation). Returns whether state changed, for a later
     /// dirty-draw pass.
     pub(crate) fn exec_poll(&mut self) -> bool {
@@ -167,16 +167,10 @@ impl Editor {
     }
 }
 
-/// **Run a program over text, bounded.** `input` goes to its stdin, its stdout comes back,
-/// and a wall clock bounds the whole thing — this sits on the SAVE path (gofmt on a Go
-/// buffer), where a child that never answers would be an editor that never saves.
-///
-/// A different shape from [`Editor::do_filter`], which is the interactive `M-|`: that one
-/// goes through `sh -c` on its own thread and splices into a marked region of the buffer;
-/// this one runs a program directly with an argv and hands its output back to the caller.
-///
-/// Both pipes are drained by their own threads: writing first and reading afterwards
-/// deadlocks on a 64 KiB pipe, which is the same trap `do_filter` records one paragraph up.
+/// Run a program over text with a wall-clock bound; used on the save path
+/// (gofmt on a Go buffer), where a child that never answers is an editor
+/// that never saves. Pipes are drained by their own threads — writing
+/// before reading deadlocks on a full pipe.
 pub(crate) fn run_filter(
     program: &str,
     args: &[&str],

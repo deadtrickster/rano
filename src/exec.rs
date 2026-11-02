@@ -1,4 +1,4 @@
-//! Async command execution (D7), backing ^T / F6 Execute. The command runs
+//! Async command execution, backing ^T / F6 Execute. The command runs
 //! under `sh -c` with piped stdout/stderr and a reader thread per pipe, so
 //! the editor's event loop only ever polls — never blocks on the child.
 
@@ -54,11 +54,9 @@ fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<String> {
 }
 
 impl ExecJob {
-    /// Poll the job. None while the child is still running; once it has
-    /// exited, (exit code, stdout, stderr). The `recv`s cannot block
-    /// forever: the child's exit closes the pipes, each reader hits EOF and
-    /// sends exactly once. (A stray grandchild inheriting a pipe can delay
-    /// delivery, exactly as `wait_with_output` would.)
+    /// Poll the job. None while the child runs; once it has exited, (exit
+    /// code, stdout, stderr). The `recv`s cannot block: the child's exit
+    /// closes the pipes and each reader sends exactly once.
     pub fn try_finish(&mut self) -> Option<(Option<i32>, String, String)> {
         let status = self.child.try_wait().ok().flatten()?;
         let out = self.rx.recv().unwrap_or_default();

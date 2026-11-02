@@ -1,21 +1,12 @@
 //! Render a buffer to a file: colourised HTML, ANSI for a terminal, a
-//! markdown code fence, or plain text.
-//!
-//! Why it exists, beyond being a feature: it is the only path that runs the
-//! highlighter and then does NOT draw to a terminal. `rano --export html
-//! big.rs` measures parse + colorisation with the screen, the terminal and the
-//! event loop all out of the picture, which is what makes it possible to say
-//! where a slow file's time actually goes (`--bench` reports both sides of
-//! that line).
-//!
-//! The style source is a closure rather than a [`crate::Editor`], so the same
-//! renderer serves the CLI, an embedder with its own palette, and the tests.
-//! Nothing here knows what a terminal is: it writes bytes.
-//!
-//! A style is a [`crate::render::Style`] — roles — and both coloured formats
-//! read the role table's look under [`Palette::Colour`]: the HTML page is dark,
-//! and an ANSI file is shown by a terminal whose theme then supplies the
-//! sixteen colours, as it does for the editor itself.
+//! markdown code fence, or plain text. It is the only path that runs the
+//! highlighter and does NOT draw to a terminal, so `rano --export html big.rs`
+//! measures parse + colorisation with the screen, terminal and event loop out
+//! of the picture. The style source is a closure rather than a
+//! [`crate::Editor`], so the same renderer serves the CLI, an embedder and the
+//! tests. Both coloured formats read the role table's look under
+//! [`Palette::Colour`]: the HTML page is dark, and an ANSI file is shown by a
+//! terminal whose theme supplies the sixteen colours.
 
 use crate::buffer::Pos;
 use crate::render::Style;
@@ -30,7 +21,7 @@ pub enum Format {
     /// SGR-escaped text: `rano --export ansi f.rs | less -R`.
     Ansi,
     /// A markdown fenced code block holding the text, tagged with the
-    /// detected language — how you paste a file into a document.
+    /// detected language.
     Markdown,
     /// The plain text, tabs expanded, nothing else.
     Text,
@@ -71,17 +62,15 @@ pub fn render(
     }
 }
 
-/// One run of characters sharing a style, already tab-expanded. The run
-/// boundaries are what both colourised formats need, so they are computed once
-/// per line, here.
+/// One run of characters sharing a style, already tab-expanded — the run
+/// boundaries both colourised formats need, computed once per line.
 struct Run {
     style: Option<Style>,
     text: String,
 }
 
 /// Walk a line, expanding tabs to the next multiple of `tab_width` and
-/// coalescing neighbours that resolved to the same style. `style_of` is asked
-/// with real positions, so callers can resolve styles however they like.
+/// coalescing neighbours that resolved to the same style.
 fn runs_at_row(
     line: &[char],
     row: usize,
@@ -199,9 +188,8 @@ fn css(style: &Style) -> Option<String> {
 }
 
 /// `#rrggbb` for a colour the role table names. The sixteen slots are a
-/// terminal's, and a page has no theme to ask, so they are one common
-/// rendering of them (VS Code's terminal colours); a cube index is the xterm
-/// cube's own RGB, which is what it is on every terminal.
+/// terminal's and a page has no theme to ask, so they are one common rendering
+/// of them; a cube index is the xterm cube's own RGB.
 fn hex(h: Hue) -> String {
     const SLOTS: [(u8, u8, u8); 16] = [
         (0, 0, 0),
@@ -261,7 +249,7 @@ fn ansi(lines: &[Vec<char>], tab_width: usize, style_of: &dyn Fn(Pos) -> Option<
         let mut open = false;
         for run in runs_at_row(line, r, tab_width, style_of) {
             // Trailing blanks are the screen's, not the file's: a colourless
-            // run of spaces adds nothing and costs a reset per line.
+            // run of spaces costs a reset per line for nothing.
             let text = if run.style.is_none() {
                 run.text.trim_end()
             } else {
@@ -315,8 +303,8 @@ fn markdown(lines: &[Vec<char>], tab_width: usize, title: &str) -> String {
 }
 
 /// A fence long enough to hold the document: one backtick longer than the
-/// longest run in the content, minimum three. Without this a file containing
-/// a ``` fence of its own — any markdown file — would close the block early.
+/// longest run in the content, minimum three — without this a file containing
+/// a ``` fence of its own would close the block early.
 fn fence_for(lines: &[Vec<char>]) -> String {
     let mut longest = 0usize;
     for line in lines {
@@ -440,7 +428,7 @@ mod tests {
         let (lines, f) = sample();
         let out = render(&lines, 8, "t.rs", Format::Html, &f);
         // `<` `>` `&` from the source must not become tags or entities by
-        // accident: the file's own text may be anything.
+        // accident.
         assert!(out.contains("&lt;&lt;not a tag&gt;&gt;"), "{out}");
         assert!(out.contains("&amp; &lt;escaped&gt;"), "{out}");
         // The tab became eight spaces, at the start of the styled run.
@@ -459,9 +447,8 @@ mod tests {
     fn plain_text_has_no_markup_at_all() {
         let (lines, f) = sample();
         let out = render(&lines, 8, "t.rs", Format::Text, &f);
-        // No escapes at all, and the document's own text passes through
-        // byte for byte — including the `<` characters a naive check would
-        // mistake for markup.
+        // No escapes at all, and the document's own text passes through byte
+        // for byte.
         assert!(!out.contains('\u{1b}'));
         assert!(!out.contains("<span"));
         assert!(!out.contains("&lt;"));
@@ -489,8 +476,7 @@ mod tests {
 
     #[test]
     fn markdown_uses_a_fence_longer_than_the_content() {
-        // A markdown file containing its own fence must not close the block:
-        // this is the case the feature exists for.
+        // A markdown file containing its own fence must not close the block.
         let lines = vec![cs("```rust"), cs("fn main() {}"), cs("```")];
         let out = render(&lines, 8, "a.md", Format::Markdown, &|_| None);
         assert!(out.starts_with("# a.md\n\n"), "{out}");

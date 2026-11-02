@@ -1,11 +1,6 @@
-//! Plugins: WASM modules that answer hooks — text in, text out. The host
-//! discovers what a module answers by enumerating its exports (`on_*` is a
-//! text hook, `provider_*` takes the viewport too, a host names other prefixes
-//! at load), so a new hook is a host-side function, not an ABI change. A hook
-//! answers the offset of an 8-byte result block — `out_ptr`/`out_len` as LE
-//! `u32`s — or `0xFFFFFFFF` for unchanged. Policy is the editor's
-//! (`editor.rs`/`buffer.rs`); a module imports exactly what the config
-//! granted, and gets [`HOOK_FUEL`], [`HOOK_MEMORY`] and [`MAX_HOOK_BYTES`].
+//! Plugins: WASM modules that answer hooks — text in, text out. The host discovers what a
+//! module answers by enumerating exports, so a new hook is a host-side function, not an ABI
+//! change. A module imports exactly what the config granted, under the caps below.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,18 +22,17 @@ pub const ABI: i32 = 1;
 /// The sentinel a hook returns to mean "leave the text as it is".
 const UNCHANGED: i32 = -1;
 
-/// What the host lets a plugin reach beyond its own text. Nothing is granted
-/// by default; the config says `capabilities = ["read-dir"]`, and a module
-/// importing anything else is refused at instantiation, by name.
+/// What the host lets a plugin reach beyond its own text. Nothing is granted by default; the
+/// config says `capabilities = ["read-dir"]`, and a module importing anything else is refused
+/// at instantiation, by name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Capabilities {
-    /// `rano.read_dir`: a folder's listing, rendered by the host with the same
-    /// rules as the built-in dired.
+    /// `rano.read_dir`: a folder's listing, rendered by the host with the built-in dired's
+    /// rules.
     pub read_dir: bool,
-    /// `rano.read_file`: the bytes of the one file this call is about. Not a
-    /// filesystem door: the host answers only for that path, resolved first;
-    /// anything else — `/etc/shadow` included — is refused, and a text hook
-    /// has no file to scope to at all.
+    /// `rano.read_file`: the bytes of the one file this call is about. Not a filesystem
+    /// door: the host answers only for that path, resolved first, and a text hook has no file
+    /// to scope to at all.
     pub read_file: bool,
     /// `rano.convert_page`/`rano.convert_page_text`: one page of the file this
     /// call is about, under the host's converters, deadline, caps and scoping.
@@ -46,9 +40,8 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// From the config's `capabilities = ["read-dir"]` list: unknown names are
-    /// ignored (a misspelt capability is not a grant), and the empty list
-    /// grants nothing.
+    /// From the config's `capabilities = ["read-dir"]` list: unknown names are ignored (a
+    /// misspelt capability is not a grant), and the empty list grants nothing.
     pub fn from_names(names: &[String]) -> Capabilities {
         let has = |name: &str| names.iter().any(|n| n.trim().eq_ignore_ascii_case(name));
         Capabilities {
@@ -70,7 +63,6 @@ pub struct Picture {
 }
 
 impl Picture {
-    /// One pixel, or `None` outside the picture.
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;
@@ -80,7 +72,7 @@ impl Picture {
     }
 }
 
-/// **A loaded plugin**: its module, compiled once, and the hooks it answers.
+/// A loaded plugin: its module, compiled once, and the hooks it answers.
 #[derive(Debug)]
 pub struct Plugin {
     engine: Engine,
@@ -216,7 +208,6 @@ impl Plugin {
         &self.hooks
     }
 
-    /// Whether it answers `hook`.
     pub fn has(&self, hook: &str) -> bool {
         self.hooks.iter().any(|h| h == hook)
     }
@@ -237,9 +228,8 @@ impl Plugin {
         self.fuel.load(Ordering::Relaxed)
     }
 
-    /// `provider_open`: what this path should open as, or `None` when the
-    /// plugin does not claim it. Told the viewport because a provider's
-    /// answer is laid out at the width it will be drawn at.
+    /// `provider_open`: what this path should open as, or `None` when the plugin does not
+    /// claim it, laid out at the viewport's width.
     pub fn provider_open(
         &self,
         path: &str,
@@ -249,10 +239,9 @@ impl Plugin {
         self.call_sized("provider_open", path, cols as i32, rows as i32)
     }
 
-    /// `provider_picture`: the picture this path should be drawn as, or `None`
-    /// when not claimed; `[width u32 LE][height u32 LE][rgb]`, bounds the
-    /// host's — `width * height * 3` within [`MAX_HOOK_BYTES`], the header
-    /// describing exactly the bytes that came with it. Refused, never clipped.
+    /// `provider_picture`: the picture this path should be drawn as, or `None` when not
+    /// claimed; `[width u32 LE][height u32 LE][rgb]` within [`MAX_HOOK_BYTES`], the header
+    /// describing exactly the bytes that came. Refused, never clipped.
     pub fn provider_picture(
         &self,
         path: &str,
@@ -267,7 +256,6 @@ impl Plugin {
         Self::decode_picture(&bytes)
     }
 
-    /// The payload checked: header, size inside the cap, bytes as promised.
     fn decode_picture(bytes: &[u8]) -> Result<Option<Picture>, String> {
         if bytes.len() < 8 {
             return Err(format!(
@@ -305,14 +293,12 @@ impl Plugin {
         }))
     }
 
-    /// The linker a module is instantiated with: one import per granted
-    /// capability, and nothing else. `scope` is the path this call is about,
-    /// resolved once here, and it is what [`Capabilities::read_file`] is scoped
-    /// to.
+    /// The linker a module is instantiated with: one import per granted capability, and
+    /// nothing else. `scope` is the path this call is about, resolved once here, and it is
+    /// what [`Capabilities::read_file`] is scoped to.
     fn linker(engine: &Engine, caps: Capabilities, scope: Option<PathBuf>) -> Linker<StoreLimits> {
-        // The one file this call is about, resolved once, with the part before
-        // a `#` taken (a provider keeps state in a fragment:
-        // `paper.pdf#p=4` is about `paper.pdf`).
+        // The one file this call is about, resolved once, with the part before a `#` taken:
+        // a provider keeps state in a fragment, so `paper.pdf#p=4` is about `paper.pdf`.
         let scoped = scope.and_then(|p| {
             let text = p.to_string_lossy().into_owned();
             let file = text.split('#').next().unwrap_or(&text);
@@ -320,8 +306,8 @@ impl Plugin {
         });
         let mut linker = Linker::new(engine);
         if caps.read_dir {
-            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written,
-            // `-needed`, or `i32::MIN` for an error.
+            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed`, or
+            // `i32::MIN` for an error.
             let f = |mut caller: wasmtime::Caller<'_, StoreLimits>,
                      a: u32,
                      b: u32,
@@ -340,8 +326,8 @@ impl Plugin {
             let _ = linker.func_wrap("rano", "read_dir", f);
         }
         if caps.read_file {
-            // The same shape as `read_dir`, but scoped: it reads only the one
-            // file this call is about, resolved; anything else is `i32::MIN`.
+            // The same shape as `read_dir`, but scoped: only the one file this call is about,
+            // resolved; anything else is `i32::MIN`.
             let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           a: u32,
@@ -373,9 +359,8 @@ impl Plugin {
             let _ = linker.func_wrap("rano", "read_file", f);
         }
         if caps.convert_page {
-            // One page of the file this call is about, counted from zero as
-            // `pdf::page_rgb` documents. pdf owns the deadline and caps; the
-            // path is scoped as `read_file`'s is.
+            // One page of the file this call is about, from zero as `pdf::page_rgb` documents.
+            // pdf owns the deadline and caps; the path is scoped as `read_file`'s is.
             let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           page: i32,
@@ -403,8 +388,7 @@ impl Plugin {
                         return i32::MIN;
                     }
                 };
-                // **The same block `provider_picture` answers with** — one
-                // picture format: `[width][height][rgb]`, no decoder.
+                // The same block `provider_picture` answers with — one picture format, no decoder.
                 let mut payload = Vec::with_capacity(8 + rgb.len());
                 payload.extend_from_slice(&w.to_le_bytes());
                 payload.extend_from_slice(&h.to_le_bytes());
@@ -462,9 +446,8 @@ impl Plugin {
         linker
     }
 
-    /// Run any text hook: `Ok(None)` when the plugin does not answer it or
-    /// left the text alone. One fresh store per call, so nothing a guest
-    /// allocates can accumulate across saves.
+    /// Run any text hook: `Ok(None)` when the plugin does not answer it or left the text
+    /// alone. One fresh store per call, so nothing a guest allocates accumulates across saves.
     pub fn call(&self, hook: &str, text: &str) -> Result<Option<String>, String> {
         self.call_with(hook, text, None)
     }
@@ -480,8 +463,7 @@ impl Plugin {
         self.call_with(hook, text, Some((cols, rows)))
     }
 
-    /// One hook call: two `i32`s for a text hook, four for a provider; the
-    /// viewport, when there is one, is what picks which.
+    /// One hook call: two `i32`s for a text hook, four for a provider; the viewport picks which.
     fn call_with(
         &self,
         hook: &str,
@@ -603,8 +585,8 @@ impl Plugin {
         Ok(Some(data[out_ptr..end].to_vec()))
     }
 
-    /// A store with the budget this host allows: fuel, and a memory cap the
-    /// guest's own `memory.grow` cannot pass.
+    /// A store with the budget this host allows: fuel, and a memory cap the guest's own
+    /// `memory.grow` cannot pass.
     fn store(engine: &Engine) -> Store<StoreLimits> {
         let limits = StoreLimitsBuilder::new().memory_size(HOOK_MEMORY).build();
         let mut store = Store::new(engine, limits);
@@ -615,8 +597,7 @@ impl Plugin {
         store
     }
 
-    /// Why a module could not be instantiated when the reason is the sandbox
-    /// rather than a mistake.
+    /// Why a module could not be instantiated when the reason is the sandbox, not a mistake.
     fn refusal(e: &wasmtime::Error) -> Option<String> {
         let text = e.to_string();
         if text.contains("unknown import") || text.contains("incompatible import type") {
@@ -628,7 +609,6 @@ impl Plugin {
         }
     }
 
-    /// A one-line description for a status line: the file and what it answers.
     pub fn summary(&self) -> String {
         if self.hooks.is_empty() {
             format!("{} (no hooks)", self.path.display())
@@ -655,8 +635,7 @@ fn guest_path(
     Some(PathBuf::from(text))
 }
 
-/// An import's answer: bytes written, `-needed` for a small buffer,
-/// `i32::MIN` for no memory to write into.
+/// An import's answer: bytes written, `-needed` for a small buffer, `i32::MIN` for no memory.
 fn write_guest(
     caller: &mut wasmtime::Caller<'_, StoreLimits>,
     out_ptr: u32,

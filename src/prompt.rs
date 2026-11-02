@@ -1,6 +1,5 @@
-//! Prompt line (E4): the Prompt/PromptKind model, its key handling, word
-//! motion, history, tilde expansion, path completion and the status-bar
-//! prompt labels.
+//! Prompt line: the Prompt/PromptKind model, its key handling, word motion,
+//! history, tilde expansion, path completion and the labels.
 
 use std::fs;
 
@@ -30,8 +29,8 @@ pub enum PromptKind {
     ConfirmOverwrite,
     /// The file changed on disk since it was read; `pending_write` holds it.
     ConfirmExternal,
-    /// The save's directory does not exist; `pending_write` and `pending_dir` hold the
-    /// write and the directory to make. See `Editor::answer_mkdir`.
+    /// The save's directory does not exist; `pending_write` and `pending_dir` hold
+    /// the write and the directory to make.
     ConfirmMkdir,
     ReplaceAsk,
 }
@@ -71,8 +70,8 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
 impl Editor {
     // ---------- prompt history ----------
 
-    /// The history list recorded for a prompt kind, if any: Search queries,
-    /// Exec/Filter commands, and file names.
+    /// The history list recorded for a prompt kind: search queries, exec commands,
+    /// file names.
     fn history_for(&self, kind: PromptKind) -> Option<&Vec<String>> {
         match kind {
             PromptKind::Search => Some(&self.search_hist),
@@ -99,8 +98,7 @@ impl Editor {
         }
     }
 
-    /// Record a submitted prompt line: skip empty input, dedupe consecutive
-    /// repeats. Called from the Enter arm before dispatch.
+    /// Record a submitted prompt line: skip empty input, dedupe consecutive repeats.
     fn record_history(&mut self, kind: PromptKind, text: &str) {
         if text.is_empty() {
             return;
@@ -211,8 +209,8 @@ impl Editor {
                     PromptKind::ReadName => self.do_read(p.text),
                     PromptKind::DirName => self.do_dir(p.text),
                     PromptKind::OpenName => {
-                        // `name:line[:col]` jumps there, as on the command
-                        // line. Read failed: keep the prompt open for editing.
+                        // `name:line[:col]` jumps there, as on the command line. A
+                        // failed read keeps the prompt open for editing.
                         let opened =
                             match crate::send_ctrl::split_position(&expand_tilde(p.text.trim())) {
                                 Some((name, line, col)) => {
@@ -253,9 +251,8 @@ impl Editor {
                     _ => {}
                 }
             }
-            // Modifier-specific arms MUST sit above the modifier-blind
-            // Char/Left/Right arms below, or M-b/M-f type letters instead of
-            // moving by words.
+            // Modifier-specific arms sit above the modifier-blind Char/Left/Right
+            // arms, or M-b/M-f type letters instead of moving by words.
             KeyCode::Char('b') if alt => {
                 prompt_prev_word(&mut p);
                 self.prompt = Some(p);
@@ -264,8 +261,8 @@ impl Editor {
                 prompt_next_word(&mut p);
                 self.prompt = Some(p);
             }
-            // Search-modifier toggles, Search prompt ONLY, and above the
-            // modifier-blind arms so M-c/M-r toggle instead of typing.
+            // Search-modifier toggles, Search prompt only, above the modifier-blind
+            // arms so M-c/M-r toggle instead of typing.
             KeyCode::Char('c') if alt && matches!(p.kind, PromptKind::Search) => {
                 self.search_case_sensitive = !self.search_case_sensitive;
                 self.flash(&format!(
@@ -294,8 +291,8 @@ impl Editor {
                 prompt_next_word(&mut p);
                 self.prompt = Some(p);
             }
-            // Up cycles into the history, newest first; Down walks forward, and
-            // past the newest entry restores the text being edited when cycling began.
+            // Up cycles into the history, newest first; Down walks forward, and past
+            // the newest restores the text being edited when cycling began.
             KeyCode::Up => {
                 let entry = self.history_for(p.kind).and_then(|h| {
                     if h.is_empty() {
@@ -331,8 +328,7 @@ impl Editor {
                 }
                 self.prompt = Some(p);
             }
-            // Tab completes file paths, in the path-ish prompts only; other kinds
-            // fall through to the re-store arm below.
+            // Tab completes file paths, in the path-ish prompts only.
             KeyCode::Tab
                 if matches!(
                     p.kind,
@@ -384,9 +380,8 @@ impl Editor {
                 } else {
                     self.hist_idx = None;
                     self.hist_draft.clear();
-                    // A file name asked for by a quit or a close: cancelling
-                    // it abandons that too, or the next ordinary ^O would
-                    // quit or close behind the user's back.
+                    // A file name asked for by a quit or a close: cancelling it abandons
+                    // that too, or the next ^O would quit behind the user's back.
                     if matches!(p.kind, PromptKind::WriteName) {
                         self.quit_after_save = false;
                         self.close_after_save = false;
@@ -397,9 +392,8 @@ impl Editor {
     }
 }
 
-// Prompt text editing helpers. `Prompt::cursor` is a CHAR index while
-// String::{insert, remove} take BYTE indices, so editing goes through a
-// Vec<char> to stay multibyte-safe.
+// `Prompt::cursor` is a CHAR index while String takes BYTE indices, so editing
+// goes through a Vec<char> to stay multibyte-safe.
 fn prompt_insert(p: &mut Prompt, c: char) {
     let idx = p.cursor.min(p.text.chars().count());
     let mut v: Vec<char> = p.text.chars().collect();
@@ -418,9 +412,8 @@ fn prompt_backspace(p: &mut Prompt) {
     p.text = v.into_iter().collect();
 }
 
-// Word motion inside prompts, over the same word chars (alphanumeric or '_')
-// as the buffer's prev_word/next_word. Forward skips whitespace, then the word
-// (or a single non-word char), then trailing whitespace; backward is symmetric.
+// Word motion inside prompts, over the same word chars as the buffer's: skip
+// whitespace, then the word (or one non-word char), then trailing whitespace.
 fn prompt_next_word(p: &mut Prompt) {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let v: Vec<char> = p.text.chars().collect();
@@ -458,8 +451,7 @@ fn prompt_prev_word(p: &mut Prompt) {
     p.cursor = c;
 }
 
-/// Expand a leading `~` or `~/` to $HOME. `~user` is intentionally not
-/// expanded; without $HOME the input is returned unchanged.
+/// Expand a leading `~` or `~/` to $HOME. `~user` is deliberately not expanded.
 pub fn expand_tilde(p: &str) -> String {
     if p == "~" {
         return std::env::var("HOME").unwrap_or_else(|_| p.to_string());
@@ -472,9 +464,9 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
-/// Complete a file-path prefix against the filesystem: split at the last '/', read that
-/// directory, and collect matching entries — hidden ones only when the typed part starts
-/// with '.', directories suffixed with '/', sorted. Returns the common prefix and the candidates.
+/// Complete a file-path prefix against the filesystem: split at the last '/', read
+/// that directory, collect matching entries (hidden ones only when the typed part
+/// starts with '.'), and return the common prefix with the candidates.
 pub(crate) fn complete_path(prefix: &str) -> Option<(String, Vec<String>)> {
     let (dir, file) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),

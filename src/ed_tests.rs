@@ -1,8 +1,4 @@
 //! The editor's behaviour tests: keys in, buffer and screen out.
-//!
-//! They lived in the binary's `main.rs` while the editor did; they test the
-//! library now, so they moved with it. The command-line tests stayed behind,
-//! because the command line is still the binary's.
 
 use crate::BufferState;
 use crate::buffer::Buffer;
@@ -67,8 +63,6 @@ fn temp_dir(tag: &str) -> TempDir {
     TempDir(d)
 }
 
-// B2 — move_left at BOL must land on the END of the previous row.
-
 #[test]
 fn move_left_bol_clamps_to_prev_row_end() {
     let mut ed = test_ed("ab\ncdef");
@@ -78,8 +72,6 @@ fn move_left_bol_clamps_to_prev_row_end() {
     press(&mut ed, KeyCode::Backspace, Mods::NONE);
     assert_eq!(lines(&ed), vec!["a", "cdef"]);
 }
-
-// B1 — prompt editing is char-indexed; multibyte text must not panic.
 
 #[test]
 fn prompt_multibyte_backspace_no_panic() {
@@ -134,8 +126,6 @@ fn prompt_ascii_edit_still_works() {
     assert!(ed.prompt.is_some());
 }
 
-// C3 — ^C cursor position flashes for 2 s, then expires.
-
 #[test]
 fn show_loc_expires() {
     let mut ed = test_ed("hi");
@@ -159,9 +149,8 @@ fn goto_still_shows_loc() {
 
 #[test]
 fn prompt_reopen_multibyte_query_cursor_ok() {
-    // ^F re-opens the prompt only when the last search had no matches,
-    // so search for something absent; the seeded cursor must be a CHAR
-    // index (byte length would start past EOL for "éé").
+    // ^F re-opens the prompt only after a search that found nothing; the cursor
+    // is a char index, so a byte length would start past EOL.
     let mut ed = test_ed("abc");
     press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for c in "éé".chars() {
@@ -174,8 +163,6 @@ fn prompt_reopen_multibyte_query_cursor_ok() {
     assert_eq!(p.text, "éé");
     assert_eq!(p.cursor, 2);
 }
-
-// D2 — sort: case-insensitive, region-scoped when marked.
 
 #[test]
 fn sort_lines_case_insensitive_and_region() {
@@ -190,8 +177,6 @@ fn sort_lines_case_insensitive_and_region() {
     press(&mut ed, KeyCode::F(9), Mods::NONE);
     assert_eq!(lines(&ed), vec!["a", "A", "B", "b"]);
 }
-
-// C1 — save_to preserves the buffer's original CRLF line endings.
 
 #[test]
 fn save_preserves_crlf() {
@@ -208,8 +193,6 @@ fn save_preserves_crlf() {
     assert!(!ed.bs().buf.modified);
     assert_eq!(ed.bs().buf.name, Some(out));
 }
-
-// Saving over a file something else changed since it was read.
 
 /// A file read into an editor, then rewritten on disk behind its back.
 fn externally_changed(tag: &str) -> (TempDir, PathBuf, Editor) {
@@ -289,8 +272,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
             .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
             .collect()
     };
-    // Unified first (the session's default): the file's name, the hunk, and
-    // each line numbered in its own file.
     let rows = text(&ed);
     assert!(rows[0].ends_with("f.txt"), "{rows:?}");
     assert!(rows[1].starts_with("@@"), "{rows:?}");
@@ -300,7 +281,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
         rows.contains(&"3 -three from elsewhere".to_string()),
         "{rows:?}"
     );
-    // s: two panels, the disk's line on the left and the buffer's on the right.
     press(&mut ed, KeyCode::Char('s'), Mods::NONE);
     assert!(ed.diff_split, "the choice is remembered");
     let rows = text(&ed);
@@ -308,11 +288,9 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     let (left, right) = pair.split_once('│').expect("two panels");
     assert!(left.contains("- one"), "{pair:?}");
     assert!(right.contains("+ Xone"), "{pair:?}");
-    // A resize re-renders at the new width.
     ed.text_w = 60;
     assert!(ed.refresh_diff_view());
     assert!(!ed.refresh_diff_view());
-    // Drawn over the text, with the header naming the view.
     ed.text_h = 8;
     let buf = ui::Screen::of(&ed, 60, 12);
     let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
@@ -321,7 +299,6 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
-    // y from the diff itself answers the question.
     press(&mut ed, KeyCode::Char('d'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     press(&mut ed, KeyCode::Char('y'), Mods::NONE);
@@ -353,13 +330,11 @@ fn m_p_previews_a_patch_buffer_and_closes_again() {
     assert!(rows.contains(&"8 -    old();".to_string()), "{rows:?}");
     assert!(rows.contains(&"8 +    new();".to_string()), "{rows:?}");
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Patch"));
-    // y and n are not answers here; M-P closes and leaves no prompt.
     press(&mut ed, KeyCode::Char('y'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.prompt.is_none());
-    // The text is untouched: the preview is a view, not an edit.
     assert_eq!(lines(&ed)[0], "diff --git a/src/a.rs b/src/a.rs");
 }
 
@@ -370,8 +345,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
     ed.text_w = 100;
     ed.text_h = 20;
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
-    // The markup is gone, not coloured: a heading, emphasis and a code span
-    // arrive as the words they wrap.
     let rows = diff_view_text(&ed);
     assert_eq!(rows[0], "# Title", "{rows:?}");
     assert!(
@@ -381,8 +354,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
     assert!(rows.contains(&"· one".to_string()), "{rows:?}");
     let header = ed.diff_view.as_ref().unwrap().header();
     assert!(header.contains("Markdown /tmp/rano_preview.md"), "{header}");
-    // `s` is the shared diff map's split, and this view is one column: it says
-    // so rather than re-rendering the same rows, and the view stays open.
     press(&mut ed, KeyCode::Char('s'), Mods::NONE);
     assert!(ed.diff_view.is_some());
     assert!(
@@ -390,7 +361,6 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
         "{:?}",
         ed.status.as_ref().map(|f| f.text.clone())
     );
-    // M-P closes back to the text, which is untouched.
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_none());
     assert!(ed.prompt.is_none());
@@ -444,7 +414,6 @@ fn conflict_ed() -> Editor {
 #[test]
 fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
     let mut ed = conflict_ed();
-    // A short screen, so moving to a conflict has to scroll.
     ed.text_h = 6;
     assert!(
         ed.diff_view
@@ -456,14 +425,12 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
     press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     let v = ed.diff_view.as_ref().unwrap();
     assert!(v.header().contains("Conflict 2/2"), "{}", v.header());
-    // Scrolled to it: the first row shown is its header, marked current.
     let first: String = v.lines[v.top]
         .spans
         .iter()
         .map(|s| s.content.as_str())
         .collect();
     assert!(first.starts_with("▶ Conflict 2 of 2"), "{first:?}");
-    // Past the last one it stays.
     press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(
         ed.diff_view
@@ -472,7 +439,6 @@ fn the_conflict_view_moves_between_conflicts_and_compares_with_the_base() {
             .header()
             .contains("Conflict 2/2")
     );
-    // c: base against ours shows the base's line.
     press(&mut ed, KeyCode::Char('c'), Mods::NONE);
     let rows = diff_view_text(&ed);
     assert!(
@@ -503,11 +469,9 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
         "{:?}",
         lines(&ed)
     );
-    // One left, and it is now current.
     let v = ed.diff_view.as_ref().expect("still open");
     assert!(v.header().contains("Conflict 1/1"), "{}", v.header());
     assert!(ed.status_text().unwrap().contains("1 conflict left"));
-    // b: both, ours first — the last one, so the view closes.
     press(&mut ed, KeyCode::Char('b'), Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert!(ed.status_text().unwrap().contains("All conflicts resolved"));
@@ -522,15 +486,12 @@ fn taking_a_side_resolves_one_conflict_as_one_undo_step() {
             "}"
         ]
     );
-    // Each take is one undo step.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert!(lines(&ed).contains(&"<<<<<<< HEAD".to_string()));
     assert!(lines(&ed).contains(&"    let sum = 1;".to_string()));
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
 }
-
-// ---- keymaps, M-x, help pages, which-key ----
 
 fn screen(ed: &Editor, w: u16, h: u16) -> Vec<String> {
     let s = ui::Screen::of(ed, w, h);
@@ -544,7 +505,6 @@ fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
     assert_eq!(ed.pending.keys.len(), 1, "M-t is a prefix");
     assert!(ed.pending_card().is_none(), "its card waits a moment");
     assert!(ed.card_due().is_some());
-    // Held still: the card shows.
     ed.pending.since = Some(Instant::now() - Duration::from_secs(1));
     let (m, _) = ed.pending_card().expect("card");
     assert_eq!(m.name, "todo");
@@ -555,12 +515,10 @@ fn a_prefix_waits_for_its_next_key_and_esc_abandons_it() {
             .any(|r| r.contains("Tick") && r.contains("Decline")),
         "{rows:#?}"
     );
-    // The bar shows what can follow, too.
     assert!(ed.bar_items().iter().any(|(k, t)| k == "t" && t == "Tick"));
     press(&mut ed, KeyCode::Char('t'), Mods::NONE);
     assert!(ed.pending.keys.is_empty());
     assert_eq!(lines(&ed)[0], "- [x] task", "M-t t ticked it");
-    // ESC abandons a prefix; an unbound key says so.
     press(&mut ed, KeyCode::Char('t'), Mods::ALT);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert_eq!(ed.status_text().as_deref(), Some("Quit"));
@@ -598,12 +556,10 @@ fn the_help_key_shows_its_card_at_once_and_opens_pages() {
         text.iter()
             .any(|r| r.contains("Conflict view") || r.contains("Patch and conflict"))
     );
-    // A page's own keys, and q closes it; typing does not reach the text.
     press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["text"]);
     press(&mut ed, KeyCode::Char('q'), Mods::NONE);
     assert!(ed.info.is_none());
-    // C-g C-g: the overview.
     press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     assert_eq!(ed.info.as_ref().unwrap().title, "Help");
@@ -671,13 +627,11 @@ fn m_x_runs_a_command_by_name_and_offers_recent_ones_first() {
         Some(PromptKind::WriteName)
     );
     ed.prompt = None;
-    // Recently run comes first among equals; an empty query lists all.
     press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     assert_eq!(ed.palette.as_ref().unwrap().items[0], "write-out");
     assert!(ed.palette.as_ref().unwrap().items.len() > 40);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.palette.is_none());
-    // Nothing matches: Enter says so and runs nothing.
     press(&mut ed, KeyCode::Char('x'), Mods::ALT);
     press_text(&mut ed, "qqqq");
     press(&mut ed, KeyCode::Enter, Mods::NONE);
@@ -696,7 +650,6 @@ fn a_view_puts_its_own_keys_on_the_bar() {
         bar.iter().any(|(k, t)| k == "s" && t == "Split/Unified"),
         "{bar:?}"
     );
-    // A key the view does not bind is ignored, not typed.
     press(&mut ed, KeyCode::Char('z'), Mods::NONE);
     assert_eq!(lines(&ed).join("\n"), CONFLICTED);
     press(&mut ed, KeyCode::Esc, Mods::NONE);
@@ -710,8 +663,8 @@ fn a_view_puts_its_own_keys_on_the_bar() {
 const SUN_PNG_W: u32 = 200;
 const SUN_PNG_H: u32 = 100;
 
-/// A PNG-shaped file: signature, then a real IHDR carrying `w` and `h`. The bytes
-/// need not decode — nothing in rano decodes a PNG, the terminal does.
+/// A PNG-shaped file: signature, then a real IHDR. Nothing decodes it — the
+/// terminal does.
 fn write_png(path: &std::path::Path, w: u32, h: u32) {
     let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
     v.extend_from_slice(&13u32.to_be_bytes());
@@ -739,9 +692,7 @@ fn graphics(ed: &mut Editor) -> Vec<String> {
         .collect()
 }
 
-/// **M-P on a PNG draws it**: the rows are placeholder cells the terminal fills, and the
-/// terminal is told the upload and the placement that go with them, in that order,
-/// before the frame that draws them.
+/// M-P on a PNG draws it: placeholder rows plus the upload, before the frame.
 #[test]
 fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     let d = temp_dir("png");
@@ -765,28 +716,21 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     let header = ed.diff_view.as_ref().unwrap().header();
     assert!(header.contains("Picture"), "{header}");
     assert!(header.contains("sun.png"), "{header}");
-    // The text under the view was never touched.
     assert_eq!(
         lines(&ed)[0],
         "the buffer is the file's bytes, and they are not the picture"
     );
-    // Uploaded once, then placed where the rows draw it.
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");
     assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
     assert!(out[1].contains("a=p,U=1"), "{:?}", out[1]);
     assert!(out[1].contains(&format!("c={},", cells.0)), "{:?}", out[1]);
-    // Nothing changed since: nothing is sent again.
     assert!(graphics(&mut ed).is_empty());
-    // A resize moves the box, and the terminal is given the picture again at it.
     ed.text_w = 200;
     assert!(ed.refresh_diff_view());
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "the picture again, at the new box: {out:?}");
     assert!(graphics(&mut ed).is_empty(), "and then quiet again");
-    // **A narrow frame takes a narrow picture** — half a screen, a split pane, a phone.
-    // The rows drawn always fit the width they are drawn in, which is what `image_box`
-    // now guarantees even below its 20-column floor.
     ed.text_w = 15;
     assert!(ed.refresh_diff_view());
     let rows = picture_rows(&ed);
@@ -794,13 +738,10 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     assert!(rows.len() <= crate::term::graphics::IMAGE_MAX_ROWS as usize);
     let out = graphics(&mut ed);
     assert!(out[1].contains("c=15,"), "placed 15 wide: {:?}", out[1]);
-    // **M-P on a picture is the way out of it**, as Esc is: there is no text behind a
-    // picture worth toggling back to, so the key that opened it in the first place closes
-    // the *file* — and with nothing behind it the picture stays and says how to leave.
+    // M-P on a picture is the way out of it, as Esc is.
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     assert!(ed.diff_view.is_some(), "the only buffer is the picture");
     assert!(ed.status_text().unwrap().contains("Last buffer"));
-    // With a file beside it, the same key closes the picture's buffer and drops the bytes.
     let other = d.0.join("notes.txt");
     fs::write(&other, "text\n").unwrap();
     ed.config.multibuffer = true;
@@ -814,8 +755,8 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
     assert!(out[0].contains("a=d,d=I"), "{:?}", out[0]);
 }
 
-/// **A markdown preview draws the pictures the document names**, under the row that
-/// names them — the alt text is all the renderer leaves of a reference.
+/// A markdown preview draws the pictures the document names, under the row that
+/// names them.
 #[test]
 fn a_markdown_preview_draws_the_pictures_the_document_names() {
     let d = temp_dir("md_img");
@@ -828,21 +769,18 @@ fn a_markdown_preview_draws_the_pictures_the_document_names() {
     ed.images = true;
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
     let rows = picture_rows(&ed);
-    // The picture goes under the reference, not under the sentence that names the file.
     let reference = rows
         .iter()
         .position(|r| r.contains("the sun"))
         .unwrap_or_else(|| panic!("{rows:?}"));
     assert!(rows[reference + 1].starts_with('\u{10EEEE}'), "{rows:?}");
     assert!(rows[0].contains("Intro"), "{rows:?}");
-    // One picture: one upload, one placement.
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");
     assert!(out[0].starts_with("\x1b_Ga=t,f=100,i="), "{:?}", out[0]);
     assert!(out[1].contains("a=p,U=1"), "{:?}", out[1]);
     let wide = crate::width::text::width(&rows[reference + 1]);
-    // **A narrower frame re-splices the picture narrower**: the rows are the box, and the
-    // box follows the width, so the document adapts like everything else rano draws.
+    // A narrower frame re-splices the picture narrower: the rows are the box.
     ed.text_w = 40;
     assert!(ed.refresh_diff_view());
     let rows = picture_rows(&ed);
@@ -858,8 +796,7 @@ fn a_markdown_preview_draws_the_pictures_the_document_names() {
     assert_eq!(graphics(&mut ed).len(), 1, "and dropped with the view");
 }
 
-/// A reference that is not there is not an error: the alt text is what the renderer
-/// drew, and a document is still a document with a picture missing from it.
+/// A reference that is not there is not an error: the alt text is drawn.
 #[test]
 fn a_reference_to_a_missing_file_draws_nothing() {
     let d = temp_dir("md_missing");
@@ -882,7 +819,6 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     let d = temp_dir("png_why");
     let file = d.0.join("sun.png");
     write_png(&file, 20, 10);
-    // No pictures on this terminal: the placeholder cells would be garbage.
     let mut ed = test_ed("x");
     ed.bs_mut().buf.name = Some(file.clone());
     ed.images = false;
@@ -891,10 +827,8 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     let msg = ed.status_text().unwrap();
     assert!(msg.contains("does not take inline pictures"), "{msg}");
     assert!(graphics(&mut ed).is_empty());
-    // **A file that is not a picture is refused by name**, and which refusal it is depends
-    // on the machine: the bytes are not a PNG, so a converter is asked — and there may be
-    // none (`no converter found`), or one that cannot read it (`could not read it`). What
-    // the reader is owed is the file and a reason, so that is what is pinned.
+    // A file that is not a picture is refused by name; which refusal depends on
+    // the machine.
     for nonsense in ["liar.png", "sun.jpg"] {
         let path = d.0.join(nonsense);
         fs::write(&path, b"not a picture at all, whatever the name says").unwrap();
@@ -915,10 +849,8 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     }
 }
 
-/// **A picture file opens as the picture**, not as the text of its bytes: what M-P would
-/// show is what opening it shows, because a lossy decode of a PNG is not a reading of it
-/// and this editor has no byte view. The buffer underneath is the file as it is, so Esc
-/// lands in that text and M-P shows the picture again.
+/// A picture file opens as the picture, not as the text of its bytes. The buffer
+/// underneath is the file as it is, so Esc lands in that text.
 #[test]
 fn opening_a_picture_shows_the_picture() {
     let d = temp_dir("open_png");
@@ -932,16 +864,13 @@ fn opening_a_picture_shows_the_picture() {
     let rows = picture_rows(&ed);
     assert!(rows[0].starts_with('\u{10EEEE}'), "{:?}", rows[0]);
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Picture"));
-    // The terminal was told, as it is for M-P.
     assert_eq!(graphics(&mut ed).len(), 2);
-    // **Escaping the picture leaves the file, not the view** — the text of a PNG is not a
-    // reading of it — and with nothing behind it the picture stays and says how to leave.
+    // Escaping the picture leaves the file, not the view; with nothing behind it
+    // the picture stays.
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_some(), "the picture is the only thing here");
     assert!(ed.status_text().unwrap().contains("Last buffer"));
     assert!(!ed.bs().buf.modified, "and the file was never touched");
-    // **And the keys that reach past a view work in one**: F8 used to do nothing at all
-    // while a preview was up. It opens the prompt; the view is still there behind it.
     press(&mut ed, KeyCode::F(8), Mods::NONE);
     assert_eq!(
         ed.prompt.as_ref().map(|p| p.kind),
@@ -950,9 +879,6 @@ fn opening_a_picture_shows_the_picture() {
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.prompt.is_none());
     assert!(ed.diff_view.is_some(), "and the picture is still up");
-    // With a file beside it, escaping the picture **closes that buffer** and leaves the
-    // other one — the file it was, not the text of its bytes. (Multibuffer, so the second
-    // file lands beside the picture instead of replacing it.)
     ed.config.multibuffer = true;
     let other = d.0.join("notes.txt");
     fs::write(&other, "plain text\n").unwrap();
@@ -963,8 +889,6 @@ fn opening_a_picture_shows_the_picture() {
         ed.diff_view.is_some(),
         "back to the picture, as the picture"
     );
-    // The picture comes back: the drop of the one held (the view closed with the file), then
-    // the upload and the placement again.
     let out = graphics(&mut ed);
     assert!(out.iter().any(|c| c.contains("a=d,d=I")), "{out:?}");
     assert!(out.iter().any(|c| c.contains("a=t,f=100")), "{out:?}");
@@ -977,9 +901,8 @@ fn opening_a_picture_shows_the_picture() {
         Some(other.as_path()),
         "and the file beside it is current"
     );
-    // A terminal that takes no pictures says nothing *about pictures* on the way in — the
-    // reader is told by M-P, not by a flash every time a file opens — and the file is then
-    // read as text like any other.
+    // A terminal that takes no pictures says nothing on the way in; the file is
+    // read as text.
     let mut ed = test_ed("");
     ed.images = false;
     assert!(ed.open_at(&file, 1, None).is_ok());
@@ -989,57 +912,47 @@ fn opening_a_picture_shows_the_picture() {
     assert!(msg.starts_with("Read"), "the ordinary reading: {msg}");
 }
 
-/// A copy must reach the system clipboard, not only rano's own cutbuffer: a mouse drag
-/// selects in rano, so the terminal's own copy has nothing to work from, and `M-6`/`^K`
-/// have to put the text where the terminal can take it.
+/// A copy must reach the system clipboard, not only rano's own cutbuffer.
 #[test]
 fn a_copy_reaches_the_terminal_clipboard() {
     let mut ed = test_ed("one\ntwo\nthree\n");
-    // M-6 over a marked region: exactly the characters, no newline added for a partial
-    // first line.
+    // M-6 over a marked region: exactly the characters.
     ed.bs_mut().mark = Some(Pos { row: 0, col: 1 });
     ed.bs_mut().cursor = Pos { row: 1, col: 1 };
     press(&mut ed, KeyCode::Char('6'), Mods::ALT);
     assert_eq!(ed.take_clipboard().as_deref(), Some("ne\nt"));
     assert!(ed.take_clipboard().is_none(), "and it is taken once");
-    // The cutbuffer got it too: rano's own paste still works.
     assert_eq!(ed.cut.len(), 2);
-    // A selection that starts at a row's first column is line-wise: the newline it took
-    // with it comes back, or pasting it into something else joins it to the next line.
+    // A selection that starts at a row's first column is line-wise: the newline
+    // comes back.
     ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
     press(&mut ed, KeyCode::Char('6'), Mods::ALT);
     assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
-    // ^K cuts what is selected, and the clipboard takes it too: a selection from a row's
-    // first column into the next row is the shape `cut_range`'s arithmetic has to survive.
+    // ^K cuts what is selected, and the clipboard takes it too.
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("one\ntw\n"));
     assert_eq!(lines(&ed), vec!["o", "three"]);
-    // ^K with no mark takes the line, newline and all.
     let mut ed = test_ed("first\nsecond\n");
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(ed.take_clipboard().as_deref(), Some("first\n"));
     assert_eq!(lines(&ed)[0], "second");
-    // A mouse selection is a selection: dragging and letting go puts it on the clipboard.
     let mut ed = test_ed("alpha beta\nsecond line\n");
     ed.text_w = 40;
     ed.text_h = 10;
-    // No gutter, so a pane column is a character column and the arithmetic below is
-    // readable: 0 to 5 is `alpha`.
+    // No gutter, so a pane column is a character column: 0 to 5 is `alpha`.
     ed.show_line_numbers = false;
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 0)));
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 1, 5)));
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 5));
     assert_eq!(ed.take_clipboard().as_deref(), Some("alpha"));
-    // A plain click is not a selection, and queues nothing.
     ed.bs_mut().mark = None;
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 2)));
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, 2));
     assert!(ed.take_clipboard().is_none(), "a click is not a copy");
 }
 
-/// **A save into a directory that is not there is offered, not failed.** The operator:
-/// *"when I save file without parent dir- offer to create one instead of just failing"*.
+/// A save into a directory that is not there is offered, not failed.
 #[test]
 fn saving_into_a_missing_directory_offers_to_create_it() {
     let d = temp_dir("mkdir");
@@ -1047,7 +960,6 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
     let file = deep.join("notes.txt");
     let mut ed = test_ed("hello\n");
     ed.bs_mut().buf.modified = true;
-    // ^O then the name: the save is offered the directory.
     ed.do_write(file.display().to_string());
     assert_eq!(
         ed.prompt.as_ref().map(|p| p.kind),
@@ -1055,7 +967,7 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
         "the question is asked"
     );
     assert!(!deep.exists(), "and nothing is created before the answer");
-    // **n** keeps everything as it was: no directory, no file, the buffer still modified.
+    // n keeps everything as it was: no directory, no file, still modified.
     press(&mut ed, KeyCode::Char('n'), Mods::NONE);
     assert!(ed.prompt.is_none());
     assert!(!deep.exists());
@@ -1064,7 +976,7 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
         ed.status_text().unwrap().contains("Not saved"),
         "and says so"
     );
-    // **y** makes every directory on the way and retries the write.
+    // y makes every directory on the way and retries the write.
     let mut ed = test_ed("hello\n");
     ed.bs_mut().buf.modified = true;
     ed.do_write(file.display().to_string());
@@ -1073,8 +985,7 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
     assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
     assert!(!ed.bs().buf.modified, "saved");
     assert_eq!(ed.bs().buf.name.as_deref(), Some(file.as_path()));
-    // Esc answers no like `n` does, and the quit a save was waiting for is dropped with
-    // it: a ^X that cannot write must not quit.
+    // Esc answers no like n, and the quit a save was waiting for goes with it.
     let mut ed = test_ed("x\n");
     ed.bs_mut().buf.modified = true;
     ed.quit_after_save = true;
@@ -1093,11 +1004,7 @@ fn saving_into_a_missing_directory_offers_to_create_it() {
     );
 }
 
-/// **gofmt on save, for a Go file**: the buffer is formatted before it is written, so the
-/// file and the buffer agree — and it is one undo step, because it is an edit.
-///
-/// Skips (loudly) where `gofmt` is not installed: this is a check of the machine's own
-/// formatter, not of rano's own code.
+/// gofmt on save: the buffer is formatted before the write, as one undo step.
 #[test]
 fn saving_a_go_file_runs_gofmt_first() {
     if crate::lsp::find_bin("gofmt") == "gofmt" {
@@ -1106,16 +1013,12 @@ fn saving_a_go_file_runs_gofmt_first() {
     }
     let d = temp_dir("gofmt");
     let file = d.0.join("main.go");
-    // Four-space indentation, which gofmt writes as tabs (measured: it is the one thing
-    // Go's rule is emphatic about, and the tool has no flag to say otherwise).
     let spaces = "package main\n\nfunc main() {\n    println(1)\n}\n";
     fs::write(&file, spaces).unwrap();
     let mut ed = test_ed(spaces);
     ed.bs_mut().buf.name = Some(file.clone());
     ed.text_w = 60;
     ed.text_h = 20;
-    // ^O then Enter: the prompt is pre-filled with the file's own name, so this is the
-    // ordinary "save this buffer" path.
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     let written = fs::read_to_string(&file).unwrap();
@@ -1124,23 +1027,18 @@ fn saving_a_go_file_runs_gofmt_first() {
         "gofmt wrote tabs: {written:?}"
     );
     assert!(!written.contains("    println"), "{written:?}");
-    // The buffer is the formatted text, not the spaces that were typed.
     assert_eq!(lines(&ed).join("\n") + "\n", written);
     assert!(!ed.bs().buf.modified, "and the save landed");
-    // **One undo step takes the formatting back**, which is the whole reason the buffer
-    // is replaced as an edit rather than silently rewritten.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert!(
         lines(&ed).join("\n").contains("    println(1)"),
         "M-U undoes it"
     );
-    // A file that is already formatted is left alone: no edit, no undo step, no flash.
     let mut ed = test_ed(&written);
     ed.bs_mut().buf.name = Some(file.clone());
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed).join("\n") + "\n", written);
-    // And another language is never handed to gofmt.
     let rs = d.0.join("main.rs");
     let rust = "fn main() {\n    let x = 1;\n}\n";
     fs::write(&rs, rust).unwrap();
@@ -1151,8 +1049,8 @@ fn saving_a_go_file_runs_gofmt_first() {
     assert_eq!(fs::read_to_string(&rs).unwrap(), rust);
 }
 
-/// **A folder opens as a listing** (the dired): directories first and marked with `/`, the
-/// buffer named after the folder, read-only, and `RET` enters what the cursor is on.
+/// A folder opens as a listing (the dired), read-only; `RET` enters the cursor's
+/// entry.
 #[test]
 fn a_folder_opens_as_a_listing_and_ret_enters_it() {
     let d = temp_dir("dired");
@@ -1163,20 +1061,16 @@ fn a_folder_opens_as_a_listing_and_ret_enters_it() {
     let mut ed = test_ed("");
     ed.text_h = 20;
     assert!(ed.open_at(&d.0, 1, None).is_ok(), "a folder is an open");
-    // The listing: the folder is the buffer's name, the rows are its entries.
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
     assert_eq!(ed.bs().dir.as_deref(), Some(d.0.as_path()));
     assert!(ed.bs().read_only, "a listing is a view, not a document");
     assert_eq!(lines(&ed), vec!["src/", "README.md"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
-    // **RET enters**: the folder in place, the file as a file.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(src.as_path()));
     assert_eq!(lines(&ed), vec!["deep/", "main.rs"]);
-    // `-` is the folder above, back where we were.
     press(&mut ed, KeyCode::Char('-'), Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
-    // And RET on a file opens it: no longer a listing.
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.bs().dir.is_none(), "a file is not a listing");
@@ -1197,8 +1091,8 @@ fn a_listing_refreshes_keeps_its_place_and_refuses_edits() {
     assert!(ed.open_at(&d.0, 1, None).is_ok());
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
     assert_eq!(lines(&ed)[1], "d.txt");
-    // A file appears while the listing is open: `r` sees it, and the cursor is still on the
-    // entry it was on rather than on whatever now happens to be row 1.
+    // A file appears while the listing is open: r sees it, and the cursor stays
+    // on its entry.
     fs::write(d.0.join("c.txt"), "x").unwrap();
     press(&mut ed, KeyCode::Char('r'), Mods::NONE);
     assert_eq!(lines(&ed), vec!["b.txt", "c.txt", "d.txt"]);
@@ -1207,9 +1101,8 @@ fn a_listing_refreshes_keeps_its_place_and_refuses_edits() {
         "d.txt",
         "the cursor followed it"
     );
-    // It is a view: an edit is refused with a line saying so, and changes nothing. (A bare
-    // letter types nothing here — a mode's map is on top, so the dispatcher does not reach
-    // `insert_char` at all; `^K` is an *edit*, and that is what the gate answers.)
+    // It is a view: an edit is refused with a line saying so. (A bare letter
+    // types nothing — a mode's map is on top; `^K` is an edit.)
     press(&mut ed, KeyCode::Char('k'), Mods::CTRL);
     assert_eq!(lines(&ed), vec!["b.txt", "c.txt", "d.txt"]);
     assert!(!ed.bs().buf.modified);
@@ -1224,15 +1117,14 @@ fn a_folder_that_is_not_there_says_so_and_changes_nothing() {
     assert!(ed.bs().dir.is_none());
     assert_eq!(lines(&ed), vec!["the buffer stays"]);
     assert!(ed.status_text().unwrap().contains("No such folder"));
-    // The prompt path is the same answer: F8 on a folder opens it, F8 on nothing says so.
     let d = temp_dir("dired_f8");
     fs::write(d.0.join("one.txt"), "x").unwrap();
     assert!(ed.open_file(&d.0.display().to_string()));
     assert_eq!(lines(&ed), vec!["one.txt"]);
 }
 
-/// **A WAT plugin for the editor tests**: `hook` answers a fixed text, which is enough to see
-/// both seams (open and save) without a `wasm32` toolchain or a committed binary.
+/// A WAT plugin for the editor tests: `hook` answers a fixed text, without a wasm
+/// toolchain.
 fn wat_hook(hook: &str, out: &str) -> Vec<u8> {
     let mut body = String::new();
     for (i, b) in out.bytes().enumerate() {
@@ -1257,8 +1149,8 @@ fn wat_hook(hook: &str, out: &str) -> Vec<u8> {
     wat::parse_str(&src).expect("valid wat")
 }
 
-/// **The open hook**: a file's text is the hook's answer, the file on disk is not touched, and the
-/// buffer is not "modified" — opening is a reading, not an edit.
+/// The open hook: the hook's answer is the text, and opening is a reading, not an
+/// edit.
 #[test]
 fn opening_a_file_runs_the_open_hook() {
     let d = temp_dir("plugin_open");
@@ -1279,8 +1171,7 @@ fn opening_a_file_runs_the_open_hook() {
     assert!(!ed.bs().buf.modified, "reading is not an edit");
 }
 
-/// **The save hook**: what is written is what the hook answered *and* what the buffer becomes —
-/// one undo step, so the glass and the file never disagree.
+/// The save hook: what is written is the hook's answer, as one undo step.
 #[test]
 fn saving_runs_the_save_hook_and_the_buffer_is_what_was_written() {
     let d = temp_dir("plugin_save");
@@ -1297,13 +1188,11 @@ fn saving_runs_the_save_hook_and_the_buffer_is_what_was_written() {
     assert_eq!(fs::read_to_string(&f).unwrap(), "after\n");
     assert_eq!(lines(&ed), vec!["after"]);
     assert!(!ed.bs().buf.modified);
-    // One press takes the hook's transformation back — it was an edit, and says so.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert_eq!(lines(&ed), vec!["before"], "M-U undoes the plugin's step");
 }
 
-/// **A hook that fails is skipped, never a failed save**: the file is written as the buffer had
-/// it, and the line names the plugin.
+/// A hook that fails is skipped, never a failed save; the line names the plugin.
 #[test]
 fn a_trapping_plugin_leaves_the_save_intact() {
     let d = temp_dir("plugin_trap");
@@ -1336,7 +1225,7 @@ fn a_trapping_plugin_leaves_the_save_intact() {
     );
 }
 
-/// **A binary never reaches a plugin**: it is read-only and its text is not the file.
+/// A binary never reaches a plugin: it is read-only and its text is not the file.
 #[test]
 fn a_binary_file_never_reaches_the_plugin() {
     let d = temp_dir("plugin_binary");
@@ -1358,8 +1247,8 @@ fn a_binary_file_never_reaches_the_plugin() {
     );
 }
 
-/// **A folder opens through the plugin**: `provider_open` is asked first, the answer becomes the
-/// listing, and the editor keeps the keys — `RET` enters an entry.
+/// A folder opens through the plugin: `provider_open` is asked first, and its
+/// answer becomes the listing.
 #[test]
 fn a_folder_opens_through_the_plugin() {
     let wasm: &[u8] = include_bytes!("../examples/plugin-dired/plugin.wasm");
@@ -1377,11 +1266,9 @@ fn a_folder_opens_through_the_plugin() {
         },
     );
     assert!(ed.open_at(&d.0, 1, None).is_ok());
-    // The plugin answered: the buffer is a listing with the editor's own mode and keys.
     assert_eq!(lines(&ed), vec!["sub/", "one.txt"]);
     assert!(ed.bs().dir.is_some(), "a folder keeps the listing keys");
     assert!(ed.bs().read_only);
-    // RET enters: the folder through the plugin again, the file as a file.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.join("sub").as_path()));
     press(&mut ed, KeyCode::Char('-'), Mods::NONE);
@@ -1392,8 +1279,8 @@ fn a_folder_opens_through_the_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
-/// **The same folder, through the TypeScript plugin**: the editor cannot tell the two apart —
-/// that is the ABI's whole point.
+/// The same folder through the TypeScript plugin: the editor cannot tell the two
+/// apart.
 #[test]
 fn a_folder_opens_through_the_typescript_plugin() {
     let wasm: &[u8] = include_bytes!("../examples/plugin-dired-as/plugin.wasm");
@@ -1417,10 +1304,8 @@ fn a_folder_opens_through_the_typescript_plugin() {
     assert_eq!(lines(&ed), vec!["one"]);
 }
 
-/// **The manual is `docs/*.md`, or the build is stale.** The text is built from the files on disk
-/// the way the plugin's `include_str!` builds it at compile time — each file whole, ending in one
-/// newline, a blank line between — so a doc edited without rebuilding `plugin.wasm` fails here.
-/// `docs/` stays the single copy, which is the whole point of the include.
+/// The manual is `docs/*.md`, or the build is stale: the text is rebuilt from the
+/// files on disk, so a doc edited without rebuilding fails here.
 #[test]
 fn the_manual_is_the_docs() {
     let p = manual_plugin();
@@ -1432,8 +1317,8 @@ fn the_manual_is_the_docs() {
     assert!(got.starts_with("# Configuration\n"), "{:.40}", got);
 }
 
-/// **`provider_open` says "not mine" for an ordinary path**, so a file still opens as a file. The
-/// sentinel is the ABI's `0xFFFFFFFF`, which the SDK answers as `None`.
+/// `provider_open` says "not mine" for an ordinary path, so a file still opens as
+/// a file.
 #[test]
 fn the_manual_is_not_mine_for_an_ordinary_path() {
     let p = manual_plugin();
@@ -1451,9 +1336,8 @@ fn the_manual_is_not_mine_for_an_ordinary_path() {
     }
 }
 
-/// **`M-x manual` opens the manual**: the builtin unpacked into the reader's folder, loaded from
-/// there, the virtual path through the same door a folder takes, and the answer drawn as prose —
-/// a read-only buffer, so a view is a view and not a file.
+/// `M-x manual` opens the manual: the builtin unpacked and loaded from the
+/// reader's folder.
 #[test]
 fn the_manual_opens_read_only_with_the_preview_on() {
     let d = temp_dir("manual_open");
@@ -1478,8 +1362,7 @@ fn the_manual_opens_read_only_with_the_preview_on() {
         }
         _ => panic!("the manual opens rendered, not as raw markdown"),
     }
-    // **Unpacked, not overwritten**: the file is in `scripts/built-in/`, and a second use leaves
-    // whatever is there — here a build the reader replaced it with — exactly as it was.
+    // Unpacked, not overwritten: a second use leaves whatever is there.
     let at = d.0.join("built-in").join("manual.wasm");
     assert_eq!(
         fs::read(&at).unwrap(),
@@ -1487,8 +1370,7 @@ fn the_manual_opens_read_only_with_the_preview_on() {
         "the shipped build is unpacked byte for byte"
     );
     fs::write(&at, b"my own build").unwrap();
-    // **Editable means editable**: the file in that folder is the plugin that runs, so a later
-    // editor loads the replacement — which is not a module — and says so instead of opening.
+    // Editable means editable: a later editor loads the replacement and says so.
     let mut later = test_ed("");
     later.open_manual_from(&d.0);
     assert_eq!(fs::read(&at).unwrap(), b"my own build", "never overwritten");
@@ -1525,14 +1407,8 @@ fn docs_manual() -> String {
     out
 }
 
-/// **Reproduction: a three-row file, a mouse drag, then the frame.** The operator's crash
-/// (`index out of bounds: the len is 3 but the index is 3` at `buffer.rs:171`) came from a mouse
-/// selection, so this replays exactly that: press, drag, release, draw.
-/// **A short file in a tall window draws** — with wrap OFF, which is where the crash was: the
-/// viewport's last row is `scroll + text_h`, one past the end for any buffer shorter than the
-/// window, and the highlighter indexed it (`buffer.rs:171`, "len is 3 but the index is 3").
-/// Reported as "mouse-select, then copy": the selection was not the cause — the redraw after it
-/// was, and any redraw would have hit it.
+/// A short file in a tall window draws: the viewport's last row is one past the
+/// end, and the highlighter must not index it.
 #[test]
 fn a_short_file_in_a_tall_window_draws() {
     for wrap in [true, false] {
@@ -1563,9 +1439,8 @@ fn a_short_file_in_a_tall_window_draws() {
     crate::ui::draw_in(&mut buf, rect, &ed);
 }
 
-/// **A view wears no line numbers and starts no language server**, and its status line says a row,
-/// not a line: the number would be a row of a rendering (`Ln 7` of a directory is a claim about a
-/// file that does not exist).
+/// A view wears no line numbers, starts no language server, and says rows, not
+/// lines.
 #[test]
 fn a_view_wears_no_line_numbers_and_starts_no_server() {
     let d = temp_dir("view_gutter");
@@ -1579,8 +1454,8 @@ fn a_view_wears_no_line_numbers_and_starts_no_server() {
     assert!(ed.bs().lsp.is_none(), "a view starts no server");
 }
 
-/// **A send from a listing carries the entry under the cursor**, not a line of the listing: the
-/// reader is pointing at a file, and a host opening `dir:7` would land nowhere.
+/// A send from a listing carries the entry under the cursor, not a line of the
+/// listing.
 #[test]
 fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
     use std::cell::RefCell;
@@ -1597,7 +1472,6 @@ fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
         sink.borrow_mut().push(e.clone());
         Ok("sent".into())
     }));
-    // The cursor on `src/` (dirs sort first): the entry is that folder, at line 1.
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     {
         let g = got.borrow();
@@ -1609,7 +1483,6 @@ fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
         );
         assert!(!g[0].modified);
     }
-    // On a file row: that file, and the view's rows as the selection when one is marked.
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     {
@@ -1623,17 +1496,14 @@ fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
     }
 }
 
-/// **The example plugin, end to end through the editor.** `examples/plugin-upper` is a real
-/// `wasm32` build committed as `plugin.wasm` (264 bytes, source beside it), so this uses no
-/// toolchain and no file on disk beyond a scratch file — and it is the answer to "can I write
-/// something already": yes, and this is it running.
+/// The example plugin end to end through the editor: a committed wasm build, no
+/// toolchain.
 #[test]
 fn the_example_plugin_transforms_through_the_editor() {
     let wasm: &[u8] = include_bytes!("../examples/plugin-upper/plugin.wasm");
     let d = temp_dir("example_plugin");
     let f = d.0.join("notes.txt");
     fs::write(&f, "hello rano\n").unwrap();
-    // The open hook: the text arrives uppercase, the file on disk does not.
     let mut ed = test_ed("");
     ed.set_plugin_bytes(wasm, PathBuf::from("plugin-upper.wasm"));
     assert!(ed.open_at(&f, 1, None).is_ok());
@@ -1641,8 +1511,8 @@ fn the_example_plugin_transforms_through_the_editor() {
     assert_eq!(fs::read_to_string(&f).unwrap(), "hello rano\n");
     let note = ed.status_text().unwrap_or_default();
     assert!(note.contains("transformed"), "the open says so: {note}");
-    // Type something lowercase, then save: the hook has work to do, and its answer becomes the
-    // buffer too — one undo step, so `M-U` takes exactly that transformation back.
+    // Type lowercase, then save: the hook's answer becomes the buffer too, one
+    // undo step.
     press(&mut ed, KeyCode::End, Mods::NONE);
     press_text(&mut ed, "abc");
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
@@ -1685,9 +1555,6 @@ fn a_timestamp_only_change_says_so_in_the_diff() {
             .contains("only the file's timestamp")
     );
 }
-
-// D3 — undo/redo protective tests (green on the snapshot impl; they must
-// stay green through the region-based refactor).
 
 fn press_text(ed: &mut Editor, s: &str) {
     for c in s.chars() {
@@ -1790,9 +1657,8 @@ fn undo_limit_trims() {
     for _ in 0..600 {
         press(&mut ed, KeyCode::Enter, Mods::NONE);
     }
-    // CURRENT snapshot impl coalesces a run of Enters into one step (1
-    // step here); D3 makes Newline never coalesce (500 steps). The plan's
-    // contract "500 steps max" holds for both.
+    // A run of Enters coalesces into one step; the "500 steps max" contract
+    // holds either way.
     assert!(ed.bs().undo.len() <= 500);
 }
 
@@ -1862,8 +1728,6 @@ fn undo_redo_after_new_edit() {
     assert_eq!(lines(&ed), vec!["abx"]);
 }
 
-// D1 — replace-all is one pass from the cursor, non-overlapping.
-
 #[test]
 fn replace_all_from_cursor_and_no_overlap() {
     let mut ed = test_ed("aaa");
@@ -1889,8 +1753,7 @@ fn replace_all_drift() {
     assert_eq!(ed.replace_count, 2);
 }
 
-// D4 — didChange is debounced: the flag clears only after the 300 ms
-// window, even when no client is attached (scratch buffer → lsp None).
+// didChange is debounced: the flag clears only after the 300 ms window.
 
 #[test]
 fn lsp_flush_debounce() {
@@ -1904,9 +1767,6 @@ fn lsp_flush_debounce() {
     assert!(!ed.bs().lsp_dirty, "no client attached: flag still cleared");
     assert_eq!(ed.bs().lsp_last_send, now + Duration::from_millis(400));
 }
-
-// D5 — a failed async handshake is adopted on the next poll and flashes;
-// a handshake started for another file stays silent.
 
 #[test]
 fn lsp_adopt_err_flashes() {
@@ -1932,9 +1792,6 @@ fn lsp_adopt_stale_silent() {
     assert!(ed.bs().lsp_starting.is_none());
     assert!(ed.status.is_none(), "stale failure must be silent");
 }
-
-// E5 — diagnostics are underlined in severity color under the cursor;
-// search matches and the selection still win.
 
 // ---------- completion (LSP) ----------
 
@@ -1976,8 +1833,8 @@ fn completion_prefix_word_dot_and_colons() {
 
 #[test]
 fn completion_response_prefix_first_then_fuzzy() {
-    // Exact prefix matches keep the server's order and come first;
-    // subsequence matches follow; non-matches are dropped.
+    // Exact prefix matches come first in the server's order; subsequence matches
+    // follow.
     let mut ed = test_ed("x\nis\n");
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
     ed.completion_q.push_back((1, "is".to_string()));
@@ -1997,8 +1854,8 @@ fn completion_response_prefix_first_then_fuzzy() {
     ]);
     let p = ed.completion.as_ref().unwrap();
     let labels: Vec<_> = p.items.iter().map(|i| i.label.as_str()).collect();
-    // "into_raw_parts" survives as a subsequence match (i…s), but only
-    // after the exact-prefix items; "as_bytes" has no `i` and is dropped.
+    // "into_raw_parts" is a subsequence match (i…s), after the exact ones;
+    // "as_bytes" has no `i` and is dropped.
     assert_eq!(
         labels,
         vec!["is_empty", "is_ascii", "into_raw_parts", "__is_long"]
@@ -2016,10 +1873,8 @@ fn completion_response_prefix_first_then_fuzzy() {
 
 #[test]
 fn completion_fallback_junk_parks_popup_and_retries() {
-    // A `.`-context answered with path-fallback items (rust-analyzer
-    // still scanning a freshly opened crate) is not applied: the popup
-    // stays empty and a re-request is scheduled. The same items in a
-    // word context ("cra") are legitimate and applied as-is.
+    // A `.`-context answered with path fallback (rust-analyzer still scanning) is
+    // not applied; the same items in a word context are legitimate.
     let mut ed = test_ed("text.\n");
     ed.bs_mut().cursor = Pos { row: 0, col: 5 };
     ed.completion_q.push_back((0, String::new()));
@@ -2031,8 +1886,8 @@ fn completion_fallback_junk_parks_popup_and_retries() {
     );
     assert!(ed.completion_retry.is_some(), "re-request scheduled");
     assert_eq!(ed.completion_retries, 1);
-    // Timer elapsed: the poll consumes it and keeps the popup open
-    // (no LSP attached here, so the re-request itself is a no-op).
+    // Timer elapsed: the poll consumes it and keeps the popup (no LSP here, so a
+    // no-op).
     ed.completion_retry = Some(Instant::now() - Duration::from_millis(1));
     ed.completion_retry_poll();
     assert!(ed.completion.is_some());
@@ -2058,8 +1913,7 @@ fn completion_fallback_junk_parks_popup_and_retries() {
 
 #[test]
 fn completion_response_stale_or_missing_popup() {
-    // Response answering an older keystroke (different prefix): dropped,
-    // popup untouched.
+    // Response for an older keystroke: dropped, popup untouched.
     let mut ed = test_ed("ab\n");
     ed.bs_mut().cursor = Pos { row: 0, col: 2 };
     ed.completion_q.push_back((0, "a".to_string()));
@@ -2146,8 +2000,7 @@ fn completion_enter_accepts_not_newline() {
 
 #[test]
 fn completion_typing_backspace_and_space_lifecycle() {
-    // No LSP attached: the popup can't (re)open, but typing inside the
-    // word and backspacing keep it alive; leaving the word closes it.
+    // No LSP: the popup cannot reopen, but typing inside the word keeps it alive.
     let mut ed = test_ed("pr x\n");
     ed.bs_mut().cursor = Pos { row: 0, col: 2 };
     ed.completion = Some(popup(vec![citem("pr", 6)], 0, 0));
@@ -2299,10 +2152,7 @@ fn diag_style_priority() {
     );
 }
 
-// E5 — M-D walks the diagnostics top-down, wrapping past the last one.
-
-// Indentation: Tab follows the buffer's own indent style instead of
-// always inserting a literal tab char.
+// Indentation: Tab follows the buffer's own indent style.
 
 #[test]
 fn tab_matches_space_indent() {
@@ -2323,9 +2173,6 @@ fn tab_aligns_to_next_unit_mid_line() {
 
 #[test]
 fn tab_uses_tab_char_when_file_does() {
-    // **This is `indent = auto`**, the mode that follows the file: a tab-indented buffer
-    // gets a tab. The default is `indent = spaces` (four of them), which the case below
-    // pins — the old default was a tab for every buffer that had no style to detect.
     let mut ed = test_ed("\ta\n\tb\n\n");
     ed.config.indent = config::Indent::Auto;
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
@@ -2335,9 +2182,6 @@ fn tab_uses_tab_char_when_file_does() {
 
 #[test]
 fn tab_inserts_the_configured_unit_by_default() {
-    // Four spaces, in a buffer whose file indents with tabs: the setting wins, which is
-    // what "make tabs configurable" asked for (and `indent = auto` is how to follow the
-    // file). Go's gofmt rewrites those spaces back to tabs on save, which is Go's rule.
     let mut ed = test_ed("\ta\n\tb\n\n");
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
     press(&mut ed, KeyCode::Tab, Mods::NONE);
@@ -2367,8 +2211,8 @@ fn backspace_mid_text_still_one_char() {
     assert_eq!(lines(&ed), vec!["    a"]);
 }
 
-// Syntax errors surface without a language server (tree-sitter ERROR
-// nodes become diagnostics), and zero-width LSP ranges become visible.
+// Syntax errors surface without a language server, and zero-width ranges become
+// visible.
 
 #[test]
 fn syntax_error_diag_without_lsp() {
@@ -2377,9 +2221,7 @@ fn syntax_error_diag_without_lsp() {
     buf.set_rows(vec!["fn main() {".chars().collect()]);
     let mut ed = Editor::new(buf, config::Config::default());
     ed.edit_invalidate();
-    // Diagnostics are a WHOLE-document parse now, debounced the way the
-    // LSP's `didChange` is — so the test does what the run loop does: the
-    // frame's highlight (colour), then a flush past the debounce.
+    // Diagnostics are debounced: do what the run loop does — highlight, then flush.
     ed.ensure_highlight();
     let after_the_pause = std::time::Instant::now() + std::time::Duration::from_millis(400);
     ed.diag_flush(after_the_pause);
@@ -2442,8 +2284,8 @@ fn jump_next_diag_empty_flashes() {
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
 }
 
-// D7 — exec is async: output lands below the spawn row as ONE undo
-// step; a failed command records no step and never edit_invalidates.
+// Exec is async: output lands below the spawn row as one undo step; a failure
+// records none.
 
 fn poll_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2491,7 +2333,7 @@ fn status_shows_running_command() {
     poll_until(&mut ed, |ed| ed.bs().exec_job.is_none());
 }
 
-// E1 — bracketed paste: one undo step, \r stripped, cursor at the end.
+// Bracketed paste: one undo step, \r stripped, cursor at the end.
 
 #[test]
 fn paste_text_single_and_multiline() {
@@ -2520,7 +2362,7 @@ fn paste_text_strips_cr() {
     assert_eq!(lines(&ed), vec!["x", "y"]);
 }
 
-// F6 — M-| filters the selected rows through an external command.
+// M-| filters the selected rows through an external command.
 
 #[test]
 fn filter_region_uppercases() {
@@ -2562,8 +2404,6 @@ fn filter_failure_no_undo() {
     assert!(ed.bs().undo.is_empty(), "failure must record no undo step");
 }
 
-// E5 — M-D is next-diagnostic; word motions moved to Alt+Left/Right.
-
 #[test]
 fn alt_d_jumps_diag_alt_arrows_words() {
     let mut ed = test_ed("ab cd ef");
@@ -2577,7 +2417,7 @@ fn alt_d_jumps_diag_alt_arrows_words() {
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
 }
 
-// E3 — horizontal scroll follows the cursor in display cols.
+// Horizontal scroll follows the cursor in display cols.
 
 #[test]
 fn scroll_x_follows_cursor() {
@@ -2595,11 +2435,7 @@ fn scroll_x_follows_cursor() {
 
 #[test]
 fn scroll_x_with_tabs() {
-    // cursor col 3 → display col 9; 9 >= 0 + 4 → scroll_x = 9 + 1 - 4
     let mut ed = test_ed("a\tb");
-    // The width is named rather than taken from the default (four columns now): this test
-    // is about the arithmetic *given* a tab width, and the default is pinned in
-    // `config::tests` and `config_line_numbers_seeded`.
     ed.tab_width = 8;
     ed.wrap = false; // horizontal scrolling needs wrap off
     ed.show_line_numbers = false;
@@ -2609,7 +2445,7 @@ fn scroll_x_with_tabs() {
     assert_eq!(ed.bs().scroll_x, 6);
 }
 
-// F4 — M-N toggles the line-number gutter.
+// M-N toggles the line-number gutter.
 
 #[test]
 fn m_n_toggles_line_numbers() {
@@ -2621,7 +2457,7 @@ fn m_n_toggles_line_numbers() {
     assert!(ed.show_line_numbers);
 }
 
-// M-\ — soft line wrap: scroll, motion and mouse work in VISUAL rows.
+// M-\ — soft line wrap: scroll, motion and mouse work in visual rows.
 
 #[test]
 fn m_backslash_toggles_wrap() {
@@ -2635,9 +2471,8 @@ fn m_backslash_toggles_wrap() {
 
 #[test]
 fn wrap_table_and_motion_handle_wide_characters() {
-    // 5 CJK characters = 10 display columns in a 4-column view: three
-    // visual rows of 2, 2 and 1 characters. Nothing may split a glyph,
-    // and the cursor's column must be measured in cells, not characters.
+    // 5 CJK characters = 10 display columns in a 4-column view: three visual rows
+    // of 2, 2 and 1. Nothing may split a glyph.
     let mut ed = test_ed("中文字语言\nx");
     ed.show_line_numbers = false;
     ed.text_w = 4;
@@ -2648,15 +2483,12 @@ fn wrap_table_and_motion_handle_wide_characters() {
         "10 columns / 4 per row = 3 visual rows"
     );
     assert_eq!(ed.seg_count(0), 3);
-    // Segments begin at characters 0, 2 and 4 — and at display columns
-    // 0, 4 and 8, which is what the renderer paints from.
     assert_eq!(ed.seg_chars(0, 0), (0, 2));
     assert_eq!(ed.seg_chars(0, 1), (2, 4));
     assert_eq!(ed.seg_chars(0, 2), (4, 5));
     assert_eq!(ed.seg_disp(0, 0), (0, 4));
     assert_eq!(ed.seg_disp(0, 1), (4, 8));
     assert_eq!(ed.seg_disp(0, 2), (8, 10));
-    // A char col maps to its visual row and to its offset inside it.
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 0 }), 0);
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 1 }), 0);
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 2 }), 1);
@@ -2664,8 +2496,8 @@ fn wrap_table_and_motion_handle_wide_characters() {
     assert_eq!(ed.disp_in_seg(0, 0), 0);
     assert_eq!(ed.disp_in_seg(0, 1), 2, "one glyph in, on row 0");
     assert_eq!(ed.disp_in_seg(0, 4), 0, "start of the third row");
-    // End goes to the end of the VISUAL row — a cluster boundary, never
-    // the middle of a glyph — and Down carries that offset across.
+    // End goes to the end of the visual row, never mid-glyph; Down carries the
+    // offset across.
     ed.bs_mut().cursor = Pos { row: 0, col: 0 };
     press(&mut ed, KeyCode::End, Mods::NONE);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 2 });
@@ -2685,23 +2517,18 @@ fn mouse_pos_maps_wide_columns_to_the_clicked_character() {
     ed.show_line_numbers = false;
     ed.text_w = 4;
     ed.ensure_wrap_prefix();
-    // Pane column 1 is the left cell of 中; column 3 is inside 文.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 1)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 1 });
-    // Pane row 2 is the second visual row: its column 3 is inside 语.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
-    // Past the last cell of the final row → end of line.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 5 });
 }
 
 #[test]
 fn wheel_scrolls_wide_rows_by_visual_row() {
-    // 5 CJK characters in a 4-column view is 3 visual rows; a wheel
-    // notch must move three of them, not three characters.
     let mut ed = test_ed("中文字语言\nx");
     ed.show_line_numbers = false;
     ed.text_w = 4;
@@ -2709,14 +2536,11 @@ fn wheel_scrolls_wide_rows_by_visual_row() {
     ed.ensure_wrap_prefix();
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3, "one buffer row is three visual rows");
-    // The cursor is pinned onto the edge it would have crossed.
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
 }
 
 #[test]
 fn wrap_prefix_counts_visual_rows() {
-    // view_w 10: row 0 (25 cols) → 3 visual rows, row 1 (5) → 1,
-    // row 2 (15) → 2.
     let mut ed = test_ed(&format!(
         "{}\n{}\n{}",
         "a".repeat(25),
@@ -2791,19 +2615,16 @@ fn open_at_opens_switches_and_never_discards_unsaved_edits() {
     fs::write(&b, "b1\nb2\nb3\nb4\n").unwrap();
     let mut ed = Editor::new(Buffer::from_file(&a).unwrap(), config::Config::default());
     ed.text_h = 10;
-    // Single-buffer, but the current buffer is modified: b gets its own.
     press_text(&mut ed, "X");
     ed.open_at(&b, 3, Some(2)).expect("open");
     assert_eq!(ed.buffers.len(), 2, "the edited buffer was kept");
     assert_eq!(ed.bs().buf.name.as_deref(), Some(b.as_path()));
     assert_eq!(ed.bs().cursor, Pos { row: 2, col: 1 });
     assert!(!ed.config.multibuffer, "the config is as it was");
-    // Already open: switch, and position.
     ed.open_at(&a, 2, None).expect("switch");
     assert_eq!(ed.bs().buf.name.as_deref(), Some(a.as_path()));
     assert_eq!(lines(&ed)[0], "Xa1", "the edit is still there");
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
-    // A missing file is an error, and nothing changes.
     assert!(ed.open_at(&d.0.join("missing.txt"), 1, None).is_err());
     assert_eq!(ed.buffers.len(), 2);
 }
@@ -2832,7 +2653,6 @@ fn m_s_sends_the_file_the_cursor_and_the_selection() {
     use std::rc::Rc;
     let mut ed = test_ed("fn a() {\n    body();\n}");
     ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_send.rs"));
-    // No host yet: it says so.
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     assert!(ed.status_text().unwrap().starts_with("Nowhere to send"));
     let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
@@ -2876,7 +2696,6 @@ fn send_command_gets_the_event_as_json_and_in_its_environment() {
         modified: false,
     };
     assert_eq!(send(&e).unwrap(), "Sent line 4, column 2");
-    // The command runs on its own; wait for what it wrote.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !out.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -2891,10 +2710,8 @@ fn send_command_gets_the_event_as_json_and_in_its_environment() {
 
 #[test]
 fn a_startup_position_is_centred() {
-    // 500 lines in a 20-row viewport. The target is a line with room above
-    // AND below it, which is what makes centring mean anything — with the
-    // file's end in view the clamp wins instead, which
-    // `centring_clamps_at_both_ends` pins.
+    // 500 lines in a 20-row viewport; the target has room above and below, which
+    // is what makes centring mean anything — at the file's end the clamp wins.
     let mut ed = ed_with_lines(500);
     ed.text_h = 20;
     ed.show_line_numbers = false;
@@ -2904,7 +2721,6 @@ fn a_startup_position_is_centred() {
     ed.apply_startup_pos();
     assert_eq!(ed.bs().cursor, Pos { row: 249, col: 0 });
     assert_eq!(ed.bs().goto, None, "applied once");
-    // Centred: text_h/2 = 10 rows above, so the target is on pane row 11.
     assert_eq!(ed.bs().scroll, 239, "249 - text_h/2");
     let vis = ed.visual_pos(Pos { row: 249, col: 0 });
     assert_eq!(
@@ -2916,15 +2732,13 @@ fn a_startup_position_is_centred() {
 
 #[test]
 fn centring_clamps_at_both_ends() {
-    // Near the start there is nothing above to show, so the target is not
-    // centred — it is as centred as the file allows, which is the top.
+    // Near the start there is nothing above, so it is as centred as the file allows.
     let mut ed = ed_with_lines(100);
     ed.text_h = 20;
     ed.bs_mut().goto = Some(Pos { row: 1, col: 0 });
     ed.ensure_wrap_prefix();
     ed.apply_startup_pos();
     assert_eq!(ed.bs().scroll, 0, "no blank space above the first line");
-    // And near the end, the last screenful.
     let mut ed = ed_with_lines(100);
     ed.text_h = 20;
     ed.bs_mut().goto = Some(Pos { row: 99, col: 0 });
@@ -2935,11 +2749,8 @@ fn centring_clamps_at_both_ends() {
 
 #[test]
 fn centring_counts_visual_rows_when_wrapped() {
-    // One long line above the target occupies several visual rows, and the
-    // scroll is counted in those — so a buffer row and a visual row differ
-    // and the centring has to use the visual one.
-    // A long line first, then enough short ones that the target can
-    // actually be centred (there has to be something below it).
+    // One long line above the target occupies several visual rows, so the scroll is
+    // counted in those and centring must use the visual row.
     let tail: String = (0..40).map(|i| format!("tail {i}\n")).collect();
     let mut ed = test_ed(&format!("{}\ntarget\n{tail}", "x".repeat(120)));
     ed.text_h = 10;
@@ -2951,9 +2762,8 @@ fn centring_counts_visual_rows_when_wrapped() {
     ed.bs_mut().goto = Some(Pos { row: 20, col: 0 });
     ed.apply_startup_pos();
     let vis = ed.visual_pos(Pos { row: 20, col: 0 });
-    // The target's BUFFER row is 20, but its VISUAL row is much further down
-    // because the long line above it occupies `seg` rows. Centring uses the
-    // visual one — using the buffer row would put the view `seg` rows off.
+    // The buffer row is 20, the visual row far below: using the buffer row would
+    // put the view `seg` rows off.
     assert_eq!(
         vis,
         seg + 19,
@@ -2964,9 +2774,8 @@ fn centring_counts_visual_rows_when_wrapped() {
 
 #[test]
 fn a_position_waits_for_its_row_to_arrive() {
-    // With the loader a row a million lines in arrives long after the first
-    // frame. Clamping to what had arrived would open the file at the wrong
-    // place and look like the feature was broken, so it waits.
+    // A row a million lines in arrives long after the first frame; clamping to
+    // what has arrived would open the file in the wrong place.
     let mut ed = ed_with_lines(10);
     ed.text_h = 10;
     ed.bs_mut().goto = Some(Pos {
@@ -2983,7 +2792,6 @@ fn a_position_waits_for_its_row_to_arrive() {
         }),
         "still pending"
     );
-    // Now the row arrives.
     ed.bs_mut()
         .buf
         .extend_rows((0..1_000_000).map(|i| format!("r{i}").chars().collect()));
@@ -3023,10 +2831,8 @@ fn no_position_leaves_the_editor_alone() {
 
 #[test]
 fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
-    // The loader APPENDS rows, and the table is extended from the join
-    // rather than rebuilt. A wrong prefix is wrong scrolling, so this drives
-    // both paths over the same sequence of appends and compares — the same
-    // form as the single-row test above, for the same reason.
+    // The loader appends rows and the table is extended, not rebuilt: drive both
+    // paths over the same appends and compare.
     let mut ed = test_ed("seed");
     ed.show_line_numbers = false;
     ed.text_w = 12;
@@ -3042,7 +2848,6 @@ fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
             })
             .collect();
         ed.bs_mut().buf.extend_rows(added);
-        // What the loader does: only the first batch overlaps the seed.
         ed.bs_mut().wrap_extend_from = Some(if was <= 1 { 0 } else { was });
         ed.bs_mut().edit_gen = ed.bs().edit_gen.wrapping_add(1);
         ed.ensure_wrap_prefix();
@@ -3074,10 +2879,6 @@ fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
 
 #[test]
 fn the_incremental_wrap_table_agrees_with_a_full_rebuild() {
-    // Typing re-measures ONE row and re-sums the rest arithmetically; a
-    // multi-row edit rebuilds everything. The two must not disagree, so
-    // this drives both and compares — the fast path is only ever a
-    // shorter way to compute the same table.
     let text: String = (0..40)
         .map(|i| format!("{}{}\n", i, "x".repeat(i * 3)))
         .collect();
@@ -3109,8 +2910,6 @@ fn the_incremental_wrap_table_agrees_with_a_full_rebuild() {
 
 #[test]
 fn a_row_that_stops_wrapping_is_still_measured_once() {
-    // The dirty-row path must notice a row that shrinks back under the
-    // viewport, not just one that grows past it.
     let mut ed = test_ed(&format!("{}\nshort", "a".repeat(30)));
     ed.show_line_numbers = false;
     ed.text_w = 10;
@@ -3128,16 +2927,8 @@ fn a_row_that_stops_wrapping_is_still_measured_once() {
     assert_eq!(ed.bs().wrap_prefix, vec![0, 1, 2], "5 cols → 1 visual row");
 }
 
-/// **Scrolling must re-highlight.** The style grid is a WINDOW over the
-/// viewport, and until now nothing recomputed it when the view scrolled:
-/// `highlight_dirty` is set by edits and loads and by no scroll path, so
-/// `ensure_highlight` returned early for ever after the first frame and every
-/// newly revealed row was drawn plain.
-///
-/// Found by comparing the operator's window (rano's own `TODO.md`, scrolled
-/// to line 229) against a fresh open of the same file: everything above
-/// ~row 260 was coloured, everything below was plain, and the boundary was
-/// `first viewport + text_h + HIGHLIGHT_MARGIN`.
+/// Scrolling must re-highlight: the grid is a window over the viewport, and rows
+/// revealed after the first frame would otherwise be drawn plain.
 #[test]
 fn scrolling_far_re_highlights_the_new_viewport() {
     let text: String = (0..600)
@@ -3148,27 +2939,18 @@ fn scrolling_far_re_highlights_the_new_viewport() {
     ed.text_w = 60;
     ed.text_h = 20;
     ed.ensure_wrap_prefix();
-    // The frame at the top of the file.
     ed.ensure_highlight();
-    // Row 4 is `## Section 1` — the `##` is a keyword, so an answer here is
-    // the grid actually being built. (`row 5` is the blank line after it,
-    // where `None` is the correct answer and asserting on it would have been
-    // a test that could not fail.)
     assert!(
         ed.bs().hl.style_at(Pos { row: 4, col: 0 }).is_some(),
         "the first viewport is highlighted"
     );
 
-    // Scroll a long way WITHOUT touching the buffer, which is what PgDn and
-    // the wheel do — no edit, so `highlight_dirty` stays false.
     let far = 1500;
     ed.bs_mut().scroll = far;
     ed.bs_mut().cursor = Pos { row: far, col: 0 };
     ed.ensure_wrap_prefix();
     ed.ensure_highlight();
 
-    // The window must cover the viewport. This is the assertion that fails
-    // without the fix: the window would still be the one built for the top.
     let win = ed
         .bs()
         .hl
@@ -3184,23 +2966,16 @@ fn scrolling_far_re_highlights_the_new_viewport() {
 
 #[test]
 fn an_edit_highlights_on_the_frame_not_per_key() {
-    // The open cost, and the reason a burst of typing costs one highlight
-    // rather than one per keystroke. A big buffer is highlighted by
-    // viewport window and only when a frame asks for it, so nothing is
-    // parsed at open and nothing is parsed by the edit itself.
     let text: String = (0..60_000)
         .map(|i| format!("pub fn f{i}(x: usize) -> usize {{ x + {i} }}\n"))
         .collect();
     assert!(text.len() > 2 << 20, "{} bytes", text.len());
     let mut ed = test_ed(&text);
-    // A name, so the highlighter has a language at all (`detect` works
-    // from the name and the shebang).
     ed.bs_mut().buf.name = Some(std::path::PathBuf::from("big.rs"));
     ed.show_line_numbers = false;
     ed.text_w = 100;
     ed.text_h = 40;
 
-    // Opening parses nothing: the grid is empty until a frame asks.
     assert_eq!(
         ed.bs().hl.styled_window(),
         None,
@@ -3208,7 +2983,6 @@ fn an_edit_highlights_on_the_frame_not_per_key() {
     );
     assert_eq!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }), None);
 
-    // The frame's call: a viewport window, not the document.
     ed.ensure_highlight();
     let win = ed
         .bs()
@@ -3223,16 +2997,12 @@ fn an_edit_highlights_on_the_frame_not_per_key() {
     );
     assert!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }).is_some());
 
-    // An edit marks the grid stale and does NOT re-highlight; the next
-    // frame does, once, however many keys arrived in between.
     ed.bs_mut().cursor = Pos { row: 3, col: 0 };
     for _ in 0..5 {
         ed.insert_char('y');
     }
-    // Five keystrokes, one highlight — and it happens when asked.
     ed.ensure_highlight();
     assert!(ed.bs().hl.styled_window().is_some());
-    // Idempotent: asking twice is free and changes nothing.
     let before = ed.bs().hl.styled_window();
     ed.ensure_highlight();
     assert_eq!(ed.bs().hl.styled_window(), before);
@@ -3257,7 +3027,6 @@ fn wrap_disables_horizontal_scroll() {
 
 #[test]
 fn adjust_scroll_keeps_cursor_visible_with_wrap() {
-    // 10 rows × 30 cols, view 10 wide → 3 visual rows per row, 30 total.
     let text: String = (0..10)
         .map(|i| format!("{}{}\n", i, "a".repeat(29)))
         .collect();
@@ -3267,7 +3036,6 @@ fn adjust_scroll_keeps_cursor_visible_with_wrap() {
     ed.text_h = 6;
     ed.bs_mut().cursor = Pos { row: 5, col: 29 }; // visual row 5*3 + 2 = 17
     ed.adjust_scroll(ed.text_h);
-    // max_scroll = 30 - 6 = 24; scroll = 17 - 6 + 1 = 12
     assert_eq!(ed.bs().scroll, 12);
 }
 
@@ -3280,7 +3048,6 @@ fn wheel_scrolls_visual_rows_with_wrap() {
     ed.show_line_numbers = false;
     ed.text_w = 10;
     ed.text_h = 6;
-    // 30 visual rows; the cursor (visual 0) is pinned to the top edge.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(
@@ -3298,7 +3065,6 @@ fn move_up_down_cross_wrap_segments() {
     let mut ed = test_ed(&format!("{}\n{}", "a".repeat(25), "b".repeat(5)));
     ed.show_line_numbers = false;
     ed.text_w = 10;
-    // row 0 occupies visual rows 0..3; the cursor starts on row 1 (visual 3).
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
     press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(
@@ -3359,10 +3125,8 @@ fn page_keys_move_visual_rows_with_wrap() {
     ed.text_h = 6;
     ed.bs_mut().cursor = Pos { row: 5, col: 0 }; // visual row 15
     press(&mut ed, KeyCode::PageUp, Mods::NONE);
-    // step 5 → visual row 10 = row 3, segment 1, col 0 → char col 10
     assert_eq!(ed.bs().cursor, Pos { row: 3, col: 10 });
     press(&mut ed, KeyCode::PageDown, Mods::NONE);
-    // back to visual row 15 = row 5, segment 0
     assert_eq!(ed.bs().cursor, Pos { row: 5, col: 0 });
 }
 
@@ -3372,15 +3136,11 @@ fn mouse_pos_maps_visual_rows_with_wrap() {
     ed.show_line_numbers = false;
     ed.text_w = 10;
     ed.text_h = 10;
-    // pane row 2 = visual row 1 = row 0, segment 1; col 3 → display col 13.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 13 });
-    // pane row 4 = visual row 3 = row 1, segment 0.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 4, 2)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
 }
-
-// D6 — tick_status reports whether it cleared visible state.
 
 #[test]
 fn tick_status_reports_clear() {
@@ -3393,8 +3153,6 @@ fn tick_status_reports_clear() {
     assert!(ed.status.is_none());
     assert!(!ed.tick_status());
 }
-
-// F1 — Editor::new takes a Config; tab_width/line_numbers seed from it.
 
 #[test]
 fn config_tab_width_used() {
@@ -3428,9 +3186,6 @@ fn config_line_numbers_seeded() {
     assert_eq!(ed.config.indent_size, 4, "and a Tab inserts four spaces");
 }
 
-// F3 — auto-indent carries the current line's leading whitespace onto
-// the new row (only when config.auto_indent is on).
-
 #[test]
 fn auto_indent_copies_indent() {
     let mut buf = Buffer::new();
@@ -3446,15 +3201,10 @@ fn auto_indent_copies_indent() {
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
 }
 
-/// **The one-pass scan must agree with the obvious one.** The early exit at
-/// GCD 1 is exact (a GCD cannot rise), but "exact" is a claim, so it is
-/// checked against a reference over documents chosen to reach every branch:
-/// no indentation at all, a tab anywhere, a single width, a 1 that appears
-/// only at the END (the case the early exit has to get right), a mixed 4/8,
-/// and a unit past the 8-space fallback.
+/// The one-pass scan must agree with the obvious one: GCD 1 exits early, and that
+/// claim is checked against a reference reaching every branch.
 #[test]
 fn indent_unit_matches_the_reference_scan() {
-    /// The literal reading: collect every count, sort, fold the GCD.
     fn reference(text: &str) -> String {
         let lines: Vec<&str> = text.split('\n').collect();
         if lines.iter().any(|l| l.starts_with('\t')) {
@@ -3481,10 +3231,7 @@ fn indent_unit_matches_the_reference_scan() {
             }
             unit = a;
         }
-        // Nothing to detect — no indented row at all, a one-space run (which means "this
-        // row was indented by one", not "my style is one column"), or a unit past the
-        // 8-space bound — and the mode's fallback is the **configured size**, which is what
-        // `Indent::Auto` does (it used to be a tab).
+        // Nothing to detect: the fallback is the configured size.
         if unit <= 1 || unit > 8 {
             return "    ".to_string();
         }
@@ -3505,9 +3252,7 @@ fn indent_unit_matches_the_reference_scan() {
         ("blank lines", "\n\n    a\n\n"),
         ("single", "    only"),
     ] {
-        // **The scan is what `indent = auto` asks for**: the *default* is four spaces,
-        // which is a setting rather than a detection (see `config::Indent`), so the mode
-        // is named here and the fallback is the configured size.
+        // The scan is what `indent = auto` asks for; the default is a setting.
         let mut ed = test_ed(text);
         ed.config.indent = config::Indent::Auto;
         ed.config.indent_size = 4;
@@ -3531,13 +3276,11 @@ fn auto_indent_off_by_config() {
 
 #[test]
 fn auto_indent_on_by_default_and_electric_after_brace() {
-    // Default config: Enter carries the indent...
     let mut ed = test_ed("    foo");
     ed.bs_mut().cursor = Pos { row: 0, col: 7 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    foo", "    "]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
-    // ...and an opening brace indents one unit deeper.
     let mut ed = test_ed("    if x {");
     ed.bs_mut().cursor = Pos { row: 0, col: 10 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
@@ -3551,26 +3294,20 @@ fn mouse_click_drag_and_wheel() {
     ed.show_line_numbers = true;
     ed.text_w = 40;
     ed.text_h = 10;
-    // Click on "world" (pane row 2, col 2; gutter is 3 wide).
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 5)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // Drag extends the selection (pane col 4 → disp 1 → char col 1).
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 2, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // The button coming up keeps a selection that was actually dragged.
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 2, 4));
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // Title row and status/bar rows are ignored.
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 0, 3)));
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 22, 3)));
 }
 
-/// **A click places the cursor and arms nothing.** The anchor a press sets is for
-/// the drag that may follow; a release with no drag in between drops it. Leaving
-/// it armed is what made a later scroll redraw a selection from wherever the
-/// click landed — the wheel pins the edit point as it scrolls.
+/// A click places the cursor and arms nothing: leaving the anchor armed made a
+/// later scroll redraw a selection.
 #[test]
 fn a_click_arms_no_selection_for_the_wheel_to_grow() {
     let text: String = (1..=40).map(|i| format!("L{i}\n")).collect();
@@ -3586,8 +3323,6 @@ fn a_click_arms_no_selection_for_the_wheel_to_grow() {
     );
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 3, 1));
     assert_eq!(ed.bs().mark, None, "a click is not a selection");
-    // Scroll back and forth: the wheel pins the edit point to the edge it would
-    // cross (nano's scroll), and there is no anchor for that to select from.
     for _ in 0..4 {
         assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     }
@@ -3600,9 +3335,7 @@ fn a_click_arms_no_selection_for_the_wheel_to_grow() {
     assert_eq!(ed.bs().mark, None);
 }
 
-/// nano's other half of the click: on the cursor itself it toggles the mark, which
-/// is how a selection is started with the mouse (winio.c: *"Clicking there where
-/// the cursor is toggles the mark"*).
+/// nano's other half of the click: on the cursor itself it toggles the mark.
 #[test]
 fn a_click_on_the_cursor_itself_toggles_the_mark() {
     let mut ed = test_ed("hello\nworld\n");
@@ -3617,16 +3350,14 @@ fn a_click_on_the_cursor_itself_toggles_the_mark() {
         Some(c),
         "and the release keeps what was asked for"
     );
-    // Clicking there again toggles it off, release or no release.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, c.col as u16)));
     assert_eq!(ed.bs().mark, None);
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, c.col as u16));
     assert_eq!(ed.bs().mark, None);
 }
 
-/// **The wheel works in a view drawn over the text** — the markdown preview, a
-/// diff — and only on the view: the text underneath is not what the reader is
-/// looking at, so a click there must not move its cursor either.
+/// The wheel works in a view drawn over the text, and only on the view: a click
+/// there must not move the text's cursor.
 #[test]
 fn the_wheel_scrolls_a_preview_and_leaves_the_text_under_it_alone() {
     let text: String = (1..=60).map(|i| format!("para {i}\n\n")).collect();
@@ -3646,33 +3377,26 @@ fn the_wheel_scrolls_a_preview_and_leaves_the_text_under_it_alone() {
         was,
         "the text under it did not move"
     );
-    // A click is not the text's either: the view has nothing to point at.
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 3)));
     assert_eq!(ed.bs().mark, None);
     assert_eq!(ed.bs().cursor, was.1);
 }
 
-// Wheel — viewport scrolls without moving the edit point; the cursor is
-// pulled along only when the scroll would push it out of the view.
 #[test]
 fn mouse_wheel_scrolls_view_not_cursor() {
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
     let mut ed = test_ed(&text);
     ed.text_h = 10; // max_scroll = 30 - 10 = 20
     ed.bs_mut().cursor = Pos { row: 4, col: 1 };
-    // Wheel down: the viewport moves, the edit point stays.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 4, "wheel must not move the cursor");
-    // Scrolling past the cursor pins it to the top edge of the view.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 6);
     assert_eq!(ed.bs().cursor.row, 6, "cursor pinned to the viewport top");
-    // Wheel up: the viewport moves back, the cursor stays.
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(ed.bs().cursor.row, 6);
-    // Cursor on the bottom row of the view: scrolling up pins it there.
     ed.bs_mut().cursor = Pos { row: 12, col: 1 };
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
@@ -3681,19 +3405,15 @@ fn mouse_wheel_scrolls_view_not_cursor() {
         9,
         "cursor pinned to the viewport bottom"
     );
-    // Clamped at the top of the file.
     assert!(ed.handle_mouse(me(MouseKind::WheelUp, 0, 0)));
     assert_eq!(ed.bs().scroll, 0);
     assert_eq!(ed.bs().cursor.row, 9);
-    // Clamped at the end of the file.
     ed.bs_mut().scroll = 20;
     ed.bs_mut().cursor = Pos { row: 25, col: 1 };
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 20, "scroll clamped at end of file");
     assert_eq!(ed.bs().cursor.row, 25);
 }
-
-// E4a — expand_tilde: only a leading ~ (exactly "~" or "~/") expands.
 
 #[test]
 fn expand_tilde_home() {
@@ -3710,9 +3430,6 @@ fn expand_tilde_leaves_paths() {
     assert_eq!(expand_tilde(""), "");
 }
 
-// E4b — prompt history: Up cycles back, Down forward, past the newest
-// entry restores the text captured when cycling began.
-
 #[test]
 fn search_history_cycles() {
     let mut ed = test_ed("bar");
@@ -3720,7 +3437,6 @@ fn search_history_cycles() {
     press_text(&mut ed, "foo");
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.search_hist, vec!["foo".to_string()]);
-    // no matches → ^F re-opens the prompt seeded with the old query
     press(&mut ed, KeyCode::Char('f'), Mods::CTRL);
     for _ in 0..3 {
         press(&mut ed, KeyCode::Backspace, Mods::NONE);
@@ -3757,8 +3473,6 @@ fn prompt_history_skips_empty() {
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert!(ed.file_hist.is_empty());
 }
-
-// E4c — Tab completes file paths in the path prompts.
 
 #[test]
 fn complete_path_fixture() {
@@ -3799,9 +3513,6 @@ fn tab_completes_in_prompt() {
     assert!(ed.prompt.is_some());
 }
 
-// E4d — M-b / M-f / Ctrl+Left / Ctrl+Right are word motion inside
-// prompts (they must not type letters or move one char).
-
 #[test]
 fn prompt_word_motion() {
     let mut ed = test_ed("");
@@ -3831,9 +3542,6 @@ fn prompt_ctrl_arrow_word_motion() {
     assert_eq!(ed.prompt.as_ref().unwrap().cursor, 0);
     assert!(ed.prompt.is_some());
 }
-
-// F5 — search wiring: Matcher semantics (regex + case toggle), invalid
-// regex flashes, M-C / M-R toggles in the search prompt only.
 
 #[test]
 fn regex_search_matches_line_starts() {
@@ -3916,7 +3624,6 @@ fn m_c_m_r_toggle_in_prompt() {
     let p = ed.prompt.as_ref().unwrap();
     assert_eq!(p.text, "q", "toggle leaves prompt text unchanged");
     assert_eq!(p.cursor, 1);
-    // Toggles must not leak into other prompt kinds: M-C types 'c' there.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Char('c'), Mods::ALT);
@@ -3925,9 +3632,8 @@ fn m_c_m_r_toggle_in_prompt() {
     assert!(p.text.contains('c'), "M-C must type in a WriteName prompt");
 }
 
-// F8 — multi-buffer: open pushes/replaces, M-</M-> switch with per-buffer
-// state, title index, and ^X cycling over modified buffers.
-
+// Multi-buffer: open pushes or replaces, M-</M-> switch, ^X cycles over modified
+// buffers.
 fn buf_with(text: &str) -> Buffer {
     let mut b = Buffer::new();
     b.set_rows(text.lines().map(|l| l.chars().collect()).collect());
@@ -3956,8 +3662,8 @@ fn open_file_multibuffer_pushes() {
     assert_eq!(ed.bs().buf.name, Some(f2));
 }
 
-/// **An untouched scratch is replaced even with multibuffer on**: the empty, unnamed buffer a
-/// bare `rano` or a host's pane starts with is not kept beside the file as a `[1/2]`.
+/// An untouched scratch is replaced even with multibuffer on: the empty unnamed
+/// buffer of a bare `rano` is not kept beside the file.
 #[test]
 fn open_file_multibuffer_replaces_an_untouched_scratch() {
     let d = temp_dir("open_scratch");
@@ -3971,7 +3677,6 @@ fn open_file_multibuffer_replaces_an_untouched_scratch() {
     ed.open_at(&f, 2, None).unwrap();
     assert_eq!(ed.buffers.len(), 1);
     assert_eq!(ed.bs().buf.name, Some(f.clone()));
-    // A scratch with text in it is work, and keeps its place.
     let cfg = config::Config {
         multibuffer: true,
         ..config::Config::default()
@@ -4015,7 +3720,6 @@ fn open_file_keeps_a_buffer_with_unsaved_edits_when_disabled() {
         ed.buffers[0].buf.row(0).iter().collect::<String>(),
         "EDIT seed"
     );
-    // Back in an unmodified buffer, the next open replaces as before.
     let f2 = d.0.join("b.txt");
     fs::write(&f2, "b").unwrap();
     press(&mut ed, KeyCode::F(8), Mods::NONE);
@@ -4071,7 +3775,6 @@ fn per_buffer_state_isolated() {
         Pos { row: 1, col: 1 },
         "buffer 2's cursor preserved across the switch"
     );
-    // Undo stacks are per buffer: each M-U hits only the current one.
     press_text(&mut ed, "Z");
     press(&mut ed, KeyCode::Char('>'), Mods::ALT);
     press_text(&mut ed, "Q");
@@ -4442,16 +4145,13 @@ fn picker_draws_over_the_text() {
     assert!(!(1..9).any(|y| row(y).contains("hidden text")));
 }
 
-// ---------- read-only mode (TODO.md §20.6) ----------
+// ---------- read-only mode ----------
 
 /// Nothing in read-only mode changes the buffer, and it says why.
 #[test]
 fn read_only_refuses_every_way_to_change_the_buffer() {
-    // Every mutating action, driven through the editor "the way a key does".
-    // The list is not a guess: each of these records an undo step
-    // (`begin_action`'s callers) except `undo`/`redo`, which restore rather
-    // than record. A new mutation that forgets the gate is a hole — this test
-    // is what makes that visible.
+    // Each of these records an undo step except `undo`/`redo`: a new mutation that
+    // forgets the gate is a hole this test makes visible.
     for (label, act) in [
         ("insert_char", 0usize),
         ("newline", 1),
@@ -4499,8 +4199,8 @@ fn read_only_refuses_every_way_to_change_the_buffer() {
     }
 }
 
-/// A save is refused, and the file on disk is untouched — the whole point of
-/// the mode's being at the keystroke rather than at the save.
+/// A save is refused and the file on disk is untouched: the point of refusing at
+/// the keystroke.
 #[test]
 fn read_only_refuses_the_save_and_leaves_the_file_alone() {
     let d = temp_dir("ro_save");
@@ -4534,8 +4234,8 @@ fn read_only_refuses_the_save_and_leaves_the_file_alone() {
     );
 }
 
-/// Navigation and search are not editing: they must still work, because that
-/// is the point of opening a file you will not change.
+/// Navigation and search are not editing, and must still work in a file you will
+/// not change.
 #[test]
 fn read_only_still_moves_and_searches() {
     let mut ed = test_ed("alpha\nbeta\ngamma\n");
@@ -4551,8 +4251,8 @@ fn read_only_still_moves_and_searches() {
     assert_eq!(lines(&ed), vec!["alpha", "beta", "gamma"]);
 }
 
-/// The title says the buffer cannot be written — the one thing a reader must
-/// know before typing into it.
+/// The title says the buffer cannot be written — what a reader must know before
+/// typing.
 #[test]
 fn the_title_says_view_when_read_only() {
     let mut ed = test_ed("x\n");
@@ -4567,11 +4267,10 @@ fn the_title_says_view_when_read_only() {
     assert!(t.contains("VIEW") && t.contains('M'), "{t:?}");
 }
 
-// ---------- tail mode (-f/--follow, TODO.md §20) ----------
+// ---------- tail mode (-f/--follow) ----------
 
-/// Pump the loader until the file has arrived. The loader is a thread, so this
-/// is the same loop `run` makes — bounded, because a test that waits forever
-/// is a test that hangs CI rather than failing it.
+/// Pump the loader until the file has arrived: the same bounded loop `run` makes,
+/// because a test that waits forever hangs CI.
 fn settle(ed: &mut Editor) {
     for _ in 0..500 {
         ed.load_poll();
@@ -4592,9 +4291,7 @@ fn numbered_log(tag: &str, n: usize) -> (TempDir, PathBuf) {
     (d, path)
 }
 
-/// **A tail opens at the END.** The rows it shows are the file's LAST ones —
-/// which is what scanning backwards for the offset buys, and what a wrong
-/// offset would quietly replace with the first screenful.
+/// A tail opens at the end: the rows it shows are the file's last ones.
 #[test]
 fn a_tail_open_shows_the_end_of_the_file() {
     let n = crate::loader::TAIL_ROWS + 300;
@@ -4616,9 +4313,8 @@ fn a_tail_open_shows_the_end_of_the_file() {
     assert_eq!(rows[rows.len() - 1], format!("line {n}"));
 }
 
-/// The view lands at the BOTTOM: the cursor is on the last row, so the scroll
-/// that follows the cursor leaves the end of the file at the foot of the
-/// screen. This is the half of a tail a user sees immediately.
+/// The view lands at the bottom: the cursor is on the last row, so the scroll that
+/// follows it leaves the end of the file at the foot of the screen.
 #[test]
 fn a_tail_lands_at_the_bottom() {
     let (_d, path) = numbered_log("tail_bottom", crate::loader::TAIL_ROWS + 300);
@@ -4638,8 +4334,7 @@ fn a_tail_lands_at_the_bottom() {
     );
 }
 
-/// **A tail is a view of somebody else's file**, so it opens read-only — the
-/// operator's rule, and the refusal is at the keystroke (§20.6).
+/// A tail is a view of somebody else's file: read-only, refusal at the keystroke.
 #[test]
 fn a_tail_is_read_only() {
     let (_d, path) = numbered_log("tail_ro", crate::loader::TAIL_ROWS + 300);
@@ -4656,9 +4351,7 @@ fn a_tail_is_read_only() {
     assert!(said.contains("Read-only"), "it did not say why: {said:?}");
 }
 
-/// **A tail follows.** A `-f` view of a file something else is writing shows the
-/// new lines as they arrive, in order, without dropping any — which is what
-/// makes `-f` a follow rather than a snapshot (TODO.md §20.3 D).
+/// A tail follows: a `-f` view shows the new lines as they arrive, in order.
 #[test]
 fn a_tail_follows_the_growth() {
     use std::io::Write as _;
@@ -4683,9 +4376,7 @@ fn a_tail_follows_the_growth() {
         ed.load_poll();
         std::thread::sleep(Duration::from_millis(2));
     }
-    // **And the view came with it**, because it was at the end: a follow that
-    // left the scroll behind would show new lines off the bottom of the screen
-    // for ever.
+    // And the view came with it, because it was at the end.
     ed.tick(Instant::now());
     assert_eq!(ed.bs().cursor.row, 5, "the view did not follow the end");
     assert_eq!(lines(&ed).last().unwrap(), "line 6");
@@ -4704,9 +4395,8 @@ fn a_tail_follows_the_growth() {
     assert_eq!(ed.bs().cursor.row, 7);
 }
 
-/// **A follow does not yank a reader.** If the view is not at the end, growth
-/// must not pull it there — the user is reading something, and following a file
-/// is not a licence to move their screen. The rows still arrive.
+/// A follow does not yank a reader: growth must not pull a view that is not at the
+/// end.
 #[test]
 fn a_follow_leaves_a_scrolled_away_view_alone() {
     use std::io::Write as _;
@@ -4743,8 +4433,7 @@ fn a_follow_leaves_a_scrolled_away_view_alone() {
     assert_eq!(ed.bs().cursor.row, 0, "the cursor was moved");
 }
 
-/// A plain open is NOT a tail: the whole file, editable, from row 1. The flag
-/// has to be the only thing that decides this, or `-f` would be a mode.
+/// A plain open is not a tail: the whole file, editable, from row 1.
 #[test]
 fn a_plain_open_is_not_a_tail() {
     let n = crate::loader::TAIL_ROWS + 300;
@@ -4772,13 +4461,12 @@ fn settle_count(ed: &mut Editor) {
     panic!("the line count never finished");
 }
 
-/// **A tail's rows are not the file's lines, and the editor says so rather
-/// than guessing** (TODO.md §20.1's idea 3, §20.3 C). The count is what turns
-/// the buffer's row 0 into the file's line 1001.
+/// A tail's rows are not the file's lines, and the editor says so: the count is
+/// what turns the buffer's row 0 into the file's line 1001.
 #[test]
 fn a_tail_numbering_is_unknown_until_the_count_answers() {
-    // 1200 rows: the tail is rows 1001..1200, so the first row's number is
-    // 1001 — and until the count lands there is no number at all.
+    // 1200 rows: the tail is 1001..1200, and until the count lands there is no
+    // number at all.
     let n = crate::loader::TAIL_ROWS + 1000;
     let (_d, path) = numbered_log("tail_count", n);
     let mut ed = test_ed("");
@@ -4792,8 +4480,7 @@ fn a_tail_numbering_is_unknown_until_the_count_answers() {
     assert!(ed.counting(), "no count was started");
     let said = ed.counting_text().unwrap_or_default();
     assert!(said.contains("Counting lines"), "{said:?}");
-    // A flash wins over the count: a refusal must never be hidden by a number
-    // arriving late.
+    // A flash wins over the count: a refusal must never be hidden by a late number.
     ed.flash("something happened");
     assert_eq!(ed.status_text().as_deref(), Some("something happened"));
 
@@ -4805,17 +4492,14 @@ fn a_tail_numbering_is_unknown_until_the_count_answers() {
     );
     assert!(!ed.counting(), "the job outlived its answer");
 
-    // And an ordinary buffer names its own rows from 1, which is the same
-    // question with a known answer.
+    // An ordinary buffer names its own rows from 1.
     let ed = test_ed("a\nb\nc\n");
     assert_eq!(ed.bs().line_number(0), Some(1));
     assert_eq!(ed.bs().line_number(2), Some(3));
 }
 
-/// The two places a line number reaches the glass: the gutter and the status
-/// line. Both are blank/`?` while the count is in flight, and both become the
-/// FILE's numbers when it lands — including the gutter's WIDTH, which has to
-/// grow from three digits to four for the numbers to fit.
+/// The gutter and the status line are blank while the count is in flight, and the
+/// file's numbers when it lands, the gutter's width included.
 #[test]
 fn the_gutter_and_the_status_line_wait_for_the_count() {
     let n = crate::loader::TAIL_ROWS + 1000; // 1200 rows → 4 digits
@@ -4826,10 +4510,7 @@ fn the_gutter_and_the_status_line_wait_for_the_count() {
     ed.text_h = 24;
     ed.start_tail(&path).expect("tail open");
     settle(&mut ed);
-    // Deliberately NOT `tick` first: `tick` is what adopts the count, and the
-    // point of this half of the test is the frame drawn before it has arrived.
-    // (`settle` pumps the loader only, so the count is finished on its thread
-    // and not yet installed.)
+    // Not `tick` first: `tick` adopts the count, and this is the frame before it.
 
     let (before_first, before_status) = {
         let screen = ui::Screen::of(&ed, 100, 30);
@@ -4846,9 +4527,7 @@ fn the_gutter_and_the_status_line_wait_for_the_count() {
     );
 
     settle_count(&mut ed);
-    // The tail lands at the bottom, so row 1 of the SCREEN is not row 0 of the
-    // buffer; put the view AND the cursor on the first row, so the numbers
-    // under test are that row's.
+    // The tail lands at the bottom: put the view and the cursor on the first row.
     {
         let bs = ed.bs_mut();
         bs.scroll = 0;
@@ -4869,12 +4548,8 @@ fn the_gutter_and_the_status_line_wait_for_the_count() {
     );
 }
 
-/// **Rows past the settled boundary are never handed to the parser** (§20.3 E).
-///
-/// Asserted on the parse WINDOW rather than on colours, because the window is
-/// what the claim is about: `style_at` answers nothing outside it, and nothing
-/// is what the renderer draws. A `.rs` name, because `syntax::detect` has no
-/// language for `.log` and a colourless test would pass for the wrong reason.
+/// Rows past the settled boundary are never parsed, asserted on the parse window.
+/// A `.rs` name: `syntax::detect` has no language for `.log`.
 #[test]
 fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
     use std::io::Write as _;
@@ -4903,9 +4578,7 @@ fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
         "the window reached past the boundary"
     );
 
-    // Growth. The new row must not be parsed, and must not dirty the highlight:
-    // a log appends constantly, and a parse per append is the cost §16 exists to
-    // avoid arriving in a new shape.
+    // Growth: the new row must not be parsed, nor dirty the highlight.
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -4922,9 +4595,7 @@ fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
         !ed.highlight_dirty,
         "an append to a settled tail asked for a re-highlight"
     );
-    // **Forced, so the assertion below is about the WINDOW and not about the
-    // refresh not happening.** Without this, `styled_window` would still hold
-    // the pre-growth window and would pass whether the clamp existed or not.
+    // Forced, so the assertion is about the window, not about a refresh not happening.
     ed.highlight_dirty = true;
     ed.tick(Instant::now());
     let have = ed.bs().hl.styled_window().expect("still a window");
@@ -4944,12 +4615,7 @@ fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
         "a row past the boundary came back styled"
     );
 
-    // **And the coverage check agrees with the window** — the pairing this
-    // increment turns on. A frame's worth of ticks on a grown, settled tail must
-    // not re-parse: if only the parse range were clamped, `highlight_covers_
-    // viewport` would keep asking for rows the parser will never return, answer
-    // "not covered" every frame, and re-parse every frame — the §16 regression
-    // arriving dressed as a saving. Counted, not timed.
+    // Idle ticks on a grown, settled tail must not re-parse. Counted, not timed.
     ed.highlight_dirty = true;
     ed.tick(Instant::now());
     let before = ed.bs().hl.parses;
@@ -4963,9 +4629,8 @@ fn a_tail_does_not_parse_rows_past_the_settled_boundary() {
     );
 }
 
-/// **A plain open is not clamped at all**: every row may be styled, because
-/// there is no file still writing it. Without this the clamp of the test above
-/// could be a clamp for everyone.
+/// A plain open is not clamped: every row may be styled, no file is still writing
+/// it.
 #[test]
 fn a_plain_open_styles_past_what_a_tail_would_settle() {
     let d = temp_dir("tail_not_clamped");
@@ -4989,8 +4654,7 @@ fn a_plain_open_styles_past_what_a_tail_would_settle() {
     );
 }
 
-/// A plain open has nothing to wait for: its numbering is known from the first
-/// frame, because its row 1 IS the file's line 1.
+/// A plain open has nothing to wait for: row 1 is line 1 from the first frame.
 #[test]
 fn a_plain_open_is_numbered_from_the_first_frame() {
     let (_d, path) = numbered_log("tail_plain_numbering", 5);
@@ -5007,10 +4671,7 @@ fn a_plain_open_is_numbered_from_the_first_frame() {
     assert!(row(27).contains("Ln 1, Col 1"), "{:?}", row(27));
 }
 
-/// **The status line must not claim a line count it does not know** (§20.3 C).
-/// "Read 200 lines" is a lie about a file with 500 in it — and it is the
-/// measured line count of the file, not of the tail, that §20.1's background
-/// scan exists to provide.
+/// The status line must not claim a line count it does not know.
 #[test]
 fn the_tail_says_what_it_is_instead_of_a_line_count() {
     let (_d, path) = numbered_log("tail_status", crate::loader::TAIL_ROWS + 300);
@@ -5032,8 +4693,7 @@ fn the_tail_says_what_it_is_instead_of_a_line_count() {
     assert_eq!(ed.status_text().as_deref(), Some("Read 3 lines"));
 }
 
-/// A file shorter than a tail is shown whole, and an empty one is still a
-/// buffer — the awkward shapes, not special cases.
+/// A file shorter than a tail is shown whole, and an empty one is still a buffer.
 #[test]
 fn a_tail_of_a_short_or_empty_file_is_whole() {
     let (_d, path) = numbered_log("tail_short", 3);
@@ -5052,9 +4712,8 @@ fn a_tail_of_a_short_or_empty_file_is_whole() {
     assert_eq!(lines(&ed), vec![""], "an empty tail is one empty row");
 }
 
-/// A tail keeps its own buffers' state: opening a second file plainly must not
-/// leave the tail flag behind on it, or every later buffer would land at the
-/// bottom and refuse to be written.
+/// A tail keeps its own buffer's state: opening a second file plainly must not
+/// leave the tail flag on it.
 #[test]
 fn a_plain_open_clears_the_tail_flag() {
     let (_d, path) = numbered_log("tail_clear", 5);
@@ -5076,12 +4735,9 @@ fn a_plain_open_clears_the_tail_flag() {
     );
 }
 
-// ---------- §20.7: a `.log` opens in log mode ----------
+// ---------- a `.log` opens in log mode ----------
 
-/// **The rule is the name, and nothing else.** Not `/var/log/`, not a content
-/// sniff, not a list of formats — §20.7's first draft had the directory rule too
-/// and it was written from one `ls` of one directory, which is how a predicate
-/// acquires a case per file its author happened to see.
+/// The rule is the name and nothing else: not a directory, not a content sniff.
 #[test]
 fn the_log_rule_is_the_name_and_nothing_else() {
     let ed = test_ed("");
@@ -5091,8 +4747,7 @@ fn the_log_rule_is_the_name_and_nothing_else() {
         ("/home/x/Projects/thing/out/serve.LOG", true),
         ("a.b.log", true),
         ("x.LoG", true),
-        // Rotated logs are NOT `.log`: the extension is the whole rule, and
-        // `server.log.1` does not end in it.
+        // Rotated logs are not `.log`: the extension is the whole rule.
         ("server.log.1", false),
         ("server.log.gz", false),
         ("log", false),
@@ -5110,15 +4765,14 @@ fn the_log_rule_is_the_name_and_nothing_else() {
             if want { "" } else { "not" }
         );
     }
-    // And `--edit` turns every one of them off, which is the escape hatch §20.7
-    // names.
+    // And `--edit` turns every one of them off.
     let mut ed = test_ed("");
     ed.edit_override = true;
     assert!(!ed.log_mode_for(std::path::Path::new("server.log")));
 }
 
 /// One decision for every door: a `.log` tails, a `.rs` does not, and `--edit`
-/// says to treat the log as a file.
+/// overrides.
 #[test]
 fn the_name_decides_as_a_log_or_as_a_file() {
     let d = temp_dir("log_named");
@@ -5153,10 +4807,8 @@ fn the_name_decides_as_a_log_or_as_a_file() {
     assert_eq!(lines(&ed).len(), 500);
 }
 
-/// **A `.log` opened later is not read eagerly either.** `M->`/F8 go through
-/// `open_file`, which reads a file whole — so a log is named and deferred
-/// instead, which is both the same rule and the fix for opening a huge log that
-/// way at all.
+/// A `.log` opened later is not read eagerly either: `open_file` reads a file
+/// whole, so a log is named and deferred instead.
 #[test]
 fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
     let d = temp_dir("log_open_file");
@@ -5180,7 +4832,7 @@ fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
     assert!(ed.bs().read_only);
     assert_eq!(lines(&ed)[0], "line 301");
 
-    // The control: an ordinary file is still read here, as it always was.
+    // The control: an ordinary file is still read here.
     let mut ed = test_ed("");
     assert!(ed.open_file(rs.to_str().unwrap()));
     assert!(ed.bs().pending_load.is_none());
@@ -5189,14 +4841,12 @@ fn a_log_opened_later_is_deferred_and_then_opens_as_a_tail() {
 
 // ---------- the mode, chosen rather than detected ----------
 
-/// A chosen mode is used as it is, even where detection disagrees: that is the whole point
-/// of choosing.
+/// A chosen mode is used as it is, even where detection disagrees.
 #[test]
 fn a_chosen_mode_overrules_detection() {
     let d = temp_dir("mode_pick");
     let p = d.0.join("notes.txt");
-    // No `=` and no `[section]`: a spaced `x = 1` is the INI shape, and this fixture
-    // must be a file the ladder says nothing about, or the test proves nothing.
+    // No `=` and no `[section]`: the ladder must say nothing about this file.
     fs::write(&p, "fn main() { return 1; }\n").unwrap();
     let mut ed = test_ed("");
     ed.text_w = 80;
@@ -5239,8 +4889,8 @@ fn plain_stops_the_guessing_and_auto_puts_it_back() {
     assert_eq!(ed.mode_name(), "rust", "the ladder is back");
 }
 
-/// The prompt opens on the mode in effect, so a person can see what it is before
-/// changing it — and an unknown name says so and changes nothing.
+/// The prompt opens on the mode in effect, and an unknown name says so and changes
+/// nothing.
 #[test]
 fn the_mode_prompt_opens_on_what_is_in_effect() {
     let mut ed = named_ed("fn main() {}\n", "/tmp/rano_mode_open.rs");
@@ -5270,8 +4920,7 @@ fn the_mode_prompt_opens_on_what_is_in_effect() {
     assert_eq!(ed.mode_name(), "fstab");
 }
 
-/// A binary is not text: not read into rows, not highlighted, and read-only, because the
-/// decode is lossy and a save would corrupt the file it came from.
+/// A binary is not text: not read into rows, not highlighted, read-only.
 #[test]
 fn a_binary_opens_read_only_and_unread() {
     let d = temp_dir("binary_open");
@@ -5298,10 +4947,8 @@ fn a_binary_opens_read_only_and_unread() {
     assert_eq!(ed.mode_name(), "plain", "a binary was given a language");
 }
 
-/// **A builtin claims the file nobody configured it for.** `rano paper.pdf` is the whole command:
-/// the reader ships, unpacks to the reader's own folder, and runs with the grant it declares. The
-/// test asserts the door, not the rendering - a machine with no `pdftoppm` still opens the view,
-/// with a sentence saying what it lacks.
+/// A builtin claims the file nobody configured it for; the door is asserted, not
+/// the rendering, since a machine may have no `pdftoppm`.
 #[test]
 fn a_shipped_builtin_claims_a_pdf_from_the_command_line() {
     let d = temp_dir("builtin_pdf");
@@ -5335,24 +4982,21 @@ fn a_shipped_builtin_claims_a_pdf_from_the_command_line() {
     );
 }
 
-/// **`M-P` on a provider's answer asks the text, not only the name.** A rendered PDF is named
-/// `spec.pdf` and opens with `# title`, which the name-based ladder calls nothing; toggling it
-/// back and forth said "nothing to render" while the provider's own path had decided otherwise.
+/// M-P on a provider's answer asks the text, not only the name: a rendered PDF is
+/// `spec.pdf` and opens with `# title`, which the ladder calls nothing.
 #[test]
 fn a_rendered_document_toggles_in_and_out_of_prose() {
     let d = temp_dir("pdf_toggle");
     let p = d.0.join("spec.pdf");
     let md = "# spec.pdf\n\n## Page 1\n\nprose, and a fence:\n\n```text\nlaid out\n```\n";
-    // The provider's answer is what the buffer holds: the view is drawn over the text.
+    // The provider's answer is the buffer; the view is drawn over the text.
     let mut ed = test_ed(md);
     ed.text_w = 80;
     ed.text_h = 24;
     ed.bs_mut().buf.name = Some(p);
     ed.preview_answered(md);
     assert!(ed.diff_view.is_some(), "the prose view is up");
-    // Out through the view's own door (inside a view `M-P` is "back to the text", not the
-    // toggle), and back in through the command the buffer gets: the second one is the press that
-    // used to say there was nothing to render.
+    // Out through the view's own door, and back in through M-P.
     ed.close_view();
     assert!(ed.diff_view.is_none(), "the view closed");
     ed.toggle_rendered_view();
@@ -5366,9 +5010,7 @@ fn a_rendered_document_toggles_in_and_out_of_prose() {
     );
 }
 
-/// **A view is not a place with no way out.** `C-x` is the editor's own key and must work inside a
-/// preview: it did not, because the view's maps were `[own, diff]` with no global layer under them,
-/// so leaving a rendered PDF meant pressing Esc first.
+/// A view is not a place with no way out: `C-x` must work inside a preview.
 #[test]
 fn the_exit_key_reaches_inside_a_view() {
     let md = "# title\n\n## Page 1\n\nprose\n";

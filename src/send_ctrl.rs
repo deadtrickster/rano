@@ -1,10 +1,5 @@
-//! Talking to a host: being told where to go ([`Editor::open_at`]), and telling
-//! it where the reader is ([`Editor::send_position`], M-S).
-//!
-//! Both are in-process calls, the shape embedding needs: a host that owns an
-//! `Editor` calls `open_at` and sets `on_send`. The standalone binary is its own
-//! host — `file:line:col` on the command line goes through the same positioning,
-//! and `on_send` runs the configured `send_command` ([`command_sender`]).
+//! Talking to a host: being told where to go ([`Editor::open_at`]), and telling it
+//! where the reader is ([`Editor::send_position`], M-S). Both are in-process calls.
 
 use std::io::Write;
 use std::path::Path;
@@ -15,18 +10,13 @@ use crate::send::{Point, Selection, SendEvent};
 use crate::buffer::Pos;
 use crate::editor::{Editor, canonical, normalize};
 
-/// What a host does with a [`SendEvent`]: `Ok` carries what to tell the reader
-/// (shown in the status line), `Err` why it did not work.
+/// What a host does with a [`SendEvent`]: `Ok` carries what to tell the reader.
 pub type OnSend = Box<dyn FnMut(&SendEvent) -> Result<String, String>>;
 
 impl Editor {
-    /// Open `path` — or switch to it when a buffer already shows it — and put
-    /// the cursor on `line` (1-based), at `column` (1-based, the line's start
-    /// when `None`), centred. A file still arriving is positioned when that
-    /// row lands, in its own buffer whatever is current by then.
-    ///
-    /// Without `multibuffer` a new file replaces the current buffer, unless
-    /// that one has unsaved edits: then it gets a buffer of its own.
+    /// Open `path` — or switch to it when a buffer already shows it — and put the
+    /// cursor on `line` (1-based), at `column`, centred. A file still arriving is
+    /// positioned when that row lands.
     pub fn open_at(
         &mut self,
         path: &Path,
@@ -52,21 +42,8 @@ impl Editor {
         Ok(())
     }
 
-    /// The reader's place: the file (absolute), the cursor, and the marked
-    /// region with its text when a mark is set and the region is not empty.
-    /// **What a send carries.** Every buffer is sendable — that is the rule — but a *view* does not
-    /// send a line of text, because its rows are a rendering: what it sends is the **target the
-    /// cursor is on**.
-    ///
-    /// - An ordinary buffer: its file, the cursor as line/column (1-based), the mark as a
-    ///   selection with its text.
-    /// - A folder listing: the **entry under the cursor**, as an absolute path with line 1 — the
-    ///   thing a reader is pointing at. A mark selects entries, but "several entries" is not what
-    ///   [`SendEvent`] carries (it has one path and one text selection); the first selected entry
-    ///   is sent, and the row range is the selection, which is the honest shape until the event
-    ///   grows a list.
-    /// - Any other view (a provider's rendering, a picture): its path, and no line — the file is
-    ///   what is being talked about, and there is no line of it in view.
+    /// The reader's place: the file (absolute), the cursor, and the marked region
+    /// with its text. A view does not send a line of text — its rows are a rendering.
     pub fn send_event(&self) -> SendEvent {
         let bs = self.bs();
         let point = |p: Pos| Point {
@@ -80,8 +57,8 @@ impl Editor {
                     .map(|r| r.iter().collect::<String>())
                     .unwrap_or_default()
             };
-            // A listing's row names an entry; a provider's row names nothing, so the view's own
-            // path is the target.
+            // A listing's row names an entry; a provider's row names nothing, so the
+            // view's own path is the target.
             let entry = bs
                 .dir
                 .as_ref()
@@ -89,8 +66,7 @@ impl Editor {
             let selection = bs.mark.and_then(|m| {
                 let (a, b) = normalize(m, bs.cursor);
                 (a != b).then(|| Selection {
-                    // The rows of the view, and the text the reader can see — which for a listing
-                    // is the entry names.
+                    // The view's own rows; for a listing, the entry names.
                     start: point(a),
                     end: point(b),
                     text: bs
@@ -104,8 +80,8 @@ impl Editor {
             });
             return SendEvent {
                 path: entry.or_else(|| bs.buf.name.as_deref().map(canonical)),
-                // A view has no line of the target in it: line 1 is the file's first line, which is
-                // where a host opening the target lands.
+                // A view has no line of the target in it: line 1 is where a host
+                // opening the target lands.
                 cursor: Point { line: 1, column: 1 },
                 selection,
                 modified: bs.buf.modified,
@@ -147,13 +123,8 @@ impl Editor {
     }
 }
 
-/// `on_send` for the standalone binary: run `cmd` with `sh -c`, the event as
-/// JSON on its stdin and `RANO_FILE` / `RANO_LINE` / `RANO_COLUMN` in its
-/// environment (`RANO_FILE` empty for an unnamed buffer).
-///
-/// The command is not waited for — the editor stays live while it runs — so
-/// what is reported is that it started. Its output goes nowhere: the terminal
-/// belongs to the editor.
+/// `on_send` for the standalone binary: run `cmd` with `sh -c`, the event as JSON
+/// on stdin and `RANO_FILE`/`RANO_LINE`/`RANO_COLUMN` in its environment.
 pub fn command_sender(cmd: String) -> OnSend {
     Box::new(move |e: &SendEvent| {
         let mut child = Command::new("sh")
@@ -175,8 +146,8 @@ pub fn command_sender(cmd: String) -> OnSend {
             .map_err(|err| format!("{cmd}: {err}"))?;
         let json = e.to_json();
         let mut stdin = child.stdin.take().expect("piped");
-        // Off the main thread, and reaped there: a command that reads slowly
-        // (or not at all) must not hold up a keystroke.
+        // Off the main thread, and reaped there: a command that reads slowly must
+        // not hold up a keystroke.
         std::thread::spawn(move || {
             let _ = stdin.write_all(json.as_bytes());
             let _ = stdin.write_all(b"\n");
@@ -194,9 +165,8 @@ pub fn command_sender(cmd: String) -> OnSend {
     })
 }
 
-/// `name:line` or `name:line:col`, when `arg` is not itself an existing path
-/// (a file really named `a:3` opens as named). Splits from the right, so a
-/// name with colons of its own keeps them.
+/// `name:line` or `name:line:col`, when `arg` is not itself an existing path.
+/// Splits from the right, so a name with colons of its own keeps them.
 pub fn split_position(arg: &str) -> Option<(String, usize, Option<usize>)> {
     if Path::new(arg).exists() {
         return None;

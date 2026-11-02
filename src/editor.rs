@@ -1,6 +1,4 @@
-//! Editor core: the Editor model, the undo machinery and the editing
-//! actions (input, cut/paste, undo/redo, movement, files, buffers,
-//! goto, justify/sort, styling glue).
+//! Editor core: the model, undo, and the editing actions.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -24,17 +22,10 @@ use crate::syntax;
 use crate::ui;
 use crate::width;
 
-/// **The image id a plugin's picture of `path` is drawn under** — the path with a prefix, so a
-/// plugin's picture and a PNG view of the same file are two images in the terminal: their rows
-/// come from two mechanisms, and one freeing the other's data would blank a picture that is still
-/// on the glass.
 fn picture_id(path: &Path) -> u32 {
     crate::term::graphics::image_id(&format!("plugin:{}", path.display()))
 }
 
-/// **The rows a picture's view holds**: the placeholder cells [`Picture::lines`] gives, as a
-/// buffer's rows. A buffer holds characters and no style, so the colours that say *which* image
-/// come back at draw time from the id ([`Editor::picture_row_id`], [`crate::term::graphics::placeholder_style`]).
 fn picture_rows(picture: &Picture, proto: Proto) -> Vec<Vec<char>> {
     picture
         .lines(proto)
@@ -43,12 +34,7 @@ fn picture_rows(picture: &Picture, proto: Proto) -> Vec<Vec<char>> {
         .collect()
 }
 
-/// **A picture a plugin answered, on the glass**: the buffer it was opened for and the picture
-/// itself. One at a time — a picture view is a buffer, and the rows the terminal fills are the
-/// rows of the one being drawn.
 pub(crate) struct PictureView {
-    /// The path the provider claimed. The view belongs to the buffer with this name: a buffer
-    /// that is not current is a picture the terminal is not asked to hold.
     path: PathBuf,
     picture: Picture,
 }
@@ -73,19 +59,9 @@ pub enum ActionKind {
     Filter,
     Exec,
     ReadFile,
-    /// A TODO.md state change: one or more three-byte markers rewritten. Its own
-    /// kind rather than a reuse of `Replace` so a toggle is one undo step that
-    /// coalesces with nothing — pressing M-T twice must undo twice, not merge
-    /// into one.
     Todo,
-    /// A merge conflict resolved from the conflict view: its marker block
-    /// replaced by the side taken. One undo step each, coalescing with nothing.
     Resolve,
-    /// A plugin's `on_save` output replacing the buffer before the write: one step,
-    /// coalescing with nothing, so `M-U` takes the hook's transformation back in one press.
     Plugin,
-    /// A formatter's whole-buffer rewrite on save (gofmt): one step, coalescing with
-    /// nothing, so `M-U` takes the formatting back in one press.
     Format,
 }
 
@@ -101,15 +77,8 @@ pub(crate) struct UndoStep {
     len_at_begin: usize, // buf.row_count() when the step began
 }
 
-/// How far one wheel notch scrolls — the text viewport, and a view drawn over
-/// it: three rows, which is what a notch is worth on a screen of any height
-/// (nano puts two `Alt+Up`/`Alt+Down` in for one, and those move a line each).
 const WHEEL_LINES: isize = 3;
 
-/// **Which of nano's bars an editor draws** — the title row on top and the two-row function
-/// bar at the bottom. Both by default, which is the binary; a host framing the pane in its own
-/// chrome turns them off ([`Editor::set_chrome`]). The status row is not optional: prompts,
-/// messages and the cursor's place are drawn there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chrome {
     pub title: bool,
@@ -126,40 +95,27 @@ impl Default for Chrome {
 }
 
 impl Chrome {
-    /// Neither bar: the text, and the status row under it.
     pub const BARE: Chrome = Chrome {
         title: false,
         keys: false,
     };
 
-    /// The pane row the text starts on.
     pub fn top(&self) -> u16 {
         u16::from(self.title)
     }
 
-    /// Rows that are not text: the bars that are on, and the status row.
     pub fn rows(&self) -> usize {
         usize::from(self.title) + 1 + if self.keys { 2 } else { 0 }
     }
 }
 
-/// What the title bar says, for a host that draws its own ([`Editor::frame_title`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTitle {
-    /// The file's name as the bar shows it — `[i/n] ` first with several buffers open, empty
-    /// for a scratch buffer.
     pub name: String,
-    /// Unsaved edits.
     pub modified: bool,
-    /// The buffer cannot be written (a tailed log, a view).
     pub read_only: bool,
 }
 
-/// A rectangle of terminal cells: where the editor sits on the screen.
-///
-/// The editor's own type rather than the drawing side's rectangle on purpose:
-/// the editor's logic (sizing, mouse mapping) and a host's calls into it should
-/// not change with how it draws. `ui` converts (`From<render::Rect>`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Area {
     pub x: u16,
@@ -177,7 +133,6 @@ impl Area {
         self.w == 0 || self.h == 0
     }
 
-    /// Whether the cell at column `x`, row `y` is inside.
     pub const fn contains(&self, x: u16, y: u16) -> bool {
         x >= self.x
             && y >= self.y
@@ -187,200 +142,81 @@ impl Area {
 }
 
 pub struct Editor {
-    /// Open buffers (F8 groundwork); exactly one until multi-buffer lands.
     pub buffers: Vec<BufferState>,
-    /// Index into `buffers` of the active buffer.
     pub cur: usize,
     pub cut: Vec<Vec<char>>,
     pub cut_line: bool,
-    /// Search modifier toggles (M-C / M-R in the search prompt; runtime-only,
-    /// like show_line_numbers). Defaults are case-insensitive, literal.
     pub search_case_sensitive: bool,
     pub search_regex: bool,
     pub prompt: Option<Prompt>,
-    /// Live path suggestions for the open file-name prompt: the (kind, text)
-    /// they were computed for, and the matching entries. Refreshed once per
-    /// frame by `refresh_prompt_hints`, so the directory is read when the
-    /// text changes rather than on every draw.
     pub prompt_hints: Option<(PromptKind, String, Vec<String>)>,
-    /// The keymaps in effect: the global layer and each mode's (see
-    /// `commands.rs`). A host can rebind by editing them.
     pub keymaps: crate::commands::Keymaps,
-    /// A host's own maps, stacked over `keymaps` (see `Editor::push_keymap`).
-    /// Kept apart from the editor's so a host never has to know which of
-    /// the editor's maps is in effect to put a chord above all of them.
     pub(crate) host_keymaps: Vec<crate::keymap::Keymap>,
-    /// A key sequence under way: a prefix pressed, or `describe-key` waiting.
     pub pending: crate::commands::Pending,
-    /// `M-x`, while it is open.
     pub palette: Option<crate::help::Palette>,
-    /// A help page (the overview, every key, a key's description).
     pub info: Option<crate::help::InfoView>,
-    /// Commands run, most recent first: `M-x` offers them first.
     pub command_history: Vec<&'static str>,
     pub status: Option<Flash>,
     pub loc_until: Option<Instant>,
     pub quit: bool,
     pub pending_write: Option<PathBuf>,
-    /// A save that was refused because its directory is missing: the directory the reader is
-    /// being asked to create, kept while the question is up. See [`Self::answer_mkdir`].
     pub(crate) pending_dir: Option<PathBuf>,
     pub quit_after_save: bool,
-    /// M-W on a modified buffer answered 'y': close it once the save lands
-    /// (the save may first need a file name).
     pub close_after_save: bool,
-    /// The list overlay (M-L buffers, M-? usages); modal while open.
     pub picker: Option<crate::picker::Picker>,
-    /// The external-change diff over the text; modal while open, and it answers
-    /// to the "File changed on disk" question.
     pub diff_view: Option<crate::diffview::DiffView>,
-    /// Split (two panels) rather than unified, for the next diff view: the last
-    /// choice made with `s` in this session.
     pub diff_split: bool,
-    /// **Whether the terminal on the other end takes inline pictures**
-    /// ([`crate::term::Features::images`]). Off until a host says otherwise: a
-    /// placeholder cell is `U+10EEEE` with combining marks, which a terminal that
-    /// cannot fill it draws as garbage — so M-P on a PNG says why instead of drawing one.
+    /// Whether the terminal takes inline pictures: a cell it cannot fill is
+    /// drawn as garbage, so off until a host says otherwise.
     pub images: bool,
-    /// **Which picture protocol the terminal speaks**, when a host knows more than
-    /// [`Self::images`] says ([`Self::set_pictures`]). `Proto::None` with `images` on is
-    /// read as kitty ([`Self::picture_proto`]), which is what this editor draws: rows of
-    /// placeholder cells a terminal fills from its own copy of the picture.
     pub(crate) proto: Proto,
-    /// **The picture a plugin answered, while it is on the glass** — the buffer it was opened
-    /// for and the picture itself, so a resize can re-cut the box and a buffer that is left can
-    /// free the terminal's copy ([`Self::sync_picture`]).
     pub(crate) picture_view: Option<PictureView>,
-    /// **The pictures the terminal holds for [`Self::picture_view`]**, as `id → the box it is
-    /// placed in`. Separate from [`Self::images_held`], which is the views' (`diffview`): the two
-    /// mechanisms draw different rows and must not delete each other's images.
+    /// The pictures the terminal holds, separate from `images_held` so the two cannot
+    /// free each other's.
     pub(crate) pictures: Pictures,
-    /// **The WASM plugin** (`plans/S10-wasm-hooks.md`): loaded from the config's `plugin` (or
-    /// `RANO_PLUGIN`), compiled once, and asked at the two seams — `on_open` when a file's text
-    /// enters, `on_save` before a save is written. `None` is a build or a config with no plugin,
-    /// and every call site treats it as "nothing to do".
     pub plugin: Option<crate::plugin::Plugin>,
-    /// **The builtins this session unpacked and loaded** (`plans/S10-wasm-hooks.md` §2.4): today
-    /// the manual. They answer `provider_open` and nothing else — the plan's registry is plural,
-    /// and this is the smallest thing that is: a builtin must not displace the plugin the config
-    /// named, whose `on_open`/`on_save` hooks are the reader's own setup.
     pub builtins: Vec<crate::plugin::Plugin>,
-    /// **What the plugin had to say about the last read or write**, waiting to be appended to the
-    /// message that reports it: a hook's transformation, or why it was skipped. Composed rather
-    /// than flashed twice, because the save's own line ("Wrote N bytes") is the one the reader is
-    /// reading and a second flash would replace it.
     pub(crate) plugin_note: Option<String>,
-    /// **`--edit`: open a `.log` as an ordinary file** rather than as a tail
-    /// (TODO.md §20.7's escape hatch from the mode).
-    ///
-    /// A property of RUNNING rather than of being, like [`Self::images`]: no test
-    /// needs it set, and only a command line sets it. `-f` is the other escape —
-    /// it opens ANY file as a tail — and it wins where both are given, because it
-    /// says what to do rather than what not to.
     pub edit_override: bool,
-    /// **Bytes the host must write to the terminal outside the frame**: the kitty
-    /// graphics commands for the pictures a view is drawing. The editor cannot write
-    /// them itself — it is a library, and the terminal is the host's — so they wait here
-    /// ([`Self::take_graphics`]).
     pub(crate) graphics_out: Vec<Vec<u8>>,
-    /// **Text the host must put on the terminal's clipboard** (OSC 52): what `M-6`, `^K` and
-    /// the end of a mouse drag queued ([`Self::take_clipboard`]). The editor does not know
-    /// whether the terminal speaks OSC 52 — that is [`crate::term::Features::clipboard`], and
-    /// the terminal's own answer — so it queues the text and the host hands it over.
     pub(crate) clipboard_out: Option<String>,
-    /// **The pictures the terminal is holding**, as `id → the cell box it is placed in`.
-    /// Kept so a frame that changed nothing sends nothing, and so a picture that is gone
-    /// — or whose box moved — is dropped rather than left in the terminal's memory.
+    /// The pictures the terminal is holding, so an unchanged frame sends nothing.
     pub(crate) images_held: std::collections::HashMap<u32, (u32, u32)>,
-    /// **Whether a left press armed a selection that has not dragged yet.** A
-    /// click places the cursor, and the anchor armed for the drag that may
-    /// follow is dropped when the button comes up without one — an anchor left
-    /// behind is what made a later scroll (whose pin moves the edit point)
-    /// redraw a selection from wherever the click landed.
     pub(crate) mouse_arm: bool,
-    /// Where M-S sends the reader's place (see `send_ctrl.rs`): a host's
-    /// callback, or in the standalone binary the configured `send_command`.
     pub on_send: Option<crate::send_ctrl::OnSend>,
     pub replace: Option<ReplaceState>,
     pub replace_pos: Option<Pos>,
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
-    /// **Which of nano's bars this editor draws itself** — see [`Chrome`]. A host that frames
-    /// the pane in its own look turns them off and draws [`Editor::frame_title`] and
-    /// [`Editor::key_hints`] where its own chrome goes.
     pub chrome: Chrome,
-    /// The screen rectangle the editor occupies, as last given to
-    /// [`Self::set_area`]. Mouse events arrive in terminal coordinates and are
-    /// mapped through its origin; `text_w`/`text_h` are derived from its size.
-    /// Empty until a host sets it, which means "at (0, 0), unbounded" — what
-    /// the editor assumed before it could be a pane, and what tests that set
-    /// `text_w`/`text_h` by hand still rely on.
     pub(crate) area: Area,
-    /// Rendered width of a tab (seeded from config, F1).
     pub tab_width: usize,
-    /// Line-number gutter toggle (M-N; seeded from config, F1).
     pub show_line_numbers: bool,
-    /// Soft line wrap toggle (M-\; seeded from config, F1). When on, long
-    /// lines wrap at the viewport edge, `bs.scroll` counts VISUAL rows, and
-    /// horizontal scrolling is disabled (scroll_x stays 0).
+    /// Soft line wrap (M-\; seeded from config). When on, `bs.scroll` counts
+    /// visual rows and horizontal scrolling is off.
     pub wrap: bool,
-    /// Startup config (F1). tab_width/show_line_numbers/wrap seed from it;
-    /// the M-N / M-\ toggles stay runtime-only (no config write-back).
-    /// `multibuffer` is unused until F8.
     pub config: config::Config,
-    /// Prompt history per kind (E4b). Session-global: survives buffer
-    /// switches and prompt close/reopen.
     pub search_hist: Vec<String>,
     pub exec_hist: Vec<String>,
     pub file_hist: Vec<String>,
-    /// Index into the active history while cycling (None = not browsing),
-    /// plus the text being edited when cycling started.
     pub hist_idx: Option<usize>,
     pub hist_draft: String,
-    /// Live completion popup (LSP textDocument/completion); None when no
-    /// candidates are showing.
     pub completion: Option<CompletionPopup>,
-    /// Context each in-flight completion request was made for, in request
-    /// order: (row, typed prefix). A response is applied only when it
-    /// answers the request for the *current* context — servers can lag
-    /// several keystrokes behind, and applying their older answers is what
-    /// made the popup show unrelated items.
+    /// Context each in-flight completion request was made for; a stale response is junk.
     pub(crate) completion_q: VecDeque<(usize, String)>,
-    /// rust-analyzer answers member completions with a path-completion
-    /// fallback until it has finished scanning a freshly opened crate
-    /// (~15 s on rano itself). Responses carrying that fallback signature
-    /// are dropped and re-requested on this timer instead of flashing junk.
+    /// Until rust-analyzer has scanned a fresh crate it answers member
+    /// completions with path junk; those are re-requested on this timer.
     pub(crate) completion_retry: Option<Instant>,
     pub(crate) completion_retries: u8,
-    /// Where M-, returns to, one entry per definition jump (stacked).
     pub def_back: Vec<DefBack>,
-    /// The loader filled its adoption budget on the last poll, so more is
-    /// ready and the loop should come straight back for it. This is what keeps
-    /// the load at disk speed: the budget bounds one ITERATION so the keyboard
-    /// stays live, and without this flag the loop would sleep its idle wait
-    /// before asking again — a 2.6M-line file then took ~10 s to arrive
-    /// instead of ~1, with the disk idle in between.
-    /// The startup update check: one background request, and the offer it may
-    /// produce. Off unless enabled — see `crate::update::enabled`, which reads
-    /// the config and `RANO_AUTOUPDATE`. Nothing here runs in tests, because
-    /// `Editor::new` does not start the check; `run()` does.
     pub update: crate::update_ctrl::UpdateCheck,
     pub(crate) load_saturated: bool,
-    /// The style grid is behind the buffer; the next frame re-highlights. See
-    /// [`Self::ensure_highlight`].
     pub(crate) highlight_dirty: bool,
-    /// Tree-sitter diagnostics are behind the buffer; a debounced whole-
-    /// document parse will refresh them. Separate from `highlight_dirty`
-    /// because the two have different budgets — see `Highlighter::parse_for_diagnostics`.
     pub(crate) diag_dirty: bool,
-    /// When the last edit happened, for the diagnostics debounce.
     pub(crate) diag_last_edit: Instant,
 }
 
-/// Live completion popup state: the filtered candidate list, the selected
-/// row, and the anchor (buffer row + word-start col) used to place the
-/// popup on screen and to reject responses for a stale cursor position.
 pub struct CompletionPopup {
     pub items: Vec<lsp::CompletionItem>,
     pub sel: usize,
@@ -388,10 +224,6 @@ pub struct CompletionPopup {
     pub col: usize,
 }
 
-/// Case-insensitive subsequence test: does every char of `needle` appear
-/// in `hay` in order? Used to keep a server's fuzzy matches (e.g. `__is_long`
-/// for `is`) below the exact-prefix ones instead of dropping or promoting
-/// them.
 fn fuzzy_match(hay: &str, needle: &str) -> bool {
     let mut rest = hay.chars();
     needle
@@ -399,20 +231,14 @@ fn fuzzy_match(hay: &str, needle: &str) -> bool {
         .all(|n| rest.any(|h| h.eq_ignore_ascii_case(&n)))
 }
 
-/// One entry of the jump-to-definition back stack: where to return to when
-/// M-, unwinds a jump. Cross-file jumps in single-buffer mode swap the whole
-/// buffer state out (edits survive); multibuffer mode remembers the buffer
-/// index; same-file jumps only need the cursor.
 pub struct DefBack {
     pub buf: Option<BufferState>,
     pub idx: Option<usize>,
     pub pos: Pos,
 }
 
-/// The word being completed just before `col` on `row`, plus its start
-/// column. Fires for identifiers (`foo|`) and with an empty prefix after a
-/// member-access trigger (`foo.|`, `foo::|`). None elsewhere (spaces,
-/// punctuation, empty lines) — the caller closes any open popup then.
+/// The word being completed before `col` on `row` and its start column; None
+/// where completion does not apply, and the caller closes any popup then.
 pub(crate) fn completion_prefix(
     lines: &[Vec<char>],
     row: usize,
@@ -510,7 +336,6 @@ impl Editor {
         ed
     }
 
-    /// The active buffer's state (F8 groundwork: exactly one buffer today).
     pub(crate) fn bs(&self) -> &BufferState {
         &self.buffers[self.cur]
     }
@@ -524,8 +349,6 @@ impl Editor {
         bs.cursor = bs.buf.clamp(bs.cursor);
     }
 
-    /// Recompute the live path suggestions when the open prompt is a
-    /// file-name prompt whose text changed. Returns whether they changed.
     pub(crate) fn refresh_prompt_hints(&mut self) -> bool {
         let want = self.prompt.as_ref().filter(|p| {
             matches!(
@@ -555,8 +378,6 @@ impl Editor {
         }
     }
 
-    /// `msg`, with the plugin's note appended when a hook just had something to say — the two
-    /// facts in one line, because the status bar holds one.
     pub(crate) fn flash_with_note(&mut self, msg: &str) {
         match self.plugin_note.take() {
             Some(note) => self.flash(&format!("{msg} — {note}")),
@@ -576,8 +397,7 @@ impl Editor {
             return;
         }
         if self.wrap {
-            // M-\: scroll counts VISUAL rows; the cursor's visual row must
-            // stay inside [scroll, scroll + text_h).
+            // Scroll counts visual rows; the cursor's visual row must stay in.
             self.ensure_wrap_prefix();
             let bs = self.bs();
             let total = bs.wrap_prefix.last().copied().unwrap_or(0);
@@ -604,10 +424,8 @@ impl Editor {
         bs.scroll = bs.scroll.min(max_scroll);
     }
 
-    /// E3: keep the cursor's display column inside the horizontal window.
-    /// scroll_x and the viewport width are both in display cols; the
-    /// viewport excludes the gutter when line numbers are shown (F4).
-    /// M-\: with soft wrap on, lines wrap instead of scrolling sideways.
+    /// Keep the cursor's display column inside the horizontal window; with
+    /// soft wrap on, lines wrap instead of scrolling sideways.
     pub(crate) fn adjust_scroll_x(&mut self) {
         if self.wrap {
             self.bs_mut().scroll_x = 0;
@@ -637,10 +455,8 @@ impl Editor {
         };
         bs.scroll_x = bs.scroll_x.min(disp).max((disp + 1).saturating_sub(view_w));
         bs.scroll_x = bs.scroll_x.min(line_w);
-        // The viewport's left edge must not fall inside a DOUBLE-WIDTH
-        // character: painting half of one and putting the cursor a cell off
-        // is worse than one column of slack. A tab is fine — the renderer
-        // clips it into the leading spaces the edge has left.
+        // The left edge must not fall inside a wide character; a tab is
+        // fine — the renderer clips it into leading spaces.
         if bs.scroll_x > 0 {
             let at = ui::char_at_display(line, bs.scroll_x, tab_width);
             if line
@@ -652,29 +468,14 @@ impl Editor {
         }
     }
 
-    // ---------- soft wrap (M-\) ----------
-
-    /// Width of the text viewport in display cols (gutter excluded).
     pub(crate) fn view_w(&self) -> usize {
         self.text_w.saturating_sub(self.gutter_w()).max(1)
     }
 
-    /// The gutter's width in display cols, or 0 when line numbers are off.
-    ///
-    /// **One place, because four call sites must agree**: the draw, the mouse →
-    /// position mapping, `view_w` and `adjust_scroll_x` all ask how far the text
-    /// starts from the left edge, and a gutter that is one column wider in one
-    /// of them puts the cursor, the click or the wrap width one column off.
-    ///
-    /// The width is measured from the buffer's line SPAN and not its row count,
-    /// because a tail's numbers are the file's: `BufferState::line_span` is the
-    /// file's last line once the background count has answered, and the rows in
-    /// the buffer until it does.
+    /// The gutter's width, one place so the draw, the mouse mapping and
+    /// `view_w` agree; measured from the buffer's line span, not its rows.
     pub(crate) fn gutter_w(&self) -> usize {
-        // **A view wears no line numbers**: the number would be the row of a rendering, not a line
-        // of a file, and a reader who reads `7` as "line 7" is reading something that does not
-        // exist. One place, because the draw, the mouse mapping, `view_w` and `adjust_scroll_x`
-        // all ask this.
+        // A view wears no line numbers: a rendering's row is not a file line.
         if self.show_line_numbers && !self.bs().synthetic {
             ui::gutter_width(self.bs().line_span())
         } else {
@@ -683,17 +484,7 @@ impl Editor {
     }
 
     /// Rebuild the visual-row prefix table when the buffer or the wrap width
-    /// changed since the last build. No-op when wrap is off. The same pass
-    /// records each row's segment geometry (see [`RowWrap`]) so a row with a
-    /// tab, a wide character or a combining mark never has to be walked again
-    /// per frame.
-    ///
-    /// When an edit names the one row it changed (`wrap_dirty_row`) and the
-    /// row COUNT is unchanged, only that row is re-scanned and the prefix is
-    /// re-summed arithmetically. That is the difference between a keystroke
-    /// costing one line and costing the document: measured 2026-09-22, a 30 MB
-    /// file spent 184 ms per keystroke here, all of it re-walking 400,000
-    /// lines that had not changed, against 0.5 ms to re-sum their counts.
+    /// changed; an edit that names its one changed row re-scans only that row.
     pub(crate) fn ensure_wrap_prefix(&mut self) {
         if !self.wrap {
             return;
@@ -708,15 +499,8 @@ impl Editor {
         }
         let tw = self.tab_width.max(1);
         let n = self.bs().buf.row_count();
-        // An APPEND: rows `[0, k)` are untouched and only `[k, n)` are new.
-        //
-        // This is the loader's path, and without it a load is quadratic in
-        // disguise: each adopted batch bumped `edit_gen`, the table was
-        // invalidated, and the next frame re-measured EVERY row so far. On a
-        // 2.6M-line file that is ~800M row measurements across the load —
-        // measured at 315k rows/s against a page-cached read of 17 GB/s and a
-        // 3.9M rows/s decode in Python. Extending instead of rebuilding took it
-        // to disk speed; see `bench_load_throughput`.
+        // An append: rows `[0, k)` are untouched and only `[k, n)` are new —
+        // without it a load re-measures every row per batch.
         if let Some(k) = self.bs().wrap_extend_from {
             let k = k.min(n).min(self.bs().wrap_rows.len());
             let usable = k > 0
@@ -741,8 +525,7 @@ impl Editor {
                 return;
             }
         }
-        // The cheap path: same rows, one of them edited. `wrap_prefix` and
-        // `wrap_rows` keep their length, so nothing has to move.
+        // The cheap path: same rows, one of them edited.
         if self.bs().wrap_lines == n
             && self.bs().wrap_rows.len() == n
             && self.bs().wrap_prefix.len() == n + 1
@@ -752,8 +535,7 @@ impl Editor {
             let row_wrap = Self::row_wrap_of_line(self.bs().buf.row(row), tw, vw);
             let bs = self.bs_mut();
             bs.wrap_rows[row] = row_wrap;
-            // Re-sum from the edited row to the end. Pure arithmetic over
-            // cached counts — no line is looked at.
+            // Re-sum from the edited row to the end: pure arithmetic.
             for i in row..n {
                 let segs = match &bs.wrap_rows[i].segs {
                     Some(s) => s.len(),
@@ -788,22 +570,15 @@ impl Editor {
         bs.wrap_extend_from = None;
     }
 
-    /// One row's wrap geometry. Shared by the incremental and the full rebuild
-    /// so the two cannot disagree about what a row looks like — the cheap path
-    /// is only ever a shorter way to compute the same thing.
     fn row_wrap_of_line(line: &[char], tab_width: usize, view_w: usize) -> RowWrap {
-        // A row of megabytes is measured affinely unless its HEAD is
-        // non-ordinary. Scanning all of it to answer the question cost 25 ms
-        // per keystroke on a 4 MB minified bundle, which is the slowest thing
-        // left in the editor. See `width::is_simple_prefix` for the trade.
+        // A huge row is measured affinely unless its head is non-ordinary.
         let bounded = if line.len() > Self::LONG_ROW {
             width::is_simple_prefix(line, Self::LONG_ROW)
         } else {
             width::is_simple(line)
         };
         if bounded {
-            // Every character one column: segments are affine and the renderer
-            // needs no table.
+            // Every character one column: segments are affine.
             return RowWrap {
                 segs: None,
                 w: line.len(),
@@ -815,9 +590,6 @@ impl Editor {
         }
     }
 
-    /// The wrap geometry of row `r` from the table, when it is fresh.
-    /// `None` means the table is stale or absent and callers must fall back
-    /// to scanning the line.
     fn row_wrap(&self, r: usize) -> Option<&RowWrap> {
         let bs = self.bs();
         if bs.wrap_key != (bs.edit_gen, self.view_w()) || bs.wrap_rows.len() != bs.buf.row_count() {
@@ -826,15 +598,10 @@ impl Editor {
         bs.wrap_rows.get(r)
     }
 
-    /// `Some(true)` when row `r` is simple — every character one column and
-    /// no tab, so display col == char index — and `None` when the table is
-    /// stale and the caller must scan. `Some(false)` means the row needs the
-    /// width-aware paths.
     pub(crate) fn row_is_simple(&self, r: usize) -> Option<bool> {
         self.row_wrap(r).map(|rw| rw.segs.is_none())
     }
 
-    /// How many visual rows buffer row `r` occupies.
     pub(crate) fn seg_count(&self, r: usize) -> usize {
         let len = self.line_len(r);
         if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
@@ -843,7 +610,6 @@ impl Editor {
         len.div_ceil(self.view_w()).max(1)
     }
 
-    /// Char range `[lo, hi)` of segment `seg` of buffer row `r`.
     pub(crate) fn seg_chars(&self, r: usize, seg: usize) -> (usize, usize) {
         let len = self.line_len(r);
         if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
@@ -856,7 +622,6 @@ impl Editor {
         (lo, (lo + vw).min(len))
     }
 
-    /// Display range `[d0, d1)` segment `seg` of buffer row `r` paints into.
     pub(crate) fn seg_disp(&self, r: usize, seg: usize) -> (usize, usize) {
         if let Some(rw) = self.row_wrap(r) {
             if let Some(segs) = &rw.segs {
@@ -874,13 +639,11 @@ impl Editor {
         ((seg * vw).min(len), ((seg + 1) * vw).min(len))
     }
 
-    /// Which segment of buffer row `r` holds char col `col`.
     pub(crate) fn seg_of_col(&self, r: usize, col: usize) -> usize {
         let len = self.line_len(r);
         let col = col.min(len);
         if let Some(segs) = self.row_wrap(r).and_then(|rw| rw.segs.as_ref()) {
-            // The starts are sorted and strictly increasing, so the segment
-            // is the last one that begins at or before `col`.
+            // Starts are sorted, so the segment is the last one at or before `col`.
             return match segs.binary_search_by_key(&col, |s| s.0) {
                 Ok(i) => i,
                 Err(0) => 0,
@@ -890,14 +653,10 @@ impl Editor {
         (col / self.view_w()).min(self.seg_count(r).saturating_sub(1))
     }
 
-    /// Display offset of char col `col` inside its own segment — where the
-    /// cursor sits on the visual row, which is `disp % view_w` only while
-    /// every character is one column wide.
     pub(crate) fn disp_in_seg(&self, r: usize, col: usize) -> usize {
         let (lo, _) = self.seg_chars(r, self.seg_of_col(r, col));
         if self.row_is_simple(r) == Some(true) {
-            // Char index == display col, so the offset is the distance from
-            // the segment's first char.
+            // Char index == display col: the offset is from the segment's start.
             return col.min(self.line_len(r)).saturating_sub(lo);
         }
         let line = self.bs().buf.row(r);
@@ -905,8 +664,6 @@ impl Editor {
             .saturating_sub(self.seg_disp(r, self.seg_of_col(r, col)).0)
     }
 
-    /// Char col at display offset `within` into segment `seg` of row `r`
-    /// (clamped to the segment, so it never spills onto the next one).
     pub(crate) fn col_in_seg(&self, r: usize, seg: usize, within: usize) -> usize {
         let (lo, hi) = self.seg_chars(r, seg);
         if self.row_is_simple(r) == Some(true) {
@@ -921,15 +678,12 @@ impl Editor {
         self.bs().buf.row_opt(r).map(Vec::len).unwrap_or(0)
     }
 
-    /// Visual row containing position `p` (wrap on only).
     pub(crate) fn visual_pos(&self, p: Pos) -> usize {
         let bs = self.bs();
         let r = p.row.min(bs.buf.row_count().saturating_sub(1));
         bs.wrap_prefix.get(r).copied().unwrap_or(0) + self.seg_of_col(r, p.col)
     }
 
-    /// (buffer row, wrap segment) of visual row `v`, clamped to the buffer
-    /// (wrap on only).
     pub(crate) fn buf_row_of_visual(&self, v: usize) -> (usize, usize) {
         let bs = self.bs();
         if bs.wrap_prefix.is_empty() {
@@ -942,9 +696,7 @@ impl Editor {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        // Clamped to the TABLE as well as the buffer: the table is only valid
-        // for the rows it was built from, and a caller holding a stale one
-        // must get a sane row rather than an index past its end.
+        // Clamped to the table too: a stale caller gets a sane row, not one past the end.
         let r = r
             .min(bs.buf.row_count().saturating_sub(1))
             .min(bs.wrap_prefix.len().saturating_sub(2));
@@ -952,23 +704,19 @@ impl Editor {
     }
 
     /// Wait until the buffer has `p.row`, then put the cursor there and centre
-    /// the line. No-op once applied.
+    /// the line; clamping to what has arrived would open the file elsewhere.
     pub(crate) fn apply_startup_pos(&mut self) {
         let Some(p) = self.bs().goto else {
             return;
         };
-        // Not yet: with the loader, a row a million lines in arrives minutes
-        // after the first frame. Waiting is the whole point — clamping to what
-        // has arrived would open the file at the wrong place and look like the
-        // feature was broken.
+        // Not yet: a row a million lines in arrives minutes after the first
+        // frame, and waiting is the whole point.
         if p.row >= self.bs().buf.row_count() {
             return;
         }
         let bs = self.bs_mut();
         bs.cursor = bs.buf.clamp(p);
-        // Centred, which needs the wrap table: with soft wrap a long line above
-        // the target occupies several visual rows, and the scroll is counted in
-        // those.
+        // Centred, which needs the wrap table: a long line above spans several rows.
         self.ensure_wrap_prefix();
         let text_h = self.text_h;
         let cv = self.visual_pos(self.bs().cursor);
@@ -981,83 +729,53 @@ impl Editor {
         self.adjust_scroll_x();
     }
 
-    /// Rows either side of the viewport that a large buffer's highlight
-    /// covers. The window's edges are where a construct that opens outside it
-    /// is mis-coloured, so they are kept off screen: 200 rows is several
-    /// screens of margin at any realistic terminal height, and 200 rows of a
-    /// huge file still parse in well under a frame.
+    /// Rows either side of the viewport a large buffer's highlight covers: a
+    /// construct that opens outside the window is mis-coloured at its edges.
     pub(crate) const HIGHLIGHT_MARGIN: usize = 200;
 
-    /// Characters either side of the viewport on the SAME row, for a row too
-    /// long to hand to the parser whole.
-    ///
-    /// A row can be megabytes long — minified JavaScript, one-line JSON, a
-    /// bundled CSS file — and then a row-shaped window is the whole document.
-    /// 4,000 characters is several screen widths even on an ultra-wide
-    /// terminal, so this margin is never seen, and it bounds the parse on a
-    /// document whose *first* row is 4 MB.
+    /// Characters either side of the viewport, for a row too long to hand over
+    /// whole.
     pub(crate) const COL_MARGIN: usize = 4_000;
 
-    /// A row longer than this is windowed by columns rather than handed over
-    /// whole. Well past any hand-written line (the longest in letibot's
-    /// 25,000-line `app.rs` is 334) and well under the megabytes a minifier
-    /// produces.
+    /// A longer row is windowed by columns: past any hand-written line, under
+    /// what a minifier produces.
     pub(crate) const LONG_ROW: usize = 8_000;
 
     /// The buffer rows the viewport shows, with the wrap segments of the first
-    /// and last — the CORE of [`Self::highlight_window`], before any margin.
-    ///
-    /// Split out because "does the style grid still cover what is on screen?" is
-    /// a question about the viewport, not about the margined window, and
-    /// answering it with the margined window would re-parse on every single row
-    /// scrolled.
+    /// and last, before any margin: coverage is about the viewport.
     fn viewport_core(&self, text_h: usize) -> (usize, usize, usize, usize) {
         let bs = self.bs();
-        // Visual row → buffer row, when the wrap table is fresh. The scroll
-        // position is in visual rows (M-\), so a deep scroll into a long line
-        // still lands on the right buffer row.
+        // Visual row → buffer row, when the wrap table is fresh.
         if self.wrap && !bs.wrap_prefix.is_empty() {
             let (r0, s0) = self.buf_row_of_visual(bs.scroll);
             let (r1, s1) = self.buf_row_of_visual(bs.scroll + text_h.max(1));
             (r0, r1, s0, s1)
         } else {
-            // **The last visible row is one PAST the buffer for a short file**, and this branch
-            // used to hand that index on: with wrap off, any buffer shorter than the window asked
-            // the highlighter for `row(row_count)` and panicked there (`buffer.rs:171`,
-            // "index out of bounds: the len is 3 but the index is 3"). The caller draws the frame
-            // and highlights it, so the crash arrived on a redraw — which is how it surfaced as
-            // "mouse-select, then copy".
+            // The last visible row can be one past a short buffer; clamping
+            // keeps the highlighter off a row that does not exist.
             let last = bs.buf.row_count().saturating_sub(1);
             (bs.scroll.min(last), (bs.scroll + text_h).min(last), 0, 0)
         }
     }
 
-    /// The window a highlight should cover for the current viewport: the visible
-    /// rows plus a margin, and for a row too long to hand over whole, the visible
-    /// columns plus a margin.
+    /// The window a highlight should cover: the visible rows plus a margin, and
+    /// the visible columns plus one for a row too long to hand over whole.
     fn highlight_window(&self, text_h: usize) -> syntax::Window {
         let bs = self.bs();
         let last_row = bs.buf.row_count().saturating_sub(1);
         let (first_vis, last_vis, first_seg, last_seg) = self.viewport_core(text_h);
-        // Clamped again here, because this is where the indices are USED: the window is derived
-        // from the viewport, and a viewport row past the buffer is a row no parse can name.
+        // Clamped here, where the indices are used.
         let last_row_now = bs.buf.row_count().saturating_sub(1);
         let first_vis = first_vis.min(last_row_now);
         let last_vis = last_vis.min(last_row_now);
         let first = first_vis.saturating_sub(Self::HIGHLIGHT_MARGIN);
-        // **A tail clamps the window to what is settled** (TODO.md §20.3 E).
-        // Everything below the boundary is a row the file is still writing, and
-        // handing it to the parser is how a half-written stack trace gets
-        // coloured as if it were whole — and work thrown away when the row
-        // changes. Clamping it here, rather than filtering the styles
-        // afterwards, is also what makes `style_at` answer nothing for those
-        // rows, since the grid never covers them.
+        // A tail clamps the window to what is settled, so `style_at` answers
+        // nothing for rows the file is still writing.
         let last = (last_vis + Self::HIGHLIGHT_MARGIN)
             .min(last_row)
             .min(bs.settled_last_row());
         let (first, last) = (first.min(last), last);
-        // Column bounds, for the long-row case. Only meaningful on the first
-        // and last row of the window; every other row is taken whole.
+        // Column bounds matter only on the window's first and last row.
         let from = if bs.buf.row(first_vis).len() > Self::LONG_ROW {
             let (lo, _) = self.seg_chars(first_vis, first_seg);
             lo.saturating_sub(Self::COL_MARGIN)
@@ -1076,64 +794,28 @@ impl Editor {
         }
     }
 
-    /// Whether the refreshed style grid still covers what the viewport shows.
-    ///
-    /// **The window is a viewport, so it has to follow the viewport.** It is
-    /// computed from the scroll position, and until this existed nothing
-    /// recomputed it when the view scrolled: `highlight_dirty` is set by edits
-    /// and loads and by no scroll path, so `ensure_highlight` returned early for
-    /// ever after the first frame. Measured on this repo's own `TODO.md` —
-    /// opened at the top in a 59-row pane, scrolled to line 229, and every row
-    /// below ~260 was PLAIN while a fresh open of the same file coloured it.
-    /// `style_at` answers nothing outside the window, and nothing is what the
-    /// renderer draws.
-    ///
-    /// Compared against the CORE (`viewport_core`), not the margined window: the
-    /// window is viewport ± `HIGHLIGHT_MARGIN`, so asking whether the *margined*
-    /// window is still covered would come out false after one row of scroll and
-    /// re-parse on every row. Against the core it refreshes when the viewport
-    /// approaches the edge of what was parsed — every ~200 rows of scrolling —
-    /// which is what the margin is for.
     fn highlight_covers_viewport(&self) -> bool {
         let Some(have) = self.bs().hl.styled_window() else {
-            // No window means the last refresh covered the whole document, which
-            // covers the viewport too.
+            // No window means the last refresh covered the whole document.
             return true;
         };
         let (r0, r1, _, _) = self.viewport_core(self.text_h);
         let last_row = self.bs().buf.row_count().saturating_sub(1);
-        // **Clamped to what is settled, exactly as `highlight_window` is.**
-        // This is the pairing the whole increment turns on: clamp only the
-        // parse range and this check keeps asking for rows the parser will
-        // never return, so it answers "not covered" on every frame and
-        // re-parses per frame — turning a saving into the exact regression
-        // (§16) the window exists to prevent. Clamped to the boundary, a
-        // viewport showing only arriving rows asks for nothing new.
+        // Clamped to what is settled, exactly as `highlight_window` is.
         let settled = self.bs().settled_last_row();
         let (r0, r1) = (r0.min(last_row).min(settled), r1.min(last_row).min(settled));
         if r0 < have.rows.0 || r1 > have.rows.1 {
             return false;
         }
-        // Columns too, for a row too long to have been handed over whole: those
-        // are what horizontal scrolling moves through, and the same staleness
-        // applies. `highlight_window` computes them from the visible segments, so
-        // they only shift when the horizontal position does.
+        // Columns too, for a row not handed over whole — what horizontal
+        // scrolling moves through.
         let want = self.highlight_window(self.text_h);
         want.cols.0 >= have.cols.0 && want.cols.1 <= have.cols.1
     }
 
-    /// Whether the style grid is behind the buffer and the frame should
-    /// re-highlight before painting.
-    ///
-    /// Highlighting lazily, once per frame rather than once per edit, is what
-    /// makes a fast typist cost one highlight per painted frame instead of one
-    /// per keystroke — and it is what lets a huge file open at all, since the
-    /// first highlight is then the viewport window rather than the document.
     pub(crate) fn ensure_highlight(&mut self) {
-        // The wrap table first: `highlight_covers_viewport` reads the viewport in
-        // VISUAL rows when wrap is on, so a stale table would answer the question
-        // about the wrong rows. `highlight_now` already did this; the check now
-        // needs it too. It is a no-op when the table is fresh.
+        // The wrap table first: the coverage check reads the viewport in visual
+        // rows, and a stale table answers about the wrong rows.
         self.ensure_wrap_prefix();
         if !self.highlight_dirty && self.highlight_covers_viewport() {
             return;
@@ -1142,30 +824,19 @@ impl Editor {
         self.highlight_now();
     }
 
-    /// Refresh tree-sitter diagnostics, at most once per pause.
-    ///
-    /// The colour grid is per frame and a window; diagnostics are a
-    /// WHOLE-document parse (~180 µs per kilobyte) and therefore belong here
-    /// instead: 300 ms after the last edit, the way `lsp_flush` sends
-    /// `didChange`. Nobody is waiting on a squiggle within a frame of a
-    /// keystroke, and the alternative — parsing the document per keystroke —
-    /// measured 402 ms per key on a 2.09 MB file (`bench_threshold_cliff`).
-    ///
-    /// Returns whether diagnostics changed, for the dirty-draw pass.
+    /// Refresh tree-sitter diagnostics at most once per pause, 300 ms after the
+    /// last edit: a whole-document parse does not belong on a keystroke.
     pub(crate) fn diag_flush(&mut self, now: Instant) -> bool {
         if !self.diag_dirty || now < self.diag_last_edit + Duration::from_millis(300) {
             return false;
         }
         self.diag_dirty = false;
         let before = self.bs().syntax_diags.len() + self.bs().todo_diags.len();
-        // The todo check rides the same debounce as the syntax parse, and for
-        // the same reason: `Doc::parse` is 2.1 ms on a 200-item file, which is
-        // nothing once per pause and a liability per keystroke. It is also the
-        // same KIND of thing — what the format cannot express, reported where
-        // the format's own errors go.
+        // The todo check rides the same debounce: nothing per pause, a liability
+        // per keystroke.
         let todo = self.todo_check();
-        // `refresh_syntax_diags` takes `&mut`, so the borrow has to be mutable
-        // even though only the diagnostics field changes.
+        // `refresh_syntax_diags` takes `&mut`, so this borrow is mutable
+        // though only the diagnostics change.
         let bs = self.bs_mut();
         if bs.hl.parse_for_diagnostics(&bs.buf) {
             refresh_syntax_diags(bs);
@@ -1183,62 +854,24 @@ impl Editor {
         bs.syntax_diags.len() + bs.todo_diags.len() != before
     }
 
-    /// Re-highlight for the current viewport — always a window.
-    ///
-    /// There is no size threshold any more. There was one, and it was a cliff in
-    /// the wrong direction: a whole-document highlight below 2 MiB to keep
-    /// tree-sitter diagnostics, and a window above it, which cost **402 ms per
-    /// keystroke on a 2.09 MB file against 2.5 ms on the same file one byte
-    /// over**. Diagnostics no longer depend on the choice (they are their own
-    /// debounced parse), and the window covers the whole buffer whenever the
-    /// buffer is small enough for it to, so the window is never worse.
-    ///
-    /// Measured 2026-09-22 (release, one keystroke):
-    ///
-    /// | buffer | whole document | window |
-    /// |---|---|---|
-    /// | 2.09 MB Rust | 402 ms | 2.5 ms |
-    /// | 7 MB Rust | 1452 ms | 1.3 ms |
-    /// | 4 MB minified JS (1 line) | 2246 ms | see `bench.rs` |
-    /// | 30 MB log | 365 ms | 0.57 ms |
     pub(crate) fn highlight_now(&mut self) {
-        // Before the window is measured, not after: the window is derived from
-        // the wrap table, and an edit that added or removed a row leaves that
-        // table shorter than the buffer. Reading it there would index past its
-        // end, and a stale total would put the window in the wrong place.
+        // Before the window is measured: an edit that added or removed a row
+        // leaves the table short.
         self.ensure_wrap_prefix();
         let text_h = self.text_h;
         let win = self.highlight_window(text_h);
-        // ALWAYS a window, and the threshold that used to be here is gone.
-        //
-        // It existed to keep tree-sitter diagnostics for small files (a
-        // windowed parse cannot report them) by paying a whole-document
-        // highlight for anything under 2 MiB. Measured, that cost 402 ms per
-        // keystroke on a 2.09 MB file while the same file one byte over the
-        // threshold cost 2.5 ms — a 160x cliff in the wrong direction, and the
-        // windowed highlight of that file is 774 µs.
-        //
-        // The window covers the whole buffer whenever the buffer is small
-        // enough for it to, so the margin makes this identical to a full
-        // refresh for small files (and `Highlighter::syntax_errors` reports
-        // when it does — see `window_covers_whole`). There is no size at which
-        // the full path is better, so there is no reason to choose.
         let bs = self.bs_mut();
         bs.hl.refresh_window(&bs.buf, win);
-        // Diagnostics are NOT refreshed here: they need the whole document and
-        // this is the per-frame path. `diag_flush` does them on a pause.
+        // Diagnostics need the whole document, so `diag_flush` does them on a
+        // pause.
     }
 
-    /// An edit whose one changed row is known: only that row is re-measured
-    /// for the wrap table. **Only safe when the edit neither added nor removed
-    /// a row** — `ensure_wrap_prefix` re-checks that and falls back to the full
-    /// rebuild when the count moved, so a mistake here is slow, not wrong.
+    /// An edit whose one changed row is known: only that row is re-measured. A
+    /// mistake here is slow, not wrong — the full rebuild is the fallback.
     pub(crate) fn edit_invalidate_row(&mut self, row: usize) {
         self.edit_invalidate_impl(Some(row));
     }
 
-    /// An edit that touched rows other than one, or that cannot say which.
-    /// The conservative default: the wrap table rebuilds in full.
     pub(crate) fn edit_invalidate(&mut self) {
         self.edit_invalidate_impl(None);
     }
@@ -1246,9 +879,7 @@ impl Editor {
     fn edit_invalidate_impl(&mut self, row: Option<usize>) {
         {
             let bs = self.bs_mut();
-            // An edit during a load: the user has started working in the part
-            // that arrived, so stop the rest from landing underneath them. The
-            // adopted rows stay; the buffer is left exactly as it is on screen.
+            // An edit during a load: stop the rest from landing underneath.
             if let Some(job) = bs.load.as_ref() {
                 job.cancel();
             }
@@ -1260,19 +891,14 @@ impl Editor {
             bs.lsp_dirty = true;
             bs.wrap_dirty_row = row;
         }
-        // Not highlighted here: the frame does it, once, via
-        // `ensure_highlight`. Every edit path funnels through here, so this one
-        // flag is enough, and a burst of keystrokes between two frames then
-        // costs one highlight instead of one per key.
+        // Not highlighted here: the frame does it once, so a burst of keystrokes
+        // between frames costs one highlight.
         self.highlight_dirty = true;
-        // And diagnostics, which are a whole-document parse and so wait for a
-        // pause rather than riding the keystroke. See `diag_flush`.
         self.diag_dirty = true;
         self.diag_last_edit = Instant::now();
     }
 
-    /// The union of tree-sitter and LSP diagnostics, row-major — what the
-    /// underline, the gutter and M-D all work off.
+    /// The union of tree-sitter and LSP diagnostics, row-major.
     pub fn all_diags(&self) -> Vec<lsp::Diagnostic> {
         let bs = self.bs();
         let mut out = bs.syntax_diags.clone();
@@ -1282,16 +908,12 @@ impl Editor {
         out
     }
 
-    /// The whitespace a Tab inserts, and what an auto-indent puts on a new line: the
-    /// configured unit ([`crate::config::Indent`]) — `indent_size` spaces, a literal tab,
-    /// or the buffer's own style under `auto` (see `crate::config::detect_indent`).
     pub fn indent_unit(&self) -> String {
         self.config.indent_unit(&self.bs().buf)
     }
 
-    /// Tab: insert the indent unit. Spaces are inserted up to the next unit boundary (so a
-    /// four-space buffer keeps its columns when Tab is pressed mid-indent), a literal tab is
-    /// inserted as one character.
+    /// Tab: insert the indent unit. Spaces go to the next unit boundary, so a
+    /// four-space buffer keeps its columns mid-indent.
     pub fn indent_line(&mut self) {
         let unit = self.indent_unit();
         if unit == "\t" {
@@ -1308,22 +930,17 @@ impl Editor {
 
     // ---------- undo / redo ----------
     //
-    // Region-based: each step records only the affected rows (before/after)
-    // plus the row-count delta, not the whole buffer. A run of the same kind
-    // of single-row action (a typed word, a run of backspaces) coalesces into
-    // one step; repeated ^K cuts merge with pre-edit-row extension.
+    // Region-based: a step records the affected rows plus the row-count delta,
+    // and a run of the same single-row action coalesces into one.
 
     const UNDO_LIMIT: usize = 500;
 
-    // Row span [first, last_exclusive) of the current selection, if non-empty.
     pub(crate) fn sel_span(&self) -> Option<(usize, usize)> {
         let mark = self.bs().mark?;
         let (a, b) = normalize(mark, self.bs().cursor);
         (a != b).then_some((a.row, b.row))
     }
 
-    // Empty region allowed: first_row == last_row_exclusive (pure insertion
-    // point); before == [] is tolerated.
     pub(crate) fn begin_action(
         &mut self,
         kind: ActionKind,
@@ -1370,8 +987,7 @@ impl Editor {
         self.bs_mut().last_kind = Some(kind);
     }
 
-    // Coalescing rules for merging `step` into `undo.back()`: runs of
-    // Insert/Backspace/Delete on the same single row, and repeated ^K cuts.
+    // Coalescing: runs of Insert/Backspace/Delete on one row, repeated ^K cuts.
     fn coalesce_kind(&self, step: &UndoStep) -> bool {
         let Some(prev) = self.bs().undo.back() else {
             return false;
@@ -1447,27 +1063,15 @@ impl Editor {
         }
     }
 
-    /// Make this document a view: read it, navigate it, search it, but do not
-    /// edit it or write it. See TODO.md §20.6 for why a tailed log opens this
-    /// way and why the refusal is at the keystroke rather than at the save.
+    /// Make this document a view: read, navigate, search, but do not edit or
+    /// write it. The refusal is at the keystroke, not at the save.
     pub fn set_read_only(&mut self, on: bool) {
         self.bs_mut().read_only = on;
     }
 
-    /// Refuse `what` because this buffer is read-only. Returns true when it
-    /// refused, so a caller writes `if self.refuse_read_only("cut") { return; }`.
-    ///
-    /// **One gate, called from every mutation, because a read-only mode that
-    /// guards nine of ten ways to change a buffer is worse than none at all** —
-    /// the tenth loses the user's work silently, which is the exact failure the
-    /// mode exists to prevent.
-    ///
-    /// The list it guards is not a guess: it is every function that records an
-    /// undo step (`begin_action`'s callers, 12 of them) plus `undo`/`redo`, which
-    /// restore rather than record, plus the two write paths. Derive it again the
-    /// same way when adding a mutation — `grep -n 'begin_action(' src/editor.rs`
-    /// — because a new mutation that forgets this gate is a hole, not a bug in
-    /// the gate.
+    /// Refuse `what` because this buffer is read-only; true when it refused. One
+    /// gate for every mutation — a mode that guards nine of ten ways to change a
+    /// buffer is worse than none.
     pub(crate) fn refuse_read_only(&mut self, what: &str) -> bool {
         if !self.bs().read_only {
             return false;
@@ -1531,10 +1135,6 @@ impl Editor {
         false
     }
 
-    // ---------- character input ----------
-
-    /// Insert text at the cursor as one undo step, without triggering
-    /// completion (used by completion_accept).
     fn insert_str_plain(&mut self, s: &str) {
         if self.refuse_read_only("typing") {
             return;
@@ -1554,12 +1154,8 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    // ---------- completion (LSP) ----------
-
-    /// Ask the language server for completions at the cursor when the
-    /// context warrants it (an identifier, or after `.` / `::`), and keep
-    /// the popup alive across requests so responses don't flicker it away.
-    /// Closes the popup when the cursor leaves completion context.
+    /// Ask the language server for completions where the context warrants it,
+    /// keeping the popup alive across requests; close it outside that context.
     pub(crate) fn maybe_request_completion(&mut self) {
         let cur = self.bs().cursor;
         let Some((prefix, start)) = completion_prefix(&self.bs().buf.rows_vec(), cur.row, cur.col)
@@ -1568,8 +1164,8 @@ impl Editor {
             self.completion_q.clear();
             return;
         };
-        // Push the exact text to the server first: the 300 ms didChange
-        // debounce would otherwise complete against a stale document.
+        // Push the exact text first: the didChange debounce would complete
+        // against a stale document.
         let bs = self.bs_mut();
         let Some(l) = bs.lsp.as_mut() else {
             return;
@@ -1586,8 +1182,8 @@ impl Editor {
         if self.completion_q.len() > 8 {
             self.completion_q.drain(0..self.completion_q.len() - 8);
         }
-        // Keep an existing popup anchored where it first opened: moving it
-        // with every keystroke reads as flicker.
+        // Anchor an existing popup where it opened; moving it per keystroke
+        // reads as flicker.
         match &mut self.completion {
             Some(p) if p.row == cur.row => {}
             _ => {
@@ -1601,14 +1197,9 @@ impl Editor {
         }
     }
 
-    /// Apply a completion response. Servers send their raw ranked list
-    /// (rust-analyzer marks big member lists `isIncomplete` and leaves the
-    /// filtering to the client), so the list is filtered here: items whose
-    /// label starts with the typed prefix first — in server order — then
-    /// fuzzy (subsequence) matches, everything else dropped. An empty
-    /// prefix (right after `.` / `::`) keeps the server's order untouched.
-    /// The response is applied only when it answers the request for the
-    /// current (row, prefix) — answers for older typing are dropped.
+    /// Apply a completion response: sort by sortText, prefix matches first then
+    /// fuzzy ones, and only when it answers the request for the current context.
+    /// An empty prefix keeps the server's order.
     pub(crate) fn complete_response(&mut self, items: Vec<lsp::CompletionItem>) {
         let Some((req_row, req_prefix)) = self.completion_q.pop_front() else {
             return;
@@ -1623,10 +1214,8 @@ impl Editor {
         if req_row != cur.row || req_prefix != prefix {
             return;
         }
-        // A `.` context answered with path items (self:: / crate:: /
-        // super::) means the server has not finished scanning the crate
-        // yet — member lists never contain those. Park the popup and
-        // re-request shortly instead of flashing fallback junk.
+        // A `.` context answered with path items means the crate scan is not
+        // done; re-request shortly instead of flashing fallback junk.
         let dot_ctx = cur.col > 0 && self.bs().buf.row(cur.row).get(cur.col - 1) == Some(&'.');
         if dot_ctx
             && self.completion_retries < 40
@@ -1651,7 +1240,7 @@ impl Editor {
             self.completion_q.clear();
             return;
         }
-        // The server's JSON order is not its ranked order: sortText is.
+        // The server's JSON order is not its ranked order; sortText is.
         let mut items = items;
         items.sort_by(|a, b| a.sort.cmp(&b.sort));
         let mut exact = Vec::new();
@@ -1704,9 +1293,6 @@ impl Editor {
         self.completion_retries = 0;
     }
 
-    /// Fire a scheduled completion re-request once its timer elapses. The
-    /// popup must still be open on the cursor's row with a completable
-    /// prefix, otherwise the wait is dropped.
     pub(crate) fn completion_retry_poll(&mut self) {
         let Some(t) = self.completion_retry else {
             return;
@@ -1728,8 +1314,8 @@ impl Editor {
         self.maybe_request_completion();
     }
 
-    /// Insert the selected completion: append the part past the typed
-    /// prefix, or replace the prefix when the item's text diverges from it.
+    /// Insert the selected completion: append the part past the typed prefix, or
+    /// replace the prefix when the item's text diverges from it.
     pub(crate) fn completion_accept(&mut self) {
         let Some(p) = self.completion.take() else {
             return;
@@ -1758,11 +1344,6 @@ impl Editor {
         }
     }
 
-    // ---------- jump to definition (M-. / M-,) ----------
-
-    /// M-.: ask the language server for the definition of the symbol under
-    /// the cursor and jump there — within the file, or into another file
-    /// (pushing the current position onto the M-, back stack).
     pub(crate) fn jump_definition(&mut self) {
         let cur = self.bs().cursor;
         let bs = self.bs_mut();
@@ -1798,7 +1379,6 @@ impl Editor {
         self.goto_location(loc, cur);
     }
 
-    /// Move to a definition target, pushing a back-stack entry first.
     pub(crate) fn goto_location(&mut self, loc: lsp::DefLocation, from: Pos) {
         let target_path = lsp::uri_to_path(&loc.uri);
         let cur_name = self.bs().buf.name.clone();
@@ -1807,18 +1387,15 @@ impl Editor {
             None => false,
         };
         if same_file {
-            // The buffer is named even for a same-file jump: by the time M-,
-            // unwinds it the user may have switched buffers, and the position
-            // belongs to this one.
+            // Named even for a same-file jump: M-, may come after a switch.
             self.def_back.push(DefBack {
                 buf: None,
                 idx: Some(self.cur),
                 pos: from,
             });
         } else if let Some(i) = self.find_buffer(&target_path) {
-            // Already open (from the command line, F8, or an earlier jump):
-            // go to that buffer rather than reading a second copy of the file,
-            // which would split its edits across two buffers.
+            // Already open: a second copy would split its edits across two
+            // buffers.
             self.def_back.push(DefBack {
                 buf: None,
                 idx: Some(self.cur),
@@ -1866,7 +1443,6 @@ impl Editor {
         self.adjust_scroll_x();
     }
 
-    /// M-,: unwind one definition jump (stacked — press repeatedly).
     pub(crate) fn jump_back(&mut self) {
         let Some(entry) = self.def_back.pop() else {
             self.flash("No jump to return to");
@@ -1889,16 +1465,6 @@ impl Editor {
         self.adjust_scroll_x();
     }
 
-    // ---------- mouse ----------
-
-    /// Give the editor its place on the screen: the whole terminal for the
-    /// binary, a pane for a host. Sets the text viewport from the size (the
-    /// title, status and two function-bar rows take four) and the origin
-    /// mouse events are mapped through. Returns whether anything changed,
-    /// i.e. whether the next frame must be drawn.
-    ///
-    /// Draw with the same rectangle ([`crate::ui::draw_in`]); the two are
-    /// separate only because drawing borrows the editor immutably.
     pub fn set_area(&mut self, area: Area) -> bool {
         if area == self.area {
             return false;
@@ -1906,18 +1472,12 @@ impl Editor {
         self.area = area;
         self.text_w = area.w as usize;
         self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
-        // **A picture's box follows the frame** — the same answer a PNG's view gives in
-        // `refresh_diff_view`, over the rows this one draws.
+        // A picture's box follows the frame, as a PNG's view does in
+        // `refresh_diff_view`.
         self.recut_picture();
         true
     }
 
-    /// **Draw with or without nano's own bars** — the title row and the two-row function bar.
-    ///
-    /// The binary keeps both. A host whose pane sits inside its own chrome turns them off: the
-    /// text gets those rows, and the host draws the file's name ([`Editor::frame_title`]) and the
-    /// keys ([`Editor::key_hints`]) in its own look. The status row stays either way — prompts,
-    /// messages and the cursor position live there.
     pub fn set_chrome(&mut self, chrome: Chrome) {
         self.chrome = chrome;
         if !self.area.is_empty() {
@@ -1925,9 +1485,6 @@ impl Editor {
         }
     }
 
-    /// **What the title bar would say, for a host drawing its own**: the name (`[i/n] ` first
-    /// when several buffers are open; empty for a scratch buffer), whether it has unsaved
-    /// edits, and whether it can be written at all.
     pub fn frame_title(&self) -> FrameTitle {
         let bs = self.bs();
         FrameTitle {
@@ -1937,27 +1494,21 @@ impl Editor {
         }
     }
 
-    /// **The function bar's entries, for a host drawing its own**: `(key, label)` in the bar's
-    /// order — what is in effect right now (a pending prefix's continuations, a mode's keys, or
-    /// the global ones), in the notation the person's keymap uses.
     pub fn key_hints(&self) -> Vec<(String, String)> {
         self.bar_items()
     }
 
-    /// Map a pane cell to a buffer position: only clicks inside the text
-    /// area land; the title, status and function bars are ignored, and a
-    /// click on the gutter or past EOL goes to the line start / line end.
+    /// Map a pane cell to a buffer position: only clicks inside the text area
+    /// land; the gutter or past EOL goes to the line start/end.
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
         let top = self.chrome.top();
         if self.prompt.is_some() || pane_row < top || (pane_row - top) as usize >= self.text_h {
             return None;
         }
-        // From here `pane_row` counts as though the title row were there, which is what the
-        // arithmetic below was written for.
+        // From here `pane_row` counts as though the title row were there.
         let pane_row = pane_row + 1 - top;
         let bs = self.bs();
-        // M-\: the pane row is a VISUAL row; map it to (buffer row, wrap
-        // segment). With wrap off, seg is 0 and this is the old arithmetic.
+        // With wrap on, the pane row is a visual row.
         let (row, seg) = if self.wrap {
             let v = pane_row as usize - 1 + bs.scroll;
             let total = bs.wrap_prefix.last().copied().unwrap_or(0);
@@ -1989,14 +1540,8 @@ impl Editor {
         })
     }
 
-    /// Left click: the cursor, and — where the cursor already is — the mark, toggled
-    /// (`nano`'s rule). Left drag: extend. Release: a click that never dragged drops the
-    /// anchor it armed. Wheel: scroll the viewport a few lines. Everything else is
-    /// ignored.
-    ///
-    /// `m` is in terminal coordinates; an event outside the editor's area
-    /// (see [`Self::set_area`]) is not the editor's and is ignored, so a host
-    /// may forward every mouse event without hit-testing first.
+    /// Left click: the cursor, and on the cursor itself the mark (nano's rule).
+    /// Drag: extend. Release without a drag: drop the anchor. Wheel: scroll.
     pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
         let mut m = m;
         if !self.area.is_empty() {
@@ -2006,15 +1551,12 @@ impl Editor {
             m.x -= self.area.x;
             m.y -= self.area.y;
         }
-        // The list overlay is keyboard-only; the text under it is not there
-        // to click.
+        // The list overlay is keyboard-only; the text under it is not there to click.
         if self.picker.is_some() {
             return false;
         }
-        // **A view drawn over the text takes the wheel and nothing else**: what the
-        // reader is looking at is the view, and a click has nothing there to point
-        // at (the renderer hides the cursor over it) — so a click must not move the
-        // cursor of the text underneath, which is a buffer they cannot see.
+        // A view over the text takes the wheel and nothing else: a click has
+        // nothing to point at, and must not move the cursor underneath.
         if self.diff_view.is_some() {
             return match m.kind {
                 MouseKind::WheelUp => {
@@ -2037,13 +1579,8 @@ impl Editor {
                     let bs = self.bs_mut();
                     let at = bs.buf.clamp(p);
                     let at_cursor = at == bs.cursor;
-                    // **nano's click** (winio.c: `do_mouse`): a click where the cursor
-                    // already is toggles the mark — that is the gesture that starts a
-                    // selection with the mouse. Anywhere else it places the cursor and
-                    // arms the mark for a drag, and a release that never dragged drops
-                    // the arm: an armed mark left behind is what made a later scroll
-                    // (whose pin moves the edit point) redraw a selection from wherever
-                    // the click landed.
+                    // nano's click: on the cursor itself the mark toggles (the
+                    // gesture that starts a selection); elsewhere it places the cursor.
                     if at_cursor {
                         bs.mark = match bs.mark {
                             None => Some(bs.cursor),
@@ -2061,19 +1598,15 @@ impl Editor {
             },
             MouseKind::Release(MouseButton::Left) => {
                 // A press that never dragged was a click, and a click places the
-                // cursor: the anchor it armed goes with it. A drag's selection is
-                // kept (the two ends differ), and so is a mark the reader toggled by
-                // clicking on the cursor itself.
+                // cursor: its anchor goes. A drag's selection is kept.
                 let armed = std::mem::take(&mut self.mouse_arm);
                 let bs = self.bs_mut();
                 let dropped = armed && bs.mark == Some(bs.cursor);
                 if dropped {
                     bs.mark = None;
                 }
-                // **A selection made with the mouse goes to the system clipboard**, the way
-                // it does in every program with a mouse: the drag selected in *rano*, so the
-                // terminal's own copy has nothing to work from, and without this a reader
-                // selects text and then finds that nothing can pick it up.
+                // A mouse selection goes to the system clipboard: the drag
+                // selected here, so the terminal's own copy has nothing.
                 if !dropped {
                     self.copy_to_clipboard();
                 }
@@ -2091,15 +1624,10 @@ impl Editor {
         }
     }
 
-    /// Wheel: scroll the viewport without moving the edit point; the cursor
-    /// is pulled along only when the scroll would push it out of the view
-    /// (nano-style — it pins to the edge it would cross, so it stays on a
-    /// real line and the view follows it from there).
     fn wheel(&mut self, delta: i64) -> bool {
         let text_h = self.text_h;
         if self.wrap {
-            // M-\: scroll in visual rows; the cursor is pinned to the edge
-            // it would cross, at the start/end of that edge's visual row.
+            // Scroll in visual rows; the cursor is pinned at that edge's row start/end.
             self.ensure_wrap_prefix();
             let total = self.bs().wrap_prefix.last().copied().unwrap_or(0);
             let max_scroll = total.saturating_sub(text_h);
@@ -2151,8 +1679,7 @@ impl Editor {
         bs.cursor.col += 1;
         let row = self.bs().cursor.row;
         self.finish_step();
-        // Typing: the row is known and no row was added, so the wrap table
-        // re-measures one line instead of the document.
+        // Typing: the row is known and none was added, so one row is re-measured.
         self.edit_invalidate_row(row);
         self.maybe_request_completion();
     }
@@ -2169,9 +1696,8 @@ impl Editor {
         self.delete_selection_if_any();
         let row = self.bs().cursor.row;
         let col = self.bs().cursor.col;
-        // F3: with auto_indent, carry the current line's leading whitespace
-        // (up to the cursor) onto the new row. Electric: an opening brace at
-        // the end of the line puts the cursor one indent unit deeper.
+        // With auto_indent, carry the leading whitespace onto the new row; an
+        // opening brace puts the cursor one unit deeper.
         let indent: Vec<char> = if self.config.auto_indent {
             let mut ind: Vec<char> = self
                 .bs()
@@ -2241,8 +1767,7 @@ impl Editor {
         let mut same_row = false;
         if c.col > 0 {
             same_row = true;
-            // Soft tabs: on leading whitespace, backspace eats a whole
-            // indent unit down to the previous boundary, not one space.
+            // Soft tabs: on leading whitespace, backspace eats a whole indent unit.
             let unit = self.indent_unit();
             let line = self.bs().buf.row(c.row).clone();
             let on_indent =
@@ -2254,8 +1779,7 @@ impl Editor {
             };
             let bs = self.bs_mut();
             for _ in 0..n {
-                // buf.backspace removes a row it empties; stop before the
-                // row index goes stale and let clamp_cursor settle it.
+                // backspace removes a row it empties; stop before the index goes stale.
                 if bs.cursor.col == 0 || bs.buf.row_opt(c.row).is_none() {
                     break;
                 }
@@ -2316,16 +1840,11 @@ impl Editor {
         }
     }
 
-    // ---------- cut / paste ----------
-
     pub(crate) fn cut(&mut self) {
         if self.refuse_read_only("cut") {
             return;
         }
-        // **What was cut goes to the system clipboard too**, computed first: after the cut
-        // there is no selection left to read, and a cut that nothing outside rano can see is
-        // the same complaint the copy had (*"nothing copies"*). "Cut" to the rest of the
-        // machine means "put it on the clipboard and remove it here".
+        // What was cut goes to the clipboard too, read before the selection goes.
         let clip = self.selection_text().or_else(|| {
             // A whole line, which is `^K`'s own unit, with its newline.
             let c = self.bs().cursor;
@@ -2437,8 +1956,8 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    /// E1: bracketed paste. \r is stripped, newlines split into rows; the
-    /// whole paste (including selection replacement) is ONE undo step.
+    /// Bracketed paste. \r is stripped, newlines split into rows; the whole
+    /// paste (including selection replacement) is one undo step.
     pub fn paste_text(&mut self, s: &str) {
         if self.refuse_read_only("paste") {
             return;
@@ -2480,10 +1999,8 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    /// **The marked region, as text**: the rows joined, with a newline after each — the
-    /// form a reader pastes into another program. `None` when nothing is marked (or the
-    /// mark is empty), and a *whole-line* selection ends with a newline, the way `^K` and
-    /// every editor's line-wise copy do, so pasting it back is a line rather than a run-on.
+    /// The marked region as text, rows joined with newlines: the form a reader
+    /// pastes elsewhere. A whole-line selection keeps its trailing newline.
     pub fn selection_text(&self) -> Option<String> {
         let mark = self.bs().mark?;
         let (a, b) = normalize(mark, self.bs().cursor);
@@ -2498,44 +2015,30 @@ impl Editor {
             .map(|row| row.iter().collect::<String>())
             .collect::<Vec<String>>()
             .join("\n");
-        // **The newline the selection took with it.** `copy_range` is the cutbuffer's view —
-        // whole rows, trimmed at both ends — so a selection that starts at a row's first
-        // column (line-wise, the way `^K` takes one) or ends at one (it swallowed the
-        // newline before it) is missing the newline it covered, and pasting it would join it
-        // to whatever comes next.
+        // `copy_range` trims both ends, so a line-wise selection is missing its
+        // newline and pasting it would join it to what follows.
         if a.row < b.row && (a.col == 0 || b.col == 0) {
             out.push('\n');
         }
         Some(out)
     }
 
-    /// **Put the marked region on the terminal's clipboard** (OSC 52, where the terminal
-    /// speaks it), for everything that copies: `M-6`, `^K`, and the end of a mouse drag.
-    ///
-    /// Queued rather than written — the editor is a library and the terminal is the
-    /// host's — so a host drains it with [`Self::take_clipboard`] and hands it to
-    /// `term::Terminal::copy`, which is the one place that knows the terminal's answer.
-    ///
-    /// The reader, on not being able to copy a selection they had just made with the
-    /// mouse: *"when i just select text without shift and try to copy it - nothing
-    /// copies"*. rano's selection is rano's, so the terminal's own copy has nothing to
-    /// work from — the text has to go out from here.
+    /// Put the marked region on the terminal's clipboard (OSC 52). Queued rather
+    /// than written: the terminal is the host's, drained with [`Self::take_clipboard`].
     pub(crate) fn copy_to_clipboard(&mut self) {
         if let Some(text) = self.selection_text() {
             self.clipboard_out = Some(text);
         }
     }
 
-    /// **Take the text queued for the terminal's clipboard**, if any. A host that wants
-    /// copy to reach the system clipboard writes it with `term::Terminal::copy` (OSC 52);
-    /// the standalone binary does it every frame, as it does with pictures.
+    /// Take the text queued for the terminal's clipboard, if any; a host writes
+    /// it with `term::Terminal::copy`.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard_out.take()
     }
 
-    /// M-6: copy the current line (or marked region) to the cutbuffer
-    /// without deleting it. The mark stays active, and the region goes to the system
-    /// clipboard as well — a copy that nothing outside rano can see is not a copy.
+    /// M-6: copy the current line (or marked region) without deleting it; the
+    /// mark stays and the region also goes to the system clipboard.
     pub(crate) fn copy(&mut self) {
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
@@ -2576,8 +2079,6 @@ impl Editor {
         }
     }
 
-    // ---------- movement ----------
-
     pub(crate) fn move_left(&mut self) {
         let c = self.bs().cursor;
         if c.col > 0 {
@@ -2601,8 +2102,6 @@ impl Editor {
         }
     }
 
-    /// Move the cursor to visual row `v`, keeping the current column WITHIN
-    /// the visual row (clamped to the target row's length). Wrap on only.
     fn goto_visual_row(&mut self, v: usize) {
         let c = self.bs().cursor;
         let within = self.disp_in_seg(c.row, c.col);
@@ -2613,8 +2112,7 @@ impl Editor {
 
     pub(crate) fn move_up(&mut self) {
         if self.wrap {
-            // One VISUAL row up: a wrapped line is traversed segment by
-            // segment before the cursor reaches the previous buffer row.
+            // One visual row up: a wrapped line is traversed segment by segment.
             let cv = self.visual_pos(self.bs().cursor);
             if cv > 0 {
                 self.goto_visual_row(cv - 1);
@@ -2647,7 +2145,7 @@ impl Editor {
 
     pub(crate) fn move_home(&mut self) {
         if self.wrap {
-            // Start of the VISUAL row, not of the buffer row.
+            // Start of the visual row, not of the buffer row.
             let cv = self.visual_pos(self.bs().cursor);
             let (r, seg) = self.buf_row_of_visual(cv);
             let (lo, _) = self.seg_chars(r, seg);
@@ -2659,7 +2157,7 @@ impl Editor {
 
     pub(crate) fn move_end(&mut self) {
         if self.wrap {
-            // End of the VISUAL row, not of the buffer row.
+            // End of the visual row, not of the buffer row.
             let cv = self.visual_pos(self.bs().cursor);
             let (r, seg) = self.buf_row_of_visual(cv);
             let (_, hi) = self.seg_chars(r, seg);
@@ -2724,7 +2222,6 @@ impl Editor {
         self.bs_mut().cursor = Pos { row: r, col: c };
     }
 
-    // Next Word (nano's ^Right / M-N): move forward one word.
     pub(crate) fn next_word(&mut self) {
         let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
         let mut r = self.bs().cursor.row;
@@ -2757,13 +2254,11 @@ impl Editor {
         self.bs_mut().cursor = Pos { row: r, col: c };
     }
 
-    // To Bracket (nano's M-]): jump to the bracket matching the one at/near
-    // the cursor.
     pub(crate) fn match_bracket(&mut self) {
         let pairs: [(char, char); 3] = [('(', ')'), ('{', '}'), ('[', ']')];
         let start = self.bs().cursor;
-        // Copy the at-cursor chars out of the buffer so the search below can
-        // borrow it mutably-free while we still test them.
+        // Copy the at-cursor chars out so the search below can borrow the
+        // buffer freely.
         let window: Vec<char> = {
             let line = self.bs().buf.row(start.row);
             (0..5)
@@ -2791,8 +2286,6 @@ impl Editor {
         self.flash("No matching bracket");
     }
 
-    /// Find the position of `target` matching the bracket at (row, col),
-    /// scanning the whole buffer. `dir` is 1 (forward) or -1 (backward).
     fn find_matching(&self, row: usize, col: usize, target: char, dir: i64) -> Option<Pos> {
         let start_ch = self.bs().buf.row(row)[col];
         let nlines = self.bs().buf.row_count() as i64;
@@ -2837,8 +2330,6 @@ impl Editor {
         }
     }
 
-    // ---------- mark ----------
-
     pub(crate) fn toggle_mark(&mut self) {
         let bs = self.bs_mut();
         bs.mark = match bs.mark {
@@ -2846,8 +2337,6 @@ impl Editor {
             Some(_) => None,
         };
     }
-
-    // ---------- goto ----------
 
     pub(crate) fn start_goto(&mut self) {
         self.prompt = Some(Prompt {
@@ -2865,10 +2354,6 @@ impl Editor {
         self.loc_until = Some(Instant::now() + Duration::from_secs(2));
     }
 
-    // ---------- the mode ----------
-
-    /// The mode in effect, as a person reads it: the one they chose, or what the ladder
-    /// detected. Bare, because the prompt opens on it and must accept it back.
     pub fn mode_name(&self) -> String {
         match self.bs().hl.mode {
             syntax::Mode::Plain => "plain".to_string(),
@@ -2879,9 +2364,8 @@ impl Editor {
         }
     }
 
-    /// Ask for a mode, opening on the one in effect (`M-x Mode`): an editor that guesses
-    /// must be able to be told it guessed wrong, or an ambiguous file's wrong detection
-    /// stays for the session.
+    /// Ask for a mode, opening on the one in effect: an editor that guesses
+    /// must be able to be told it guessed wrong.
     pub fn start_setmode(&mut self) {
         let text = self.mode_name();
         let cursor = text.chars().count();
@@ -2892,8 +2376,6 @@ impl Editor {
         });
     }
 
-    /// Apply what was typed: a language's name, `plain` to stop the guessing, or `auto`
-    /// (and an empty answer) to put the detection back.
     pub fn do_setmode(&mut self, text: &str) {
         let t = text.trim();
         let mode =
@@ -2910,8 +2392,8 @@ impl Editor {
         self.set_mode(mode);
     }
 
-    /// Set the mode and invalidate what it decided: the colour grid and the diagnostics
-    /// were both computed for the old one.
+    /// Set the mode and invalidate what it decided: the colour grid and the
+    /// diagnostics were the old mode's.
     pub fn set_mode(&mut self, mode: syntax::Mode) {
         self.bs_mut().hl.set_mode(mode);
         self.highlight_dirty = true;
@@ -2923,8 +2405,6 @@ impl Editor {
             if auto { " (auto)" } else { "" }
         ));
     }
-
-    // ---------- write / read / backup ----------
 
     pub(crate) fn start_write(&mut self) {
         if self.refuse_read_only("writing") {
@@ -2952,8 +2432,7 @@ impl Editor {
             return;
         }
         let path = PathBuf::from(expand_tilde(&name));
-        // Writing a buffer back to its own file is a save, not an overwrite:
-        // `save_to` asks only when something else changed the file.
+        // Writing back to the buffer's own file is a save, not an overwrite.
         let own = self
             .bs()
             .buf
@@ -2972,9 +2451,8 @@ impl Editor {
         }
     }
 
-    /// Save to `path`, unless it is this buffer's own file and something
-    /// else wrote that file since it was read: then ask (y overwrites, n
-    /// cancels, d shows what differs) — see `answer_external`.
+    /// Save to `path`, unless it is this buffer's own file and something else
+    /// wrote it since it was read: then ask (y, n, d) — see `answer_external`.
     pub(crate) fn save_to(&mut self, path: PathBuf) {
         if self.refuse_read_only("writing") {
             return;
@@ -2991,9 +2469,8 @@ impl Editor {
         self.write_file(path);
     }
 
-    /// Whether `path` is the current buffer's file and no longer looks the
-    /// way it did when the buffer read or last wrote it. Checked lazily,
-    /// at save time only.
+    /// Whether `path` is the buffer's own file and no longer looks the way it did
+    /// when it was read or last written; checked at save time only.
     fn changed_on_disk(&self, path: &Path) -> bool {
         let buf = &self.bs().buf;
         let (Some(stamp), Some(name)) = (buf.disk, buf.name.as_deref()) else {
@@ -3016,8 +2493,6 @@ impl Editor {
         }
     }
 
-    /// Not saving after all: the quit or close the save was for is off too,
-    /// or the next unrelated save would finish it.
     pub(crate) fn cancel_external_save(&mut self) {
         self.pending_write = None;
         self.quit_after_save = false;
@@ -3033,9 +2508,8 @@ impl Editor {
         });
     }
 
-    /// `d`: what saving would change in the file as it is on disk now, drawn
-    /// by the library's diff renderers (split or unified, `s` toggles). Esc
-    /// (or d) comes back to the question; y and n answer it from there.
+    /// `d`: what saving would change in the file on disk now, as a diff view;
+    /// Esc comes back to the question, y and n answer it from there.
     fn show_external_diff(&mut self) {
         let Some(path) = self.pending_write.clone() else {
             return;
@@ -3071,10 +2545,8 @@ impl Editor {
         self.open_diff_view(&path, disk, mine);
     }
 
-    /// **Answer to "the directory does not exist": create it and write.** `y` makes the
-    /// directories (all of them: `a/b/c.txt` is one `mkdir -p`) and retries the write that
-    /// asked; `n` drops the save and says so, keeping the buffer as it is — modified — so
-    /// nothing is lost by having asked.
+    /// Answer to "the directory does not exist": `y` makes the directories and
+    /// retries the write; `n` drops the save and keeps the buffer modified.
     pub(crate) fn answer_mkdir(&mut self, c: char) {
         match c {
             'y' | 'Y' => {
@@ -3089,8 +2561,8 @@ impl Editor {
                         }
                     }
                     Err(e) => {
-                        // The quit or close this save was for is off, as it is for any
-                        // failed write: the buffer is unsaved and must not finish silently.
+                        // The quit or close this save was for is off too, as for
+                        // any failed write.
                         self.pending_write = None;
                         self.pending_dir = None;
                         self.quit_after_save = false;
@@ -3113,21 +2585,8 @@ impl Editor {
         }
     }
 
-    /// **gofmt on save, for a Go file.** The buffer is formatted *before* it is written, so
-    /// what lands on disk and what the reader is looking at are the same text — formatting
-    /// the file afterwards would leave the buffer stale and the next save would ask about a
-    /// file "changed on disk" by rano itself. The replacement is one undo step
-    /// ([`ActionKind::Format`]), so `M-U` takes it back.
-    ///
-    /// Go's own rule is tabs — measured, not assumed: `gofmt` turns a four-space indent into
-    /// one tab and has no `-tabs` flag any more, so it is not a choice the formatter offers —
-    /// which is `indent = auto`'s business, not this function's: what a *Tab key* inserts is
-    /// [`crate::config::Indent`], and what a *Go file* gets on save is gofmt's answer.
-    ///
-    /// Silent when this is not a Go file, when `gofmt` is not on the machine (the file is
-    /// simply saved unformatted — no worse than before) and when the formatting changed
-    /// nothing. A file gofmt cannot parse is saved as written, with one line saying why,
-    /// because a reader who expects formatting would otherwise not know nothing happened.
+    /// gofmt on save, for a Go file: formatted before the write, as one undo
+    /// step. Silent when nothing changed, or when gofmt is missing.
     fn format_for_save(&mut self) {
         let is_go = self
             .bs()
@@ -3174,12 +2633,8 @@ impl Editor {
     }
 
     fn write_file(&mut self, path: PathBuf) {
-        // **A save into a directory that is not there**: `fs::write` can only say "No such
-        // file or directory", which does not say which of the two is missing, and the reader
-        // typed the path on purpose — so it is *offered* rather than failed (the operator:
-        // *"when I save file without parent dir- offer to create one instead of just
-        // failing"*). Nothing is created yet: a `n` leaves the file alone and the buffer
-        // untouched.
+        // A save into a missing directory is offered rather than failed: the
+        // reader typed the path on purpose.
         if let Some(dir) = path
             .parent()
             .filter(|d| !d.as_os_str().is_empty() && !d.is_dir())
@@ -3194,17 +2649,13 @@ impl Editor {
             });
             return;
         }
-        // **gofmt on save, for a Go file** (see `format_for_save`): the buffer is formatted
-        // *here*, after the questions above are answered, so a save the reader backed out of
-        // changes nothing.
+        // gofmt after the questions, so a save the reader backed out of changes
+        // nothing.
         self.format_for_save();
-        // **The plugin's `on_save`, after the language's own rule** (gofmt first): what it returns
-        // is what is written *and* what the buffer becomes — one undo step, so the glass and the
-        // file never disagree.
+        // The plugin's `on_save`: its answer is what is written and what the
+        // buffer becomes.
         self.run_save_hook();
-        // The buffer's OWN encoding, not always UTF-8: a file read as cp1252 or
-        // UTF-16 is written back the way it was found, or opening and saving
-        // would rewrite it as UTF-8 with the characters replaced.
+        // The buffer's own encoding: a file read as cp1252 is written back so.
         let encoded = match self.bs().buf.file_bytes() {
             Ok(b) => b,
             Err(e) => {
@@ -3220,15 +2671,11 @@ impl Editor {
                     bs.buf.disk = DiskStamp::of(&path);
                     bs.buf.name = Some(path);
                     bs.buf.modified = false;
-                    // The file's name changed, so its language may have too:
-                    // re-establish the highlight here rather than waiting for
-                    // the frame. Rare (a save, a rename), so the windowed path
-                    // would only add the risk of a stale language.
+                    // The file's name changed, so its language may have too.
                     bs.hl.refresh(&bs.buf);
                     refresh_syntax_diags(bs);
                 }
-                // lsp_sync below may kill the client; send any pending
-                // change while it is still alive.
+                // lsp_sync below may kill the client; flush first.
                 self.lsp_flush(Instant::now());
                 self.lsp_sync();
                 self.flash_with_note(&format!("Wrote {bytes} bytes"));
@@ -3238,14 +2685,12 @@ impl Editor {
                 }
                 if self.quit_after_save {
                     self.quit_after_save = false;
-                    // Re-attempt the quit: further modified buffers get the
-                    // save prompt, otherwise this quits.
+                    // Re-attempt the quit: further modified buffers get the prompt.
                     self.try_quit();
                 }
             }
             Err(e) => {
-                // The quit or close this save was for is off: the buffer is
-                // still unsaved, and a later save must not finish it silently.
+                // The quit or close this save was for is off: still unsaved.
                 self.quit_after_save = false;
                 self.close_after_save = false;
                 self.flash(&format!("Error: {}", e));
@@ -3261,8 +2706,6 @@ impl Editor {
         });
     }
 
-    // F8: open a file — a new buffer when config.multibuffer, else the
-    // current buffer is replaced in place.
     pub(crate) fn start_open(&mut self) {
         self.prompt = Some(Prompt {
             kind: PromptKind::OpenName,
@@ -3271,13 +2714,8 @@ impl Editor {
         });
     }
 
-    /// **Open `path` as a folder listing** — the dired. One row per entry (directories first,
-    /// each marked with a trailing `/`), the buffer named after the folder so the title bar
-    /// says where you are, **read-only** (a listing is a view, and every way to change one is
-    /// refused the way a tail's are), and `RET` enters what the cursor is on.
-    ///
-    /// The replacement rule is `open_file`'s: an untouched scratch makes way, and a buffer with
-    /// unsaved edits is never thrown away for a listing.
+    /// Open `path` as a folder listing — the dired: read-only, `RET` enters what
+    /// the cursor is on, and unsaved edits are never thrown away for it.
     pub fn open_dir(&mut self, path: &Path) -> bool {
         let rows = match crate::dirview::rows(path) {
             Ok(rows) => rows,
@@ -3296,15 +2734,10 @@ impl Editor {
         true
     }
 
-    /// **A read-only buffer holding a view of `path`** — a folder listing or anything a provider
-    /// hook answered. `dir_mode` is what decides whether `RET`/`-`/`r` mean anything: a folder is
-    /// navigable, a virtual document is read.
-    ///
-    /// The replacement rule is `open_file`'s: an untouched scratch makes way, and a buffer with
-    /// unsaved edits is never thrown away for a view.
+    /// A read-only buffer holding a view of `path` — a folder listing or a
+    /// provider's text; `dir_mode` decides what `RET`/`-`/`r` mean.
     fn install_view(&mut self, path: &Path, text: &str, dir_mode: bool) {
-        // **A view replaces a view**: a picture the terminal was holding for the one that was up
-        // goes with it, with its bytes.
+        // A view replaces a view: a picture the terminal held goes with its bytes.
         self.close_picture();
         let buf = Buffer::from_text(
             text,
@@ -3332,9 +2765,6 @@ impl Editor {
         self.adjust_scroll_x();
     }
 
-    /// **Open a path the way its providers say, or the way [`Self::start_named`] does.** The
-    /// command line's door: without it a plugin view is reachable only through `M->`, because
-    /// `start_named` goes straight to a load and never asks.
     pub fn open_named(&mut self, path: &Path) -> std::io::Result<()> {
         if self.ask_providers(path) {
             return Ok(());
@@ -3342,19 +2772,13 @@ impl Editor {
         self.start_named(path)
     }
 
-    /// **Ask the providers whether this path opens as something else**, and install that view
-    /// if one answers. One door for the command line, `M->`, F8 and a host's jump — a rule
-    /// honoured at four doors out of five is a rule nobody can predict.
-    ///
-    /// `true` when a provider answered. A terminal without a picture protocol declines rather
-    /// than stopping the path: the plugin's text answer is who that answer is for.
+    /// Ask the providers whether this path opens as something else; one door for
+    /// the command line, `M->`, F8 and a host's jump.
     pub fn ask_providers(&mut self, path: &Path) -> bool {
         let cols = self.text_w as u32;
         let rows = self.text_h as u32;
-        // **A provider that DRAWS is asked first.** A plugin answering both hooks (the STL
-        // viewer draws pixels for a terminal that takes them and a character ramp for one that
-        // does not) has said which it means by answering the richer question, so the picture
-        // wins where the protocol can carry it and the text answer is the fallback.
+        // A provider that draws is asked first: a picture wins, the text answer is
+        // the fallback.
         let mut drawn: Option<(PathBuf, crate::plugin::Picture)> = None;
         for plugin in self.plugin.iter().chain(self.builtins.iter()) {
             if !plugin.has("provider_picture") {
@@ -3374,12 +2798,8 @@ impl Editor {
                 }
             }
         }
-        // Drawn only if the terminal can carry it; a decline falls through to the text hook, and
-        // **says so**, because the plugin cannot: it does not know what the terminal speaks, and
-        // its own state line can only report what the build offers.
-        // Drawn only if the terminal can carry it. Nothing is said here when it cannot: the view
-        // installs its own status line a moment later and a flash written now is gone before the
-        // next frame, so the provider's own mode word is where a person reads what they have.
+        // Drawn only if the terminal can carry it; a decline falls through to the
+        // text hook.
         if let Some((at, answer)) = drawn
             && self.open_provider_picture(&at, &answer)
         {
@@ -3411,9 +2831,8 @@ impl Editor {
         false
     }
 
-    /// **A path the plugin claims**: `provider_open` answered a text, and that text is what opens.
-    /// A folder keeps the listing keys (`RET` enters an entry), anything else is a read-only
-    /// buffer named after the path — a document the plugin rendered.
+    /// A path the plugin claims: `provider_open`'s text is what opens, a folder
+    /// keeping the listing keys.
     fn open_provider(&mut self, path: &Path, text: String) {
         let dir_mode = path.is_dir();
         self.install_view(path, &text, dir_mode);
@@ -3423,11 +2842,8 @@ impl Editor {
         }
     }
 
-    /// **A provider's answer that is markdown opens as prose**, so the manual is readable the
-    /// moment it is asked for. A virtual document need not exist, so its path may carry no
-    /// extension (`rano:manual`) and the language ladder has nothing to go by: the text is asked
-    /// instead. A name that says what the document is still wins, and a folder listing is never
-    /// markdown.
+    /// A provider's answer that is markdown opens as prose: a virtual document
+    /// need not exist, so its path may carry no extension.
     pub(crate) fn preview_answered(&mut self, text: &str) {
         let named = syntax::detect(self.bs().buf.name.as_deref(), None);
         let markdown = match named {
@@ -3440,20 +2856,11 @@ impl Editor {
         }
     }
 
-    /// **The manual** (`M-x manual`, `C-g m`): rano's own docs as one document.
-    ///
-    /// The builtin is unpacked on first use (`scripts/built-in/manual.wasm`, never over a file
-    /// that is already there — `plans/S10` §2.4) and loaded from that folder like any plugin the
-    /// reader installed by hand, so replacing it replaces the manual. Then the virtual path goes
-    /// through `open_file`, the same door a folder takes, and `provider_open` answers it.
     pub fn open_manual(&mut self) {
         self.open_manual_from(&crate::builtin::scripts_dir());
     }
 
-    /// **Unpack and load everything that ships**, so a builtin can claim a file the reader never
-    /// configured: `rano paper.pdf` needs no `RANO_PLUGIN` and no `RANO_CAPABILITIES`, because the
-    /// grant a builtin runs with is the one it ships with. Idempotent, and a builtin that fails
-    /// to load is a note rather than a failure to start.
+    /// Unpack and load every builtin, so one can claim a file never configured.
     pub fn load_builtins_from(&mut self, scripts: &Path) {
         for builtin in crate::builtin::ALL {
             let Ok(at) = crate::builtin::unpack(scripts, builtin) else {
@@ -3477,13 +2884,10 @@ impl Editor {
         }
     }
 
-    /// [`Self::load_builtins_from`] in the reader's own scripts folder.
     pub fn load_builtins(&mut self) {
         self.load_builtins_from(&crate::builtin::scripts_dir());
     }
 
-    /// [`Self::open_manual`] with the scripts folder given, the way `config::load_from` takes a
-    /// path: a test unpacks into its own folder instead of writing to the reader's config.
     pub fn open_manual_from(&mut self, scripts: &Path) {
         let builtin = &crate::builtin::MANUAL;
         let at = match crate::builtin::unpack(scripts, builtin) {
@@ -3502,8 +2906,7 @@ impl Editor {
             .chain(self.builtins.iter())
             .any(|p| p.path() == at);
         if !loaded {
-            // A builtin is loaded with the grant the config gives a plugin the reader installed by
-            // hand, because that is what it is: a file in their folder that they may replace.
+            // A builtin is granted what the config grants a hand-installed plugin.
             let caps = crate::plugin::Capabilities::from_names(&self.config.capabilities);
             match crate::plugin::Plugin::load_with(&at, caps) {
                 Ok(p) => self.builtins.push(p),
@@ -3514,32 +2917,21 @@ impl Editor {
             }
         }
         self.open_file("rano:manual");
-        // Asked for again with the manual already open: `open_file` switches buffers and closes
-        // the view, and the rendered form is what was asked for both times. Nothing is rendered
-        // when the answer was not the manual (a provider that failed leaves the path as it was).
+        // Asked for again with the manual open: the rendered form is re-opened.
         if self.bs().buf.name.as_deref() == Some(Path::new("rano:manual")) {
             let text = self.bs().buf.text();
             self.preview_answered(&text);
         }
     }
 
-    // ---------- a plugin's picture ----------
-
-    /// **Told the terminal's picture protocol, once** — a host that has asked the terminal
-    /// ([`crate::term::Proto::detect`]) says so here, and [`Self::images`] follows: a protocol
-    /// that speaks takes pictures and one that does not refuses them, which is the same answer in
-    /// two words. What the terminal was holding is dropped, because a protocol that changed is
-    /// not one where the old ids mean the same thing.
+    /// Told the terminal's picture protocol, once; [`Self::images`] follows it,
+    /// and what the terminal held is dropped: the old ids mean nothing now.
     pub fn set_pictures(&mut self, proto: Proto) {
         self.proto = proto;
         self.images = proto.speaks();
         self.sync_picture();
     }
 
-    /// **The protocol a picture is drawn with**: the one a host named ([`Self::set_pictures`]),
-    /// else kitty for a host that only said [`Self::images`] — this editor draws a picture as
-    /// placeholder cells, which is kitty's protocol, and the binary sets `images` exactly when
-    /// the terminal speaks it — else [`Proto::None`], where a picture is refused by name.
     pub(crate) fn picture_proto(&self) -> Proto {
         if self.proto.speaks() {
             self.proto
@@ -3550,17 +2942,8 @@ impl Editor {
         }
     }
 
-    /// **A path a plugin answered with pixels** (`provider_picture`), drawn as the view it is:
-    /// read-only, like a tail, its rows the box's placeholder cells the terminal fills from its
-    /// own copy of the picture ([`Picture::lines`], the same cells a PNG's view draws), with the
-    /// bytes queued for the host ([`Self::take_graphics`]).
-    ///
-    /// **Refused, not drawn, where it cannot be carried**: a placeholder no terminal fills is a
-    /// screenful of garbage, and a payload whose size disagrees with its pixels is whatever the
-    /// bytes happen to be. Either way one line says so and nothing is opened.
-    ///
-    /// Returns whether the path was handled — drawn, or refused by name — so a caller that asks
-    /// before opening the file can stop either way.
+    /// A path a plugin answered with pixels, drawn as the read-only view it is;
+    /// refused, not drawn, where the terminal cannot carry it.
     pub fn open_provider_picture(&mut self, path: &Path, answer: &crate::plugin::Picture) -> bool {
         let proto = self.picture_proto();
         let pic = match Picture::of_rgb(
@@ -3577,11 +2960,11 @@ impl Editor {
             }
         };
         if pic.refusal(proto).is_some() {
-            // **Not drawn, and not the end of the path**: the plugin may also answer a text
-            // hook, and a terminal without pictures is exactly who that answer is for.
+            // Not the end of the path: the plugin may answer a text hook, and a
+            // terminal without pictures is exactly who that is for.
             return false;
         }
-        // The rows ARE the picture: the box's placeholders, one per cell the terminal fills.
+        // The rows are the picture: the box's placeholders.
         let text = pic
             .lines(proto)
             .iter()
@@ -3599,11 +2982,6 @@ impl Editor {
         true
     }
 
-    /// **What the terminal must be told about the plugin's picture**: the upload and the placement
-    /// of one it has not been sent, the placement alone of one whose box moved (a resize re-cuts
-    /// the rows, not the pixels), and the delete of one the view no longer draws — the three
-    /// answers a PNG's view gets from [`Pictures::sync`], over a set of its own so the two kinds of
-    /// view cannot free each other's images.
     fn sync_picture(&mut self) {
         let mut out = self.pictures.set_proto(self.picture_proto());
         let want: Vec<Picture> = match &self.picture_view {
@@ -3614,23 +2992,18 @@ impl Editor {
         self.graphics_out.extend(out);
     }
 
-    /// Whether the picture view is the buffer on the glass: a picture the reader has moved away
-    /// from is one the terminal need not hold, and its rows are not drawn either.
     fn picture_is_current(&self, v: &PictureView) -> bool {
         self.bs().buf.name.as_deref() == Some(v.path.as_path())
     }
 
-    /// **The picture is no longer on the glass** — the reader closed its buffer or opened
-    /// something else. The terminal's copy goes with it: nothing else can free it once the rows
-    /// that named it are gone.
+    /// The picture is off the glass: the terminal's copy goes, since nothing else
+    /// can free it.
     fn close_picture(&mut self) {
         if self.picture_view.take().is_some() {
             self.sync_picture();
         }
     }
 
-    /// **A picture's box follows the frame**: a resize re-cuts the rows and the placement, which
-    /// is what a PNG's view does in `refresh_diff_view`. The pixels are the terminal's already.
     fn recut_picture(&mut self) {
         let proto = self.picture_proto();
         let Some(mut v) = self.picture_view.take() else {
@@ -3656,10 +3029,8 @@ impl Editor {
         }
     }
 
-    /// **The image id, when `row` is a picture view's row of placeholder cells.** The id is hashed
-    /// from the view's own name ([`picture_id`]) — the number the upload went out under — so the
-    /// renderer needs no table of what the terminal holds, which is the trick
-    /// [`crate::term::graphics::image_id`] already plays for a row of a document.
+    /// The image id, when `row` is a picture view's placeholder row: hashed from
+    /// the view's name, so the renderer needs no table of terminal state.
     fn picture_row_id(&self, row: usize) -> Option<u32> {
         let bs = self.bs();
         if !bs.synthetic || !bs.read_only {
@@ -3669,7 +3040,6 @@ impl Editor {
         crate::term::graphics::is_placeholder_row(bs.buf.row_opt(row)?).then(|| picture_id(name))
     }
 
-    /// M-g: ask for a folder, defaulting to this buffer's own.
     pub(crate) fn start_dir(&mut self) {
         let from = self
             .bs()
@@ -3693,9 +3063,6 @@ impl Editor {
         });
     }
 
-    /// The answer to the folder prompt: a folder opens as a listing, a file opens as a file
-    /// (a path typed into the folder prompt that is a file is what the reader meant), and
-    /// anything else says so.
     pub(crate) fn do_dir(&mut self, name: String) {
         let path = PathBuf::from(expand_tilde(name.trim()));
         if path.is_dir() {
@@ -3707,8 +3074,6 @@ impl Editor {
         }
     }
 
-    /// `RET` in a listing: enter what the cursor is on — a folder in place, a file through
-    /// `open_file`, so the multibuffer rule stays in one place.
     pub(crate) fn dir_enter(&mut self) {
         let Some(dir) = self.bs().dir.clone() else {
             return;
@@ -3731,7 +3096,6 @@ impl Editor {
         }
     }
 
-    /// `-` in a listing: the folder above.
     pub(crate) fn dir_parent(&mut self) {
         let Some(dir) = self.bs().dir.clone() else {
             return;
@@ -3744,8 +3108,6 @@ impl Editor {
         }
     }
 
-    /// `r` in a listing: read the folder again, and keep the cursor on the entry it was on
-    /// when that entry still exists.
     pub(crate) fn dir_refresh(&mut self) {
         let Some(dir) = self.bs().dir.clone() else {
             return;
@@ -3767,9 +3129,8 @@ impl Editor {
         }
     }
 
-    /// **Load the plugin named by the config** (or `RANO_PLUGIN`). One line says what it answers,
-    /// and a plugin that cannot load is *reported and left off* — never a broken editor, because a
-    /// hook is an improvement and never a precondition.
+    /// Load the plugin named by the config (or `RANO_PLUGIN`); one that cannot
+    /// load is reported and left off — a hook is never a precondition.
     pub fn set_plugin(&mut self, path: &Path) {
         let caps = crate::plugin::Capabilities::from_names(&self.config.capabilities);
         match crate::plugin::Plugin::load_with(path, caps) {
@@ -3785,14 +3146,10 @@ impl Editor {
         }
     }
 
-    /// The plugin from inline bytes — the seam the tests use, so a hook can be exercised without a
-    /// `wasm32` toolchain or a file on disk. A host may use it to ship a plugin it embeds.
     pub fn set_plugin_bytes(&mut self, wasm: &[u8], from: PathBuf) {
         self.set_plugin_bytes_with(wasm, from, crate::plugin::Capabilities::default())
     }
 
-    /// [`Self::set_plugin_bytes`] under granted capabilities — the seam a test uses to exercise a
-    /// provider, which needs `read-dir`.
     pub fn set_plugin_bytes_with(
         &mut self,
         wasm: &[u8],
@@ -3812,10 +3169,8 @@ impl Editor {
         }
     }
 
-    /// **A file, read through the open hook.** The one place a file's text enters rano (`F8`,
-    /// `^R`, a host's jump, a reload, the command line); the hook is skipped for a binary — a
-    /// binary is read-only and its text is not the file — and a hook that fails leaves the text as
-    /// it was, with one line saying so.
+    /// A file, read through the open hook — the one place a file's text enters
+    /// rano. Skipped for a binary; a failing hook says so and leaves the text.
     pub(crate) fn read_file(&mut self, path: &Path) -> std::io::Result<Buffer> {
         let mut buf = Buffer::from_file(path)?;
         if buf.binary {
@@ -3843,10 +3198,8 @@ impl Editor {
         Ok(buf)
     }
 
-    /// **The save hook.** Called from `write_file` after `format_for_save` and before the encode:
-    /// the hook's answer *replaces the buffer* as one undo step (`ActionKind::Plugin`), so the
-    /// glass and the file are the same text; a hook that fails writes the buffer as it was and
-    /// says so.
+    /// The save hook, after `format_for_save` and before the encode: its answer
+    /// replaces the buffer as one undo step, and a failing hook says so.
     fn run_save_hook(&mut self) {
         let Some(plugin) = self.plugin.as_ref().filter(|p| p.has("on_save")) else {
             return;
@@ -3891,9 +3244,8 @@ impl Editor {
         let read = self.read_file(Path::new(&expand_tilde(&name)));
         match read {
             Ok(mut read) => {
-                // The whole read comes from `Buffer::from_file`, so `^R` gets
-                // the same encoding detection as startup and remembers what it
-                // found for the eventual save.
+                // From `Buffer::from_file`, so `^R` gets the same encoding
+                // detection as startup.
                 let lines = read.take_rows();
                 let count = lines.len();
                 self.bs_mut().buf.crlf = read.crlf;
@@ -3919,51 +3271,36 @@ impl Editor {
         }
     }
 
-    /// F8: open `path` (same read path as startup: Buffer::from_file). With
-    /// config.multibuffer the file becomes a NEW buffer that becomes
-    /// current; otherwise it replaces the current buffer in place. Returns
-    /// false when the read failed — the caller keeps the prompt open.
+    /// F8: open `path` — a new buffer with config.multibuffer, else in place.
+    /// False when the read failed, and the caller keeps the prompt open.
     pub(crate) fn open_file(&mut self, path: &str) -> bool {
         let path = path.trim();
         if path.is_empty() {
             return true;
         }
-        // **A view was of the buffer that was current**: opening a file gives that one up,
-        // whether the new file lands in a new buffer or replaces it.
+        // A view was of the current buffer: opening a file gives that one up.
         self.close_view();
         self.close_picture();
         let path = PathBuf::from(expand_tilde(path));
-        // Already open in another buffer: switch to it. (Re-opening the
-        // CURRENT file in single-buffer mode still re-reads it from disk —
-        // that is how a revert is done there.)
+        // Re-opening the current file single-buffer still re-reads it: that is
+        // how a revert is done there.
         if let Some(i) = self.find_buffer(&path)
             && (self.config.multibuffer || i != self.cur)
         {
             self.set_current(i);
             return true;
         }
-        // **A provider hook asks first**: "should this path open as something else?" — the folder
-        // viewer's door. `provider_open` answers a text (or nothing, and the ordinary path
-        // continues); a folder it answers keeps the listing keys, so `RET` still enters an entry.
-        //
-        // The config's plugin is asked first and the builtins after it: a builtin answers
-        // providers only, so it can never shadow the hooks of the plugin the reader configured.
-        // The answer is laid out at the width it will be drawn at: rano is width-adaptive
-        // throughout, and a provider that renders columns has to be told how many.
+        // A provider hook asks first; the config's plugin before the builtins, so
+        // none shadows it.
         if self.ask_providers(&path) {
             return true;
         }
-        // **A folder opens as a listing** — the same door F8, `name:line` and a host's jump
-        // come through: typing a directory should show what is in it, not fail.
+        // A folder opens as a listing: typing a directory should show what is in it.
         if path.is_dir() {
             return self.open_dir(&path);
         }
-        // **A `.log` is never read here.** It opens in log mode, which is a LOAD,
-        // so the file is named now and read on the next tick — the same decision
-        // `start_pending_load` makes for a command-line file, at the same one
-        // place. Without this, `M->` on a 2 GiB log would read it whole into a
-        // buffer before the next frame, which is the freeze TODO.md §14 exists to
-        // avoid.
+        // A `.log` opens in log mode, a load that reads it on the next tick, so a
+        // huge log is never read whole into a buffer.
         let log = self.log_mode_for(&path);
         let (buf, count) = if log {
             let mut b = Buffer::new();
@@ -3982,14 +3319,11 @@ impl Editor {
                 }
             }
         };
-        // Without multibuffer the new file replaces the current buffer — but
-        // never one with unsaved edits: that one stays, and the file gets a
-        // buffer of its own, so opening a file cannot throw work away.
+        // Without multibuffer the new file replaces the current buffer, but never
+        // one with unsaved edits: that one stays and the file gets its own.
         let kept = !self.config.multibuffer && self.bs().buf.modified;
-        // **An untouched scratch is replaced, multibuffer or not.** The buffer a bare `rano`
-        // (or a host's pane) starts with has no name, no edits and no text; keeping it beside
-        // the file left a `[1/2]` nobody asked for, which the letibot head's pane showed on
-        // its first open.
+        // An untouched scratch is replaced either way: keeping it left a `[1/2]`
+        // nobody asked for.
         let scratch = {
             let b = &self.bs().buf;
             b.name.is_none() && !b.modified && b.row_count() <= 1 && b.text().is_empty()
@@ -4004,15 +3338,12 @@ impl Editor {
         } else {
             self.buffers[self.cur] = state;
         }
-        // A fresh highlighter has no window, which `highlight_covers_viewport`
-        // reads as "covers everything"; only the flag gets it a first pass.
+        // A fresh highlighter has no window, which reads as "covers everything".
         self.highlight_dirty = true;
         self.lsp_sync();
         self.adjust_scroll(self.text_h);
         self.adjust_scroll_x();
-        // A log says nothing here: its rows have not been read, and the line
-        // count is the background scan's to say (`start_tail`'s `CaughtUp` flash
-        // says "Tailing — showing the last N lines" in a moment).
+        // A log says nothing: its rows have not been read, and the scan counts them.
         if !log {
             if kept {
                 self.flash_with_note(&format!(
@@ -4022,9 +3353,7 @@ impl Editor {
                 self.flash_with_note(&format!("Read {} lines", count));
             }
         }
-        // **A picture is its own reading**: the text just loaded is a lossy decode of bytes
-        // that are not text, so the picture opens over it. The flash above still says what
-        // was read, under the view.
+        // A picture is its own reading: the text just loaded is a lossy decode.
         self.preview_if_picture();
         true
     }
@@ -4057,17 +3386,11 @@ impl Editor {
         }
     }
 
-    // ---------- quit ----------
-
-    /// ^X: quit once every buffer has been dealt with. The first modified
-    /// buffer at-or-after the current one (wrapping) becomes current and
-    /// gets the save prompt; with none modified the editor quits.
+    /// ^X: quit once every buffer has been dealt with. The first modified buffer
+    /// at or after this one (wrapping) becomes current and gets the save prompt.
     pub(crate) fn try_quit(&mut self) {
-        // ^C is the interrupt, and while a file is still arriving that is what
-        // it should do: stop reading it. The rows already adopted stay on
-        // screen, so the user is left with the part of the file they have.
-        // (TODO.md §14.6: the loop has to answer the keyboard during a load,
-        // and this is what makes the answer real rather than merely prompt.)
+        // ^C is the interrupt, and while a file is still arriving that is what it
+        // should do: stop reading, keeping the rows already adopted.
         self.cancel_load();
         if let Some(i) = self.first_modified_from(self.cur) {
             if i != self.cur {
@@ -4086,7 +3409,6 @@ impl Editor {
         self.quit = true;
     }
 
-    // Index of the first modified buffer starting at `start`, wrapping.
     fn first_modified_from(&self, start: usize) -> Option<usize> {
         let n = self.buffers.len();
         (0..n)
@@ -4111,8 +3433,7 @@ impl Editor {
                 }
             },
             'n' | 'N' => {
-                // Discard this buffer's changes, then move on to the next
-                // modified buffer (or quit when none is left).
+                // Discard these changes, then move on to the next modified buffer.
                 self.bs_mut().buf.modified = false;
                 self.try_quit();
             }
@@ -4120,11 +3441,7 @@ impl Editor {
         }
     }
 
-    // ---------- buffers ----------
-
-    /// The open buffer showing `path`, if any. Paths are compared after
-    /// canonicalising, so `./src/a.rs`, `src/a.rs` and the absolute path a
-    /// language server sends all name the same buffer.
+    /// The open buffer showing `path`, canonicalised so all spellings agree.
     pub(crate) fn find_buffer(&self, path: &Path) -> Option<usize> {
         let want = canonical(path);
         self.buffers
@@ -4132,8 +3449,6 @@ impl Editor {
             .position(|bs| bs.buf.name.as_deref().is_some_and(|n| canonical(n) == want))
     }
 
-    /// Make buffer `i` current and say so — the one way M-</M->, the buffer
-    /// list and F8-on-an-open-file change buffers.
     pub(crate) fn set_current(&mut self, i: usize) {
         if i >= self.buffers.len() {
             return;
@@ -4145,16 +3460,13 @@ impl Editor {
         self.adjust_scroll_x();
         let name = self.buffer_name(i);
         self.flash(&format!("Buffer: {name}"));
-        // The view that was up belonged to the buffer that was current (see `close_view`), and
-        // a buffer that is a picture is shown as its picture, as opening one is.
+        // The view that was up belonged to the buffer that was current.
         self.close_view();
-        // **A picture the terminal holds is one this buffer draws**: leaving it frees that, and
-        // coming back to it uploads again (the rows were never gone).
+        // A picture the terminal holds is one this buffer draws: leaving frees it.
         self.sync_picture();
         self.preview_if_picture();
     }
 
-    /// What the status line and the buffer list call buffer `i`.
     pub(crate) fn buffer_name(&self, i: usize) -> String {
         self.buffers[i]
             .buf
@@ -4164,10 +3476,6 @@ impl Editor {
             .unwrap_or_else(|| "scratch".to_string())
     }
 
-    /// M-> / M-<: switch to the next/previous buffer, wrapping. All view and
-    /// edit state lives in BufferState, so switching only re-points `cur`;
-    /// each buffer keeps its own LSP session (lsp_poll services whichever
-    /// buffer is current).
     pub(crate) fn switch_buffer(&mut self, dir: isize) {
         let n = self.buffers.len();
         if n < 2 {
@@ -4177,8 +3485,8 @@ impl Editor {
         self.set_current(i);
     }
 
-    /// M-W: close the current buffer. A modified one asks first (y saves,
-    /// n discards); the last buffer is not closed — ^X is how to leave.
+    /// M-W: close the current buffer; a modified one asks first. The last one
+    /// stays — ^X is how to leave.
     pub(crate) fn close_buffer(&mut self) {
         if self.buffers.len() < 2 {
             self.flash("Last buffer; ^X to exit");
@@ -4215,12 +3523,10 @@ impl Editor {
         }
     }
 
-    /// Drop the current buffer (its load is cancelled and its language
-    /// server shut down with it) and fix up everything that indexes
-    /// `buffers`: the M-, stack loses the entries that pointed into the
-    /// closed buffer, and later indices shift down by one.
+    /// Drop the current buffer and fix up everything that indexes `buffers`: the
+    /// M-, stack loses entries into it and later indices shift down.
     pub(crate) fn remove_current_buffer(&mut self) {
-        // The view belonged to this buffer: it goes with it, pictures and all.
+        // The view belonged to this buffer: it goes with it.
         self.close_view();
         self.close_picture();
         if self.buffers.len() < 2 {
@@ -4240,8 +3546,7 @@ impl Editor {
                 *i -= 1;
             }
         }
-        // The buffer that followed takes the closed one's place (nano's
-        // order); closing the last one lands on the new last.
+        // The buffer that followed takes its place (nano's order).
         self.cur = k.min(self.buffers.len() - 1);
         self.highlight_dirty = true;
         self.adjust_scroll(self.text_h);
@@ -4249,15 +3554,10 @@ impl Editor {
         self.flash(&format!("Closed {name}"));
     }
 
-    // ---------- justify / sort ----------
-
     pub(crate) fn justify(&mut self) {
         if self.refuse_read_only("justify") {
             return;
         }
-        // text_w is the full viewport since D6 unified it with draw; the -2
-        // keeps the historical wrap width (it used to be subtracted at the
-        // size-plumbing site).
         let width = self.text_w.saturating_sub(2).max(20);
         let c = self.bs().cursor.row;
         let mut top = c;
@@ -4323,19 +3623,15 @@ impl Editor {
         self.edit_invalidate();
     }
 
-    /// Style for the character at `p`, given THIS row's diagnostics (a
-    /// slice of the frame's merged list — `ui::draw` walks the sorted list
-    /// once per frame, so `all_diags` must not run per character).
+    /// Style for the character at `p`; `diags` is this row's slice, since
+    /// `all_diags` must not run per character.
     pub fn char_style_with(&self, p: Pos, diags: &[lsp::Diagnostic]) -> Style {
-        // **A picture view's cells are placeholders**: the terminal fills each one from its own
-        // copy of the image and reads *which* image from the cell's colours, so the row is drawn
-        // in [`crate::term::graphics::placeholder_style`] — and this comes first, because a
-        // selected or underlined placeholder is a cell the terminal no longer fills.
+        // A picture view's cells are placeholders: the terminal reads the image
+        // from the cell's colours, so this comes before any selection styling.
         if let Some(id) = self.picture_row_id(p.row) {
             return crate::term::graphics::placeholder_style(id);
         }
-        // Current search match: black on yellow (nano's default). Other
-        // matches are not highlighted.
+        // Current match: black on yellow (nano's default). Others are not highlighted.
         if let Some((a, b)) = self.current_match_range()
             && a <= p
             && p < b
@@ -4345,14 +3641,13 @@ impl Editor {
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);
             if a <= p && p < b {
-                // Explicit colors (not reverse) so the selection is visible
-                // on terminals whose reverse-video comes out white-on-white.
+                // Explicit colours, not reverse: reverse comes out white-on-white
+                // on some terminals.
                 return Style::of(Role::Selection);
             }
         }
-        // Diagnostics: underline in severity color. Search match and
-        // selection return above, so they still win. LSP cols are UTF-16
-        // units and can drift on astral chars (accepted limitation).
+        // Diagnostics: underline in severity colour. LSP cols are UTF-16 units
+        // and can drift on astral chars.
         for d in diags {
             if d.line == p.row && d.col <= p.col && p.col < d.end_col {
                 return Style::of(diag_role(d.severity)).underline();
@@ -4366,8 +3661,6 @@ impl Editor {
     }
 }
 
-/// The role a diagnostic's severity paints with (LSP numbering: 1 error,
-/// 2 warning, anything else lesser), in the gutter and under the code.
 pub(crate) fn diag_role(severity: u64) -> Role {
     match severity {
         1 => Role::DiagError,
@@ -4384,11 +3677,7 @@ pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// Rebuild `syntax_diags` from the fresh tree-sitter parse. Called after
-/// every re-highlight (open, read, edit) so mistakes are visible even with
-/// no language server.
-/// `path` made absolute and symlink-free when it exists; otherwise made
-/// absolute against the working directory, so a not-yet-saved buffer still
+/// `path` made absolute and symlink-free when it exists, so an unsaved buffer still
 /// compares equal to itself.
 pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| {
@@ -4423,10 +3712,8 @@ pub(crate) fn refresh_syntax_diags(bs: &mut BufferState) {
     widen_zero_width(&mut bs.syntax_diags, &bs.buf.rows_vec());
 }
 
-/// rust-analyzer reports many syntax errors as zero-width insertion points,
-/// which rano's `col <= p.col < end_col` underline can never match. Widen
-/// those to one visible column: the char under the insertion point, or the
-/// last char of the line when the point is at EOL.
+/// Zero-width diagnostics (rust-analyzer reports syntax errors as insertion
+/// points) can never be underlined; widen each to one visible column.
 pub(crate) fn widen_zero_width(diags: &mut [lsp::Diagnostic], lines: &[Vec<char>]) {
     for d in diags {
         if d.end_col > d.col {
@@ -4440,15 +3727,13 @@ pub(crate) fn widen_zero_width(diags: &mut [lsp::Diagnostic], lines: &[Vec<char>
     }
 }
 
-/// How long a formatter on the save path may take. `gofmt` is local and fast (a megabyte of
-/// Go is tens of milliseconds), so this is slack rather than a budget — but a save must never
-/// be something that can hang on a subprocess.
+/// A save must never hang on a subprocess: a formatter gets slack, not a budget.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Editor {
     pub fn status_text(&self) -> Option<String> {
         // A load in flight is the most important thing to say: without it the
-        // screen is a frame with nothing in it, which reads as frozen.
+        // screen reads as frozen.
         if let Some(s) = self.loading_text() {
             return Some(s);
         }
@@ -4457,8 +3742,7 @@ impl Editor {
         {
             return Some(f.text.clone());
         }
-        // After the flash, because it is a number arriving late rather than a
-        // state the screen is in — see `counting_text`.
+        // After the flash: it is a number arriving late, not a state of the screen.
         if let Some(s) = self.counting_text() {
             return Some(s);
         }
@@ -4480,8 +3764,6 @@ impl Editor {
         None
     }
 
-    /// Expire an overdue status flash / cursor-position display. Returns
-    /// whether anything visible was cleared (dirty-draw, D6).
     pub(crate) fn tick_status(&mut self) -> bool {
         let mut dirty = false;
         if let Some(f) = &self.status
@@ -4497,19 +3779,12 @@ impl Editor {
         dirty
     }
 
-    /// One buffer per extra command-line file, after the first. Each is
-    /// named at once (title, buffer list, language) but read only when it
-    /// first becomes current — see `start_pending_load`. A file named twice
-    /// gets one buffer; a file that does not exist yet is a new buffer that
-    /// will be saved under that name, as for the first file.
     #[cfg(test)]
     pub(crate) fn add_deferred_buffers(&mut self, paths: &[PathBuf]) {
         let at: Vec<(PathBuf, Option<Pos>)> = paths.iter().map(|p| (p.clone(), None)).collect();
         self.add_deferred_buffers_at(&at);
     }
 
-    /// [`Self::add_deferred_buffers`], each with the position (`file:line:col`,
-    /// `+line`) its cursor goes to once it is read.
     pub fn add_deferred_buffers_at(&mut self, files: &[(PathBuf, Option<Pos>)]) {
         for (p, at) in files {
             if self.find_buffer(p).is_some() {
@@ -4526,10 +3801,7 @@ impl Editor {
         }
     }
 
-    // ---------- styling ----------
-
-    /// The file name for the title bar, prefixed "[i/n] " when several
-    /// buffers are open. Scratch buffers show an empty name.
+    /// The file name for the title bar, `[i/n] ` when several buffers are open.
     pub(crate) fn title_text(&self) -> String {
         let name = self
             .bs()
@@ -4563,10 +3835,6 @@ mod tests {
         ed
     }
 
-    /// A provider's answer: `[width][height][rgb]`, the wire format the plugin half writes.
-    /// A plugin's answer, as `plugin::provider_picture` hands it over: the pixels and the size
-    /// they call themselves. The header is the plugin's to parse now, so a test that wants a
-    /// lying size builds the struct with the wrong `rgb` length.
     fn plugin_pic(w: u32, h: u32) -> crate::plugin::Picture {
         crate::plugin::Picture {
             width: w,
@@ -4582,9 +3850,7 @@ mod tests {
             .collect()
     }
 
-    /// **A plugin's picture is a view**: read-only, its rows the placeholder cells the terminal
-    /// fills, and the pixels queued for the host before the frame that draws them — the same
-    /// shape a converted PNG's view has.
+    /// A plugin's picture is a view, the same shape a converted PNG's view has.
     #[test]
     fn a_provider_picture_is_the_rows_the_terminal_fills_and_the_bytes_that_fill_them() {
         let mut ed = view_ed("the buffer this picture replaced");
@@ -4612,13 +3878,11 @@ mod tests {
             cells.0 as usize
         );
 
-        // **The cell's colour is what names the image to the terminal**, and it is the id the
-        // upload went out under — not a table the renderer has to be handed.
         let id = crate::term::graphics::image_id(&format!("plugin:{}", path.display()));
         let style = ed.char_style_with(Pos { row: 0, col: 0 }, &[]);
         assert_eq!(style, crate::term::graphics::placeholder_style(id));
-        // A selection over a placeholder does not repaint it: a cell the terminal no longer
-        // recognises as its own is a picture with a hole in it.
+        // A selection over a placeholder does not repaint it: a cell the terminal
+        // no longer knows is a hole in the picture.
         ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
         ed.bs_mut().cursor = Pos { row: 0, col: 3 };
         assert_eq!(
@@ -4627,8 +3891,8 @@ mod tests {
         );
         ed.bs_mut().mark = None;
 
-        // **Through a frame**, the row is drawn in that colour: the painter is the one that has
-        // to agree, because a picture whose cells come out plain is a picture that is not drawn.
+        // Through a frame, the row is drawn in that colour: plain cells are a
+        // picture not drawn.
         let mut frame = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 24));
         crate::ui::draw(&mut frame, &ed);
         let colour = format!(
@@ -4645,7 +3909,6 @@ mod tests {
         );
         assert!(emitted[1].contains('\u{10EEEE}'), "{:?}", emitted[1]);
 
-        // The terminal is told: the raw-RGB upload, then the placement the rows name.
         let out = graphics(&mut ed);
         assert_eq!(out.len(), 2, "{out:?}");
         assert!(
@@ -4654,14 +3917,11 @@ mod tests {
             &out[0][..40.min(out[0].len())]
         );
         assert!(out[1].contains("a=p,U=1") && out[1].contains(&format!("c={},", cells.0)));
-        // Nothing changed since, so nothing is sent again.
         assert!(graphics(&mut ed).is_empty());
     }
 
-    /// **A terminal that speaks no picture protocol is drawn nothing** — the precedent a PNG
-    /// already has: a placeholder nothing fills is garbage on the screen. And it is answered
-    /// `false`, because a plugin that draws may also write: the caller goes on to the text hook,
-    /// which is what a terminal without pictures is owed.
+    /// A terminal without a picture protocol draws nothing, and false lets the
+    /// caller try the text hook.
     #[test]
     fn a_terminal_without_pictures_declines_a_provider_picture_instead_of_drawing_it() {
         let mut ed = view_ed("still here");
@@ -4679,7 +3939,8 @@ mod tests {
         );
         assert!(!ed.bs().read_only);
         assert!(graphics(&mut ed).is_empty());
-        // And the same answer from a host that named the protocol rather than only `images`.
+        // The same answer from a host that named the protocol rather than only
+        // `images`.
         let mut ed = view_ed("still here");
         ed.set_pictures(Proto::None);
         assert!(!ed.open_provider_picture(&path, &plugin_pic(8, 8)));
@@ -4695,8 +3956,7 @@ mod tests {
         assert!(graphics(&mut ed).is_empty());
     }
 
-    /// **A payload whose size and pixels disagree is refused by name**: drawn, it is whatever the
-    /// bytes happen to be, held by the terminal until the id is deleted.
+    /// A payload whose size and pixels disagree is refused by name.
     #[test]
     fn a_payload_that_disagrees_with_its_pixels_is_refused_and_nothing_is_drawn() {
         let mut ed = view_ed("still here");
@@ -4715,8 +3975,8 @@ mod tests {
         assert!(graphics(&mut ed).is_empty());
     }
 
-    /// **A resize re-cuts the box and the terminal is given the placement alone**: the pixels are
-    /// the terminal's already, which is the whole reason the upload is not repeated.
+    /// A resize re-cuts the box and the terminal gets the placement alone: it
+    /// has the pixels already.
     #[test]
     fn a_resize_re_cuts_a_providers_picture_and_sends_only_the_placement() {
         let mut ed = view_ed("still here");
@@ -4733,7 +3993,7 @@ mod tests {
         );
         assert_ne!(ed.bs().buf.row(0).len(), before, "the rows were re-cut");
         assert!(graphics(&mut ed).is_empty(), "and then quiet again");
-        // **Leaving the view frees the terminal's copy**, with its data: nothing else can.
+        // Leaving the view frees the terminal's copy, with its data.
         let mut ed = view_ed("still here");
         assert!(ed.open_provider_picture(&path, &plugin_pic(64, 48)));
         let _ = graphics(&mut ed);

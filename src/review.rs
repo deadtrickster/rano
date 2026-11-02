@@ -1,27 +1,14 @@
-//! **A change a host hands the editor to review**: the file, and what one edit did to it.
-//!
-//! A host that watched a file change — an agent's edit, a formatter, a patch it applied —
-//! knows two things the editor cannot work out for itself: what the lines were before, and
-//! where in the file the change landed. [`Editor::open_review`] takes both, opens the file
-//! with the cursor on the first line that changed, and draws the change over the text as a
-//! diff view (split or unified, the reader's `s`). Leaving the view lands the reader in the
-//! text, on the change, where `M-S` sends their place back to the host and `M-P` shows the
-//! change again.
-//!
-//! The change is the host's **snapshot**: it says what the edit did when it was made, and is
-//! not re-diffed against the buffer. A file edited since still opens, and the view still
-//! shows the edit that was asked about — which is the thing being reviewed.
+//! A change a host hands the editor to review: what one edit did to a file.
+//! [`Editor::open_review`] opens the file on the first changed line and draws the
+//! change over it — a snapshot, not a re-diff against the buffer.
 
 use std::path::Path;
 
 use crate::diffview::Source;
 use crate::editor::Editor;
 
-/// One change to one file: an excerpt of the file before and after it, each side's lines
-/// joined by `\n`, with the 1-based line of its own file that the excerpt starts at.
-///
-/// An excerpt may carry unchanged lines around the change (context); they are drawn as
-/// context and are what [`Change::first_changed_line`] steps over.
+/// One change to one file: an excerpt before and after the edit, each side's
+/// lines joined by `\n`, with the 1-based line each side starts at.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Change {
     pub before: String,
@@ -33,13 +20,8 @@ pub struct Change {
 }
 
 impl Change {
-    /// **The line of the new file the change begins at**, 1-based: past the context the two
-    /// sides share, and never past the excerpt's own last line.
-    ///
-    /// The cap is for a change that only removed lines at the excerpt's end: the first line
-    /// that differs is then *after* the last line the new side has, and a position past the
-    /// end of the file is one the editor would wait for and never reach. Its last line is the
-    /// nearest place that exists.
+    /// The line of the new file the change begins at, 1-based: past the shared
+    /// context, capped at the excerpt's last line. A pure removal has no later line.
     pub fn first_changed_line(&self) -> usize {
         let start = self.after_start.max(1);
         let after: Vec<&str> = self.after.lines().collect();
@@ -54,12 +36,8 @@ impl Change {
 }
 
 impl Editor {
-    /// **Open `path` to review `change`**: the file with the cursor on the first changed line
-    /// ([`Change::first_changed_line`], through [`Editor::open_at`]), and the change drawn over
-    /// the text as a diff view. Esc goes to the text, `M-P` shows the change again, and `M-S`
-    /// — from the view or the text — sends the reader's place to the host (`on_send`).
-    ///
-    /// An error is [`Editor::open_at`]'s: the file could not be opened, and nothing changed.
+    /// Open `path` to review `change`: the file with the cursor on the first changed
+    /// line, the change drawn over it. An error is [`Editor::open_at`]'s.
     pub fn open_review(&mut self, path: &Path, change: Change) -> Result<(), String> {
         self.open_at(path, change.first_changed_line(), None)?;
         self.bs_mut().review = Some(change);
@@ -135,9 +113,6 @@ mod tests {
         (ed, path)
     }
 
-    /// **The review opens on the change**: the diff view is up with the change's lines in it,
-    /// the cursor underneath is already on the first changed line, and Esc is the way down to
-    /// it — where `M-P` brings the change back.
     #[test]
     fn a_review_opens_the_change_over_the_text_and_esc_lands_on_it() {
         let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
@@ -174,8 +149,6 @@ mod tests {
         assert!(ed.diff_view.is_none(), "and closes it");
     }
 
-    /// **`M-S` from the review sends the place the change is at**, without leaving the view:
-    /// the reader asks about what they are looking at.
     #[test]
     fn send_from_the_review_hands_the_host_the_changed_line() {
         let text: String = (1..=10).map(|i| format!("line {i}\n")).collect();

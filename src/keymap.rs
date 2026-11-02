@@ -1,24 +1,6 @@
-//! Keys and keymaps, emacs-shaped.
-//!
-//! A [`Key`] is one chord (`C-x`, `M-p`, `<f8>`, `RET`); a [`Keymap`] maps keys
-//! to a command's name or to another keymap — a **prefix** — so `M-t t` is the
-//! key `M-t` leading to a map whose `t` names a command. What is active is a
-//! [`stack`](lookup) of keymaps, most specific first (a mode's map above the
-//! global one), and a key sequence resolves in the first map that knows it.
-//!
-//! The maps hold command **names**, not functions: what a name does is the
-//! host's (the editor's command table, or an embedding host's own). That keeps
-//! this module pure data — a host can build a map, stack it over the editor's,
-//! print it, or ask which keys reach a command, without any of the editor.
-//!
-//! # Notation
-//!
-//! Emacs's, for reading and writing: `C-` control, `M-` meta (alt), `S-` shift
-//! (for keys that are not characters), `C-M-x`; named keys in angle brackets
-//! (`<f8>`, `<left>`, `<pgdn>`, `<delete>`) and the four emacs spells it out
-//! (`RET`, `TAB`, `ESC`, `DEL` for backspace, `SPC`). A sequence is keys joined
-//! by spaces: `M-t t`. [`Key::nano`] writes the same key the way nano's bar does
-//! (`^X`, `M-U`, `F8`).
+//! Keys and keymaps, emacs-shaped. A [`Key`] is one chord; a [`Keymap`] binds keys
+//! to a command's name or to another keymap, and a stack of maps, most specific
+//! first, resolves a sequence. Notation: `C-`/`M-`/`S-`, `<f8>`, `RET`.
 
 use crate::term::{KeyCode, KeyEvent};
 
@@ -28,8 +10,8 @@ pub struct Key {
     pub code: KeyCode,
     pub ctrl: bool,
     pub alt: bool,
-    /// Only for keys that are not characters (`S-<tab>`); a character's case
-    /// is the shift.
+    /// Only for keys that are not characters (`S-<tab>`); a character's case is the
+    /// shift.
     pub shift: bool,
 }
 
@@ -61,10 +43,8 @@ impl Key {
         }
     }
 
-    /// A terminal key event as a key, with the terminal's own spellings undone:
-    /// `C-/` arrives as `C-_` (the byte 0x1f, which is also what `C-7` sends),
-    /// some terminals spell `C-\` as `C-4`, and a character's shift is already
-    /// its case.
+    /// A terminal key event as a key, with its spellings undone: `C-/` arrives as
+    /// `C-_`, some terminals spell `C-\` as `C-4`. A character's shift is its case.
     pub fn from_event(e: &KeyEvent) -> Key {
         let ctrl = e.mods.ctrl();
         let alt = e.mods.alt();
@@ -93,8 +73,8 @@ impl Key {
         }
     }
 
-    /// The same key with a letter's case folded to lower — what `M-U` falls
-    /// back to when only `M-u` is bound (nano's Meta keys ignore case).
+    /// The same key with a letter's case folded to lower — what `M-U` falls back to
+    /// when only `M-u` is bound (nano's Meta keys ignore case).
     pub fn folded(self) -> Key {
         match self.code {
             KeyCode::Char(c) if c.is_ascii_uppercase() => Key {
@@ -105,8 +85,7 @@ impl Key {
         }
     }
 
-    /// A plain printable character: what is typed, not a command, unless a
-    /// map binds it.
+    /// A plain printable character: typed, not a command, unless a map binds it.
     pub fn printable(self) -> Option<char> {
         match self.code {
             KeyCode::Char(c) if !self.ctrl && !self.alt && !c.is_control() => Some(c),
@@ -266,8 +245,7 @@ pub enum Entry {
     Prefix(Keymap),
 }
 
-/// Keys to entries, in the order they were bound (which is the order cards and
-/// the bar show them in).
+/// Keys to entries, in the order they were bound (the order cards show them in).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Keymap {
     /// What the map is called when it is shown: `"global"`, `"todo"`, `"diff"`.
@@ -283,11 +261,8 @@ impl Keymap {
         }
     }
 
-    /// Bind `seq` (emacs notation, `"M-t t"`) to `command`, creating prefix
-    /// maps on the way. A later binding of the same sequence replaces the
-    /// earlier one. Panics on notation it cannot parse or on a sequence that
-    /// would go through a key already bound to a command: a keymap is written
-    /// by hand, and either is a typo to catch at once.
+    /// Bind `seq` to `command`, creating prefix maps on the way; a rebind replaces.
+    /// Panics on a bad sequence or one that goes through a bound command.
     pub fn bind(&mut self, seq: &str, command: &str) -> &mut Keymap {
         let keys = parse_seq(seq).unwrap_or_else(|| panic!("bad key sequence {seq:?}"));
         assert!(!keys.is_empty(), "empty key sequence");
@@ -373,9 +348,8 @@ pub enum Lookup<'a> {
     Unbound,
 }
 
-/// Resolve `seq` in `stack`, most specific map first: the first map in which
-/// the sequence leads anywhere decides — so a mode's map shadows the global
-/// one key by key, as emacs's minor and major mode maps do.
+/// Resolve `seq` in `stack`, most specific map first: the first map in which the
+/// sequence leads anywhere decides, so a mode's map shadows the global one key by key.
 pub fn lookup<'a>(stack: &[&'a Keymap], seq: &[Key]) -> Lookup<'a> {
     for map in stack {
         let mut m: &Keymap = map;
@@ -401,8 +375,8 @@ pub fn lookup<'a>(stack: &[&'a Keymap], seq: &[Key]) -> Lookup<'a> {
     Lookup::Unbound
 }
 
-/// Every sequence that reaches `command` in `stack` and is not shadowed by a
-/// map above — emacs's `where-is`. Shortest first.
+/// Every sequence that reaches `command` in `stack` and is not shadowed by a map
+/// above — emacs's `where-is`. Shortest first.
 pub fn where_is(stack: &[&Keymap], command: &str) -> Vec<Vec<Key>> {
     let mut out: Vec<Vec<Key>> = Vec::new();
     for map in stack {
@@ -485,11 +459,8 @@ mod tests {
         }
     }
 
-    /// **The keymap reads the terminal decoder's keys as the keys it binds.** The
-    /// spellings checked are the ones a decoder could get wrong for an emacs map:
-    /// `0x1c` is Ctrl+`\` and `0x1f` (Ctrl+`/` on most keyboards) is Ctrl+`_`, which
-    /// must land on `C-\` and `C-/`; a NUL is `C-SPC`; Shift+Tab arrives as its own
-    /// sequence; and the kitty keyboard's `CSI 99;5u` is plain `C-c`.
+    /// The spellings a decoder could get wrong: `0x1c` is `C-\`, `0x1f` is `C-/`,
+    /// NUL is `C-SPC`, and the kitty keyboard's `CSI 99;5u` is plain `C-c`.
     #[test]
     fn the_keymap_sees_the_keys_the_decoder_reports() {
         assert_eq!(decoded(b"\x18"), Key::ctrl('x'));

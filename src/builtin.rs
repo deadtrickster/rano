@@ -1,19 +1,5 @@
-//! **Builtins: the scripts that ride in the binary and unpack into the reader's folder.**
-//!
-//! plans/S10-wasm-hooks.md §2.4: a builtin is *not* compiled into the editor's paths. It is a
-//! `.wasm` inside the binary (`include_bytes!`), written out on first use to
-//! `$XDG_CONFIG_HOME/rano/scripts/built-in/` (else `~/.config/rano/scripts/built-in/`), and
-//! loaded from there like any plugin the reader installed by hand.
-//!
-//! - **Never overwritten.** Unpacking writes a file only when it is absent, so an edited or
-//!   replaced builtin stays put. A marker (`scripts/built-in/.rano-version`) records what was
-//!   unpacked and from which release, so an upgrade can say *"the shipped manual is newer; the
-//!   one in your scripts folder was left alone"* instead of silently reverting somebody's work.
-//! - **Editable means editable**: the file in that folder is the plugin that runs. Replace the
-//!   `.wasm` with your own build and that is the builtin; delete it and the next use unpacks the
-//!   shipped one again.
-//! - **Unpacking is not running**: writing a file loads nothing. The one caller today is the
-//!   `manual` command, which the reader asked for by name.
+//! Builtins: `.wasm` scripts inside the binary, unpacked on first use into
+//! `scripts/built-in/` and loaded from there like any hand-installed plugin.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,41 +8,38 @@ use std::path::{Path, PathBuf};
 pub struct Builtin {
     /// Its name under `scripts/built-in/`.
     pub name: &'static str,
-    /// The bytes, from the example crate's own build (`examples/plugin-manual/plugin.wasm`).
+    /// The bytes, embedded from the example crate's build.
     pub wasm: &'static [u8],
-    /// **The capabilities it ships with.** A builtin comes from this binary, so what it needs is
-    /// known here rather than demanded of the reader's config: a PDF viewer that cannot convert a
-    /// page is not a viewer, and asking for three environment variables to see a document is not
-    /// an editor.
+    /// The capabilities it ships with: a builtin comes from this binary, so what
+    /// it needs is decided here, not demanded of the reader's config.
     pub caps: &'static [&'static str],
 }
 
-/// **rano's manual**: `examples/plugin-manual`, answering `provider_open("rano:manual")` with
-/// `docs/*.md` as one document.
+/// rano's manual: `examples/plugin-manual`, answering `provider_open("rano:manual")`
+/// with `docs/*.md` as one document.
 pub const MANUAL: Builtin = Builtin {
     name: "manual.wasm",
     wasm: include_bytes!("../examples/plugin-manual/plugin.wasm"),
     caps: &[],
 };
 
-/// **The PDF reader**, shipped: `rano paper.pdf` opens a page, and needs no environment at all.
+/// The shipped PDF reader: `rano paper.pdf` opens a page with no config.
 pub const PDF: Builtin = Builtin {
     name: "pdf.wasm",
     wasm: include_bytes!("../examples/plugin-pdf/plugin.wasm"),
     caps: &["convert-page"],
 };
 
-/// Everything that ships, loaded at startup so it can claim a file nobody configured it for.
+/// Everything that ships, loaded at startup so one can claim a file nobody configured.
 pub const ALL: &[&Builtin] = &[&MANUAL, &PDF];
 
-/// The marker recording what was unpacked and from which release: one `name version` line each.
+/// The marker recording what was unpacked and from which release.
 pub const MARKER: &str = ".rano-version";
 
 /// The release the shipped builtins come from.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// **`$XDG_CONFIG_HOME/rano/scripts`**, else `~/.config/rano/scripts` — beside the config file,
-/// so the reader's folder is where they already keep everything else.
+/// `$XDG_CONFIG_HOME/rano/scripts`, beside the config file.
 pub fn scripts_dir() -> PathBuf {
     let config = crate::config::config_path();
     match config.parent() {
@@ -65,19 +48,19 @@ pub fn scripts_dir() -> PathBuf {
     }
 }
 
-/// Where the builtins are unpacked: `scripts/built-in/`. The rest of `scripts/` is the reader's.
+/// Where the builtins are unpacked: `scripts/built-in/`.
 pub fn builtin_dir(scripts: &Path) -> PathBuf {
     scripts.join("built-in")
 }
 
-/// **Unpack `b` under `scripts/built-in/`, never over an existing file**, and record the write in
-/// the marker. `Ok(path)` is where it is, whether this call wrote it or found it there.
+/// Unpack `b` under `scripts/built-in/`, never over an existing file; `Ok(path)`
+/// is where it is, written or found.
 pub fn unpack(scripts: &Path, b: &Builtin) -> Result<PathBuf, String> {
     let dir = builtin_dir(scripts);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let at = dir.join(b.name);
-    // `create_new` is the "never overwrite" rule and the race with another rano at once: whoever
-    // creates the file owns it, and the loser reads what the winner wrote.
+    // `create_new` is the "never overwrite" rule and the race with another rano at
+    // once: whoever creates the file owns it.
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -94,8 +77,8 @@ pub fn unpack(scripts: &Path, b: &Builtin) -> Result<PathBuf, String> {
     }
 }
 
-/// The release the marker says `b.name` was unpacked from, or `None` when rano did not put the
-/// file there (a copy the reader made themselves, or a folder from before the marker).
+/// The release the marker says `b.name` was unpacked from, or `None` when rano did
+/// not put the file there.
 pub fn recorded(scripts: &Path, b: &Builtin) -> Option<(String, Option<u64>)> {
     let text = std::fs::read_to_string(builtin_dir(scripts).join(MARKER)).ok()?;
     text.lines().find_map(|line| {
@@ -107,16 +90,14 @@ pub fn recorded(scripts: &Path, b: &Builtin) -> Option<(String, Option<u64>)> {
     })
 }
 
-/// **The line an upgrade owes the reader**: the shipped copy is newer than the one that was
-/// unpacked, and the file in the scripts folder was left alone. `None` when rano never wrote that
-/// file — "the shipped one is newer" is not a claim rano can make about somebody else's build —
-/// or when the releases agree (or the binary is older: a downgrade says nothing).
+/// The note an upgrade owes the reader: the shipped copy is newer and the unpacked
+/// file was left alone. `None` when rano never wrote it, the releases agree, or the
+/// binary is older.
 pub fn newer_note(scripts: &Path, b: &Builtin) -> Option<String> {
     let (was, was_sum) = recorded(scripts, b)?;
     let newer = crate::update::is_newer(&was, VERSION);
-    // **A rebuild at the same version is still a different plugin**, and the marker says so by
-    // the bytes: without this, a developer's rebuilt viewer sat behind a stale unpacked copy that
-    // the version check could not see.
+    // A rebuild at the same version is a different plugin: the marker records the
+    // bytes, so a stale unpacked copy is still caught.
     let changed = was_sum.is_some_and(|sum| sum != sum_of(b.wasm));
     (newer || changed).then(|| {
         let why = if newer {
@@ -132,8 +113,7 @@ pub fn newer_note(scripts: &Path, b: &Builtin) -> Option<String> {
     })
 }
 
-/// **A cheap fingerprint of a builtin's bytes**, for the marker: FNV-1a, which is all this needs to
-/// tell one build from another.
+/// A cheap fingerprint of the bytes (FNV-1a), enough to tell builds apart.
 fn sum_of(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -143,8 +123,8 @@ fn sum_of(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Add or replace `name`'s line in the marker. A marker that cannot be written is not a failure
-/// to unpack — the plugin is on disk and works; only the upgrade note is lost.
+/// Add or replace `name`'s line in the marker; a marker that cannot be written is
+/// not a failure to unpack — only the upgrade note is lost.
 fn record(scripts: &Path, b: &Builtin) {
     let name = b.name;
     let sum = sum_of(b.wasm);
@@ -172,9 +152,6 @@ mod tests {
         d
     }
 
-    /// **The marker says what was unpacked, and from which release** — so an upgrade can tell the
-    /// reader the shipped copy is newer instead of reverting their file, and says nothing about a
-    /// file rano did not write.
     #[test]
     fn unpacking_records_the_release_and_never_overwrites() {
         let d = temp("unpack");
@@ -188,8 +165,7 @@ mod tests {
             None,
             "the release and the bytes agree"
         );
-        // **A rebuild at the same version is still a different plugin**: the bytes say so, and
-        // without that a developer's rebuilt viewer sat behind a stale unpacked copy.
+        // A rebuild at the same version is still a different plugin.
         std::fs::write(
             builtin_dir(&d).join(MARKER),
             format!("manual.wasm {VERSION} 1\n"),
@@ -197,7 +173,7 @@ mod tests {
         .unwrap();
         let note = newer_note(&d, &MANUAL).expect("the bytes changed");
         assert!(note.contains("changed"), "{note}");
-        // An older unpacking, and the same file on disk: the note names both.
+        // An older unpacking: the note names the shipped one as newer.
         std::fs::write(builtin_dir(&d).join(MARKER), "manual.wasm 0.0.1 0\n").unwrap();
         let note = newer_note(&d, &MANUAL).expect("the shipped one is newer");
         assert!(note.contains("newer") && note.contains("0.0.1"), "{note}");

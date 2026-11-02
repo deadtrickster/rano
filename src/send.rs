@@ -1,14 +1,5 @@
-//! What the editor hands a host when the reader sends their place: the file,
-//! the cursor, and the selection if there is one.
-//!
-//! The editor's side is a callback (`Editor::on_send`); this is the value it is
-//! called with, in the library so a host and the editor share one definition.
-//! The standalone binary's callback runs the configured `send_command` with
-//! [`SendEvent::to_json`] on its stdin.
-//!
-//! Positions are **1-based** lines and columns, the way a compiler error, a grep
-//! hit or `$EDITOR +line` counts them, and a column counts characters (Unicode
-//! scalar values), not bytes or display cells.
+//! What the editor hands a host when the reader sends their place: the file, the
+//! cursor, and the selection. Positions are 1-based lines and columns.
 
 use std::path::PathBuf;
 
@@ -19,8 +10,7 @@ pub struct Point {
     pub column: usize,
 }
 
-/// A selected range: `start` before `end`, `end` exclusive, and the text
-/// between them with lines joined by `\n`.
+/// A selected range: `start` before `end`, `end` exclusive, lines joined by `\n`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Selection {
     pub start: Point,
@@ -43,7 +33,7 @@ pub struct SendEvent {
 
 impl SendEvent {
     /// One JSON object, e.g.
-    /// `{"path":"/src/a.rs","cursor":{"line":3,"column":5},"selection":null,"modified":false}`.
+    /// `{"path":"/src/a.rs","cursor":{"line":3,"column":5},"selection":null}`.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("a SendEvent always serialises")
     }

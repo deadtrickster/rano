@@ -1,5 +1,5 @@
-//! Search & replace control (F5): SearchState/ReplaceState, match
-//! navigation and the replace state machine, backed by search::Matcher.
+//! Search & replace control (F5): SearchState/ReplaceState, match navigation and
+//! the replace state machine, backed by search::Matcher.
 
 use crate::buffer::Pos;
 use crate::editor::{ActionKind, Editor, plural};
@@ -86,8 +86,7 @@ impl Editor {
             self.flash("No matches");
             return;
         }
-        // First match at-or-after the cursor (previous < cursor when
-        // backwards), wrapping.
+        // First match at-or-after the cursor (before it when backwards), wrapping.
         let cur = if bs.search.backwards {
             ms.iter()
                 .rposition(|(m, _)| *m < bs.cursor)
@@ -186,10 +185,8 @@ impl Editor {
         }
     }
 
-    /// One pass, left-to-right, non-overlapping, from the first match
-    /// at-or-after the cursor (no wrap). Single-line find/with only; rows
-    /// never shift, so row-major order is preserved and drift only applies
-    /// within the anchor row. Returns the cumulative replace_count.
+    /// One pass, left-to-right, non-overlapping, from the first match at or after
+    /// the cursor (no wrap). Single-line only, so rows never shift.
     fn replace_all_from(&mut self, find: &str, with: &str) -> usize {
         let n_len = find.chars().count();
         let w_len = with.chars().count();

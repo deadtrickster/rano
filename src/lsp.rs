@@ -1,10 +1,6 @@
-//! A minimal LSP (Language Server Protocol) client: JSON-RPC 2.0 over the
-//! server process's stdio. A background reader thread parses the byte stream
-//! and routes responses to per-request channels and notifications to a
-//! channel the editor drains each event-loop tick.
-//!
-//! Only the subset rano needs is implemented: initialize/initialized,
-//! didOpen, didChange (full-document sync), publishDiagnostics, shutdown/exit.
+//! A minimal LSP client: JSON-RPC 2.0 over the server process's stdio. A reader thread
+//! parses the byte stream and routes responses to per-request channels and notifications
+//! to a channel the editor drains each tick. Only the subset rano needs is implemented.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -30,10 +26,9 @@ pub struct Diagnostic {
     pub severity: u64,
 }
 
-/// One completion choice from `textDocument/completion`. `insert` is the
-/// text to place in the buffer (label, insertText or textEdit.newText, with
-/// snippet placeholders stripped); `kind` is the LSP CompletionItemKind
-/// (0 = unknown), used for the popup's type tag.
+/// One completion choice from `textDocument/completion`. `insert` is the text to place
+/// in the buffer, snippet placeholders stripped; `kind` is the CompletionItemKind (0 =
+/// unknown), used for the popup's type tag.
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
     pub label: String,
@@ -55,9 +50,8 @@ pub enum LspEvent {
     },
     /// The result of a `textDocument/completion` request.
     Completion(Vec<CompletionItem>),
-    /// A request the *server* sent us (has a method and an id). The client
-    /// must answer it; rano answers with a null result, which is sufficient
-    /// for the requests rust-analyzer/gopls/bash-language-server send.
+    /// A request the server sent us (a method and an id): the client must answer it, and
+    /// a null result is enough for what rust-analyzer, gopls and bash-language-server send.
     ServerRequest {
         id: u64,
         method: String,
@@ -69,10 +63,9 @@ pub struct LspClient {
     stdin: Box<dyn Write + Send>,
     next_id: u64,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
-    /// ids of in-flight completion requests, so the reader can tell a
-    /// completion response apart from a late answer to a timed-out synchronous
-    /// request — both look "unclaimed", and conflating them desyncs the
-    /// completion queue.
+    /// ids of in-flight completion requests, so the reader can tell a completion response
+    /// from a late answer to a timed-out synchronous request: both look unclaimed, and
+    /// conflating them desyncs the completion queue.
     completion_ids: Arc<Mutex<HashSet<u64>>>,
     rx: mpsc::Receiver<LspEvent>,
     root_uri: String,
@@ -86,10 +79,9 @@ pub struct LspClient {
     pub lang: Lang,
 }
 
-/// Resolve an LSP server binary: `PATH`, then the tool-manager directories a
-/// process does not inherit (`~/.local/bin`, `~/.cargo/bin`, mise's shims,
-/// `~/go/bin`). Falls back to the bare name, which is how a caller tells
-/// "found" from "not found" without a second `Option` type.
+/// Resolve an LSP server binary: `PATH`, then the tool-manager directories a process does
+/// not inherit (`~/.local/bin`, `~/.cargo/bin`, mise's shims, `~/go/bin`), else the bare
+/// name — which is how a caller tells "found" from "not found" without an `Option`.
 pub(crate) fn find_bin(name: &str) -> String {
     for dir in search_dirs(std::env::var_os("PATH"), std::env::var_os("HOME")) {
         let cand = dir.join(name);
@@ -100,9 +92,8 @@ pub(crate) fn find_bin(name: &str) -> String {
     name.to_string()
 }
 
-/// **Where a server is looked for, in order**: `PATH` first, then the tool managers'
-/// directories. `HOME` is a parameter rather than read here so the list can be tested
-/// without touching the environment.
+/// Where a server is looked for, in order: `PATH` first, then the tool managers'
+/// directories. `HOME` is a parameter so the list can be tested without the environment.
 fn search_dirs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = path
         .map(|p| std::env::split_paths(&p).collect())
@@ -128,9 +119,8 @@ fn search_dirs(path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString
     dirs
 }
 
-/// The server command for `lang`, or `None` when rano knows of no language
-/// server for it — those buffers run highlighting-only, with no spawn
-/// attempt and no error flash.
+/// The server command for `lang`, or `None` when rano knows of none: those buffers run
+/// highlighting-only, with no spawn attempt and no error flash.
 pub(crate) fn command_for(lang: Lang) -> Option<(String, Vec<String>)> {
     let (name, args): (&str, &[&str]) = match lang {
         // The rustup `rust-analyzer` speaks LSP over stdio by default (no
@@ -225,9 +215,8 @@ pub fn find_project_root(start: &Path, marker: &str) -> PathBuf {
     }
 }
 
-/// A `file://` URI names an absolute path, so a relative one is made absolute
-/// first — without that the server is told about no file and answers every
-/// request with nothing.
+/// A `file://` URI names an absolute path, so a relative one is made absolute first —
+/// without that the server is told about no file and answers every request with nothing.
 pub(crate) fn path_to_uri(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy();
@@ -303,7 +292,6 @@ fn parse_diagnostics(v: &Value) -> Vec<Diagnostic> {
     out
 }
 
-/// Convert a char column on `line` to LSP's UTF-16 code-unit column.
 pub fn utf16_col(line: &[char], col_chars: usize) -> usize {
     line.iter().take(col_chars).map(|c| c.len_utf16()).sum()
 }
@@ -336,9 +324,8 @@ fn parse_definition(v: &Value) -> Option<DefLocation> {
     parse_locations(v).into_iter().next()
 }
 
-/// Every target in a Location / Location[] / LocationLink[] / null result,
-/// in the server's order. Shared by definition (which takes the first) and
-/// references (which lists them all).
+/// Every target in a Location / Location[] / LocationLink[] / null result, in the
+/// server's order; definition takes the first, references all of them.
 fn parse_locations(v: &Value) -> Vec<DefLocation> {
     let candidates: Vec<&Value> = match v {
         Value::Null => return Vec::new(),
@@ -425,9 +412,8 @@ fn strip_snippet(s: &str) -> String {
 }
 
 /// Parse the `result` of a completion request: null, an item array, or a
-/// CompletionList object with an `items` array. `insert` prefers
-/// textEdit.newText, then insertText, then the label; snippets are
-/// flattened to plain text.
+/// CompletionList with `items`. `insert` prefers textEdit.newText, then insertText,
+/// then the label; snippets are flattened.
 fn parse_completion(v: &Value) -> Vec<CompletionItem> {
     let arr = match v {
         Value::Null => return Vec::new(),
@@ -490,9 +476,9 @@ fn spawn_reader(
                     // Other notifications (logMessage, showMessage, progress)
                     // are not surfaced yet.
                 }
-                // A response to one of our requests: with a pending waiter it
-                // is synchronous (handshake, shutdown); everything else rano
-                // sends fire-and-forget is completion.
+                // A response to one of our requests: with a pending waiter it is
+                // synchronous (handshake, shutdown); everything else rano sends is
+                // completion.
                 (None, Some(i)) => {
                     let waiter = pending.lock().ok().and_then(|m| m.get(&i).cloned());
                     if let Some(tx) = waiter {
@@ -524,11 +510,9 @@ fn text_end(text: &str) -> (u64, u64) {
     (last as u64, last_len)
 }
 
-/// Build the `didChange` params for a full-document sync: one range edit
-/// replacing the whole of the SERVER's copy, from the start to where the last
-/// text sent ended. The range must describe the OLD document — a range sized
-/// to the new text points past the end of the server's copy, which
-/// rust-analyzer rejects, leaving it with an empty document.
+/// The `didChange` params for a full-document sync: one range edit replacing the whole
+/// of the server's copy, from the start to where the last text sent ended. The range
+/// must describe the OLD document, or the server is left with an empty one.
 fn did_change_params(uri: &str, version: i32, old_end: (u64, u64), text: &str) -> Value {
     json!({
         "textDocument": { "uri": uri, "version": version },
@@ -584,9 +568,8 @@ impl LspClient {
         Ok(client)
     }
 
-    /// Spawn on a background thread so the initialize handshake (up to 15 s)
-    /// never blocks the UI. The receiver yields exactly one result; dropping
-    /// it before that drops the in-flight client (→ `Drop::shutdown`).
+    /// Spawn on a background thread so the initialize handshake (up to 15 s) never blocks
+    /// the UI. The receiver yields exactly one result; dropping it first drops the client.
     pub fn spawn_async(
         lang: Lang,
         root: &Path,
@@ -676,9 +659,8 @@ impl LspClient {
         Ok(())
     }
 
-    /// Send a change. Servers may request full or incremental sync; a single
-    /// range edit replacing the whole document is valid for both, so we always
-    /// use that (LSP character offsets are UTF-16 code units).
+    /// Send a change. Servers may ask for full or incremental sync, and one range edit
+    /// replacing the whole document is valid for both (offsets are UTF-16 code units).
     pub fn change(&mut self, text: &str) {
         if !self.initialized {
             return;
@@ -692,9 +674,8 @@ impl LspClient {
         self.notify("textDocument/didChange", params);
     }
 
-    /// Drain any notifications the reader thread has delivered. Also answers
-    /// any requests the server sent us (with a null result) so the server is
-    /// never left waiting on us.
+    /// Drain the notifications the reader thread delivered, and answer any request the
+    /// server sent (with a null result) so it is never left waiting on us.
     pub fn poll(&mut self) -> Vec<LspEvent> {
         let mut out = Vec::new();
         while let Ok(e) = self.rx.try_recv() {
@@ -774,7 +755,6 @@ impl LspClient {
         Ok(parse_locations(&result))
     }
 
-    /// Send a JSON-RPC response to a server-initiated request.
     fn respond(&mut self, id: u64, result: Value) {
         let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
         let _ = write_message(self.stdin.as_mut(), &msg);
@@ -1014,9 +994,8 @@ mod tests {
         assert_eq!(text_end("a𝕏"), (0, 3));
     }
 
-    // Test-only client whose writes land in `buf` instead of a server's stdin;
-    // `cat` never reads its stdin pipe, and `initialized:false` keeps Drop
-    // from sending a shutdown request (it just kills the process).
+    // A test client whose writes land in `buf` instead of a server's stdin: `cat` never
+    // reads its pipe, and `initialized: false` keeps Drop from sending a shutdown request.
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
     impl Write for SharedBuf {
@@ -1080,14 +1059,14 @@ mod tests {
         assert_eq!(path_to_uri(Path::new("/tmp/x.rs")), "file:///tmp/x.rs");
     }
 
-    /// **Where a server is looked for**: `PATH` first and in order, then the directories a
-    /// tool manager installs into — mise's shims among them, which is what makes `gopls`
-    /// reachable for a process that inherited no shell (see `search_dirs`).
+    /// Where a server is looked for: `PATH` first and in order, then the directories a tool
+    /// manager installs into, which is what makes `gopls` reachable from a process with no
+    /// shell.
     #[test]
     fn a_server_is_found_on_the_path_and_then_in_the_tool_managers_directories() {
-        // **The real HOME**, because what is asserted about the fallbacks is where *this*
-        // machine installs: a fabricated one has nothing under it to find, and the rule
-        // (only directories that exist are searched) would then be asserted vacuously.
+        // The real HOME, because what is asserted about the fallbacks is where this
+        // machine installs: a fabricated one has nothing under it, and the rule (only
+        // directories that exist are searched) would then hold vacuously.
         let home = std::env::var_os("HOME");
         let dirs = search_dirs(
             Some(std::ffi::OsString::from("/first:/second")),
@@ -1134,12 +1113,9 @@ mod tests {
         assert!(search_dirs(None, None).is_empty());
     }
 
-    /// **A Go file gets diagnostics from gopls**, the same end-to-end shape as the
-    /// rust-analyzer test above: a module with a type error in it, the server spawned the
-    /// way an open buffer spawns it, and the error expected back. Ignored by default for
-    /// the same reason (slow, and it needs a server on PATH).
-    ///
-    /// Run it where a Go toolchain is: `cargo test -- --ignored go_diagnostics_flow`.
+    /// A Go file gets diagnostics from gopls, the same end-to-end shape as the
+    /// rust-analyzer test: a module with a type error, the server spawned the way an open
+    /// buffer spawns it. `cargo test -- --ignored go_diagnostics_flow`.
     #[test]
     #[ignore = "spawns gopls: slow + env-dependent (run with -- --ignored)"]
     fn go_diagnostics_flow() {
@@ -1178,10 +1154,9 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    // End-to-end: spawn rust-analyzer and confirm the initial analysis yields
-    // a type-error diagnostic. (This rust-analyzer build only pushes once at
-    // open and does not push after `didChange`, so we assert the initial
-    // report rather than a live update.) Skips when the server is absent.
+    // End-to-end: spawn rust-analyzer and confirm the initial analysis yields a
+    // type-error diagnostic. It pushes once at open, not after `didChange`, so this
+    // asserts the report at open. Skips when the server is absent.
     #[test]
     #[ignore] // spawns rust-analyzer: slow + env-dependent (run with -- --ignored)
     fn rust_diagnostics_flow() {

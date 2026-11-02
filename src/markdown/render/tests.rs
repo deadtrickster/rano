@@ -1,11 +1,7 @@
-//! letibot's painter tests, ported.
-//!
-//! letibot asserted on escape bytes (`\x1b[1m` for bold, `\x1b[36m` for code)
-//! because escape bytes were its output. Here the output says what each span
-//! means, so the same claims are made about text and roles: "nothing came out
-//! bold" is "no span is bold", and "the keyword is coloured" is "a span carries
-//! [`Role::Keyword`]". Where a test's point was the visible text — a table's
-//! columns, a list's indent — it asserts on the plain text exactly as before.
+//! letibot's painter tests, ported. letibot asserted on escape bytes because
+//! escape bytes were its output; here the same claims are made about text and
+//! roles — "nothing came out bold" is "no span is bold". Where a test's point
+//! was the visible text it asserts on the plain text exactly as before.
 
 use super::*;
 use crate::markdown::line::{base, spans_width};
@@ -52,17 +48,11 @@ fn render(src: &str, width: usize) -> Vec<Line> {
         .collect()
 }
 
-/// **A tab-indented fence expands its tabs, in every branch.**
-///
-/// MEASURED 2026-10-02, comparing notes with leticl: the fence path expanded
-/// tabs NOWHERE, so a raw `\t` reached the terminal and was expanded at ITS stop
-/// — conventionally eight — while the width layer counted it as ZERO columns. A
-/// Go body indented four deep in the diff view was eight deep in a fence.
-///
-/// Three branches, and the reason all three are asserted: the highlighted path,
-/// the path for a language there is no grammar for, and a bare fence. Fixing
-/// only the first is the mistake that leaves ```text and unlabelled blocks
-/// still broken.
+/// A tab-indented fence expands its tabs, in every branch. A raw `\t` handed
+/// to the terminal is expanded at that terminal's stop while the width layer
+/// counts zero columns. Three branches asserted — highlighted, no grammar,
+/// and bare — because fixing only the first is the mistake that leaves the
+/// others broken.
 #[test]
 fn a_fenced_block_expands_its_tabs_however_it_is_highlighted() {
     let body: Vec<String> = vec![
@@ -166,13 +156,9 @@ fn wrapping_counts_columns_not_markup() {
     assert_eq!(render_block(&block, 20, &opts()).len(), 1);
 }
 
-/// A marker in the *hand-written* inline syntax is literal text now.
-///
-/// The point of the tree-sitter projection is that `**bold**` is `Run { text:
-/// "bold", style: Bold }` and the asterisks are gone before the renderer sees
-/// them. A `**` that is not emphasis is therefore also literal, and this pins
-/// the two halves of that: the styles map to meanings, and nothing is scanned
-/// for.
+/// A marker in the *hand-written* inline syntax is literal text now: the
+/// projection parses `**bold**` into a styled run and the asterisks are gone
+/// before the renderer sees them.
 #[test]
 fn the_renderer_sees_styles_not_markers() {
     let runs = vec![
@@ -260,9 +246,8 @@ fn a_whole_document_has_one_blank_row_between_blocks() {
 }
 
 mod tables {
-    //! **The operator's own table, on the operator's own terminal.** 2026-09-17:
-    //! *"table rendering is broken"* — a GFM table had no block of its own, so
-    //! it lexed as a paragraph, joined with spaces and wrapped as prose.
+    //! The table a real session reported as broken: a GFM table had no block
+    //! of its own, so it lexed as a paragraph and wrapped as prose.
     use super::*;
     use crate::markdown::parse::runs_text;
 
@@ -295,9 +280,8 @@ mod tables {
         assert!(r[1].contains("sub"), "{r:#?}");
         assert!(r[2].contains("deeper"), "{r:#?}");
 
-        // **An `1. ` sub-list written at three or four spaces lands on the same
-        // step as a `- ` one at two** — that is what rounding to an even column
-        // is for.
+        // An `1. ` sub-list written at three or four spaces lands on the same
+        // step as a `- ` one at two — what rounding to an even column is for.
         let two = rows("- a\n  1. one\n", 80);
         let four = rows("- a\n    1. one\n", 80);
         assert_eq!(lead(&two[1]), lead(&four[1]), "{two:#?} {four:#?}");
@@ -329,12 +313,9 @@ mod tables {
         }
     }
 
-    /// **The §2.7 ordering CONFLICT, ruled and pinned.**
-    ///
-    /// A model that writes `1.` for every item: every markdown renderer numbers
-    /// those 1, 2, 3 — the repeated `1.` is an idiom, not a claim — so a head
-    /// that echoed it would be showing something no other reader of that message
-    /// sees. `start + i` is therefore the right rule.
+    /// A model that writes `1.` for every item: every markdown renderer
+    /// numbers those 1, 2, 3 — the repeated `1.` is an idiom, not a claim —
+    /// so `start + i` is the right rule.
     #[test]
     fn a_loose_ordered_list_counts_up_rather_than_echoing_a_repeated_marker() {
         let r = rows("1. a\n\n1. b\n\n1. c\n", 80);
@@ -578,11 +559,9 @@ mod inline_render {
         }
     }
 
-    /// Everything a real answer contains, rendered without losing a word.
-    ///
-    /// The failure this guards is the interesting one: a projection that drops a
-    /// block, or a run, produces a *plausible* screen. Only comparing against
-    /// the source's words catches it.
+    /// Everything a real answer contains, rendered without losing a word —
+    /// a projection that drops a block or a run produces a plausible screen,
+    /// and only comparing against the source's words catches it.
     #[test]
     fn a_whole_answer_renders_every_word_it_was_written_with() {
         let src = "\
@@ -643,13 +622,11 @@ done
         assert!(has_role(&lines, Role::Code), "nothing came out as code");
     }
 
-    /// The whole of a real message, rendered: the one the operator saw as cyan
-    /// prose.
-    ///
-    /// The fixture is the exact bytes from the store, and the failure it pins
-    /// was visible rather than structural — ten numbered items rendered with
-    /// their `**` showing and the whole message in code cyan, because a code
-    /// span in the first paragraph closed three kilobytes later.
+    /// The whole of a real message, rendered. The fixture is the exact bytes
+    /// from the store, and the failure it pins was visible: ten numbered items
+    /// rendered with their `**` showing and the whole message in code cyan,
+    /// because a code span in the first paragraph closed three kilobytes
+    /// later.
     #[test]
     fn a_real_message_renders_without_its_markers() {
         const REAL: &str = include_str!("../../../tests/fixtures/markdown/streamed-message.md");
@@ -686,23 +663,13 @@ done
 mod a_fence_is_coloured_only_if_it_names_a_language {
     use super::*;
 
-    /// The language in the info string is what gets coloured, and nothing else
-    /// is.
-    ///
-    /// A fence that names no language renders its frame with no label and its
-    /// body plain, because there is nothing to colour with, and guessing one
-    /// from the shape of the text is the kind of invention a head should not do.
-    /// The operator read that as "colourisation is gone" (2026-09-20) while
-    /// looking at a message whose illustrative fences were bare; this test is
-    /// here so the next reader can tell the difference between a plain block and
-    /// a broken painter in one line.
-    ///
-    /// **And the rule carries no label either** (R51 item 12): it was `┌─ code`
-    /// until the operator asked for the word to go.
-    ///
-    /// The *content* being a fence does not make it a fence: inside a
-    /// four-backtick block the line ```rust is the bytes a model wrote about a
-    /// fence.
+    /// The language in the info string is what gets coloured, and nothing
+    /// else is. A fence that names no language renders its frame with no
+    /// label and its body plain — guessing one from the shape of the text is
+    /// the kind of invention a head should not do, and this test is how a
+    /// reader tells a plain block from a broken painter. The rule carries no
+    /// label either. The *content* being a fence does not make it one:
+    /// inside a four-backtick block the line ```rust is bytes about a fence.
     #[test]
     fn a_fence_with_a_language_is_coloured_and_one_without_is_not() {
         let named = render("```rust\nfn main() {}\n```\n", 60);
@@ -718,10 +685,9 @@ mod a_fence_is_coloured_only_if_it_names_a_language {
         assert!(!out.contains("┌─ "), "a label follows the frame: {out:?}");
         assert!(out.contains("└─"), "{out:?}");
 
-        // A four-backtick block holding a three-backtick fence. **This is the
-        // case where the fence's own length is the author's signal**: a model
-        // teaching how to write a markdown rust block, where the backticks are
-        // the content, not a marker. So the demonstration must be *visible*.
+        // A four-backtick block holding a three-backtick fence: the fence's
+        // own length is the author's signal — the backticks are the content,
+        // not a marker, so the demonstration must be visible.
         let quoted = lex("````\n```rust\nlet a = 1;\n```\n````\n");
         assert_eq!(quoted.len(), 1, "{quoted:#?}");
         let out = joined(&render_block(&quoted[0], 60, &opts()));
@@ -771,9 +737,8 @@ mod code_fences_are_coloured_by_rano {
         spans(lines).any(|s| !matches!(s.style.top(), Role::Plain | Role::Faint))
     }
 
-    /// **The whole point of R18.1.** These languages were rendered plain by the
-    /// hand-written lexer letibot used before — it knew ten, and none of these
-    /// was among them.
+    /// These languages were rendered plain by the hand-written lexer before —
+    /// it knew ten, and none of these was among them.
     #[test]
     fn languages_the_old_lexer_did_not_know_are_coloured() {
         for (fence, body, header) in [
@@ -807,9 +772,8 @@ mod code_fences_are_coloured_by_rano {
         }
     }
 
-    /// The header names the grammar **that ran**, not the fence's spelling —
-    /// so a fence that says `ts` is not claiming to be tsx, and one thing is
-    /// named once.
+    /// The header names the grammar that ran, not the fence's spelling — one
+    /// thing is named once.
     #[test]
     fn the_header_names_the_grammar_that_ran() {
         assert!(joined(&painted("rust", "fn main() {}\n")).contains("┌─ rust"));
@@ -867,21 +831,21 @@ mod code_fences_are_coloured_by_rano {
             "something was painted as a string in a signature with none: {out:?}"
         );
 
-        // **A capitalised Go variable is not a type.**
+        // A capitalised Go variable is not a type.
         let out = painted("go", "func f() {\n\tX := 1\n\t_ = X\n}\n");
         assert!(
             !has_role(&out, Role::TypeName),
             "`X` was called a type: {out:?}"
         );
 
-        // **A macro is a function though only `!` follows it.**
+        // A macro is a function though only `!` follows it.
         let out = painted("rust", "println!(\"hi\");\n");
         assert!(
             has_role(&out, Role::FuncName),
             "`println!` is not a function: {out:?}"
         );
 
-        // **A Python decorator is a function.**
+        // A Python decorator is a function.
         let out = painted("python", "@decorator\ndef f():\n    pass\n");
         assert!(
             spans(&out)
@@ -890,8 +854,8 @@ mod code_fences_are_coloured_by_rano {
         );
     }
 
-    /// A block comment **closing** lines later is a comment, which the old
-    /// lexer needed a carried state for and the grammar simply knows.
+    /// A block comment closing lines later is a comment, which the old lexer
+    /// needed a carried state for and the grammar simply knows.
     #[test]
     fn a_construct_spanning_lines_keeps_its_colour() {
         let out = painted("rust", "/* one\ntwo\nthree */\nlet x = 1;\n");
@@ -908,9 +872,10 @@ mod code_fences_are_coloured_by_rano {
     }
 }
 
-/// **A citation is drawn with its file's line numbers and coloured by the file** — the fence
-/// label `path:N-M` (a note after it kept in the header), each line numbered from `N`, the gutter
-/// as wide as the last number. An ordinary fence keeps its plain gutter.
+/// A citation is drawn with its file's line numbers and coloured by the file:
+/// the fence label `path:N-M` (a note after it kept in the header), each line
+/// numbered from `N`, the gutter as wide as the last number. An ordinary
+/// fence keeps its plain gutter.
 #[test]
 fn a_citation_numbers_its_lines_as_the_file_does() {
     let md = "```flow/pgdump_schema.go:98-101 · changed since the reply\nfunc a() {\n\treturn\n}\n// end\n```\n";
@@ -949,13 +914,13 @@ fn a_citation_numbers_its_lines_as_the_file_does() {
     assert_eq!(plain, vec!["┌─ rust", "│ fn x() {}", "└─"]);
 }
 
-/// **A fence a model put after prose is a block, and its info string is the block's title** —
-/// the operator's screenshot of a real reply (2026-10-29). The reply carried
-/// `— ```/w/firecode/scripts/vsock-exec.py:60-97` with the closing delimiter on the next line;
-/// the label was drawn as one line of **text with its backticks in it**, and the closing
-/// delimiter then opened a block that never closed. Three things are asserted together
-/// because they were one defect: the prose before the fence is prose, the fence is a block
-/// labelled with the path, and the paragraph after it is a paragraph again.
+/// A fence a model put after prose is a block, and its info string is the
+/// block's title. The shape: `— ```path:60-97` with the closing delimiter on
+/// the next line — reading the label as text let the closing delimiter open
+/// a block that never closed. Three things asserted together because they
+/// were one defect: the prose before the fence is prose, the fence is a
+/// block labelled with the path, and the paragraph after it is a paragraph
+/// again.
 #[test]
 fn a_fence_after_prose_is_a_block_labelled_with_its_info_string() {
     let md = "— ```/Users/dead/Projects/firecode/firecode/scripts/vsock-exec.py:60-97\n```\n\n\
@@ -985,10 +950,9 @@ fn a_fence_after_prose_is_a_block_labelled_with_its_info_string() {
     );
 }
 
-/// **A fence glued to a word's punctuation is still a fence** — `Here is the code:```rust` is the
-/// operator's shape one character over, and measured it swallowed the same paragraphs. `a```b`
-/// is inline code glued to its sentence, and a fence would have to eat the sentence to read it, so
-/// that stays text.
+/// A fence glued to a word's punctuation is still a fence: `code:```rust`
+/// swallowed the same paragraphs. `a```b` is inline code glued to its
+/// sentence, and a fence would have to eat the sentence to read it.
 #[test]
 fn a_fence_glued_to_punctuation_is_still_a_fence() {
     let rows = text(&render_blocks(
@@ -1014,10 +978,10 @@ fn a_fence_glued_to_punctuation_is_still_a_fence() {
     );
 }
 
-/// **A fence's lines are rows, one for one** — the same reply carried a two-line block and it
-/// was drawn as ONE line with the two lines joined by a space, which is what a paragraph does to
-/// its lines and not what a code block may do to its. `N` lines in, `N` rows out, and the block
-/// drawn as a block so a reader can see where the code starts and stops.
+/// A fence's lines are rows, one for one: `N` lines in, `N` rows out — a
+/// code block may not do to its lines what a paragraph does to its, and the
+/// block is drawn as a block so a reader can see where the code starts and
+/// stops.
 #[test]
 fn a_fences_lines_are_rows_and_are_never_joined() {
     let md = "— ```\n\
@@ -1038,10 +1002,10 @@ fn a_fences_lines_are_rows_and_are_never_joined() {
     );
 }
 
-/// **A malformed fence does not poison what follows** — the half of the same reply that made it
-/// read as broken: after the block closed, `**bold**` was drawn with its asterisks, because the
-/// text was still inside the block. Everything inline and block-level after the fence has to
-/// behave as it does in a document that never held a fence.
+/// A malformed fence does not poison what follows: after the block closed,
+/// `**bold**` was drawn with its asterisks because the text was still
+/// inside the block. Everything inline and block-level after the fence
+/// behaves as in a document that never held one.
 #[test]
 fn a_paragraph_after_a_malformed_fence_parses_again() {
     let md = "— ```\n\
@@ -1079,10 +1043,9 @@ fn a_paragraph_after_a_malformed_fence_parses_again() {
     );
 }
 
-/// **A title is a label and never a delimiter** — a fence written as
-/// ` ```src/a.rs:3-9``` ` put the trailing run in the frame's title (`┌─ src/a.rs:3-9``` `). The
-/// label stops at the next run of the fence's own character, and a run as long as the opening
-/// one closes the block, which is what an empty citation written on one line means.
+/// A title is a label and never a delimiter: the label stops at the next
+/// run of the fence's own character, and a run as long as the opening one
+/// closes the block — which is what an empty citation on one line means.
 #[test]
 fn an_info_string_never_carries_a_delimiter_into_the_title() {
     for md in [
@@ -1111,9 +1074,8 @@ fn an_info_string_never_carries_a_delimiter_into_the_title() {
     );
 }
 
-/// **A markdown link's label links to its destination** — `[PR #212](https://…)` was drawn as the
-/// words "PR #212" with nowhere to go; the label now carries the URL for the emitter's OSC 8, and
-/// the text beside it carries none.
+/// A markdown link's label links to its destination: the label carries the
+/// URL for the emitter's OSC 8, and the text beside it carries none.
 #[test]
 fn a_links_label_carries_its_destination() {
     let md = "Fixed in [PR #212](https://github.com/stroppy-io/stroppy/pull/212) today.\n";

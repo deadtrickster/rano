@@ -39,8 +39,6 @@ pub struct Config {
 /// spaces, so it is one setting with three values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Indent {
-    /// `indent_size` spaces. The default, and what a buffer with no detectable
-    /// style gets.
     #[default]
     Spaces,
     /// One tab character, drawn at `tab_width`. gofmt rewrites a Go file's
@@ -52,7 +50,6 @@ pub enum Indent {
 }
 
 impl Indent {
-    /// From a config value: `spaces`, `tabs`, `auto`; anything else is ignored.
     pub fn parse(v: &str) -> Option<Indent> {
         match v.trim().to_ascii_lowercase().as_str() {
             "spaces" | "space" => Some(Indent::Spaces),
@@ -98,7 +95,6 @@ pub fn detect_indent(buf: &crate::buffer::Buffer) -> Option<String> {
     (unit > 1 && unit <= 8).then(|| " ".repeat(unit))
 }
 
-/// The largest common divisor of `a` and `b`.
 fn gcd(mut a: usize, mut b: usize) -> usize {
     while b != 0 {
         let t = b;
@@ -173,7 +169,6 @@ fn parse_config(text: &str) -> Config {
             None => value.split('#').next().unwrap_or("").trim(),
         };
         match key {
-            // Clamped so the display math can never break.
             "tab_width" => {
                 if let Ok(n) = value.parse::<usize>() {
                     cfg.tab_width = n.clamp(1, 16);
@@ -227,7 +222,6 @@ fn parse_config(text: &str) -> Config {
             "theme" => {
                 cfg.theme = (!value.is_empty()).then(|| value.to_string());
             }
-            // A plugin is a path; an empty value is "no plugin", the same way a theme is.
             "plugin" => {
                 let v = value.trim();
                 cfg.plugin = (!v.is_empty()).then(|| v.to_string());
@@ -263,7 +257,6 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
 
-    /// `theme` names a file; `color.ROLE` lines are kept in order.
     #[test]
     fn a_theme_and_colour_lines_are_read() {
         let c = parse_config(
@@ -387,7 +380,6 @@ mod tests {
         assert_eq!(Config::default().autoupdate, None);
         assert_eq!(parse_config("autoupdate = false").autoupdate, Some(false));
         assert_eq!(parse_config("autoupdate = true").autoupdate, Some(true));
-        // A bad value leaves it unset rather than guessing.
         assert_eq!(parse_config("autoupdate = yes").autoupdate, None);
     }
 

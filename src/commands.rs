@@ -12,7 +12,6 @@ use crate::diffview::{ConflictAct, DiffAct, DiffKind};
 use crate::editor::Editor;
 use crate::picker::PickAct;
 
-/// Where a command is shown: a heading on the help cards and in `M-x`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     File,
@@ -26,7 +25,6 @@ pub enum Group {
     View,
     Host,
     Help,
-    // The modes' own commands: shown on their cards and bars, not in `M-x`.
     Diff,
     Conflict,
     List,
@@ -56,7 +54,6 @@ impl Group {
         }
     }
 
-    /// Whether `M-x` offers it: the global commands, not a mode's own.
     pub fn global(self) -> bool {
         !matches!(
             self,
@@ -95,7 +92,6 @@ pub fn commands() -> &'static [Command] {
     ALL.get_or_init(|| {
         use Group::*;
         vec![
-            // ---- the mode ----
             cmd(
                 "set-mode",
                 "Mode",
@@ -104,7 +100,6 @@ pub fn commands() -> &'static [Command] {
                  it back.",
                 |e| e.start_setmode(),
             ),
-            // ---- files ----
             cmd(
                 "write-out",
                 "Write Out",
@@ -169,7 +164,6 @@ pub fn commands() -> &'static [Command] {
                 "Quit, offering every modified buffer for saving first.",
                 |e| e.try_quit(),
             ),
-            // ---- editing ----
             cmd(
                 "newline",
                 "Newline",
@@ -237,7 +231,6 @@ pub fn commands() -> &'static [Command] {
                 "Filter the marked lines through a shell command.",
                 |e| e.start_filter(),
             ),
-            // ---- mark & clipboard ----
             cmd(
                 "set-mark",
                 "Set Mark",
@@ -273,7 +266,6 @@ pub fn commands() -> &'static [Command] {
                 "Paste the cutbuffer at the cursor.",
                 |e| e.paste(),
             ),
-            // ---- search ----
             cmd(
                 "search-forward",
                 "Where Is",
@@ -305,7 +297,6 @@ pub fn commands() -> &'static [Command] {
             cmd("replace", "Replace", Search, "Search and replace.", |e| {
                 e.start_replace()
             }),
-            // ---- moving ----
             cmd("forward-char", "Forward", Move, "Move right.", |e| {
                 e.move_right()
             }),
@@ -373,7 +364,6 @@ pub fn commands() -> &'static [Command] {
                 "Say where the cursor is.",
                 |e| e.loc_until = Some(Instant::now() + Duration::from_secs(2)),
             ),
-            // ---- code ----
             cmd(
                 "goto-definition",
                 "Definition",
@@ -410,7 +400,6 @@ pub fn commands() -> &'static [Command] {
                 "Show a diff/patch buffer rendered, a markdown file as prose with its pictures, a PNG as a picture, or a file's merge conflicts side by side.",
                 |e| e.toggle_rendered_view(),
             ),
-            // ---- buffers ----
             cmd(
                 "next-buffer",
                 "Next Buffer",
@@ -439,7 +428,6 @@ pub fn commands() -> &'static [Command] {
                 "Close this buffer (asks to save a modified one).",
                 |e| e.close_buffer(),
             ),
-            // ---- todo lists ----
             cmd(
                 "todo-tick",
                 "Tick",
@@ -475,7 +463,6 @@ pub fn commands() -> &'static [Command] {
                 "Jump to the previous markdown heading.",
                 |e| e.todo_prev_heading(),
             ),
-            // ---- view ----
             cmd(
                 "toggle-line-numbers",
                 "Line Numbers",
@@ -490,7 +477,6 @@ pub fn commands() -> &'static [Command] {
                 "Turn soft line wrap on or off.",
                 |e| e.wrap = !e.wrap,
             ),
-            // ---- host & updates ----
             cmd(
                 "send-position",
                 "Send Position",
@@ -505,7 +491,6 @@ pub fn commands() -> &'static [Command] {
                 "Install the newer release the startup check found.",
                 |e| e.update_install(),
             ),
-            // ---- help ----
             cmd(
                 "execute-extended-command",
                 "Command",
@@ -541,7 +526,6 @@ pub fn commands() -> &'static [Command] {
                 "Press a key to see what it does.",
                 |e| e.start_describe_key(),
             ),
-            // ---- diff views ----
             cmd(
                 "diff-toggle-split",
                 "Split/Unified",
@@ -600,7 +584,6 @@ pub fn commands() -> &'static [Command] {
                 "Leave the file on disk as it is.",
                 |e| e.diff_act(DiffAct::Answer('n')),
             ),
-            // ---- conflict view ----
             cmd(
                 "conflict-next",
                 "Next Conflict",
@@ -650,7 +633,6 @@ pub fn commands() -> &'static [Command] {
                 "Resolve with both sides, theirs first.",
                 |e| e.diff_act(DiffAct::Conflict(ConflictAct::Take(Take::TheirsThenOurs))),
             ),
-            // ---- lists ----
             cmd("list-up", "Up", List, "Select the previous item.", |e| {
                 e.picker_act(PickAct::Move(-1))
             }),
@@ -682,7 +664,6 @@ pub fn commands() -> &'static [Command] {
                 "Close the selected buffer.",
                 |e| e.picker_act(PickAct::Delete),
             ),
-            // ---- help pages ----
             cmd("page-scroll-up", "Up", Page, "Scroll up a line.", |e| {
                 e.info_scroll(-1)
             }),
@@ -708,7 +689,6 @@ pub fn commands() -> &'static [Command] {
             cmd("page-close", "Close", Page, "Close the page.", |e| {
                 e.info = None
             }),
-            // ---- the palette ----
             cmd(
                 "palette-run",
                 "Run",
@@ -748,7 +728,6 @@ pub fn commands() -> &'static [Command] {
     })
 }
 
-/// The command called `name`.
 pub fn command(name: &str) -> Option<&'static Command> {
     commands().iter().find(|c| c.name == name)
 }

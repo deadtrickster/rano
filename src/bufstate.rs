@@ -19,7 +19,6 @@ use crate::syntax;
 pub(crate) struct RowWrap {
     /// `None` → a simple row: display col == char index, segments affine.
     pub(crate) segs: Option<Vec<(usize, usize)>>,
-    /// Rendered width of the row in display columns.
     pub(crate) w: usize,
 }
 
@@ -36,7 +35,6 @@ pub struct BufferState {
     /// TODO.md markers the format cannot express, in the same shape as
     /// `syntax_diags` so the gutter and M-D work on them unchanged.
     pub todo_diags: Vec<lsp::Diagnostic>,
-    /// didChange pending since the last flush.
     pub lsp_dirty: bool,
     pub lsp_last_send: Instant,
     /// Handshake in flight: the `buf.name` it was started for, so a mismatch on
@@ -64,7 +62,6 @@ pub struct BufferState {
     /// Complete rows the file has before this buffer's first row; None while the
     /// count runs, so `Ln 1` for a huge log is not guessed.
     pub(crate) lines_before: Option<u64>,
-    /// The scan that will fill [`Self::lines_before`] in, while it runs.
     pub(crate) line_count: Option<crate::linecount::LineCountJob>,
     /// Horizontal scroll of the text window, in display cols; always 0 with wrap on.
     pub scroll_x: usize,
@@ -83,7 +80,6 @@ pub struct BufferState {
     /// An append changed the buffer: the first `k` rows are untouched, so the table
     /// extends from `k` instead of rebuilding.
     pub(crate) wrap_extend_from: Option<usize>,
-    /// Bumped on every edit; part of the wrap_prefix freshness key.
     pub(crate) edit_gen: u64,
     /// A file still arriving from disk; None once it has.
     pub(crate) load: Option<crate::loader::LoadJob>,
@@ -137,7 +133,6 @@ impl BufferState {
         if buf.rows_is_empty() {
             buf.push_row(Vec::new());
         }
-        // Read before `buf` moves into the state below.
         let binary = buf.binary;
         let bs = Self {
             buf,

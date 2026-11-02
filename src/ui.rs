@@ -12,12 +12,10 @@ fn rev() -> Style {
     Style::of(Role::Bar)
 }
 
-/// The current row of a list or a popup: reverse too, but its own role.
 fn sel() -> Style {
     Style::of(Role::Selected)
 }
 
-/// `line` in the one-row rectangle `r`, clipped to it.
 fn put(buf: &mut Buffer, r: Rect, line: &Line) {
     line.render(r, buf);
 }
@@ -52,7 +50,6 @@ fn title_left() -> String {
     format!("  rano {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Short type tag for a completion row, from the LSP CompletionItemKind.
 pub(crate) fn kind_tag(kind: u64) -> &'static str {
     match kind {
         2..=4 => "fn",
@@ -127,7 +124,6 @@ fn simple_window<'a>(
 /// characters whole. A wrapped row asks [`seg_window`].
 fn text_window(line: &[char], d0: usize, d1: usize, tab_width: usize) -> Vec<(usize, char)> {
     let mut out = Vec::new();
-    // Lazy, and it stops at `d1`: a window near a long line's end stays cheap.
     for c in width::Clusters::new(line, tab_width) {
         if c.disp >= d1 {
             break; // fully right of the window
@@ -299,7 +295,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         cursor = Some((area.x.saturating_add(x), area.y.saturating_add(y)));
     };
     let width = area.width;
-    // A reused buffer has the last frame in it, so start from blank.
     let whole = area.intersection(buf.area());
     buf.fill(whole, &Style::new());
     let chrome = ed.chrome;
@@ -307,11 +302,8 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         Paragraph::new("Terminal too small").render(whole, buf);
         return None;
     }
-    // title (1, if on) + text + status (1) + bar (2, if on)
     let text_h = area.height as usize - chrome.rows();
-    // The pane row the text starts on: under the title, or at the top without one.
     let t0 = chrome.top();
-    // A view's header band: reverse video like nano's bars, or bold when bare.
     let head = || {
         if chrome == crate::editor::Chrome::BARE {
             Style::of(Role::Strong)
@@ -330,15 +322,12 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     // cost scale with the count.
     let diags = ed.all_diags();
 
-    // (buffer row, wrap segment) of each visible row; with wrap off seg is 0.
     let vis: Vec<(usize, usize)> = if ed.wrap {
         let mut out = Vec::with_capacity(text_h);
         let (mut r, mut seg) = ed.buf_row_of_visual(bs.scroll);
         let mut first = true;
         while out.len() < text_h && r < bs.buf.row_count() {
-            // From the cached wrap table, with a fallback for a missing one.
             let count = ed.seg_count(r);
-            // The top line may start mid-way: emit only its remaining segments.
             let emit = if first {
                 count.saturating_sub(seg)
             } else {
@@ -355,7 +344,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             r += 1;
             seg = 0;
         }
-        // Padded so both loops below emit exactly text_h rows (no stale cells).
         while out.len() < text_h {
             out.push((usize::MAX, 0));
         }
@@ -386,7 +374,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
 
     // ---- title bar (row 0, reversed) ----
     let name = ed.title_text();
-    // `VIEW` says the buffer cannot be written, beside the mark.
     let flags = match (bs.read_only, bs.mark.is_some()) {
         (true, true) => "VIEW M",
         (true, false) => "VIEW",
@@ -405,7 +392,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     if g > 0 {
         let mut nums: Vec<Line> = Vec::with_capacity(text_h);
         for (i, (r, seg)) in vis.iter().enumerate() {
-            // The number sits on the first wrap segment only; uncounted, blank.
             let s = if *r < bs.buf.row_count() && *seg == 0 {
                 match bs.line_number(*r) {
                     Some(n) => format!("{:>w$} ", n, w = g - 1),
@@ -414,7 +400,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             } else {
                 " ".repeat(g)
             };
-            // Rows with diagnostics carry their severity's colour.
             let role = match diag_sev[i] {
                 Some(sev) => crate::editor::diag_role(sev),
                 None => Role::Faint,
@@ -435,7 +420,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         match bs.buf.row_opt(*r) {
             Some(chars) => {
                 let line = match ed.row_is_simple(*r) {
-                    // A simple row: the window is a slice — the common case.
                     Some(true) => {
                         let (lo, hi) = if ed.wrap {
                             ed.seg_chars(*r, *seg)
@@ -487,7 +471,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             .unwrap_or(0)
             .min(40);
         let w = (label_w + 6).clamp(10, (width as usize).min(60));
-        // Anchor to the word's visual row, not its buffer row.
         let drow = if ed.wrap {
             ed.visual_pos(Pos {
                 row: p.row,
@@ -516,7 +499,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 (g + disp.saturating_sub(bs.scroll_x)) as u16
             };
             let x = x.min(width.saturating_sub(w as u16));
-            // Keep the selected row inside an 8-row window.
             let start = if p.items.len() > vis {
                 (p.sel + 1).saturating_sub(vis).min(p.items.len() - vis)
             } else {
@@ -567,7 +549,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- external-change diff (over the text, like the list) ----
-    // A reversed header, then the rendered diff lines from `top`.
     if let Some(v) = &ed.diff_view {
         let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
@@ -590,7 +571,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         rev()
     };
     if let Some(p) = &ed.prompt {
-        // The prompt owns the status row; its suggestions or a message go above.
         let flash = ed
             .status
             .as_ref()
@@ -621,7 +601,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
         );
     } else {
-        // The cursor position sits at the right edge; messages center left of it.
         let cur = &ed.bs().cursor;
         // `?` and not `1`: a tail's row is not the file's line until the count has
         // said which line it is.
@@ -706,17 +685,14 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     }
 
     // ---- cursor ----
-    // No cursor over the list overlay or the diff.
     if let Some(p) = &ed.palette {
         let col = 4 + p.query.chars().count();
         cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
     } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
         if let Some(p) = &ed.prompt {
-            // cursor sits right after the answer, which is left-aligned
             let (_, col) = prompt_text(p, width as usize);
             cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
         } else {
-            // The cursor's pane row is its visual row.
             let cy = if ed.wrap {
                 ed.visual_pos(bs.cursor) as i64 - bs.scroll as i64
             } else {
@@ -800,7 +776,6 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 Span::role(format!("{keys:<14} "), Role::Key),
                 Span::role(c.doc.to_string(), Role::Faint),
             ]);
-            // The selected row reverses to the pane's edge; key and doc keep theirs.
             let style = if start + k == p.sel {
                 sel()
             } else {
@@ -844,7 +819,6 @@ fn title_line(width: u16, name: &str, modified: bool, flags: &str) -> String {
     if !name.is_empty() {
         let nl = name.chars().count();
         let region_end = s.len().saturating_sub(8);
-        // Saturating: a name longer than the region is cut at the left edge.
         let mut pos = (left.len() + region_end).saturating_sub(nl) / 2;
         if pos < left.len() {
             pos = left.len();
@@ -890,7 +864,6 @@ pub(crate) struct Screen {
 
 #[cfg(test)]
 impl Screen {
-    /// `ed` drawn over a fresh `w` × `h` buffer.
     pub(crate) fn of(ed: &Editor, w: u16, h: u16) -> Screen {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         let cursor = draw(&mut buf, ed);
@@ -901,7 +874,6 @@ impl Screen {
         self.buf.cell(x, y)
     }
 
-    /// Row `y`'s text, full width.
     pub(crate) fn row(&self, y: u16) -> String {
         self.buf
             .to_plain_lines()
@@ -929,7 +901,6 @@ mod tests {
             buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         }
         let mut ed = Editor::new(buf, crate::config::Config::default());
-        // draw() assumes the run loop has kept the soft-wrap table fresh.
         ed.ensure_wrap_prefix();
         ed
     }
@@ -945,7 +916,6 @@ mod tests {
         buf.name = Some(std::path::PathBuf::from(name));
         let mut ed = Editor::new(buf, crate::config::Config::default());
         ed.ensure_wrap_prefix();
-        // The run loop highlights before it paints.
         ed.ensure_highlight();
         ed
     }
@@ -954,8 +924,6 @@ mod tests {
     fn win(chars: &[char], lo: usize, hi: usize) -> Vec<(usize, char)> {
         simple_window(chars, lo, hi).collect()
     }
-
-    // ---------- gutter_width ----------
 
     /// A view's status reads `Row N`, not `Ln N`: a rendering's row is not a file
     /// line.
@@ -986,8 +954,6 @@ mod tests {
         assert_eq!(gutter_width(100), 4);
     }
 
-    // ---------- display_width / display_col ----------
-
     #[test]
     fn display_width_tabs() {
         assert_eq!(display_width(&chars("ab\t"), 8), 8);
@@ -1007,8 +973,6 @@ mod tests {
         assert_eq!(display_col(&line, 6, 8), 10); // col clamped to len 5
         assert_eq!(display_col(&line, 100, 8), 10); // clamped to line len
     }
-
-    // ---------- line_to_spans ----------
 
     #[test]
     fn line_to_spans_coalesces_unstyled() {
@@ -1058,7 +1022,6 @@ mod tests {
                 message: "m".into(),
                 severity: 1,
             },
-            // A diag on another row never reaches this row's slice.
             lsp::Diagnostic {
                 line: 5,
                 col: 0,
@@ -1074,8 +1037,6 @@ mod tests {
         assert_eq!(line.spans[1].content, "bc");
         assert_eq!(line.spans[1].style, Style::of(Role::DiagError).underline());
     }
-
-    // ---------- text_window ----------
 
     #[test]
     fn text_window_no_tabs_passthrough() {
@@ -1116,8 +1077,6 @@ mod tests {
         assert_eq!(text_window(&line, 0, 100, 8), want);
     }
 
-    // ---------- line_to_spans: window + tabs ----------
-
     #[test]
     fn line_to_spans_window_styles_absolute_cols() {
         let mut e = ed("abcdefgh");
@@ -1131,8 +1090,6 @@ mod tests {
         assert_eq!(line.spans[2].content, "h");
     }
 
-    // ---------- title_line / function-bar layout ----------
-
     #[test]
     fn title_line_survives_a_name_longer_than_the_bar() {
         let long = format!("/tmp/{}/f.txt", "d".repeat(120));
@@ -1142,7 +1099,6 @@ mod tests {
 
     #[test]
     fn title_line_left_center_right() {
-        // Against the compiled version, not a literal.
         let banner = format!("  rano {}", env!("CARGO_PKG_VERSION"));
         let t = title_line(80, "foo.rs", true, "auto");
         assert!(t.starts_with(&banner), "{t:?}");
@@ -1152,7 +1108,6 @@ mod tests {
         let t = title_line(80, "", false, "");
         assert!(t.starts_with(&banner), "{t:?}");
         assert!(!t.contains('*'));
-        // A narrow terminal truncates the banner rather than panicking.
         let t = title_line(3, "x", false, "");
         assert_eq!(t.chars().count(), 3);
     }
@@ -1188,13 +1143,10 @@ mod tests {
                 .map(|x| buf.cell((x, y)).unwrap().symbol.as_str())
                 .collect()
         };
-        // The popup sits below the word's row: item 0 at y=2, item 1 at y=3.
         assert!(row(2).contains("print!"));
         assert!(row(3).contains("println!"));
-        // The selected row carries reverse video.
         let cell = buf.cell((3, 3)).unwrap();
         assert_eq!(cell.style.top(), Role::Selected);
-        // The fn kind tag renders at the row's right edge.
         assert!(row(2).contains("fn"));
     }
 
@@ -1225,7 +1177,6 @@ mod tests {
 
     #[test]
     fn function_bar_layout_at_width_80() {
-        // nano's algorithm: 12 items, per_row 6, itemw 13, column-major.
         let e = ed("x");
         let terminal = Screen::of(&e, 80, 24);
         let buf = &terminal;
@@ -1236,7 +1187,6 @@ mod tests {
         };
         let top = row(22);
         let bottom = row(23);
-        // Emacs notation by default; the help key is a prefix.
         assert!(top.starts_with("C-g Help…"), "{top}");
         assert!(top.contains("C-o Write Out"), "{top}");
         assert!(bottom.starts_with("C-x Exit"), "{bottom}");
@@ -1280,13 +1230,11 @@ mod tests {
         let role = |y| buf.cell((1, y)).unwrap().style.top();
         assert_eq!(role(1), Role::DiagError);
         assert_eq!(role(2), Role::DiagWarning);
-        // A row with no diagnostic is faint.
         assert_eq!(role(3), Role::Faint);
     }
 
     #[test]
     fn line_to_spans_tab_expands_with_tab_style() {
-        // the tab's space run carries the tab char's (selection) style
         let mut e = ed("a\tb");
         e.bs_mut().mark = Some(Pos { row: 0, col: 1 });
         e.bs_mut().cursor = Pos { row: 0, col: 2 };
@@ -1302,8 +1250,6 @@ mod tests {
         assert_eq!(line.spans[1].style, Style::of(Role::Selection));
         assert_eq!(line.spans[2].content, "b");
     }
-
-    // ---------- draw (into a render::Buffer) ----------
 
     #[test]
     fn draw_gutter_layout_and_cursor() {
@@ -1335,11 +1281,9 @@ mod tests {
         assert_eq!(buf.cell((3, 2)).unwrap().symbol.as_str(), "a");
         assert_eq!(buf.cell((15, 2)).unwrap().symbol.as_str(), "a");
         assert_eq!(buf.cell((16, 2)).unwrap().symbol.as_str(), " ");
-        // Gutter: the number sits on the first wrap segment only.
         assert_eq!(buf.cell((1, 1)).unwrap().symbol.as_str(), "1");
         assert_eq!(buf.cell((1, 2)).unwrap().symbol.as_str(), " ");
         assert_eq!(buf.cell((1, 3)).unwrap().symbol.as_str(), "2");
-        // Rows past the end of the buffer stay blank (no stale cells).
         assert_eq!(buf.cell((3, 5)).unwrap().symbol.as_str(), " ");
         assert_eq!(buf.cell((1, 5)).unwrap().symbol.as_str(), " ");
         // Cursor at (0, 40): visual row 1, display col 40 → x = 3 + 40 % 37.
@@ -1374,10 +1318,7 @@ mod tests {
 
     #[test]
     fn draw_wraps_tabbed_line() {
-        // A tabbed row takes the slow text_window path: the tab still expands and
-        // the row still wraps at the segment boundary.
         let mut e = ed(&format!("\t{}", "a".repeat(40)));
-        // Eight columns, named: this test's arithmetic is about an eight-column tab.
         e.tab_width = 8;
         e.show_line_numbers = true;
         e.text_w = 40;
@@ -1392,16 +1333,12 @@ mod tests {
         assert_eq!(buf.cell((3, 2)).unwrap().symbol.as_str(), "a");
         assert_eq!(buf.cell((13, 2)).unwrap().symbol.as_str(), "a");
         assert_eq!(buf.cell((14, 2)).unwrap().symbol.as_str(), " ");
-        // Gutter number on the first segment only.
         assert_eq!(buf.cell((1, 1)).unwrap().symbol.as_str(), "1");
         assert_eq!(buf.cell((1, 2)).unwrap().symbol.as_str(), " ");
     }
 
-    // ---------- width: what a character occupies ----------
-
     #[test]
     fn draw_colours_markdown_constructs_on_screen() {
-        // Not just `style_at`: the palette has to reach the cells.
         let src = "# H\n\n**bold** `code` *it*\n\n```rust\nlet x = 1;\n```\n";
         let mut e = ed_named("x.md", src);
         e.show_line_numbers = false;
@@ -1415,32 +1352,26 @@ mod tests {
         assert_eq!(cell(10, 3), want(S::of(Role::Code)), "code span");
         assert_eq!(cell(17, 3), want(S::new().italic()), "emphasis");
         assert_eq!(cell(0, 3), want(S::of(Role::Punctuation)), "the delimiter");
-        // The heading and the fenced body, on their own rows.
         assert_eq!(cell(2, 1), want(S::of(Role::TypeName)), "heading text");
         assert_eq!(cell(0, 6), want(S::of(Role::Code)), "fence body");
     }
 
     #[test]
     fn display_width_counts_wide_characters_as_two() {
-        // A CJK line is twice as wide as its character count.
         assert_eq!(display_width(&chars("中文"), 8), 4);
         assert_eq!(display_width(&chars("こんにちは"), 8), 10);
         assert_eq!(display_width(&chars("😀"), 8), 2);
-        // Combining marks add nothing; a ZWJ sequence is one glyph.
         assert_eq!(display_width(&chars("e\u{301}"), 8), 1);
         assert_eq!(display_width(&chars("\u{1f468}\u{200d}\u{1f469}"), 8), 2);
-        // Tabs still advance to the next stop, measured over the width so far.
         assert_eq!(display_width(&chars("中\t"), 8), 8);
     }
 
     #[test]
     fn display_col_and_char_at_display_agree_for_wide_rows() {
         let line = chars("中文字");
-        // Char index → display col: two columns each.
         assert_eq!(display_col(&line, 0, 8), 0);
         assert_eq!(display_col(&line, 1, 8), 2);
         assert_eq!(display_col(&line, 3, 8), 6);
-        // …and back: any cell of a wide character maps to that character.
         assert_eq!(char_at_display(&line, 0, 8), 0);
         assert_eq!(char_at_display(&line, 1, 8), 0, "the right half of 中");
         assert_eq!(char_at_display(&line, 2, 8), 1);
@@ -1482,7 +1413,6 @@ mod tests {
         assert_eq!(sym(0, 2), "字");
         assert_eq!(sym(2, 2), "语");
         assert_eq!(sym(0, 3), "言");
-        // The next buffer row starts on the row after the last segment.
         assert_eq!(sym(0, 4), "x");
     }
 
@@ -1495,7 +1425,6 @@ mod tests {
         e.ensure_wrap_prefix();
         let terminal = Screen::of(&e, 1, 12);
         let buf = &terminal;
-        // One cell per row, each holding a whole base+accent grapheme.
         for y in 1..=3 {
             assert_eq!(
                 buf.cell((0, y)).unwrap().symbol.as_str(),
@@ -1515,8 +1444,6 @@ mod tests {
         assert_eq!(buf.cell((0, 1)).unwrap().symbol.as_str(), "a");
         assert_eq!(terminal.cursor, Some((0, 1)));
     }
-
-    // ---- drawing into a host's pane (draw_in) ----
 
     /// The pane the tests below draw into: away from every edge, so an origin ignored
     /// shows.
@@ -1552,7 +1479,6 @@ mod tests {
         }
     }
 
-    /// Bare chrome: no title row, no function bar, no reverse video.
     #[test]
     fn a_bare_pane_is_text_and_a_status_row_and_nothing_reversed() {
         let mut e = ed("aa\nbb\ncc\ndd");
@@ -1595,7 +1521,6 @@ mod tests {
                 );
             }
         }
-        // A click on the first row lands on the first line.
         e.handle_mouse(crate::term::MouseEvent {
             kind: crate::term::MouseKind::Press(crate::term::MouseButton::Left),
             x: PANE.x + g,
@@ -1603,7 +1528,6 @@ mod tests {
             mods: Default::default(),
         });
         assert_eq!(e.bs().cursor.row, 0, "a click on the first row");
-        // What the bars would have said, for the host's own frame.
         let title = e.frame_title();
         assert!(!title.modified && !title.read_only);
         assert!(!e.key_hints().is_empty(), "the bar's keys");
@@ -1619,10 +1543,8 @@ mod tests {
         outside_is_untouched(&t);
         let g = gutter_width(4) as u16;
         let buf = &t;
-        // Text starts on the pane's second row, after its gutter.
         assert_eq!(buf[(PANE.x + g, PANE.y + 1)].symbol.as_str(), "a");
         assert_eq!(buf[(PANE.x + g, PANE.y + 3)].symbol.as_str(), "c");
-        // The status row's position readout sits at the pane's right edge.
         let status: String = (PANE.x..PANE.right())
             .map(|x| {
                 buf[(x, PANE.y + PANE.height - 3)]
@@ -1678,10 +1600,8 @@ mod tests {
             y,
             mods: Mods::NONE,
         };
-        // Pane row 3 is buffer row 2 (the title takes pane row 0).
         assert!(e.handle_mouse(click(PANE.x + 1, PANE.y + 3)));
         assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });
-        // Outside the pane: not the editor's click.
         assert!(!e.handle_mouse(click(PANE.x - 1, PANE.y + 1)));
         assert!(!e.handle_mouse(click(PANE.x + 1, PANE.bottom())));
         assert_eq!(e.bs().cursor, Pos { row: 2, col: 1 });

@@ -17,22 +17,16 @@ use rano::{config, export, send_ctrl, syntax, ui};
 struct Args {
     /// In command-line order; each opens as its own buffer, the first current.
     files: Vec<String>,
-    /// Each file's own position, 1-based, parallel to `files`.
     positions: Vec<Option<(usize, Option<usize>)>>,
-    /// 1-based, as a person reads them; converted to 0-based before the editor
-    /// sees them.
     line: Option<usize>,
     col: Option<usize>,
     export: Option<export::Format>,
-    /// `-f`/`--follow`: open the first file at its tail, read-only.
     follow: bool,
-    /// `--edit`: open a `.log` as an ordinary file rather than as a tail.
     edit: bool,
     help: bool,
     version: bool,
 }
 
-/// Split `--opt=value` into `("--opt", Some("value"))`.
 fn split_eq(a: &str) -> (&str, Option<&str>) {
     match a.split_once('=') {
         Some((k, v)) => (k, Some(v)),
@@ -61,7 +55,6 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut i = 0usize;
     while i < args.len() {
         let (key, inline) = split_eq(&args[i]);
-        // A flag that takes a value reads it from `=` or the next word.
         let mut value = |name: &str| -> Result<String, String> {
             if let Some(v) = inline {
                 return Ok(v.to_string());
@@ -174,8 +167,6 @@ fn main() {
     let mut load: Option<PathBuf> = None;
     if let Some(f) = &file {
         let p = Path::new(f);
-        // Named either way, so language detection, the title bar and the gutter are
-        // right from the first frame.
         buf.name = Some(p.to_path_buf());
         if p.exists() {
             load = Some(p.to_path_buf());
@@ -187,7 +178,6 @@ fn main() {
         row: l.saturating_sub(1),
         col: c.unwrap_or(1).saturating_sub(1),
     };
-    // `--line`/`--column` win over the first file's own `file:line`.
     let pos = args
         .line
         .map(|l| (l, args.col))
@@ -234,7 +224,6 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
             }
         },
         None => {
-            // No file: read stdin, which is what a pipe wants.
             let mut text = String::new();
             io::Read::read_to_string(&mut io::stdin(), &mut text)?;
             let mut b = Buffer::new();
@@ -285,7 +274,6 @@ fn run(
         mouse: term::Mouse::Buttons,
         block_cursor: false,
     })?;
-    // Until the terminal answers the background question: the dark palette.
     let mut palette = Palette::Colour;
     let mut ed = Editor::new(buf, cfg);
     // A picture is drawn as placeholder cells a terminal may fill with garbage, so
@@ -320,10 +308,7 @@ fn run(
         }
         ed.set_plugin(&PathBuf::from(expand_tilde(&p)));
     }
-    // 0-based, once, here: the editor's own coordinates are 0-based throughout.
     ed.bs_mut().goto = pos;
-    // What ships is loaded first, so a builtin can claim the file the command line
-    // names.
     ed.load_builtins();
     // The viewport before the open: a plugin asked for 0 columns answers "not mine".
     let (tw, th) = terminal.size();
@@ -334,7 +319,6 @@ fn run(
         th.min(u16::MAX as usize) as u16,
     ));
     if let Some(path) = load {
-        // A folder on the command line is a listing, not a read.
         if !follow && path.is_dir() {
             ed.open_dir(&path);
         } else {
@@ -343,7 +327,6 @@ fn run(
             let started = if follow {
                 ed.start_tail(&path)
             } else {
-                // One door for the command line and `M->`: a provider answers first.
                 ed.open_named(&path)
             };
             if let Err(e) = started {
@@ -360,7 +343,6 @@ fn run(
     // editor's own state changes.
     let mut dirty = true;
     loop {
-        // The terminal reports no resize event, so the size is asked every turn.
         let (w, h) = terminal.size();
         let (w, h) = (
             w.min(u16::MAX as usize) as u16,

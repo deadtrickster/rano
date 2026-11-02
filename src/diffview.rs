@@ -43,10 +43,8 @@ pub enum Source {
     Conflict {
         name: String,
         text: String,
-        /// The conflict the keys act on (0-based, file order).
         current: usize,
         compare: Compare,
-        /// Each conflict's header row in `lines`, from the last render.
         sections: Vec<usize>,
     },
     Review {
@@ -83,7 +81,6 @@ pub struct DiffView {
     pub source: Source,
     pub split: bool,
     pub top: usize,
-    /// The width `lines` were rendered for.
     width: usize,
     pub lines: Vec<Line>,
 }
@@ -120,7 +117,6 @@ impl DiffView {
             Source::Patch { text, .. } => {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
-            // The document's own renderer, pictures spliced under the lines that name them.
             Source::Markdown { text, images, .. } => {
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
@@ -130,7 +126,6 @@ impl DiffView {
                 splice_pictures(&mut rows, images, width);
                 rows
             }
-            // Placeholder rows the terminal fills from its own copy; nothing is read here.
             Source::Picture {
                 id,
                 intrinsic,
@@ -279,7 +274,6 @@ fn picture_anchor(rows: &[String], from: usize, alt: &str, target: &str) -> Opti
 }
 
 impl Editor {
-    /// The file on disk now against the buffer as a save would write it.
     pub(crate) fn open_diff_view(&mut self, path: &std::path::Path, disk: String, mine: String) {
         self.open_view(Source::Save {
             path: path.to_path_buf(),
@@ -291,7 +285,6 @@ impl Editor {
     pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
         self.diff_view = Some(DiffView::new(source, self.diff_split, self.text_w));
-        // Uploads and placements follow from what is now open; a picture open before is dropped.
         self.sync_image();
     }
 
@@ -329,7 +322,6 @@ impl Editor {
             return;
         };
         let id = crate::term::graphics::image_id(&name);
-        // The box a conversion may fill, before anything about the picture is known.
         let max_px = crate::image::box_px(self.text_w);
         match crate::image::read(&path.to_string_lossy(), None, max_px) {
             Ok(pic) => self.open_view(Source::Picture {
@@ -416,7 +408,6 @@ impl Editor {
         std::mem::take(&mut self.graphics_out)
     }
 
-    /// M-P: render the current buffer — patch, markdown, picture or conflicts — or say why not.
     pub(crate) fn toggle_rendered_view(&mut self) {
         let name = self.buffer_name(self.cur);
         let text = self.bs().buf.text();
@@ -475,7 +466,6 @@ impl Editor {
         }
     }
 
-    /// One action in the diff view, from a command (keymaps in `commands.rs`).
     pub(crate) fn diff_act(&mut self, act: DiffAct) {
         let Some(mut v) = self.diff_view.take() else {
             return;

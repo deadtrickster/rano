@@ -864,7 +864,6 @@ fn opening_a_picture_shows_the_picture() {
     let rows = picture_rows(&ed);
     assert!(rows[0].starts_with('\u{10EEEE}'), "{:?}", rows[0]);
     assert!(ed.diff_view.as_ref().unwrap().header().contains("Picture"));
-    // The terminal was told, as it is for M-P.
     assert_eq!(graphics(&mut ed).len(), 2);
     // Escaping the picture leaves the file, not the view; with nothing behind it
     // the picture stays.
@@ -872,7 +871,6 @@ fn opening_a_picture_shows_the_picture() {
     assert!(ed.diff_view.is_some(), "the picture is the only thing here");
     assert!(ed.status_text().unwrap().contains("Last buffer"));
     assert!(!ed.bs().buf.modified, "and the file was never touched");
-    // The keys that reach past a view work in one.
     press(&mut ed, KeyCode::F(8), Mods::NONE);
     assert_eq!(
         ed.prompt.as_ref().map(|p| p.kind),
@@ -881,7 +879,6 @@ fn opening_a_picture_shows_the_picture() {
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.prompt.is_none());
     assert!(ed.diff_view.is_some(), "and the picture is still up");
-    // With a file beside it, escaping the picture closes that buffer.
     ed.config.multibuffer = true;
     let other = d.0.join("notes.txt");
     fs::write(&other, "plain text\n").unwrap();
@@ -892,7 +889,6 @@ fn opening_a_picture_shows_the_picture() {
         ed.diff_view.is_some(),
         "back to the picture, as the picture"
     );
-    // The picture comes back: drop, then upload and placement again.
     let out = graphics(&mut ed);
     assert!(out.iter().any(|c| c.contains("a=d,d=I")), "{out:?}");
     assert!(out.iter().any(|c| c.contains("a=t,f=100")), "{out:?}");
@@ -1017,14 +1013,12 @@ fn saving_a_go_file_runs_gofmt_first() {
     }
     let d = temp_dir("gofmt");
     let file = d.0.join("main.go");
-    // Four-space indentation, which gofmt writes as tabs.
     let spaces = "package main\n\nfunc main() {\n    println(1)\n}\n";
     fs::write(&file, spaces).unwrap();
     let mut ed = test_ed(spaces);
     ed.bs_mut().buf.name = Some(file.clone());
     ed.text_w = 60;
     ed.text_h = 20;
-    // ^O then Enter: the prompt is pre-filled with the file's own name.
     press(&mut ed, KeyCode::Char('o'), Mods::CTRL);
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     let written = fs::read_to_string(&file).unwrap();
@@ -1035,8 +1029,6 @@ fn saving_a_go_file_runs_gofmt_first() {
     assert!(!written.contains("    println"), "{written:?}");
     assert_eq!(lines(&ed).join("\n") + "\n", written);
     assert!(!ed.bs().buf.modified, "and the save landed");
-    // One undo step takes the formatting back, which is why the buffer is
-    // replaced as an edit.
     press(&mut ed, KeyCode::Char('u'), Mods::ALT);
     assert!(
         lines(&ed).join("\n").contains("    println(1)"),
@@ -1074,7 +1066,6 @@ fn a_folder_opens_as_a_listing_and_ret_enters_it() {
     assert!(ed.bs().read_only, "a listing is a view, not a document");
     assert_eq!(lines(&ed), vec!["src/", "README.md"]);
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
-    // RET enters: the folder in place, the file as a file.
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(ed.bs().buf.name.as_deref(), Some(src.as_path()));
     assert_eq!(lines(&ed), vec!["deep/", "main.rs"]);
@@ -1481,7 +1472,6 @@ fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
         sink.borrow_mut().push(e.clone());
         Ok("sent".into())
     }));
-    // The cursor on `src/` (dirs sort first): the entry is that folder, at line 1.
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     {
         let g = got.borrow();
@@ -1493,7 +1483,6 @@ fn sending_from_a_listing_sends_the_entry_under_the_cursor() {
         );
         assert!(!g[0].modified);
     }
-    // On a file row: that file, and the view's rows as the selection when marked.
     ed.bs_mut().cursor = Pos { row: 1, col: 0 };
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     {
@@ -1566,8 +1555,6 @@ fn a_timestamp_only_change_says_so_in_the_diff() {
             .contains("only the file's timestamp")
     );
 }
-
-// Undo/redo protective tests.
 
 fn press_text(ed: &mut Editor, s: &str) {
     for c in s.chars() {
@@ -2186,7 +2173,6 @@ fn tab_aligns_to_next_unit_mid_line() {
 
 #[test]
 fn tab_uses_tab_char_when_file_does() {
-    // `indent = auto` follows the file: a tab-indented buffer gets a tab.
     let mut ed = test_ed("\ta\n\tb\n\n");
     ed.config.indent = config::Indent::Auto;
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
@@ -2196,7 +2182,6 @@ fn tab_uses_tab_char_when_file_does() {
 
 #[test]
 fn tab_inserts_the_configured_unit_by_default() {
-    // Four spaces in a tab-indented file: the setting wins.
     let mut ed = test_ed("\ta\n\tb\n\n");
     ed.bs_mut().cursor = Pos { row: 2, col: 0 };
     press(&mut ed, KeyCode::Tab, Mods::NONE);
@@ -2450,9 +2435,7 @@ fn scroll_x_follows_cursor() {
 
 #[test]
 fn scroll_x_with_tabs() {
-    // cursor col 3 → display col 9; 9 >= 0 + 4 → scroll_x = 9 + 1 - 4
     let mut ed = test_ed("a\tb");
-    // The tab width is named: this test is about the arithmetic given one.
     ed.tab_width = 8;
     ed.wrap = false; // horizontal scrolling needs wrap off
     ed.show_line_numbers = false;
@@ -2500,14 +2483,12 @@ fn wrap_table_and_motion_handle_wide_characters() {
         "10 columns / 4 per row = 3 visual rows"
     );
     assert_eq!(ed.seg_count(0), 3);
-    // Segments begin at chars 0, 2, 4 — display cols 0, 4, 8.
     assert_eq!(ed.seg_chars(0, 0), (0, 2));
     assert_eq!(ed.seg_chars(0, 1), (2, 4));
     assert_eq!(ed.seg_chars(0, 2), (4, 5));
     assert_eq!(ed.seg_disp(0, 0), (0, 4));
     assert_eq!(ed.seg_disp(0, 1), (4, 8));
     assert_eq!(ed.seg_disp(0, 2), (8, 10));
-    // A char col maps to its visual row and to its offset inside it.
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 0 }), 0);
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 1 }), 0);
     assert_eq!(ed.visual_pos(Pos { row: 0, col: 2 }), 1);
@@ -2536,22 +2517,18 @@ fn mouse_pos_maps_wide_columns_to_the_clicked_character() {
     ed.show_line_numbers = false;
     ed.text_w = 4;
     ed.ensure_wrap_prefix();
-    // Pane column 1 is the left cell of 中; column 3 is inside 文.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 1)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 0 });
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 1 });
-    // Pane row 2 is the second visual row: its column 3 is inside 语.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 3 });
-    // Past the last cell of the final row → end of line.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 5 });
 }
 
 #[test]
 fn wheel_scrolls_wide_rows_by_visual_row() {
-    // 5 CJK chars in a 4-column view is 3 visual rows; a notch moves three of them.
     let mut ed = test_ed("中文字语言\nx");
     ed.show_line_numbers = false;
     ed.text_w = 4;
@@ -2559,13 +2536,11 @@ fn wheel_scrolls_wide_rows_by_visual_row() {
     ed.ensure_wrap_prefix();
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3, "one buffer row is three visual rows");
-    // The cursor is pinned onto the edge it would have crossed.
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
 }
 
 #[test]
 fn wrap_prefix_counts_visual_rows() {
-    // view_w 10: row 0 (25 cols) → 3 visual rows, row 1 (5) → 1, row 2 (15) → 2.
     let mut ed = test_ed(&format!(
         "{}\n{}\n{}",
         "a".repeat(25),
@@ -2640,19 +2615,16 @@ fn open_at_opens_switches_and_never_discards_unsaved_edits() {
     fs::write(&b, "b1\nb2\nb3\nb4\n").unwrap();
     let mut ed = Editor::new(Buffer::from_file(&a).unwrap(), config::Config::default());
     ed.text_h = 10;
-    // Single-buffer, but the current buffer is modified: b gets its own.
     press_text(&mut ed, "X");
     ed.open_at(&b, 3, Some(2)).expect("open");
     assert_eq!(ed.buffers.len(), 2, "the edited buffer was kept");
     assert_eq!(ed.bs().buf.name.as_deref(), Some(b.as_path()));
     assert_eq!(ed.bs().cursor, Pos { row: 2, col: 1 });
     assert!(!ed.config.multibuffer, "the config is as it was");
-    // Already open: switch, and position.
     ed.open_at(&a, 2, None).expect("switch");
     assert_eq!(ed.bs().buf.name.as_deref(), Some(a.as_path()));
     assert_eq!(lines(&ed)[0], "Xa1", "the edit is still there");
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 0 });
-    // A missing file is an error, and nothing changes.
     assert!(ed.open_at(&d.0.join("missing.txt"), 1, None).is_err());
     assert_eq!(ed.buffers.len(), 2);
 }
@@ -2681,7 +2653,6 @@ fn m_s_sends_the_file_the_cursor_and_the_selection() {
     use std::rc::Rc;
     let mut ed = test_ed("fn a() {\n    body();\n}");
     ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_send.rs"));
-    // No host yet: it says so.
     press(&mut ed, KeyCode::Char('s'), Mods::ALT);
     assert!(ed.status_text().unwrap().starts_with("Nowhere to send"));
     let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
@@ -2725,7 +2696,6 @@ fn send_command_gets_the_event_as_json_and_in_its_environment() {
         modified: false,
     };
     assert_eq!(send(&e).unwrap(), "Sent line 4, column 2");
-    // The command runs on its own; wait for what it wrote.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !out.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -2751,7 +2721,6 @@ fn a_startup_position_is_centred() {
     ed.apply_startup_pos();
     assert_eq!(ed.bs().cursor, Pos { row: 249, col: 0 });
     assert_eq!(ed.bs().goto, None, "applied once");
-    // Centred: text_h/2 = 10 rows above, so the target is on pane row 11.
     assert_eq!(ed.bs().scroll, 239, "249 - text_h/2");
     let vis = ed.visual_pos(Pos { row: 249, col: 0 });
     assert_eq!(
@@ -2770,7 +2739,6 @@ fn centring_clamps_at_both_ends() {
     ed.ensure_wrap_prefix();
     ed.apply_startup_pos();
     assert_eq!(ed.bs().scroll, 0, "no blank space above the first line");
-    // And near the end, the last screenful.
     let mut ed = ed_with_lines(100);
     ed.text_h = 20;
     ed.bs_mut().goto = Some(Pos { row: 99, col: 0 });
@@ -2824,7 +2792,6 @@ fn a_position_waits_for_its_row_to_arrive() {
         }),
         "still pending"
     );
-    // Now the row arrives.
     ed.bs_mut()
         .buf
         .extend_rows((0..1_000_000).map(|i| format!("r{i}").chars().collect()));
@@ -2881,7 +2848,6 @@ fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
             })
             .collect();
         ed.bs_mut().buf.extend_rows(added);
-        // What the loader does: only the first batch overlaps the seed.
         ed.bs_mut().wrap_extend_from = Some(if was <= 1 { 0 } else { was });
         ed.bs_mut().edit_gen = ed.bs().edit_gen.wrapping_add(1);
         ed.ensure_wrap_prefix();
@@ -2913,7 +2879,6 @@ fn the_extended_wrap_table_agrees_with_a_full_rebuild() {
 
 #[test]
 fn the_incremental_wrap_table_agrees_with_a_full_rebuild() {
-    // Typing re-measures one row and re-sums; a multi-row edit rebuilds everything.
     let text: String = (0..40)
         .map(|i| format!("{}{}\n", i, "x".repeat(i * 3)))
         .collect();
@@ -2945,7 +2910,6 @@ fn the_incremental_wrap_table_agrees_with_a_full_rebuild() {
 
 #[test]
 fn a_row_that_stops_wrapping_is_still_measured_once() {
-    // The dirty-row path must notice a row that shrinks back under the viewport.
     let mut ed = test_ed(&format!("{}\nshort", "a".repeat(30)));
     ed.show_line_numbers = false;
     ed.text_w = 10;
@@ -2975,22 +2939,18 @@ fn scrolling_far_re_highlights_the_new_viewport() {
     ed.text_w = 60;
     ed.text_h = 20;
     ed.ensure_wrap_prefix();
-    // The frame at the top of the file.
     ed.ensure_highlight();
-    // Row 4 is `## Section 1`: an answer there means the grid was built.
     assert!(
         ed.bs().hl.style_at(Pos { row: 4, col: 0 }).is_some(),
         "the first viewport is highlighted"
     );
 
-    // Scroll a long way without touching the buffer, as PgDn does.
     let far = 1500;
     ed.bs_mut().scroll = far;
     ed.bs_mut().cursor = Pos { row: far, col: 0 };
     ed.ensure_wrap_prefix();
     ed.ensure_highlight();
 
-    // The window must cover the viewport.
     let win = ed
         .bs()
         .hl
@@ -3006,19 +2966,16 @@ fn scrolling_far_re_highlights_the_new_viewport() {
 
 #[test]
 fn an_edit_highlights_on_the_frame_not_per_key() {
-    // A big buffer is windowed, and parsed only when a frame asks.
     let text: String = (0..60_000)
         .map(|i| format!("pub fn f{i}(x: usize) -> usize {{ x + {i} }}\n"))
         .collect();
     assert!(text.len() > 2 << 20, "{} bytes", text.len());
     let mut ed = test_ed(&text);
-    // A name, so the highlighter has a language at all.
     ed.bs_mut().buf.name = Some(std::path::PathBuf::from("big.rs"));
     ed.show_line_numbers = false;
     ed.text_w = 100;
     ed.text_h = 40;
 
-    // Opening parses nothing: the grid is empty until a frame asks.
     assert_eq!(
         ed.bs().hl.styled_window(),
         None,
@@ -3026,7 +2983,6 @@ fn an_edit_highlights_on_the_frame_not_per_key() {
     );
     assert_eq!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }), None);
 
-    // The frame's call: a viewport window, not the document.
     ed.ensure_highlight();
     let win = ed
         .bs()
@@ -3041,15 +2997,12 @@ fn an_edit_highlights_on_the_frame_not_per_key() {
     );
     assert!(ed.bs().hl.style_at(Pos { row: 5, col: 0 }).is_some());
 
-    // An edit marks the grid stale and does not re-highlight; the next frame does.
     ed.bs_mut().cursor = Pos { row: 3, col: 0 };
     for _ in 0..5 {
         ed.insert_char('y');
     }
-    // Five keystrokes, one highlight — and it happens when asked.
     ed.ensure_highlight();
     assert!(ed.bs().hl.styled_window().is_some());
-    // Idempotent: asking twice is free and changes nothing.
     let before = ed.bs().hl.styled_window();
     ed.ensure_highlight();
     assert_eq!(ed.bs().hl.styled_window(), before);
@@ -3074,7 +3027,6 @@ fn wrap_disables_horizontal_scroll() {
 
 #[test]
 fn adjust_scroll_keeps_cursor_visible_with_wrap() {
-    // 10 rows × 30 cols, view 10 wide → 3 visual rows per row, 30 total.
     let text: String = (0..10)
         .map(|i| format!("{}{}\n", i, "a".repeat(29)))
         .collect();
@@ -3084,7 +3036,6 @@ fn adjust_scroll_keeps_cursor_visible_with_wrap() {
     ed.text_h = 6;
     ed.bs_mut().cursor = Pos { row: 5, col: 29 }; // visual row 5*3 + 2 = 17
     ed.adjust_scroll(ed.text_h);
-    // max_scroll = 30 - 6 = 24; scroll = 17 - 6 + 1 = 12
     assert_eq!(ed.bs().scroll, 12);
 }
 
@@ -3097,7 +3048,6 @@ fn wheel_scrolls_visual_rows_with_wrap() {
     ed.show_line_numbers = false;
     ed.text_w = 10;
     ed.text_h = 6;
-    // 30 visual rows; the cursor (visual 0) is pinned to the top edge.
     assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     assert_eq!(ed.bs().scroll, 3);
     assert_eq!(
@@ -3115,7 +3065,6 @@ fn move_up_down_cross_wrap_segments() {
     let mut ed = test_ed(&format!("{}\n{}", "a".repeat(25), "b".repeat(5)));
     ed.show_line_numbers = false;
     ed.text_w = 10;
-    // row 0 occupies visual rows 0..3; the cursor starts on row 1 (visual 3).
     ed.bs_mut().cursor = Pos { row: 1, col: 2 };
     press(&mut ed, KeyCode::Up, Mods::NONE);
     assert_eq!(
@@ -3176,10 +3125,8 @@ fn page_keys_move_visual_rows_with_wrap() {
     ed.text_h = 6;
     ed.bs_mut().cursor = Pos { row: 5, col: 0 }; // visual row 15
     press(&mut ed, KeyCode::PageUp, Mods::NONE);
-    // step 5 → visual row 10 = row 3, segment 1, col 0 → char col 10
     assert_eq!(ed.bs().cursor, Pos { row: 3, col: 10 });
     press(&mut ed, KeyCode::PageDown, Mods::NONE);
-    // back to visual row 15 = row 5, segment 0
     assert_eq!(ed.bs().cursor, Pos { row: 5, col: 0 });
 }
 
@@ -3189,15 +3136,11 @@ fn mouse_pos_maps_visual_rows_with_wrap() {
     ed.show_line_numbers = false;
     ed.text_w = 10;
     ed.text_h = 10;
-    // pane row 2 = visual row 1 = row 0, segment 1; col 3 → display col 13.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 3)));
     assert_eq!(ed.bs().cursor, Pos { row: 0, col: 13 });
-    // pane row 4 = visual row 3 = row 1, segment 0.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 4, 2)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
 }
-
-// tick_status reports whether it cleared visible state.
 
 #[test]
 fn tick_status_reports_clear() {
@@ -3210,8 +3153,6 @@ fn tick_status_reports_clear() {
     assert!(ed.status.is_none());
     assert!(!ed.tick_status());
 }
-
-// Editor::new takes a Config; tab_width/line_numbers seed from it.
 
 #[test]
 fn config_tab_width_used() {
@@ -3245,8 +3186,6 @@ fn config_line_numbers_seeded() {
     assert_eq!(ed.config.indent_size, 4, "and a Tab inserts four spaces");
 }
 
-// Auto-indent carries the line's leading whitespace onto the new row.
-
 #[test]
 fn auto_indent_copies_indent() {
     let mut buf = Buffer::new();
@@ -3266,7 +3205,6 @@ fn auto_indent_copies_indent() {
 /// claim is checked against a reference reaching every branch.
 #[test]
 fn indent_unit_matches_the_reference_scan() {
-    /// The literal reading: collect every count, sort, fold the GCD.
     fn reference(text: &str) -> String {
         let lines: Vec<&str> = text.split('\n').collect();
         if lines.iter().any(|l| l.starts_with('\t')) {
@@ -3338,13 +3276,11 @@ fn auto_indent_off_by_config() {
 
 #[test]
 fn auto_indent_on_by_default_and_electric_after_brace() {
-    // Default config: Enter carries the indent...
     let mut ed = test_ed("    foo");
     ed.bs_mut().cursor = Pos { row: 0, col: 7 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     assert_eq!(lines(&ed), vec!["    foo", "    "]);
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 4 });
-    // ...and an opening brace indents one unit deeper.
     let mut ed = test_ed("    if x {");
     ed.bs_mut().cursor = Pos { row: 0, col: 10 };
     press(&mut ed, KeyCode::Enter, Mods::NONE);
@@ -3358,18 +3294,14 @@ fn mouse_click_drag_and_wheel() {
     ed.show_line_numbers = true;
     ed.text_w = 40;
     ed.text_h = 10;
-    // Click on "world" (pane row 2, col 2; gutter is 3 wide).
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 5)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 2 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // Drag extends the selection (pane col 4 → disp 1 → char col 1).
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 2, 4)));
     assert_eq!(ed.bs().cursor, Pos { row: 1, col: 1 });
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // The button coming up keeps a selection that was actually dragged.
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 2, 4));
     assert_eq!(ed.bs().mark, Some(Pos { row: 1, col: 2 }));
-    // Title row and status/bar rows are ignored.
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 0, 3)));
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 22, 3)));
 }
@@ -3391,7 +3323,6 @@ fn a_click_arms_no_selection_for_the_wheel_to_grow() {
     );
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 3, 1));
     assert_eq!(ed.bs().mark, None, "a click is not a selection");
-    // Scroll back and forth: the wheel pins the edit point, and no anchor is left.
     for _ in 0..4 {
         assert!(ed.handle_mouse(me(MouseKind::WheelDown, 0, 0)));
     }
@@ -3419,7 +3350,6 @@ fn a_click_on_the_cursor_itself_toggles_the_mark() {
         Some(c),
         "and the release keeps what was asked for"
     );
-    // Clicking there again toggles it off, release or no release.
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 1, c.col as u16)));
     assert_eq!(ed.bs().mark, None);
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 1, c.col as u16));
@@ -3447,13 +3377,11 @@ fn the_wheel_scrolls_a_preview_and_leaves_the_text_under_it_alone() {
         was,
         "the text under it did not move"
     );
-    // A click is not the text's either: the view has nothing to point at.
     assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 3)));
     assert_eq!(ed.bs().mark, None);
     assert_eq!(ed.bs().cursor, was.1);
 }
 
-// Wheel scrolls the viewport; the cursor is pulled along only at the edge.
 #[test]
 fn mouse_wheel_scrolls_view_not_cursor() {
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
@@ -3487,8 +3415,6 @@ fn mouse_wheel_scrolls_view_not_cursor() {
     assert_eq!(ed.bs().cursor.row, 25);
 }
 
-// expand_tilde: only a leading ~ (exactly "~" or "~/") expands.
-
 #[test]
 fn expand_tilde_home() {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -3503,8 +3429,6 @@ fn expand_tilde_leaves_paths() {
     assert_eq!(expand_tilde("~user/x"), "~user/x");
     assert_eq!(expand_tilde(""), "");
 }
-
-// Prompt history: Up cycles back, Down forward; past the newest restores the draft.
 
 #[test]
 fn search_history_cycles() {
@@ -3550,8 +3474,6 @@ fn prompt_history_skips_empty() {
     assert!(ed.file_hist.is_empty());
 }
 
-// Tab completes file paths in the path prompts.
-
 #[test]
 fn complete_path_fixture() {
     let d = temp_dir("cmpl");
@@ -3590,8 +3512,6 @@ fn tab_completes_in_prompt() {
     assert_eq!(p.text, format!("{}/alpha", d.0.display()));
     assert!(ed.prompt.is_some());
 }
-
-// M-b / M-f / Ctrl+Left / Ctrl+Right are word motion inside prompts.
 
 #[test]
 fn prompt_word_motion() {

@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn regex_multibyte_char_cols() {
-        // 'é' sits BEFORE the match: its 2-byte encoding must remap to char
+        // 'é' sits before the match: its 2-byte encoding must remap to char
         // col 1, not leave the highlight at byte offset 2.
         let ls = lines("éa");
         let m = Matcher::regex("a", true).expect("valid pattern");

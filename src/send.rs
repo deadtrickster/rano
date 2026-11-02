@@ -1,14 +1,10 @@
 //! What the editor hands a host when the reader sends their place: the file,
-//! the cursor, and the selection if there is one.
+//! the cursor, and the selection if there is one. The editor's side is the
+//! `Editor::on_send` callback; the binary's runs the configured
+//! `send_command` with [`SendEvent::to_json`] on its stdin.
 //!
-//! The editor's side is a callback (`Editor::on_send`); this is the value it is
-//! called with, in the library so a host and the editor share one definition.
-//! The standalone binary's callback runs the configured `send_command` with
-//! [`SendEvent::to_json`] on its stdin.
-//!
-//! Positions are **1-based** lines and columns, the way a compiler error, a grep
-//! hit or `$EDITOR +line` counts them, and a column counts characters (Unicode
-//! scalar values), not bytes or display cells.
+//! Positions are 1-based lines and columns (the way a compiler error or
+//! `$EDITOR +line` counts them); a column counts characters, not bytes.
 
 use std::path::PathBuf;
 

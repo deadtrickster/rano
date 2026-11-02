@@ -1,6 +1,6 @@
-//! LSP session control (D4/D5): start/restart the server to match the
-//! current buffer, adopt async handshakes, debounce didChange flushes, and
-//! surface diagnostics (status line summary + M-D jump).
+//! LSP session control: start/restart the server to match the current
+//! buffer, adopt async handshakes, debounce didChange flushes, and surface
+//! diagnostics (status line summary + M-D jump).
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -14,10 +14,8 @@ use crate::syntax;
 
 impl Editor {
     /// Send the pending didChange once the 300 ms debounce window has
-    /// elapsed. The flag is cleared even when no client is attached, so a
-    /// later handshake never sends a stale extra change (the adopt path in
-    /// lsp_poll re-flags dirty to catch up with the current text). Returns
-    /// whether a change actually went out (dirty-draw, D6).
+    /// elapsed. The flag is cleared even with no client attached, so a later
+    /// handshake never sends a stale change. Returns whether one went out.
     pub(crate) fn lsp_flush(&mut self, now: Instant) -> bool {
         let bs = self.bs_mut();
         if !bs.lsp_dirty || now < bs.lsp_last_send + Duration::from_millis(300) {
@@ -39,10 +37,8 @@ impl Editor {
     /// file name and language. Stops it for scratch/unsupported files.
     pub(crate) fn lsp_sync(&mut self) {
         let bs = self.bs_mut();
-        // **A view starts no language server**, and one it had goes: the rows are a rendering, and
-        // a server handed a rendering would report diagnostics about a document that is not the
-        // file. (Today a directory's name detects no language, so this is the rule rather than the
-        // luck; a provider that renders a *file* would otherwise get a server.)
+        // A view starts no language server: a server handed a rendering
+        // would report diagnostics about a document that is not the file.
         if bs.synthetic {
             if bs.lsp.take().is_some() {
                 bs.lsp_diags.clear();
@@ -116,9 +112,8 @@ impl Editor {
     }
 
     /// Adopt a finished async handshake, then drain LSP notifications into
-    /// `lsp_diags`. Rano has a single open document, so the latest report
-    /// for it is simply the latest one. Returns whether diagnostics were
-    /// replaced (dirty-draw, D6).
+    /// `lsp_diags`; one open document, so the latest report is the latest
+    /// one. Returns whether diagnostics were replaced.
     pub(crate) fn lsp_poll(&mut self) -> bool {
         let mut dirty = false;
         let pending = self.bs_mut().lsp_starting.take();

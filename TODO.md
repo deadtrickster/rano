@@ -7,6 +7,25 @@ Conventions: editor tests use `test_ed`/`press`/`lines` (`src/ed_tests.rs:23`). 
 `handle_prompt_key`, alt and ctrl arms come before the modifier-blind `Char`/`Left` arms,
 otherwise `M-b`, `M-f` and the rest type letters.
 
+## From the 0.10.0 review
+
+Evidence and the reasoning are in [the review record](docs/review/2026-11-03-release-0.10.md).
+
+- `M-|` blocks the UI with no deadline (`src/exec_ctrl.rs:129`). Move the filter onto the polled
+  job path with a deadline; Esc kills the process group.
+- One overlay state for keys, dispatch, drawing and the cursor, instead of eight independent
+  `Option`s whose priority is encoded in `src/keys.rs`, `src/commands.rs` and `src/ui.rs`.
+- Split `write_file` into the bytes to write (formatted and hooked on a clone) and the state after
+  success; replace `quit_after_save`/`close_after_save` with one enum.
+- A wrap table updated per row: `newline` and other unnamed edits rebuild every row.
+- One table each for prompt submit and prompt answer; drop both `_ => {}` arms in `src/prompt.rs`.
+- Scope plugin `read_dir` to the opened file's tree (`src/plugin.rs:310`).
+- An undo budget in bytes, not only 500 steps (`src/editor.rs:936`).
+- Cap the tail window for a newline-free file (`src/loader.rs:234`) and LSP `Content-Length`
+  (`src/lsp.rs:266`); notice a dead LSP server.
+- Run `cargo test` in the release job, and the ignored `tests/stale_range_sweep.rs` in CI.
+- Wall-clock test budgets (2 s, 10 s) fail under a 32-way parallel `cargo test`; they pass alone.
+
 ## Crashes and data loss
 
 - Completion popup underflows on a narrow terminal. `src/ui.rs:630` `w - 2 - label - tag` and

@@ -12,7 +12,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// One measured file.
 struct Sample {
     label: String,
     path: PathBuf,
@@ -137,7 +136,6 @@ fn bench() {
         e.show_line_numbers = true;
         e.ensure_wrap_prefix();
         e.adjust_scroll(text_h);
-        // Put the cursor somewhere real, mid-document.
         let mid = e.bs().buf.row_count() / 2;
         e.bs_mut().cursor = crate::buffer::Pos { row: mid, col: 0 };
         e.adjust_scroll(text_h);
@@ -215,12 +213,10 @@ fn bench_breakdown() {
             e.bs_mut().hl.refresh(&buf);
         });
         println!("    {:>22}  {}", "hl.refresh (whole doc)", ms(t));
-        // The edit alone: the buffer mutation and the undo snapshot.
         let (t, _) = time(3, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
         });
         println!("    {:>22}  {}", "edit only", ms(t));
-        // The frame's highlight, which is where the remaining cost lives.
         let (t, _) = time(3, || {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
@@ -235,7 +231,6 @@ fn bench_breakdown() {
             e.ensure_wrap_prefix();
         });
         println!("    {:>22}  {}", "wrap table (re-sum)", ms(t));
-        // The undo snapshot: `begin_action` copies the affected rows.
         let (t, _) = time(3, || {
             let bs = e.bs_mut();
             let r = bs.cursor.row;
@@ -520,7 +515,6 @@ fn bench_cold_open() {
         }
         let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 
-        // Nothing on screen until the whole file is read, decoded and drawn.
         let t = Instant::now();
         let buf = Buffer::from_file(p).expect("read");
         let mut e = Editor::new(buf, config::Config::default());
@@ -540,7 +534,6 @@ fn bench_cold_open() {
         std::thread::spawn(move || {
             let _ = tx.send(Buffer::from_file(&path_buf).expect("worker read"));
         });
-        // The first frame the user sees: an empty buffer, immediately.
         let mut e = Editor::new(Buffer::new(), config::Config::default());
         e.text_w = 120;
         e.text_h = 36;
@@ -570,7 +563,6 @@ fn bench_cold_open() {
 #[test]
 #[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
 fn bench_first_screen() {
-    /// A viewport's worth of rows.
     const ROWS: usize = 40;
     /// Read granularity: one page-cache-friendly read, ~800 rows of a log.
     const CHUNK: usize = 64 * 1024;
@@ -593,7 +585,6 @@ fn bench_first_screen() {
         }
         let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 
-        // Time to the first screen: read chunk by chunk, decode, stop at ROWS.
         let (t_screen, bytes_read) = {
             use std::io::Read as _;
             let mut f = fs::File::open(p).expect("open");
@@ -621,7 +612,6 @@ fn bench_first_screen() {
             (t.elapsed(), total)
         };
 
-        // The whole file, for contrast.
         let t = Instant::now();
         let whole = Buffer::from_file(p).expect("read");
         let whole_t = t.elapsed();
@@ -648,7 +638,6 @@ fn bench_first_screen() {
             }
             n_reads
         });
-        // Let it get going, then cancel.
         std::thread::sleep(Duration::from_millis(5));
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let cancel_latency = t.elapsed();
@@ -991,7 +980,6 @@ fn bench_lazy_is_correct_and_cheap() {
         cols.extend((0..lazy.rows()).map(|r| (r, r)));
         let mut mismatch = 0usize;
         let mut checked = 0usize;
-        // Whole-file decode in one call, then compare row for row.
         if lazy.rows() > 0 {
             let all = lazy
                 .decode(0, lazy.rows().saturating_sub(1))
@@ -1033,7 +1021,6 @@ fn bench_lazy_is_correct_and_cheap() {
                 if from_index != from_chars {
                     seg_mismatch += 1;
                 }
-                // And the char count itself, for every row, not just narrow ones.
                 if lazy.char_count(r) != Some(eager.row(r).len() as u64) {
                     chars_mismatch += 1;
                 }
@@ -1366,7 +1353,6 @@ fn bench_chunked_fixes_the_scaling() {
         for r in 0..rows {
             assert_eq!(ch.row(r), buf.row(r).as_slice(), "row {r} differs");
         }
-        // Insert in the middle and confirm the shift is exact.
         let mid = rows / 2;
         ch.insert(mid, vec!['Z']);
         assert_eq!(ch.rows(), rows + 1);
@@ -1428,7 +1414,6 @@ fn bench_scroll_profile() {
     e.text_h = 36;
     let mut terminal = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 40));
 
-    // The first frame (open + first window highlight).
     let t = Instant::now();
     e.ensure_wrap_prefix();
     e.ensure_highlight();
@@ -1445,7 +1430,6 @@ fn bench_scroll_profile() {
         e.handle_mouse(me(crate::term::MouseKind::WheelDown))
     };
 
-    // One pass: scroll to the bottom, then back to the top, timing every frame.
     let rows = e.bs().buf.row_count();
     let notches = (rows / 3) + 1;
     println!(
@@ -1561,7 +1545,6 @@ fn bench_threshold_cliff() {
         e.text_w = 120;
         e.text_h = 36;
 
-        // The whole document, directly.
         let (t_whole, _) = time(3, || {
             e.bs_mut().hl.refresh(&buf);
         });
@@ -1570,7 +1553,6 @@ fn bench_threshold_cliff() {
             e.handle_key(KeyEvent::new(KeyCode::Char('x'), Mods::NONE));
             e.ensure_highlight();
         });
-        // And a viewport window, for comparison.
         let (t_win, _) = time(3, || {
             let win = crate::syntax::Window::rows(rows / 2, rows / 2 + 80);
             e.bs_mut().hl.refresh_window(&buf, win);

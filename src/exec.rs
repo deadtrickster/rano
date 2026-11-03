@@ -18,12 +18,19 @@ struct Pipe {
 }
 
 impl Pipe {
-    /// Take whatever has arrived; `closed` once the reader thread has gone.
+    /// Take whatever has arrived, never dropping a chunk that lands mid-poll; `closed`
+    /// once the reader thread has gone.
     fn poll(&mut self) {
-        while let Ok(chunk) = self.rx.try_recv() {
-            self.bytes.extend_from_slice(&chunk);
+        loop {
+            match self.rx.try_recv() {
+                Ok(chunk) => self.bytes.extend_from_slice(&chunk),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.closed = true;
+                    break;
+                }
+            }
         }
-        self.closed = matches!(self.rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     }
 
     fn take_text(&mut self) -> String {
@@ -155,6 +162,16 @@ mod tests {
         let (code, out, _err) = wait_finish(&mut job);
         assert_eq!(code, Some(1));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn many_chunks_all_arrive() {
+        // The reader sends a message per read: a poll that drops one loses output.
+        let mut job = spawn_job("seq 1 200000", 0).expect("spawn seq");
+        let (code, out, _err) = wait_finish(&mut job);
+        assert_eq!(code, Some(0));
+        assert_eq!(out.lines().count(), 200_000, "every line arrived");
+        assert!(out.ends_with("200000\n"), "the last line is there");
     }
 
     #[test]

@@ -869,6 +869,29 @@ fn a_markdown_preview_in_a_wide_pane_keeps_a_readable_column_centred() {
 }
 
 #[test]
+fn a_wide_code_block_gives_up_margin_to_stay_on_screen() {
+    let code = format!("{}\n{}", "x".repeat(20), "y".repeat(200));
+    let mut ed = test_ed(&format!("Prose.\n\n```\n{code}\n```\n\n```\nshort\n```\n"));
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_code.md"));
+    ed.text_w = 240;
+    ed.text_h = 30;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rows = diff_view_text(&ed);
+    let margin = |needle: &str| {
+        let r = rows.iter().find(|r| r.contains(needle)).unwrap();
+        r.len() - r.trim_start().len()
+    };
+    assert_eq!(margin("Prose."), 70, "{rows:?}");
+    assert_eq!(margin("yyyy"), 240 - 202, "fits the frame: {rows:?}");
+    assert_eq!(margin("xxxx"), margin("yyyy"), "one block: {rows:?}");
+    assert_eq!(
+        margin("short"),
+        70,
+        "a narrow block keeps the column: {rows:?}"
+    );
+}
+
+#[test]
 fn a_markdown_preview_draws_the_pictures_the_document_names() {
     let d = temp_dir("md_img");
     write_png(&d.0.join("sun.png"), SUN_PNG_W, SUN_PNG_H);

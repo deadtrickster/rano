@@ -125,7 +125,7 @@ impl DiffView {
                     &crate::markdown::RenderOptions::default(),
                 );
                 splice_pictures(&mut rows, images, column);
-                indent(&mut rows, margin);
+                indent(&mut rows, margin, width);
                 rows
             }
             Source::Picture {
@@ -243,12 +243,30 @@ fn prose_column(width: usize) -> (usize, usize) {
     (column, (width - column) / 2)
 }
 
-fn indent(rows: &mut [Line], margin: usize) {
+/// Code is not wrapped, so a frame wider than the column gives up as much of
+/// the margin as it needs to stay on screen, and moves as one block.
+fn indent(rows: &mut [Line], margin: usize, width: usize) {
     if margin == 0 {
         return;
     }
-    for row in rows.iter_mut().filter(|r| !r.spans.is_empty()) {
-        row.spans.insert(0, Span::raw(" ".repeat(margin)));
+    let mut i = 0;
+    while i < rows.len() {
+        let mut end = i + 1;
+        if rows[i].plain().starts_with("┌─") {
+            while end < rows.len() && !rows[end - 1].plain().starts_with("└─") {
+                end += 1;
+            }
+        }
+        let widest = rows[i..end]
+            .iter()
+            .map(|r| crate::width::text::width(&r.plain()))
+            .max()
+            .unwrap_or(0);
+        let pad = margin.min(width.saturating_sub(widest));
+        for row in rows[i..end].iter_mut().filter(|r| !r.spans.is_empty()) {
+            row.spans.insert(0, Span::raw(" ".repeat(pad)));
+        }
+        i = end;
     }
 }
 

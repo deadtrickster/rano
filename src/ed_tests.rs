@@ -194,6 +194,71 @@ fn save_preserves_crlf() {
     assert_eq!(ed.bs().buf.name, Some(out));
 }
 
+#[test]
+fn a_save_keeps_the_files_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = temp_dir("save_mode");
+    let f = d.0.join("run.sh");
+    fs::write(&f, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o750)).unwrap();
+    let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+    press_text(&mut ed, "X");
+    ed.save_to(f.clone());
+    assert_eq!(fs::read(&f).unwrap(), b"X#!/bin/sh\n");
+    let mode = fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o750, "the mode survives the rename");
+}
+
+#[test]
+fn a_failed_save_leaves_the_file_and_no_temp_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = temp_dir("save_readonly");
+    let f = d.0.join("f.txt");
+    fs::write(&f, "one\ntwo\n").unwrap();
+    let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+    press_text(&mut ed, "X");
+    fs::set_permissions(&d.0, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root writes into a read-only directory, so there is no failing save to test.
+    let root = fs::write(d.0.join("probe"), b"x").is_ok();
+    if root {
+        let _ = fs::remove_file(d.0.join("probe"));
+        fs::set_permissions(&d.0, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    ed.save_to(f.clone());
+    fs::set_permissions(&d.0, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        fs::read(&f).unwrap(),
+        b"one\ntwo\n",
+        "the original is intact"
+    );
+    let left: Vec<_> = fs::read_dir(&d.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left.len(), 1, "no temp file left behind: {left:?}");
+    assert!(ed.bs().buf.modified, "still unsaved");
+}
+
+#[test]
+fn a_save_through_a_symlink_keeps_the_link() {
+    let d = temp_dir("save_symlink");
+    let real = d.0.join("real.txt");
+    fs::write(&real, "one\n").unwrap();
+    let link = d.0.join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut ed = Editor::new(Buffer::from_file(&link).unwrap(), config::Config::default());
+    press_text(&mut ed, "X");
+    ed.save_to(link.clone());
+    assert_eq!(
+        fs::read(&real).unwrap(),
+        b"Xone\n",
+        "the bytes went through"
+    );
+    let meta = fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink(), "the link is still a link");
+}
+
 /// A file read into an editor, then rewritten on disk behind its back.
 fn externally_changed(tag: &str) -> (TempDir, PathBuf, Editor) {
     let d = temp_dir(tag);

@@ -28,9 +28,6 @@ Evidence and the reasoning are in [the review record](docs/review/2026-11-03-rel
 
 ## Crashes and data loss
 
-- Saves are not atomic. `src/editor.rs:3216` is a plain `fs::write`, so a crash or full disk
-  truncates the file. Write `<file>.tmp`, flush, copy the mode, `rename`, then update
-  `disk`/`name`. Test that the mode is kept and no tmp file is left.
 - A second `^T` orphans the first child. `src/exec_ctrl.rs:28` overwrites `exec_job` and
   `ExecJob` has no `Drop`. Kill and wait the old job, and kill a running job on quit.
 - `^T` and `M-|` have no timeout, and `M-|` blocks the UI on `wait_with_output`

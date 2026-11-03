@@ -1,7 +1,6 @@
-//! The reader, tested natively: the three exports are one line of glue over
-//! `reader::view`, `reader::picture` and `reader::key`. The fake renderer is the point
-//! of the [`Render`] seam — a document of a known page count, so "a page past the
-//! end" is a case a test can make.
+//! The reader, tested natively: the three exports are one line of glue over `view`, `picture` and
+//! `key`. The fake renderer is the point of the [`Render`] seam — a document of a known page count,
+//! so "a page past the end" is a case a test can make.
 
 use rano_plugin_pdf::cache;
 use rano_plugin_pdf::reader::{self, Answer, HINT, Mode, Render, State, view};
@@ -299,10 +298,9 @@ fn a_page_opens_at_the_size_of_the_pane() {
 #[test]
 fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
     let _fresh = fresh();
-    // A buffer under the cap makes the host answer "it needs this many bytes"
-    // instead of refusing; the reader reads the page's area off that and asks again
-    // lower. Landscape, because a portrait page in this pane is a thumbnail shown as
-    // text instead.
+    // A buffer under the cap makes the host answer "it needs this many bytes" instead of
+    // refusing; the page's area says which dpi fits. Landscape, because a portrait page in this
+    // pane is a thumbnail shown as text instead.
     let mut fake = Fake::paper(1, 11.69, 8.27);
     // Room for the FLOOR dpi, which is the host's minimum (24): A4 at 24 dpi is ~166 KiB, so a
     // 64 KiB buffer makes the floor itself too big and the reader gives up instead of fitting.
@@ -331,10 +329,9 @@ fn a_page_too_big_for_the_buffer_is_rendered_again_smaller() {
 #[test]
 fn a_page_above_the_cap_is_rendered_at_the_dpi_that_fits() {
     let _fresh = fresh();
-    // A4 at 300 dpi is 26 MiB of RGB, above the cap, and the host refuses it exactly
-    // as it refuses a page that is not there; the floor dpi is where an existing
-    // page always fits, so asking there separates the two. Landscape for the same
-    // reason as above.
+    // A4 at 300 dpi is 26 MiB of RGB, above the cap, and the host refuses it exactly as it refuses
+    // a page that is not there; the floor dpi is where an existing page always fits, so asking there
+    // separates the two. Landscape for the same reason as above.
     let mut fake = Fake::paper(1, 11.69, 8.27);
     let mut out = vec![0u8; reader::PAGE_BYTES];
     reader::picture("a4.pdf#z=300", 80, 24, &mut fake, &mut out, &mut []).expect("a sharp page");

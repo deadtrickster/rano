@@ -1,7 +1,6 @@
-//! A picture read off the disk, for M-P's picture view and a markdown preview's
-//! `![…](path)`: the bytes the kitty protocol carries, and the cell size they are cut
-//! to. The terminal decodes PNG and nothing else, so another format is converted by a
-//! program on the machine — a rasterizer in the binary is what the operator ruled out.
+//! A picture read off the disk, for M-P's picture view and a markdown preview's `![…](path)`: the
+//! bytes the kitty protocol carries and the cell size they are cut to. The terminal decodes PNG and
+//! nothing else, so another format goes through a converter on the machine.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

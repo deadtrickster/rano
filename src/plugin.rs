@@ -123,10 +123,9 @@ impl Plugin {
         Self::from_bytes_hooks(bytes, path, caps, &[])
     }
 
-    /// [`Self::from_bytes`] with capabilities and the **hook prefixes** the
-    /// host recognises: `on_`/`provider_` always, anything under `prefixes` a
-    /// text hook — `(i32, i32) -> i32`, refused here if not. The list is the
-    /// host's, not the module's; an empty prefix is ignored.
+    /// [`Self::from_bytes`] with capabilities and the hook prefixes the host recognises:
+    /// `on_`/`provider_` always, anything under `prefixes` a text hook. The list is the host's, not
+    /// the module's, and an empty prefix is ignored.
     pub fn from_bytes_hooks(
         bytes: &[u8],
         path: PathBuf,

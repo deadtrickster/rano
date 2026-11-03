@@ -50,10 +50,9 @@ pub struct Item {
     pub marker: Range<usize>,
     /// The whole `list_item`, nested sub-tasks included.
     pub item: Range<usize>,
-    /// The task's own text: from the marker's end to the end of its own line
-    /// (**the newline, not the item's end** — a `list_item` range covers its
-    /// nested children, so a title taken from `n.end` would swallow every
-    /// sub-task). Kept as a range: this module never rewrites it.
+    /// The task's own text: from the marker's end to the end of its own line, not the item's end —
+    /// a `list_item` covers its nested children, so a title taken from `n.end` would swallow every
+    /// sub-task. Kept as a range: this module never rewrites it.
     pub text: Range<usize>,
     /// The nearest enclosing task, when this is a sub-task.
     pub parent: Option<usize>,
@@ -213,10 +212,10 @@ impl Doc {
         (done, idx.len())
     }
 
-    /// Down: set `item` and every task inside it to `state`, then bring the ancestors into
-    /// line; `None` cascades over the whole document. One edit per marker whose bytes actually
-    /// change, and the `up` pass reads the states the cascade PRODUCED, not the parsed ones,
-    /// or the parent stays open after its last child is completed.
+    /// Down: set `item` and every task inside it to `state`, then bring the ancestors into line;
+    /// `None` cascades over the whole document. One edit per marker whose bytes actually change,
+    /// and the `up` pass reads the states the cascade PRODUCED, or a parent stays open after its
+    /// last child is completed.
     pub fn set_subtree(&self, item: Option<usize>, state: State) -> Vec<Edit> {
         let span = match item {
             Some(i) => match self.items.get(i) {
@@ -258,10 +257,9 @@ impl Doc {
             .map(|h| h.section.clone())
     }
 
-    /// Up, written to the file. A parent's marker is derived from its children: all done →
-    /// done, all declined → declined, otherwise → open. A leaf's marker is the operator's and
-    /// is never touched; mixed resolving to open is deliberate, since `[x]` above an open child
-    /// is the file disagreeing with itself.
+    /// Up, written to the file. A parent's marker is derived from its children: all done → done,
+    /// all declined → declined, otherwise → open. A leaf's marker is the operator's and is never
+    /// touched, and mixed resolving to open is deliberate — `[x]` above an open child disagrees.
     pub fn derive_up(&self) -> Vec<Edit> {
         let parsed: Vec<State> = self.items.iter().map(|it| it.state).collect();
         self.derive_from(&parsed)

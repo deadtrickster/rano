@@ -1,7 +1,6 @@
 //! The update check, in the editor: one request at startup, the install behind a confirmation.
-//! Shape follows the other pollers — a `start_*` that spawns a thread, a `*_poll` per iteration —
-//! so the check never blocks a frame. The notice appears when you QUIT: a notice that vanishes
-//! before it can be read is worse than none.
+//! Shape follows the other pollers — a `start_*` that spawns a thread, a `*_poll` per iteration. The
+//! notice appears when you QUIT, because one that vanishes before it can be read is worse than none.
 
 use crate::update::{self, Update};
 use std::sync::mpsc::{Receiver, TryRecvError};

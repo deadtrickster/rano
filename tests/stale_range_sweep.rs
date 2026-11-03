@@ -1,7 +1,6 @@
-//! The sweep that found the stale-range panic, kept so a future slice site cannot reintroduce it:
-//! a generated corpus of fences, quotes, lists, tables and multi-byte characters, each document
-//! through a whole `lex` and through `IncrementalMarkdown` in six delta sizes. `#[ignore]`d — run it
-//! after touching a `slice` site: `cargo test --test stale_range_sweep -- --ignored --nocapture`.
+//! The sweep that found the stale-range panic, kept so a slice site cannot reintroduce it: a corpus
+//! of fences, quotes, lists, tables and multibyte text through a whole `lex` and through
+//! `IncrementalMarkdown` in six delta sizes. `#[ignore]`d: run it after touching a `slice` site.
 use rano::markdown::parse::{IncrementalMarkdown, lex};
 
 const TOKENS: &[&str] = &[

@@ -4,20 +4,47 @@
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+/// How long the pipes get after the child exits before what arrived is taken as all of
+/// it: a grandchild can hold a pipe open for minutes.
+const READER_GRACE: Duration = Duration::from_millis(200);
+
+/// One pipe being drained by a reader thread: the bytes so far and whether it has closed.
+struct Pipe {
+    rx: Receiver<Vec<u8>>,
+    bytes: Vec<u8>,
+    closed: bool,
+}
+
+impl Pipe {
+    /// Take whatever has arrived; `closed` once the reader thread has gone.
+    fn poll(&mut self) {
+        while let Ok(chunk) = self.rx.try_recv() {
+            self.bytes.extend_from_slice(&chunk);
+        }
+        self.closed = matches!(self.rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    }
+
+    fn take_text(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.bytes)).into_owned()
+    }
+}
 
 pub struct ExecJob {
     pub child: Child,
-    /// Full stdout, sent by the reader thread.
-    pub rx: Receiver<String>,
-    /// Full stderr, sent by the reader thread.
-    pub err_rx: Receiver<String>,
+    /// stdout and stderr, drained as they arrive so a held pipe is not a hang.
+    out: Pipe,
+    err: Pipe,
     pub cmd: String,
     /// Row index (in the spawning buffer) where the output is inserted.
     pub insert_row: usize,
+    /// When the child was first seen to have exited; the reader grace runs from here.
+    exited: Option<Instant>,
 }
 
-/// Spawn `sh -c cmd`. Stdin is null; stdout and stderr each get a thread that
-/// drains to completion and sends the whole text — one message per channel.
+/// Spawn `sh -c cmd`. Stdin is null; stdout and stderr each get a thread that drains
+/// its pipe and sends the bytes on as it reads them.
 pub fn spawn_job(cmd: &str, insert_row: usize) -> std::io::Result<ExecJob> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -28,36 +55,54 @@ pub fn spawn_job(cmd: &str, insert_row: usize) -> std::io::Result<ExecJob> {
         .spawn()?;
     let out = child.stdout.take();
     let err = child.stderr.take();
-    let rx = spawn_reader(out);
-    let err_rx = spawn_reader(err);
+    let out = Pipe {
+        rx: spawn_reader(out),
+        bytes: Vec::new(),
+        closed: false,
+    };
+    let err = Pipe {
+        rx: spawn_reader(err),
+        bytes: Vec::new(),
+        closed: false,
+    };
     Ok(ExecJob {
         child,
-        rx,
-        err_rx,
+        out,
+        err,
         cmd: cmd.to_string(),
         insert_row,
+        exited: None,
     })
 }
 
-fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<String> {
+fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
+        let mut buf = [0u8; 4096];
         if let Some(mut p) = pipe {
-            let _ = p.read_to_end(&mut buf);
+            while let Ok(n) = p.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
         }
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
 }
 
 impl ExecJob {
     /// Poll the job: None while the child runs, else (exit code, stdout, stderr).
-    /// The `recv`s cannot block: the child's exit closes the pipes.
+    /// Never blocks: a pipe still held open after the child exits gets `READER_GRACE`.
     pub fn try_finish(&mut self) -> Option<(Option<i32>, String, String)> {
         let status = self.child.try_wait().ok().flatten()?;
-        let out = self.rx.recv().unwrap_or_default();
-        let err = self.err_rx.recv().unwrap_or_default();
+        let exited = *self.exited.get_or_insert_with(Instant::now);
+        self.out.poll();
+        self.err.poll();
+        if !(self.out.closed && self.err.closed) && exited.elapsed() < READER_GRACE {
+            return None;
+        }
+        let out = self.out.take_text();
+        let err = self.err.take_text();
         Some((status.code(), out, err))
     }
 }
@@ -110,5 +155,20 @@ mod tests {
         let (code, out, _err) = wait_finish(&mut job);
         assert_eq!(code, Some(1));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hold_the_finish() {
+        // `sleep 3` keeps the pipes open after `sh` exits; the grace ends the job.
+        let mut job = spawn_job("sleep 3 & echo hi", 0).expect("spawn");
+        let started = Instant::now();
+        let (code, out, _err) = wait_finish(&mut job);
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "hi");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }

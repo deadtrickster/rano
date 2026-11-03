@@ -1,24 +1,6 @@
-//! **Write a rano plugin in Rust, not in wasm.** The ABI is four exports and
-//! a few raw pointers; this crate is the safe layer over them, so a plugin is
-//! a function from `&str` to `String` and nothing else:
-//!
-//! ```no_run
-//! use rano_plugin as rano;
-//!
-//! rano::abi!();
-//!
-//! #[unsafe(no_mangle)]
-//! pub extern "C" fn on_save(ptr: u32, len: u32) -> u32 {
-//!     rano::hook(ptr, len, |text| Some(text.to_uppercase()))
-//! }
-//! ```
-//!
-//! The helpers read the input out of linear memory, write the answer back, and
-//! write the result block — including the "leave it alone" sentinel. A plugin
-//! may reach nothing unless the config grants it ([`read_dir`] is the stage-1
-//! capability). The `json` feature adds [`json_hook`] for pane hooks: serde in,
-//! serde out, malformed input answered as the `{"error"}` the host knows how
-//! to report.
+//! Write a rano plugin in Rust, not in wasm: the ABI is four exports and a few raw pointers, and
+//! this crate is the safe layer over them, so a plugin is a function from `&str` to `String`. A
+//! plugin may reach nothing unless the config grants it.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -32,8 +14,8 @@ use serde::de::DeserializeOwned;
 /// The ABI this crate speaks, and the value [`abi!`]'s `rano_abi` answers.
 pub const ABI: i32 = 1;
 
-/// **The sentinel a hook answers when it has nothing to say**: the host leaves the text (or the
-/// path) alone.
+/// The sentinel a hook answers when it has nothing to say: the host leaves the text (or the path)
+/// alone.
 pub const UNCHANGED: u32 = u32::MAX;
 
 /// The module's memory: the result block at its start, the arena above it
@@ -65,12 +47,8 @@ fn block() -> u32 {
     base()
 }
 
-/// **The text a hook was handed**, or `None` when the host's range is outside
-/// this module's memory (checked rather than trusted).
-///
-/// # Safety
-///
-/// `ptr` and `len` come from the host as a range inside this module's memory.
+/// The text a hook was handed, or `None` when the host's range is outside this module's memory
+/// (checked rather than trusted). Safety: `ptr` and `len` come from the host, as a range inside it.
 pub unsafe fn input<'a>(ptr: u32, len: u32) -> Option<&'a str> {
     let start = usize::try_from(ptr).ok()?;
     let len = usize::try_from(len).ok()?;
@@ -83,7 +61,7 @@ pub unsafe fn input<'a>(ptr: u32, len: u32) -> Option<&'a str> {
     std::str::from_utf8(bytes).ok()
 }
 
-/// **The answer to a hook**: the block, which tells the host where the text is and how long it is.
+/// The answer to a hook: the block, which tells the host where the text is and how long it is.
 pub fn answer(text: &str) -> u32 {
     let at = alloc(text.len() as u32);
     // SAFETY: `at` is an arena offset this module's allocator just handed out, and the block is at
@@ -98,8 +76,8 @@ pub fn answer(text: &str) -> u32 {
     block()
 }
 
-/// **One text hook**: `f` is the plugin's whole job — the text in, the text out. `None` means
-/// "leave it alone", which is also what an unreadable input gives.
+/// One text hook: `f` is the plugin's whole job — the text in, the text out. `None` means "leave
+/// it alone", which is also what an unreadable input gives.
 pub fn hook(ptr: u32, len: u32, f: impl FnOnce(&str) -> Option<String>) -> u32 {
     // SAFETY: the host's range, checked by `input`.
     let Some(text) = (unsafe { input(ptr, len) }) else {
@@ -129,11 +107,9 @@ pub fn provider(
     }
 }
 
-/// **A JSON hook**: the input parsed as `I`, `f`'s answer serialized; `None`
-/// is the "leave it alone" sentinel. **Malformed input is answered, not
-/// trapped**: it comes back as `{"error": "…"}` so the host can say why the
-/// pane is empty — a pane that answers nothing is the one failure a reader
-/// cannot act on.
+/// A JSON hook: the input parsed as `I`, `f`'s answer serialized; `None` is the sentinel.
+/// Malformed input is answered, not trapped — it comes back as `{"error": …}` so the host can say
+/// why the pane is empty, the one failure a reader cannot act on.
 #[cfg(feature = "json")]
 pub fn json_hook<I: DeserializeOwned, O: Serialize>(
     ptr: u32,
@@ -151,10 +127,9 @@ pub fn json_hook<I: DeserializeOwned, O: Serialize>(
     }
 }
 
-/// [`json_hook`] without the pointers: the parse, `f`, and the serialize —
-/// separate because this is the half that can be tested natively (the arena's
-/// address truncated to a `u32` is the ABI on wasm32 and a wrong address on
-/// the host).
+/// [`json_hook`] without the pointers: the parse, `f`, and the serialize — separate because this
+/// is the half that can be tested natively (the arena's address truncated to a `u32` is the ABI on
+/// wasm32 and a wrong address on the host).
 #[cfg(feature = "json")]
 fn json_answer<I: DeserializeOwned, O: Serialize>(
     text: &str,
@@ -171,14 +146,13 @@ fn json_answer<I: DeserializeOwned, O: Serialize>(
     }
 }
 
-/// The one thing a plugin says when it could not do its job.
 #[cfg(feature = "json")]
 fn error(why: &str) -> u32 {
     answer(&error_text(why))
 }
 
-/// **`{"error": "…"}`, escaped by serde** rather than by hand: the message quotes the input, and
-/// the input may quote anything.
+/// `{"error": …}`, escaped by serde rather than by hand: the message quotes the input, and the
+/// input may quote anything.
 #[cfg(feature = "json")]
 fn error_text(why: &str) -> String {
     #[derive(serde::Serialize)]
@@ -197,9 +171,8 @@ unsafe extern "C" {
     fn host_read_dir(path_ptr: u32, path_len: u32, out_ptr: u32, out_cap: u32) -> i32;
 }
 
-/// **The host's listing of `path`** — a folder's text, rendered by the host
-/// with the same rules as its own dired, or `None` for a non-folder. Calling
-/// this is what gives the module the `read-dir` import.
+/// The host's listing of `path` — a folder's text, rendered by the host with its own dired's
+/// rules, or `None` for a non-folder. Calling this is what gives the module the `read-dir` import.
 pub fn read_dir(path: &str) -> Option<String> {
     // A listing that does not fit is retried once at the size the host asks for.
     let mut cap = 1usize << 20;
@@ -224,11 +197,7 @@ pub fn read_dir(path: &str) -> Option<String> {
     None
 }
 
-/// **The two exports every plugin has**: `rano_abi` and `rano_alloc`.
-///
-/// ```no_run
-/// rano_plugin::abi!();
-/// ```
+/// The two exports every plugin has: `rano_abi` and `rano_alloc`.
 #[macro_export]
 macro_rules! abi {
     () => {
@@ -244,9 +213,8 @@ macro_rules! abi {
     };
 }
 
-/// **A native test of the JSON path** — the parse, the serialize and the
-/// `{"error"}` escaping. The pointer half is exercised by the host's WAT
-/// fixtures (the arena address is a `u32`, wrong on the host).
+/// A native test of the JSON path — the parse, the serialize and the `{"error"}` escaping. The
+/// pointer half is exercised by the host's WAT fixtures, where the arena address is a `u32`.
 #[cfg(all(test, feature = "json"))]
 mod json {
     use super::*;

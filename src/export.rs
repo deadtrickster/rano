@@ -1,12 +1,6 @@
-//! Render a buffer to a file: colourised HTML, ANSI for a terminal, a
-//! markdown code fence, or plain text. It is the only path that runs the
-//! highlighter and does NOT draw to a terminal, so `rano --export html big.rs`
-//! measures parse + colorisation with the screen, terminal and event loop out
-//! of the picture. The style source is a closure rather than a
-//! [`crate::Editor`], so the same renderer serves the CLI, an embedder and the
-//! tests. Both coloured formats read the role table's look under
-//! [`Palette::Colour`]: the HTML page is dark, and an ANSI file is shown by a
-//! terminal whose theme supplies the sixteen colours.
+//! Render a buffer to a file: colourised HTML, ANSI for a terminal, a markdown code fence, or
+//! plain text. It is the only path that runs the highlighter without drawing, so
+//! `rano --export html big.rs` measures parse + colorisation with the event loop out of it.
 
 use crate::buffer::Pos;
 use crate::render::Style;
@@ -20,8 +14,7 @@ pub enum Format {
     Html,
     /// SGR-escaped text: `rano --export ansi f.rs | less -R`.
     Ansi,
-    /// A markdown fenced code block holding the text, tagged with the
-    /// detected language.
+    /// A markdown fenced code block holding the text, tagged with the detected language.
     Markdown,
     /// The plain text, tabs expanded, nothing else.
     Text,
@@ -44,9 +37,8 @@ impl Format {
     pub const NAMES: &'static str = "html, ansi, markdown, text";
 }
 
-/// Render `lines` in `format`, resolving each character's style through
-/// `style_of(p)`. `title` names the document in the HTML `<title>` and the
-/// markdown heading.
+/// Render `lines` in `format`, resolving each character's style through `style_of(p)`. `title`
+/// names the document in the HTML `<title>` and the markdown heading.
 pub fn render(
     lines: &[Vec<char>],
     tab_width: usize,
@@ -62,15 +54,15 @@ pub fn render(
     }
 }
 
-/// One run of characters sharing a style, already tab-expanded — the run
-/// boundaries both colourised formats need, computed once per line.
+/// One run of characters sharing a style, already tab-expanded — the run boundaries both
+/// colourised formats need, computed once per line.
 struct Run {
     style: Option<Style>,
     text: String,
 }
 
-/// Walk a line, expanding tabs to the next multiple of `tab_width` and
-/// coalescing neighbours that resolved to the same style.
+/// Walk a line, expanding tabs to the next multiple of `tab_width` and coalescing neighbours
+/// that resolved to the same style.
 fn runs_at_row(
     line: &[char],
     row: usize,
@@ -156,8 +148,8 @@ fn html(
     s
 }
 
-/// The CSS declarations a style needs, or `None` when it renders as the
-/// page default (so plain text carries no markup at all).
+/// The CSS declarations a style needs, or `None` when it renders as the page default (so plain
+/// text carries no markup at all).
 fn css(style: &Style) -> Option<String> {
     let look = style.look(Palette::Colour);
     let mut d = String::new();
@@ -187,9 +179,8 @@ fn css(style: &Style) -> Option<String> {
     if d.is_empty() { None } else { Some(d) }
 }
 
-/// `#rrggbb` for a colour the role table names. The sixteen slots are a
-/// terminal's and a page has no theme to ask, so they are one common rendering
-/// of them; a cube index is the xterm cube's own RGB.
+/// `#rrggbb` for a colour the role table names. The sixteen slots are a terminal's and a page
+/// has no theme to ask, so they get one common rendering; a cube index is the xterm cube's own.
 fn hex(h: Hue) -> String {
     const SLOTS: [(u8, u8, u8); 16] = [
         (0, 0, 0),
@@ -248,8 +239,8 @@ fn ansi(lines: &[Vec<char>], tab_width: usize, style_of: &dyn Fn(Pos) -> Option<
         }
         let mut open = false;
         for run in runs_at_row(line, r, tab_width, style_of) {
-            // Trailing blanks are the screen's, not the file's: a colourless
-            // run of spaces costs a reset per line for nothing.
+            // Trailing blanks are the screen's, not the file's: a colourless run of spaces costs
+            // a reset per line for nothing.
             let text = if run.style.is_none() {
                 run.text.trim_end()
             } else {
@@ -278,8 +269,8 @@ fn ansi(lines: &[Vec<char>], tab_width: usize, style_of: &dyn Fn(Pos) -> Option<
     s
 }
 
-/// The opening sequence for a run's style: the role table's look, spelled as
-/// everywhere else (attributes, then foreground, then background).
+/// The opening sequence for a run's style: the role table's look, spelled as everywhere else
+/// (attributes, then foreground, then background).
 fn sgr(style: &Option<Style>) -> Option<String> {
     let look: Look = style.as_ref()?.look(Palette::Colour);
     if look.is_plain() {
@@ -302,9 +293,9 @@ fn markdown(lines: &[Vec<char>], tab_width: usize, title: &str) -> String {
     s
 }
 
-/// A fence long enough to hold the document: one backtick longer than the
-/// longest run in the content, minimum three — without this a file containing
-/// a ``` fence of its own would close the block early.
+/// A fence long enough to hold the document: one backtick longer than the longest run in the
+/// content, minimum three — without this a file containing a fence of its own would close the
+/// block early.
 fn fence_for(lines: &[Vec<char>]) -> String {
     let mut longest = 0usize;
     for line in lines {
@@ -321,8 +312,8 @@ fn fence_for(lines: &[Vec<char>]) -> String {
     "`".repeat((longest + 1).max(3))
 }
 
-/// The language tag for the fence, from the title's extension. Best effort:
-/// an unknown extension gets no tag, which is exactly what markdown wants.
+/// The language tag for the fence, from the title's extension. An unknown extension gets no
+/// tag, which is exactly what markdown wants.
 fn lang_hint(title: &str) -> &str {
     let ext = title.rsplit('.').next().unwrap_or("");
     match ext {

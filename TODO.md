@@ -28,9 +28,6 @@ Evidence and the reasoning are in [the review record](docs/review/2026-11-03-rel
 
 ## Crashes and data loss
 
-- Completion popup underflows on a narrow terminal. `src/ui.rs:630` `w - 2 - label - tag` and
-  `src/ui.rs:588` `clamp(10, width.min(60))` panic under 10 columns. Use `saturating_sub` and a
-  safe clamp. Test a long label at width 8 and 20.
 - Saves are not atomic. `src/editor.rs:3216` is a plain `fs::write`, so a crash or full disk
   truncates the file. Write `<file>.tmp`, flush, copy the mode, `rename`, then update
   `disk`/`name`. Test that the mode is kept and no tmp file is left.

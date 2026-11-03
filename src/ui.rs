@@ -470,7 +470,9 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             .max()
             .unwrap_or(0)
             .min(40);
-        let w = (label_w + 6).clamp(10, (width as usize).min(60));
+        // Clamped inside the pane: a minimum above the pane's own width panics.
+        let max = (width as usize).min(60);
+        let w = (label_w + 6).clamp(10.min(max), max);
         let drow = if ed.wrap {
             ed.visual_pos(Pos {
                 row: p.row,
@@ -507,7 +509,10 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
             for i in 0..vis {
                 let it = &p.items[start + i];
                 let label: String = it.label.chars().take(label_w).collect();
-                let pad = w - 2 - label.chars().count() - kind_tag(it.kind).len();
+                let pad = w
+                    .saturating_sub(2)
+                    .saturating_sub(label.chars().count())
+                    .saturating_sub(kind_tag(it.kind).len());
                 let style = if i + start == p.sel {
                     sel()
                 } else {
@@ -1148,6 +1153,28 @@ mod tests {
         let cell = buf.cell((3, 3)).unwrap();
         assert_eq!(cell.style.top(), Role::Selected);
         assert!(row(2).contains("fn"));
+    }
+
+    #[test]
+    fn a_completion_popup_in_a_narrow_pane_does_not_panic() {
+        let label = "x".repeat(40);
+        for width in [5, 8, 20] {
+            let mut e = ed("pri\n");
+            e.completion = Some(crate::editor::CompletionPopup {
+                items: vec![crate::lsp::CompletionItem {
+                    label: label.clone(),
+                    kind: 3,
+                    insert: label.clone(),
+                    sort: label.clone(),
+                    filter: label.clone(),
+                }],
+                sel: 0,
+                row: 0,
+                col: 0,
+            });
+            let terminal = Screen::of(&e, width, 24);
+            assert_eq!(terminal.buf.area().width, width);
+        }
     }
 
     #[test]

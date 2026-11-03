@@ -1,11 +1,6 @@
-//! What the markdown grammar gives us, pinned. Both `syntax.rs`'s highlight
-//! query and the todo schema name specific markdown nodes
-//! (`atx_heading`, `list_item`, `task_list_marker_checked/unchecked`); a
-//! grammar upgrade that renamed one would fail nothing today — the query would
-//! capture less and the colour go subtly plain. This makes it loud, and asserts
-//! byte offsets (the marker's exact 3 bytes are what a toggle rewrites, and
-//! `[-]` being invisible is the finding that makes a diagnostic necessary).
-//! Run with `-- --nocapture` to see the tree.
+//! What the markdown grammar gives us, pinned: both the highlight query and the todo schema name
+//! specific markdown nodes, and a grammar upgrade that renamed one would fail nothing today —
+//! the query would capture less and the colour go subtly plain. Run with `-- --nocapture`.
 
 use rano::syntax::{Lang, Node, Stream};
 
@@ -70,11 +65,9 @@ fn sections_of(n: &Node, out: &mut Vec<Node>) {
     }
 }
 
-/// Mark every marker inside `span` done, and return the new text plus the
-/// ranges actually REWRITTEN — the whole cascade, a cell edit per marker, not
-/// a re-render. Only markers not already the target are returned: that is what
-/// idempotence means — a cascade over an already-done subtree must produce NO
-/// edits, or the undo stack fills with steps that change nothing.
+/// Mark every marker inside `span` done, and return the new text plus the ranges actually
+/// REWRITTEN. Only markers not already the target are returned: a cascade over an already-done
+/// subtree must produce no edits, or the undo stack fills with steps that change nothing.
 fn cascade(src: &str, span: &std::ops::Range<usize>) -> (String, Vec<std::ops::Range<usize>>) {
     let inside: Vec<_> = markers(src)
         .into_iter()
@@ -89,9 +82,8 @@ fn cascade(src: &str, span: &std::ops::Range<usize>) -> (String, Vec<std::ops::R
     (out, inside)
 }
 
-/// Assert the file after equals the file before except for bytes inside
-/// `allowed`. Every state is three bytes, so a cascade is a same-length
-/// substitution and this can be checked per byte.
+/// Assert the file after equals the file before except for bytes inside `allowed`. Every state is
+/// three bytes, so a cascade is a same-length substitution and this can be checked per byte.
 fn assert_only_these_bytes_changed(before: &str, after: &str, allowed: &[std::ops::Range<usize>]) {
     assert_eq!(
         before.len(),
@@ -134,9 +126,8 @@ fn the_marker_is_exactly_three_bytes_at_a_grammar_given_offset() {
     assert_eq!(&src[2..5], "[x]");
 }
 
-/// **The cascade property, and the reason it is byte-identical by
-/// construction**: marking a subtree done rewrites each descendant marker's own
-/// three bytes and NOTHING else.
+/// The cascade property, and the reason it is byte-identical by construction: marking a subtree
+/// done rewrites each descendant marker's own three bytes and NOTHING else.
 #[test]
 fn a_cascade_changes_only_marker_bytes() {
     let src = "\
@@ -165,9 +156,9 @@ fn a_cascade_changes_only_marker_bytes() {
         .find(|n| n.start == parent_start)
         .expect("the parent list_item");
 
-    // **The containment the cascade rides on**: the nested items fall inside
-    // the parent's range, the deeper heading's and the next section's do not.
-    // Child two is already `[x]`, so it is NOT in the edit set.
+    // The containment the cascade rides on: the nested items fall inside the parent's range,
+    // the deeper heading's and the next section's do not. Child two is already `[x]`, so it is
+    // NOT in the edit set.
     let span = parent.start..parent.end;
     let (after, inside) = cascade(src, &span);
     let all = markers(src);
@@ -212,8 +203,8 @@ fn a_cascade_changes_only_marker_bytes() {
     assert_only_these_bytes_changed(src, &after, &inside);
 }
 
-/// Doing it twice is doing it once — what makes it safe to run on a file
-/// somebody else may also be editing.
+/// Doing it twice is doing it once — what makes it safe to run on a file somebody else may also
+/// be editing.
 #[test]
 fn a_cascade_is_idempotent() {
     let src = "- [ ] a\n  - [x] b\n  - [ ] c\n";
@@ -227,8 +218,8 @@ fn a_cascade_is_idempotent() {
     assert!(second.is_empty(), "nothing left to change, got {second:?}");
 }
 
-/// A `section` is a cascade target too, so "done for the whole subtree" works
-/// over headings — which is how a checklist written as sections is marked.
+/// A `section` is a cascade target too, so "done for the whole subtree" works over headings —
+/// which is how a checklist written as sections is marked.
 #[test]
 fn a_section_is_a_cascade_target_too() {
     let src = "\
@@ -271,12 +262,9 @@ fn a_section_is_a_cascade_target_too() {
     assert_only_these_bytes_changed(src, &after, &inside);
 }
 
-/// The measurement the derived-progress (`up`) decision rests on: what does it
-/// cost to have a CURRENT tree and markers, for a realistic document?
-///
-/// Ignored because it is a measurement, not an assertion. Run with
-/// `cargo test --release --test markdown_grammar -- --ignored --nocapture
-/// measure_the_cost`.
+/// The measurement the derived-progress decision rests on: what does it cost to have a CURRENT
+/// tree and markers, for a realistic document? Ignored because it measures rather than asserts:
+/// `cargo test --release --test markdown_grammar -- --ignored --nocapture measure_the_cost`.
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn measure_the_cost_of_a_current_tree() {
@@ -317,9 +305,8 @@ fn measure_the_cost_of_a_current_tree() {
     }
 }
 
-/// **The cookie is inside the heading's own range** — `[2/3]` is plain text to
-/// the grammar, no node of its own, so the only thing that makes it findable is
-/// that the heading's range covers it.
+/// The cookie is inside the heading's own range — `[2/3]` is plain text to the grammar, with no
+/// node of its own, so only the heading's range makes it findable.
 #[test]
 fn a_cookie_sits_inside_the_heading_range() {
     let src = "## Now [2/3]\n\n- [x] one\n- [ ] two\n- [x] three\n";
@@ -394,11 +381,9 @@ fn every_bullet_style_can_hold_a_marker() {
     }
 }
 
-/// **The finding.** A marker the grammar does not know is not an error and not
-/// captured — an ordinary list item whose paragraph happens to begin with
-/// brackets. `- [-]`, `- [~]` and `- []` all render as plain rows with no
-/// symptom anywhere, which is why the schema is not just a query and why
-/// `check()` has to exist.
+/// The finding: a marker the grammar does not know is not an error and not captured — an ordinary
+/// list item whose paragraph happens to begin with brackets. `- [-]`, `- [~]` and `- []` all render
+/// as plain rows with no symptom, which is why the schema is not just a query and `check()` exists.
 #[test]
 fn an_unknown_marker_is_silent_in_the_grammar() {
     for src in ["- [-] partial\n", "- [~] weird\n", "- [] no space\n"] {
@@ -440,8 +425,8 @@ fn an_unknown_marker_is_silent_in_the_grammar() {
     assert_eq!(&src[para.start..para.start + 3], "[-]");
 }
 
-/// A `section` covers a heading **and everything under it, including nested
-/// sections** — which is what makes fold and subtree move free.
+/// A `section` covers a heading and everything under it, nested sections included — which is what
+/// makes fold and subtree move free.
 #[test]
 fn a_section_is_the_whole_subtree() {
     let src = "# Top\n\ntext\n\n## Mid\n\n- [ ] x\n\n### Deep\n\n- [x] y\n\n## Other\n\nz\n";
@@ -483,8 +468,8 @@ fn a_section_is_the_whole_subtree() {
     );
 }
 
-/// The heading's level is readable from its marker node, not from counting
-/// characters — so `#`, `##` and `######` are the grammar's business.
+/// The heading's level is readable from its marker node, not from counting characters — so `#`,
+/// `##` and `######` are the grammar's business.
 #[test]
 fn a_heading_carries_its_level_marker() {
     for (src, marker) in [

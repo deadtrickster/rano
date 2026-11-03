@@ -1,8 +1,6 @@
-//! The non-interactive path: what a second caller — harnessd completing a task,
-//! or the model doing it — has to work with. Nobody has a cursor, a viewport or
-//! an open buffer, and the row it wants arrives as a wire `TodoEntry
-//! { content, status }`. This file measures what that costs, against the real
-//! module, so the answer is a number rather than an assurance.
+//! The non-interactive path: what a second caller — a harness completing a task, or the model
+//! doing it — has to work with. Nobody has a cursor, a viewport or an open buffer, and the row it
+//! wants arrives as a wire `TodoEntry { content, status }`.
 
 use rano::todo::{Doc, State, apply};
 
@@ -24,8 +22,8 @@ A description line that is not a task.
 - [ ] Publish project on GitHub @janikvonrotz
 ";
 
-/// **No interactive state is needed to drive this**: one `&str` in, one
-/// `String` out — the property the embed-the-schema decision rests on.
+/// No interactive state is needed to drive this: one `&str` in, one `String` out — the property
+/// the embed-the-schema decision rests on.
 #[test]
 fn driving_it_needs_no_cursor_or_buffer() {
     // Nothing but the file's bytes.
@@ -43,9 +41,8 @@ fn driving_it_needs_no_cursor_or_buffer() {
     );
 }
 
-/// What a caller holding `TodoEntry { content }` is up against: the wire's
-/// `content` is a *trimmed title*, and the file's text is not — measured here,
-/// not guessed.
+/// What a caller holding `TodoEntry { content }` is up against: the wire's `content` is a trimmed
+/// title, and the file's text is not — measured here, not guessed.
 #[test]
 fn the_file_text_is_not_the_wire_content() {
     let doc = Doc::parse(FILE);
@@ -83,10 +80,9 @@ fn the_file_text_is_not_the_wire_content() {
     );
 }
 
-/// The gap, stated as a failing lookup: no supported way to go from the content
-/// a non-interactive caller holds to the item it means. Documents the gap
-/// rather than asserting a behaviour; replaced by a positive test when a
-/// lookup exists.
+/// The gap, stated as a failing lookup: no supported way to go from the content a
+/// non-interactive caller holds to the item it means. Documents the gap rather than asserting a
+/// behaviour; replaced by a positive test when a lookup exists.
 #[test]
 fn a_caller_holding_content_has_no_lookup() {
     let doc = Doc::parse(FILE);
@@ -126,10 +122,9 @@ fn a_caller_holding_content_has_no_lookup() {
     );
 }
 
-/// The operation a non-interactive caller needs — complete the task with this
-/// content — works end to end **by index found however the caller likes**, and
-/// is still three bytes per changed marker. Nothing about the *operation* needs
-/// interactivity; only addressing does.
+/// The operation a non-interactive caller needs — complete the task with this content — works end
+/// to end by an index found however the caller likes, and is still three bytes per changed marker.
+/// Nothing about the operation needs interactivity; only addressing does.
 #[test]
 fn completing_by_content_is_surgical() {
     let doc = Doc::parse(FILE);

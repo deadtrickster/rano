@@ -1,12 +1,7 @@
-//! **The sweep that found the stale-range panic**, kept so a future slice site
-//! cannot reintroduce it: a generated corpus of fences, quotes, lists, tables
-//! and multi-byte characters, each document through a whole `lex` and through
-//! `IncrementalMarkdown` in six delta sizes — 279 841 documents x 7 paths. The
-//! unit test in `markdown::parse` pins the 19-byte repro; this pins the *class*.
-//!
-//! `#[ignore]`d: ~15 s, a tool run after touching a `slice` site, not a gate:
-//!
-//!     cargo test --test stale_range_sweep -- --ignored --nocapture
+//! The sweep that found the stale-range panic, kept so a future slice site cannot reintroduce it:
+//! a generated corpus of fences, quotes, lists, tables and multi-byte characters, each document
+//! through a whole `lex` and through `IncrementalMarkdown` in six delta sizes. `#[ignore]`d — run it
+//! after touching a `slice` site: `cargo test --test stale_range_sweep -- --ignored --nocapture`.
 use rano::markdown::parse::{IncrementalMarkdown, lex};
 
 const TOKENS: &[&str] = &[
@@ -33,9 +28,8 @@ const TOKENS: &[&str] = &[
     "> \u{2026}\n> \u{2026}\n",
     "- \u{2026}\n\n- \u{2026}\n",
     "***\n",
-    // **The shape the shrinker found**, which the token combinations below
-    // cannot build: a list item, an opening fence, and ellipses with no closing
-    // fence. A sweep is only as good as its tokens.
+    // The shape the shrinker found, which Token combinations alone cannot build: a list item, an
+    // opening fence, and ellipses with no closing fence. A sweep is only as good as its tokens.
     "- \u{2026}\n```\n\u{2026}\u{2026}\u{2026}",
     "- \u{2026}\n```\n\u{2026}\u{2026}\u{2026}\n",
     "```\n\u{2026}\u{2026}\u{2026}",

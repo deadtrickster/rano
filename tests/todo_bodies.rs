@@ -1,7 +1,6 @@
-//! Does the schema distinguish an item's BODY from its CHILDREN? A correctness
-//! question, not a modelling preference: if the ancestor pass can mistake a
-//! body paragraph for a child, a cascade marks the wrong things. This file
-//! asserts the distinction rather than observing that it works.
+//! Does the schema distinguish an item's BODY from its CHILDREN? A correctness question, not a
+//! modelling preference: if the ancestor pass can mistake a body paragraph for a child, a cascade
+//! marks the wrong things. This file asserts the distinction rather than observing that it works.
 
 use rano::todo::{Doc, State, apply};
 
@@ -19,8 +18,7 @@ const WITH_BODY: &str = "\
 - [ ] A plain task
 ";
 
-/// **The distinction, asserted.** The body paragraph is not a child, and the
-/// `[x]`/`[ ]` bullets are.
+/// The distinction, asserted: the body paragraph is not a child, and the `[x]`/`[ ]` bullets are.
 #[test]
 fn a_body_paragraph_is_not_a_child() {
     let doc = Doc::parse(WITH_BODY);
@@ -59,8 +57,8 @@ fn a_body_paragraph_is_not_a_child() {
     }
 }
 
-/// **The item's extent includes its body**, and the parent's extent still
-/// stops before the next sibling.
+/// The item's extent includes its body, and the parent's extent still stops before the next
+/// sibling.
 #[test]
 fn an_items_extent_includes_its_body() {
     let doc = Doc::parse(WITH_BODY);
@@ -90,8 +88,8 @@ fn an_items_extent_includes_its_body() {
     assert!(!title.contains("Why this matters"), "{title:?}");
 }
 
-/// **The cascade marks the children and nothing in the body**, even though the
-/// body sits between the parent and the children.
+/// The cascade marks the children and nothing in the body, even though the body sits between the
+/// parent and the children.
 #[test]
 fn a_cascade_does_not_mark_body_text() {
     let doc = Doc::parse(WITH_BODY);
@@ -135,8 +133,8 @@ fn a_cascade_does_not_mark_body_text() {
     assert_eq!(d.items()[p].state, State::Done, "up, written: {after}");
 }
 
-/// **The hazard, pinned**: markdown says an indented `- [ ] x` at the child
-/// level IS a child, so this is not a bug — but the behaviour has to be stated.
+/// The hazard, pinned: markdown says an indented `- [ ] x` at the child level IS a child, so this
+/// is not a bug — but the behaviour has to be stated.
 #[test]
 fn a_body_line_that_looks_like_a_task_is_a_task() {
     let src = "\
@@ -205,8 +203,8 @@ fn wrapped_prose_does_not_become_items() {
     assert!(!span.contains("next"), "{span:?}");
 }
 
-/// A whole-tree copy is the ruled operation, and it is byte-identical with
-/// bodies present — the property `set_subtree(None, …)` has to have.
+/// A whole-tree copy is the ruled operation, and it is byte-identical with bodies present — the
+/// property `set_subtree(None, …)` has to have.
 #[test]
 fn a_whole_tree_copy_keeps_bodies() {
     let doc = Doc::parse(WITH_BODY);

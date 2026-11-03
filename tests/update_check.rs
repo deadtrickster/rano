@@ -1,6 +1,6 @@
-//! The update check's logic, with no network in it: the interesting parts —
-//! is this version newer, is the feature on, what does a payload mean — are
-//! pure functions, and the only untestable piece is the HTTP call itself.
+//! The update check's logic, with no network in it: the interesting parts — is this version newer,
+//! is the feature on, what does a payload mean — are pure functions, and the only untestable piece
+//! is the HTTP call itself.
 
 use rano::update::{self, Get};
 
@@ -35,8 +35,7 @@ fn a_newer_release_is_offered() {
     assert!(u.message().contains(update::CURRENT));
 }
 
-/// **The gate**: off means not even a request — asserted with an url-recording
-/// stub.
+/// The gate: off means not even a request — asserted with an url-recording stub.
 #[test]
 fn disabled_does_not_even_ask() {
     struct Recording(std::cell::Cell<bool>);
@@ -85,9 +84,8 @@ fn versions_compare_numerically() {
     assert!(update::is_newer("0.1.0", "1.0.0"));
 }
 
-/// A version that is not `MAJOR.MINOR.PATCH` is not newer than anything.
-/// Strict on purpose: ordering `0.2.0-rc1` by accident would download a
-/// pre-release binary to someone who asked for stable.
+/// A version that is not `MAJOR.MINOR.PATCH` is not newer than anything. Strict on purpose:
+/// ordering `0.2.0-rc1` by accident would download a pre-release to someone who asked for stable.
 #[test]
 fn odd_versions_do_not_trigger_an_update() {
     for odd in [
@@ -150,9 +148,9 @@ fn the_asset_url_is_the_repo_we_are() {
     assert!(url.ends_with(&asset));
 }
 
-/// The asset names are the ones `scripts/make-dist.sh` writes and `install.sh`
-/// asks for. `scripts/check-dist-names.sh` compares the shell sides with the
-/// workflow matrix; this is the Rust side of the same contract.
+/// The asset names are the ones `scripts/make-dist.sh` writes and `install.sh` asks for;
+/// `scripts/check-dist-names.sh` compares the shell sides with the workflow matrix, and this is the
+/// Rust side of the same contract.
 #[test]
 fn asset_names_match_the_published_ones() {
     assert_eq!(
@@ -178,9 +176,8 @@ fn asset_names_match_the_published_ones() {
     assert_eq!(update::asset_name("linux", "riscv64"), None);
 }
 
-/// The gate's precedence, and its default. **On by default** — normal software
-/// checks for updates unless told not to — with the config value winning over the
-/// environment.
+/// The gate's precedence, and its default: on by default — normal software checks for updates
+/// unless told not to — with the config value winning over the environment.
 #[test]
 fn the_gate_is_on_by_default_and_the_config_wins() {
     assert!(
@@ -213,10 +210,9 @@ fn a_non_https_url_is_refused() {
     assert!(err.contains("non-https"), "{err}");
 }
 
-/// **A tarball is only accepted in the shape we publish — and the reader must
-/// not hang**: the extraction runs on a thread with a deadline, so a pipe
-/// deadlock is a FAILURE next time instead of a hang (the shape that once caught
-/// one).
+/// A tarball is only accepted in the shape we publish, and the reader must not hang: the
+/// extraction runs on a thread with a deadline, so a pipe deadlock is a FAILURE next time rather
+/// than a hang.
 #[test]
 fn a_tarball_is_only_accepted_in_the_shape_we_publish() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -275,8 +271,8 @@ fn tar_with(members: &[(&str, &[u8], u8)]) -> Vec<u8> {
     out
 }
 
-/// gzip a fixture, through the same library the module reads with — so the test
-/// cannot pass on a fixture the module could not handle.
+/// gzip a fixture, through the same library the module reads with — so the test cannot pass on a
+/// fixture the module could not handle.
 fn gzip(data: &[u8]) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -286,10 +282,9 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// **A fixture LARGER than a pipe buffer**: 300 KB of compressible payload,
-/// decompressing well past the 64 KB pipe buffer, so the shape that once
-/// deadlocked a hand-pumped `gzip` (a small fixture could not reach it) is
-/// exercised rather than assumed away.
+/// A fixture LARGER than a pipe buffer: 300 KB of compressible payload, decompressing well past the
+/// 64 KB pipe buffer, so the shape that once deadlocked a hand-pumped `gzip` is exercised rather
+/// than assumed away.
 #[test]
 fn a_large_asset_extracts() {
     let payload = vec![b'a'; 300 * 1024];

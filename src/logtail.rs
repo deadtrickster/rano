@@ -1,20 +1,6 @@
-//! The log mode's not-rendered half: a file's line bookkeeping, and nothing
-//! else. A tailed file that is not on screen keeps the sparse line index, the
-//! size at open and the current size, and block heuristics — and **no decoded
-//! rows, no wrap geometry, no highlight grid, no parse tree**:
-//!
-//! - it owns no `String` and no `Vec<char>`; the only vectors in it are the
-//!   block boundaries and the sparse `starts`, and [`LogTail::state_bytes`]
-//!   reports exactly those two, so the promise is a number a test can read;
-//! - the rows it is asked for are read from the FILE each time and dropped
-//!   ([`LogTail::last_rows`]);
-//! - a row the file has not finished writing is not a row — neither counted
-//!   nor given a block boundary until its newline arrives.
-//!
-//! The editor's own tail mode (`-f`) holds rows as `Buffer` rows because it
-//! shows them; this is the other case — a host that has a log open, is not
-//! looking at it, and still needs its line count and block structure. One
-//! forward read of the bytes, never a decode.
+//! The log mode's not-rendered half: a file's line bookkeeping and nothing else. A tailed
+//! file that is not on screen keeps a sparse line index, its size and its block heuristics —
+//! no decoded rows, no wrap geometry, no highlight grid; every row it is asked for is read.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -22,10 +8,9 @@ use std::path::{Path, PathBuf};
 
 use crate::logblocks::Blocks;
 
-/// Rows between entries of the sparse index: one `u64` per 4096 rows (two bytes
-/// per thousand), turning "which byte does row N start at?" into a lookup plus
-/// a short scan. Deliberately NOT every row — per-row state is the cost this
-/// module exists to avoid.
+/// Rows between entries of the sparse index: one `u64` per 4096 rows, turning "which byte does
+/// row N start at?" into a lookup plus a short scan. Deliberately NOT every row — per-row
+/// state is the cost this module exists to avoid.
 pub const INDEX_EVERY: u64 = 4096;
 
 /// Read granularity for the bookkeeping pass. One page-cache-friendly read, as
@@ -36,9 +21,8 @@ const CHUNK: usize = 64 * 1024;
 /// is every UTF-8 scalar value.
 const HEAD: usize = 4;
 
-/// A file's line bookkeeping, and no rows.
-///
-/// See the module header for what it keeps and what it deliberately does not.
+/// A file's line bookkeeping, and no rows. See the module header for what it keeps and what it
+/// deliberately does not.
 #[derive(Debug)]
 pub struct LogTail {
     path: PathBuf,
@@ -47,13 +31,11 @@ pub struct LogTail {
     pub size_at_open: u64,
     /// The file's length as of the last [`LogTail::poll`].
     pub size: u64,
-    /// **Rows in the file**, counted as their newlines arrive. A partial row at
-    /// the end is not one of them.
+    /// Rows in the file, counted as their newlines arrive; a partial row at the end is not one.
     pub lines: u64,
-    /// Block boundaries under the one rule (TODO.md §20.4).
+    /// Block boundaries under the layout rule.
     pub blocks: Blocks,
-    /// Sparse row → byte: `starts[k]` is the offset at which row
-    /// `k * INDEX_EVERY` begins.
+    /// Sparse row → byte: `starts[k]` is the offset at which row `k * INDEX_EVERY` begins.
     starts: Vec<u64>,
     /// The byte the next read begins at, and the offset the current (possibly
     /// unfinished) row began at.
@@ -63,9 +45,8 @@ pub struct LogTail {
     /// filled. Carried across reads because a row can outlast a chunk.
     head: [u8; HEAD],
     head_len: u8,
-    /// How the file's bytes decode, decided from the first chunk (as the loader
-    /// decides it) — one enum, not a copy of the file, so a latin-1 log's
-    /// letters come back as letters.
+    /// How the file's bytes decode, decided from the first chunk as the loader decides it —
+    /// one enum, not a copy of the file, so a latin-1 log's letters come back as letters.
     encoding: crate::encoding::Encoding,
 }
 
@@ -92,9 +73,9 @@ impl LogTail {
         Ok(tail)
     }
 
-    /// Read whatever has been appended since the last call. A row whose newline
-    /// has not arrived yet is held back — half a stack trace is not a row, and a
-    /// count that included it would count something nobody has written.
+    /// Read whatever has been appended since the last call, holding back a row whose newline
+    /// has not arrived: half a stack trace is not a row, and counting it would count what
+    /// nobody has written.
     pub fn poll(&mut self) -> io::Result<bool> {
         let file = File::open(&self.path)?;
         let size = file.metadata()?.len();
@@ -104,9 +85,9 @@ impl LogTail {
         Ok(self.lines != before)
     }
 
-    /// Read `[self.read, to)`. `detect_encoding` is true for the first pass
-    /// only: the encoding is decided from the file's own beginning, so a later
-    /// read of an appended tail must not re-decide it.
+    /// Read `[self.read, to)`. `detect_encoding` is true for the first pass only: the encoding
+    /// is decided from the file's beginning, so a later read of an appended tail must not
+    /// re-decide it.
     fn scan(&mut self, to: u64, detect_encoding: bool) -> io::Result<()> {
         if to <= self.read {
             return Ok(());
@@ -132,10 +113,9 @@ impl LogTail {
                 };
                 self.encoding = crate::encoding::detect(&buf[..n], scope);
             }
-            // Two passes over the bytes: the row's HEAD only matters right
-            // after a newline, while the search for the next newline is a
-            // whole-chunk `position` — a branch per byte for both measured far
-            // slower.
+            // Two passes over the bytes: the row's HEAD only matters right after a newline,
+            // while the search for the next newline is a whole-chunk `position` — a branch per
+            // byte for both measured far slower.
             let mut i = 0usize;
             while i < n {
                 if (self.head_len as usize) < HEAD && buf[i] != b'\n' {
@@ -161,8 +141,7 @@ impl LogTail {
         Ok(())
     }
 
-    /// The row just ended: count it, index it, and let the one rule see its first
-    /// character.
+    /// The row just ended: count it, index it, and let the one rule see its first character.
     fn end_row(&mut self) {
         if self.lines.is_multiple_of(INDEX_EVERY) {
             self.starts.push(self.row_start);
@@ -184,20 +163,18 @@ impl LogTail {
         self.head_len = 0;
     }
 
-    /// The nearest indexed row at or below `row`: `(row, byte offset)`. The
-    /// exact offset of an arbitrary row is this plus a forward scan to it — the
-    /// caller's, because only it knows whether it wants the row's start or the
-    /// rows after it.
+    /// The nearest indexed row at or below `row`, as `(row, byte offset)`. The exact offset of
+    /// an arbitrary row is this plus a forward scan, which is the caller's job: only it knows
+    /// whether it wants the row's start or the rows after it.
     pub fn nearest_index(&self, row: u64) -> Option<(u64, u64)> {
         let k = row / INDEX_EVERY;
         let byte = *self.starts.get(usize::try_from(k).ok()?)?;
         Some((k * INDEX_EVERY, byte))
     }
 
-    /// **The last `n` rows, read from the file and returned to be dropped** —
-    /// they exist while something is drawing them and not before. Reuses
-    /// [`crate::loader::tail_offset`], so a 2 GiB log's last screenful costs a
-    /// few hundred KiB of reading.
+    /// The last `n` rows, read from the file and returned to be dropped — they exist while
+    /// something is drawing them and not before. Reuses [`crate::loader::tail_offset`], so a
+    /// 2 GiB log's last screenful costs a few hundred KiB of reading.
     pub fn last_rows(&self, n: usize) -> io::Result<Vec<Vec<char>>> {
         if n == 0 {
             return Ok(Vec::new());
@@ -212,9 +189,8 @@ impl LogTail {
         Ok(split_rows(&bytes, self.encoding))
     }
 
-    /// **The bytes this holds**, counted from the two vectors' capacity and
-    /// nothing else. Does not count the file: this is state per *row*, so it
-    /// does not depend on how long the rows are.
+    /// The bytes this holds, from the two vectors' capacity and nothing else. Not the file:
+    /// this is state per row, so it does not depend on how long the rows are.
     pub fn state_bytes(&self) -> usize {
         self.starts.capacity() * std::mem::size_of::<u64>() + self.blocks.state_bytes()
     }
@@ -232,15 +208,13 @@ impl LogTail {
         self.starts.len()
     }
 
-    /// The path this is bookkeeping for.
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
-/// Split `bytes` into rows as [`crate::loader`] splits a chunk: a row ends at
-/// its `\n`, a `\r` before that is a line ending, and **a last piece with no
-/// newline after it is not a row** — the file has not finished writing it.
+/// Split `bytes` into rows as [`crate::loader`] splits a chunk: a row ends at its `\n`, a `\r`
+/// before that is a line ending, and a last piece with no newline is not a row yet.
 fn split_rows(bytes: &[u8], encoding: crate::encoding::Encoding) -> Vec<Vec<char>> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -258,8 +232,8 @@ fn split_rows(bytes: &[u8], encoding: crate::encoding::Encoding) -> Vec<Vec<char
     out
 }
 
-/// One row's bytes as characters, in the file's encoding — the same decision
-/// the loader's `decode_row` makes.
+/// One row's bytes as characters, in the file's encoding — the same decision the loader's
+/// `decode_row` makes.
 fn decode(bytes: &[u8], encoding: crate::encoding::Encoding) -> Vec<char> {
     match encoding {
         crate::encoding::Encoding::Cp1252 => {
@@ -320,8 +294,8 @@ mod tests {
         assert_eq!(tail.size_at_open, body.len() as u64);
     }
 
-    /// The two shapes the rule is for, decided by the byte pass exactly as the
-    /// row pass decides them.
+    /// The two shapes the rule is for, decided by the byte pass exactly as the row pass
+    /// decides them.
     #[test]
     fn the_byte_pass_agrees_with_the_row_pass_about_blocks() {
         let body = b"ERROR boom\n  at frame::one\n  at frame::two\n\nERROR again\n";
@@ -378,8 +352,8 @@ mod tests {
         assert_eq!(tail.blocks.count(), 3, "the indented row continued");
     }
 
-    /// A blank CRLF line is an EMPTY row and so starts a block — where a byte
-    /// pass that took `\r` for whitespace would swallow the blank.
+    /// A blank CRLF line is an EMPTY row and so starts a block — where a byte pass that took
+    /// `\r` for whitespace would swallow the blank.
     #[test]
     fn crlf_and_blank_lines_get_the_same_verdict_as_the_row_door() {
         let body = b"ERROR boom\r\n  at frame\r\n\r\nnext\r\n";
@@ -417,8 +391,7 @@ mod tests {
         assert_eq!(tail.blocks, Blocks::of(&rows));
     }
 
-    /// **The index is sparse and the count is free**: 10 000 rows give three
-    /// entries.
+    /// The index is sparse and the count is free: 10 000 rows give three entries.
     #[test]
     fn the_index_is_sparse() {
         // Fixed-width rows, so the offsets are arithmetic: every row is 7 bytes.
@@ -436,8 +409,8 @@ mod tests {
         assert_eq!(tail.nearest_index(9999), Some((8192, 8192 * 7)));
     }
 
-    /// **The budget, as a number**: the same rows in two files whose rows are
-    /// ten times longer cost the same state.
+    /// The budget, as a number: the same rows in two files whose rows are ten times longer
+    /// cost the same state.
     #[test]
     fn state_does_not_depend_on_how_long_the_rows_are() {
         let short: Vec<u8> = (0..50_000)
@@ -561,10 +534,9 @@ mod tests {
         assert!(!tail.row_continues(99));
     }
 
-    /// **The two halves join**: `LogTail` holds the count, the index and the
-    /// boundaries and no rows; `LogPane` holds rows and no file. This is the
-    /// four lines a host needs, with the row numbers and the block markers from
-    /// the SAME pass.
+    /// The two halves join: `LogTail` holds the count, the index and the boundaries and no
+    /// rows; `LogPane` holds rows and no file. This is the four lines a host needs, with the
+    /// row numbers and block markers from the same pass.
     #[test]
     fn the_bookkeeping_fills_a_pane() {
         use crate::agent::logpane::{LogPane, LogRow};

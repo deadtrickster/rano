@@ -1,15 +1,6 @@
-//! Version check, and self-update. Off by default; `autoupdate` in the config
-//! or `RANO_AUTOUPDATE` in the environment turns it on.
-//!
-//! **Checking is free; installing is not** — an install replaces the running
-//! executable, so it only happens from an accepted prompt ([`Update::install`]).
-//! What it will not do: no download unless the version is newer; no non-HTTPS
-//! URL (the host is a constant here, a redirect to plain http is refused); no
-//! writing to a path that cannot be replaced (the binary is replaced by rename,
-//! so a failure leaves the old one in place); no proxy to a shell. Tags are
-//! compared as `MAJOR.MINOR.PATCH` numerically; any other shape is not newer.
-//! The gate is on by default and turned off in one place (`autoupdate = false`
-//! or `RANO_AUTOUPDATE=0`), asserted in `tests/update_check.rs`.
+//! Version check and self-update, off by default (`autoupdate` in the config or
+//! `RANO_AUTOUPDATE`). Checking is free; installing replaces the running executable, so it
+//! only happens from an accepted prompt. No non-HTTPS URL, no proxy to a shell.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +11,6 @@ const REPO: &str = "deadtrickster/rano";
 /// This binary's version, as compiled.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// Whether an update is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Update {
     /// The latest release's version, without the leading `v`.
@@ -32,8 +22,8 @@ pub struct Update {
 }
 
 impl Update {
-    /// The URL to download `asset` from — the host is the constant above,
-    /// never anything a response said.
+    /// The URL to download `asset` from — the host is the constant above, never anything a
+    /// response said.
     pub fn asset_url(&self, asset: &str) -> String {
         format!(
             "https://github.com/{REPO}/releases/download/v{}/{asset}",
@@ -41,7 +31,6 @@ impl Update {
         )
     }
 
-    /// One line for the status bar.
     pub fn message(&self) -> String {
         match &self.asset {
             Some(_) => format!(
@@ -56,10 +45,9 @@ impl Update {
     }
 }
 
-/// Is `enabled`? **On by default**: the config value wins if set, otherwise the
-/// environment. `RANO_AUTOUPDATE=0` is how someone turns it off for one command,
-/// and reading that as `true` would make the switch a lie. A plain function so
-/// a test can drive both branches without a global.
+/// Is it enabled? On by default: the config value wins if set, otherwise the environment.
+/// `RANO_AUTOUPDATE=0` is how someone turns it off for one command, and reading that as `true`
+/// would make the switch a lie. A plain function so a test drives both branches without a global.
 pub fn enabled(config_value: Option<bool>, env_value: Option<&str>) -> bool {
     if let Some(b) = config_value {
         return b;
@@ -75,9 +63,8 @@ pub fn enabled(config_value: Option<bool>, env_value: Option<&str>) -> bool {
     }
 }
 
-/// Every URL this module fetches must be HTTPS, **checked without spawning
-/// anything** so it is testable in-process (a test that spawns a process can
-/// HANG; the decision is pure, the process is not).
+/// Every URL this module fetches must be HTTPS, checked without spawning anything so it is
+/// testable in-process: the decision is pure, the process is not.
 pub fn require_https(url: &str) -> Result<(), String> {
     if url.starts_with("https://") {
         return Ok(());
@@ -86,8 +73,8 @@ pub fn require_https(url: &str) -> Result<(), String> {
         "refusing a non-https URL: {url} (downloads here are TLS-only)"
     ))
 }
-/// Parse `MAJOR.MINOR.PATCH`. Strict on purpose: `0.2.0-rc1` and `2026.09.30`
-/// are not newer than anything, so a tag this shape never triggers an update.
+/// Parse `MAJOR.MINOR.PATCH`. Strict on purpose: `0.2.0-rc1` and `2026.09.30` are not newer
+/// than anything, so a tag this shape never triggers an update.
 pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let s = s.trim().strip_prefix('v').unwrap_or(s.trim());
     let mut parts = s.split('.');
@@ -108,9 +95,8 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
     }
 }
 
-/// The asset name for this platform, or `None` for one we do not build for.
-/// The same table `install.sh` uses — `scripts/check-dist-names.sh` keeps both
-/// in step with the release workflow.
+/// The asset name for this platform, or `None` for one we do not build for. The same table
+/// `install.sh` uses, kept in step with the release workflow by `scripts/check-dist-names.sh`.
 pub fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
     Some(match (os, arch) {
         ("linux", "x86_64") => "rano-x86_64-unknown-linux-gnu.tar.gz",
@@ -121,15 +107,13 @@ pub fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
     })
 }
 
-/// This build's asset name.
 pub fn this_asset() -> Option<&'static str> {
     asset_name(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// Ask GitHub for the latest release and decide whether it is worth offering.
-/// Returns `None` when disabled, when the request fails, or when already the
-/// latest — an unavailable network must not be an editor's problem. `Get` is a
-/// one-method trait so the parsing and the decision test with no network.
+/// Ask GitHub for the latest release and decide whether it is worth offering. `None` when
+/// disabled, when the request fails, or when already the latest — an unavailable network must
+/// not be an editor's problem. `Get` is a one-method trait so the decision tests with no network.
 pub fn check_with(enabled: bool, get: &dyn Get) -> Option<Update> {
     if !enabled {
         return None;
@@ -147,8 +131,8 @@ pub fn check_with(enabled: bool, get: &dyn Get) -> Option<Update> {
     })
 }
 
-/// The `tag_name` field of a release JSON body, without a JSON dependency —
-/// strict: no field or an empty value yields `None`, and no update.
+/// The `tag_name` field of a release JSON body, without a JSON dependency — strict: no field
+/// or an empty value yields `None`, and no update.
 pub fn tag_name(json: &str) -> Option<String> {
     let at = json.find("\"tag_name\"")?;
     let rest = &json[at + "\"tag_name\"".len()..];
@@ -159,22 +143,13 @@ pub fn tag_name(json: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// The one thing [`check_with`] needs from the network.
 pub trait Get {
     fn get(&self, url: &str) -> Result<String, String>;
 }
 
-/// Fetch a URL with `curl`, if it is present — a subprocess rather than a TLS
-/// stack, which is a few hundred kilobytes of dependencies for one request per
-/// launch.
-///
-/// **`-q` is first and it is why certificate verification is not negotiable**:
-/// curl honours `~/.curlrc`, so one `insecure` line silently turns verification
-/// off — with `-q` first, curlrc is not read at all. `--proto`/`--proto-redir`
-/// keep request and redirects on HTTPS. The cost: a proxy configured only in
-/// `~/.curlrc` is ignored; the standard `HTTPS_PROXY` variables still work.
-/// Downloading and executing a binary is not a place to inherit someone's
-/// debugging shortcuts.
+/// Fetch a URL with `curl`, a subprocess rather than a TLS stack: a few hundred kilobytes of
+/// dependencies for one request per launch. `-q` is first so `~/.curlrc` is never read — one
+/// `insecure` line there would silently turn verification off for a binary we then execute.
 pub struct Curl;
 
 /// The curl arguments every request here shares. `-q` MUST be first.
@@ -215,7 +190,6 @@ impl Get for Curl {
     }
 }
 
-/// Fetch a URL's bytes, for the asset itself rather than the JSON.
 impl Curl {
     pub fn get_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
         require_https(url)?;
@@ -232,9 +206,9 @@ impl Curl {
     }
 }
 
-/// Extract `rano` from a `.tar.gz` produced by `scripts/make-dist.sh` — a
-/// minimal reader for a single-member gzip tar. It refuses anything but the one
-/// shape we publish: a member named `rano`, regular and non-empty.
+/// Extract `rano` from a `.tar.gz` produced by `scripts/make-dist.sh` — a minimal reader for a
+/// single-member gzip tar. It refuses anything but the one shape we publish: a regular,
+/// non-empty member named `rano`.
 pub fn extract_binary(tar_gz: &[u8]) -> Result<Vec<u8>, String> {
     let raw = gunzip(tar_gz)?;
     let mut at = 0usize;
@@ -280,11 +254,9 @@ fn octal(field: &[u8]) -> Option<u64> {
     u64::from_str_radix(s, 8).ok()
 }
 
-/// Gunzip — **a library, not a subprocess**: hand-pumped `gzip -d` pipes
-/// deadlock (the child waits for stdin EOF; the 64 KB stdout pipe fills on a
-/// 20 MB decompression), and a small test fixture cannot show either. `flate2`
-/// also removes the "is gzip installed" question from an operation that runs on
-/// someone else's machine.
+/// Gunzip — a library, not a subprocess: hand-pumped `gzip -d` pipes deadlock (the child waits
+/// for stdin EOF while the stdout pipe fills), and `flate2` also removes the "is gzip
+/// installed" question from an operation that runs on someone else's machine.
 fn gunzip(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut out = Vec::new();
@@ -294,8 +266,8 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Replace the running executable with `binary`: write a temp file next to the
-/// target, then rename. Either the new binary is in place or the old one is.
+/// Replace the running executable with `binary`: write a temp file next to the target, then
+/// rename, so either the new binary is in place or the old one is.
 pub fn replace_running(binary: &[u8], exe: &Path) -> Result<(), String> {
     let dir = exe
         .parent()
@@ -316,14 +288,12 @@ pub fn replace_running(binary: &[u8], exe: &Path) -> Result<(), String> {
     })
 }
 
-/// Where this executable is.
 pub fn current_exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("cannot find my own path: {e}"))
 }
 
-/// Download and install `u`. Called only after a person said yes — nothing
-/// here asks, and nothing here is on a timer. The URL comes from
-/// [`Update::asset_url`], so the host is written down in one place.
+/// Download and install `u`, only after a person said yes — nothing here asks and nothing is on
+/// a timer. The URL comes from [`Update::asset_url`], so the host is written down once.
 pub fn install(u: &Update) -> Result<(), String> {
     let asset = u
         .asset

@@ -3732,8 +3732,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{name}.{}.rano-tmp", std::process::id()));
     // The mode the file had: a rename must not change how it opens.
     let mode = fs::metadata(&target).ok().map(|m| m.permissions().mode());
-    let write = || -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp)?;
+    // A writable file in a directory we cannot write: no temp file is possible, so
+    // write in place as nano does rather than refuse a save that used to work.
+    let mut f = match fs::File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return fs::write(&target, bytes);
+        }
+        Err(e) => return Err(e),
+    };
+    let mut write = || -> std::io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
         if let Some(mode) = mode {

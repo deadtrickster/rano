@@ -209,6 +209,35 @@ fn a_save_keeps_the_files_mode() {
     assert_eq!(mode, 0o750, "the mode survives the rename");
 }
 
+/// A directory nobody can write into, unless this runs as root (which writes anyway).
+fn read_only_dir(d: &TempDir) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&d.0, fs::Permissions::from_mode(0o555)).unwrap();
+    let root = fs::write(d.0.join("probe"), b"x").is_ok();
+    if root {
+        let _ = fs::remove_file(d.0.join("probe"));
+        fs::set_permissions(&d.0, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    !root
+}
+
+#[test]
+fn a_writable_file_in_a_read_only_directory_still_saves() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = temp_dir("save_ro_dir");
+    let f = d.0.join("f.txt");
+    fs::write(&f, "one\ntwo\n").unwrap();
+    let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
+    press_text(&mut ed, "X");
+    if !read_only_dir(&d) {
+        return;
+    }
+    ed.save_to(f.clone());
+    fs::set_permissions(&d.0, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(fs::read(&f).unwrap(), b"Xone\ntwo\n", "written in place");
+    assert!(!ed.bs().buf.modified, "saved");
+}
+
 #[test]
 fn a_failed_save_leaves_the_file_and_no_temp_behind() {
     use std::os::unix::fs::PermissionsExt;
@@ -217,12 +246,8 @@ fn a_failed_save_leaves_the_file_and_no_temp_behind() {
     fs::write(&f, "one\ntwo\n").unwrap();
     let mut ed = Editor::new(Buffer::from_file(&f).unwrap(), config::Config::default());
     press_text(&mut ed, "X");
-    fs::set_permissions(&d.0, fs::Permissions::from_mode(0o555)).unwrap();
-    // Root writes into a read-only directory, so there is no failing save to test.
-    let root = fs::write(d.0.join("probe"), b"x").is_ok();
-    if root {
-        let _ = fs::remove_file(d.0.join("probe"));
-        fs::set_permissions(&d.0, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o444)).unwrap();
+    if !read_only_dir(&d) {
         return;
     }
     ed.save_to(f.clone());

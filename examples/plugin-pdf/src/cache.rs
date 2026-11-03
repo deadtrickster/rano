@@ -1,33 +1,14 @@
-//! **The page cache: the last few pages, explicitly, in one place.**
-//!
-//! Three entries, least-recently-used evicted, keyed by document and page. Small on purpose: the
-//! point of a reader is that moving back one page is instant while the rest of the document stays
-//! unrendered.
-//!
-//! **Only text is kept.** A page's picture is up to 16 MiB the host wrote straight into the arena
-//! where `provider_picture` answers it, so there is nowhere to put a second copy, and the render
-//! ladder asks for a different dpi at every step, so no picture entry would ever be hit. A page of
-//! text is kilobytes, and it is what search, copy and the view itself are made of.
-//!
-//! **What it can and cannot do today.** The ABI instantiates a fresh module for every call
-//! (`plans/S10-wasm-hooks.md` §2.1), so this cache is empty at the start of each call: within one
-//! call it saves a repeat ask the view would otherwise make, and nothing more. The moment a host
-//! keeps one instance across a view's calls — which is the change §2.1 reserves for v2 — this is
-//! already the reader's page cache and no other line moves. That is why it is a `static` with a
-//! fixed capacity rather than a local: the cost of it being useless today is one mutex that never
-//! contends, and the cost of it being absent later is a re-render per key press.
+//! The page cache: the last few pages, LRU-evicted, keyed by document and page, so
+//! going back one page is instant while the rest stays unrendered. Text only: a
+//! picture is up to 16 MiB the host writes, at a dpi the ladder changes each step.
 
 use std::sync::Mutex;
 
-/// How many pages are kept. Three is what a reader needs: the page, the one behind it (going back
-/// is a look, not a re-render) and one ahead.
+/// How many pages are kept: the page, the one behind it and one ahead.
 pub const PAGES: usize = 3;
 
-/// What a cached entry is keyed by.
-///
-/// **`doc` is part of the key**, a hash of the document's path: a cache that keyed only on the page
-/// number would show one document's page 3 in another document the moment a host keeps an instance
-/// across two views, and "the page cache is small and explicit" must not mean "and wrong".
+/// What a cached entry is keyed by: `doc` is part of it, or one document's page 3
+/// would show in another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub doc: u64,
@@ -35,7 +16,6 @@ pub struct Key {
 }
 
 impl Key {
-    /// A page of a document.
     pub fn new(doc: u64, page: u32) -> Key {
         Key { doc, page }
     }
@@ -73,7 +53,7 @@ impl Cache {
         self.slots.iter().map(|(k, _)| *k).collect()
     }
 
-    /// **A hit, which also makes the entry the most recent.** `None` for a miss.
+    /// A hit, which also makes the entry the most recent; `None` for a miss.
     pub fn get(&mut self, key: Key) -> Option<&String> {
         let at = self.slots.iter().position(|(k, _)| *k == key)?;
         let slot = self.slots.remove(at);
@@ -81,7 +61,7 @@ impl Cache {
         self.slots.first().map(|(_, text)| text)
     }
 
-    /// **A page, whether or not it was already there.** Evicts the least recently used.
+    /// A page, whether or not it was already there; evicts the least recently used.
     pub fn put(&mut self, key: Key, text: String) {
         self.slots.retain(|(k, _)| *k != key);
         self.slots.insert(0, (key, text));
@@ -89,8 +69,8 @@ impl Cache {
     }
 }
 
-/// **A document's identity in the cache**: FNV-1a over the path, because a key is compared and
-/// copied on every lookup and a path is a `String` that would have to be cloned into every entry.
+/// A document's identity in the cache: FNV-1a over the path, because a key is
+/// copied on every lookup and a `String` path would be cloned into every entry.
 pub fn id(path: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in path.as_bytes() {
@@ -100,21 +80,21 @@ pub fn id(path: &str) -> u64 {
     hash
 }
 
-/// The one cache this module has.
+/// The one cache this module has: a `static`, so a host that keeps one instance
+/// across a view's calls already has the reader's page cache.
 static CACHE: Mutex<Cache> = Mutex::new(Cache::new(PAGES));
 
-/// **Empty the cache.** A host that reloads a plugin, or opens a different document in the same
-/// instance, must not read the last one's pages; today the fresh instance per call does this for
-/// free, and this is what makes that explicit rather than incidental.
+/// Empty the cache: a host that reloads a plugin, or opens a different document in
+/// the same instance, must not read the last one's pages.
 pub fn clear() {
     with(|c| {
         c.slots.clear();
     });
 }
 
-/// **Run `f` with the cache.** A poisoned lock is not a reason to lose a page: the entries are
-/// plain values, so the guard is taken back out of the poison and the call goes on. (A panic in a
-/// plugin is a trap the host reports; the cache must not be the second thing that goes wrong.)
+/// Run `f` with the cache. A poisoned lock is not a reason to lose a page: the
+/// guard is taken back out of the poison and the call goes on — a panic is a trap
+/// the host reports, and the cache must not be the second thing to go wrong.
 pub fn with<R>(f: impl FnOnce(&mut Cache) -> R) -> R {
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)

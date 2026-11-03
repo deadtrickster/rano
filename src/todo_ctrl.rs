@@ -1,47 +1,15 @@
-//! TODO.md in the editor: reading the buffer as a todo file, changing a task's
-//! state, cascading over a subtree, and reporting what the format cannot express.
-//!
-//! The schema itself is [`crate::todo`] — a library module that reads byte ranges
-//! and returns edits, and never writes a document. This is the binary-side half:
-//! it maps the editor's rows and columns onto those byte ranges, applies the
-//! edits through `Buffer` so they land in the undo stack, and feeds `check()` to
-//! the gutter that already renders diagnostics.
-//!
-//! # Why the byte mapping is done by hand
-//!
-//! [`crate::todo`] speaks **byte offsets into `Buffer::text()`**; the editor
-//! speaks `(row, char col)`. The two are not the same number and the difference
-//! is not a formality: a task line may contain multibyte text before its marker
-//! (`- [ ] 日本語`), so a byte offset is not a char index. [`row_chars`] is the one
-//! conversion, and it is exact rather than assumed.
-//!
-//! The conversion is safe to do once, before any edit is applied, because every
-//! edit the schema produces is **three ASCII bytes replaced by three**, so no
-//! edit moves another one's offsets and no row changes length.
-//!
-//! # Recognition
-//!
-//! A buffer is a *todo file* when its name is `TODO.md`, case-insensitively —
-//! that is what the standard is about, and it is what gates `check()` reporting
-//! unknown markers. **Toggling does not require it**: any row with a task marker
-//! toggles, in any markdown file, because being able to tick a box in a scratch
-//! note is useful and costs nothing.
+//! TODO.md in the editor: reading the buffer as a todo file, changing a task's state,
+//! cascading over a subtree, reporting what the format cannot express. The schema is
+//! [`crate::todo`] (byte offsets); this half maps rows and char columns onto them.
 
 use crate::buffer::Buffer;
 use crate::editor::{ActionKind, Editor};
-// The LIBRARY's schema, not a second copy compiled into the binary. `src/todo.rs`
-// is declared once, in `lib.rs`, so there is one implementation of the format and
-// leticl sees exactly what the editor uses. Only `&str`, ranges and `String` cross
-// the boundary, so the binary's `Buffer` and the library's stay independent — as
-// they already were for every other module.
+// The LIBRARY's schema, not a second copy in the binary: one implementation of the format,
+// and only `&str`, ranges and `String` cross the boundary.
 use crate::todo::{self, State};
 
-/// The byte range of `text()` that row `r` occupies, and how many bytes it is.
-///
-/// `text()` joins rows with `\n` and appends a final `\n` when the last row is
-/// non-empty, so a row's start is the sum of every earlier row's bytes plus one
-/// separator each. Computed rather than cached because it is only ever needed on
-/// a keypress, never per frame.
+/// The byte range of `text()` that row `r` occupies: the sum of every earlier row's bytes
+/// plus one separator each. Computed, not cached — needed on a keypress, never per frame.
 fn row_byte_range(buf: &Buffer, r: usize) -> Option<(usize, usize)> {
     if r >= buf.row_count() {
         return None;
@@ -54,17 +22,14 @@ fn row_byte_range(buf: &Buffer, r: usize) -> Option<(usize, usize)> {
     Some((at, at + len))
 }
 
-/// A byte range that lies inside ONE row, as `(row, char_start, char_end)`.
-///
-/// `None` when the range straddles a row boundary, which for this module is a
-/// bug rather than a case: every range it converts is a three-byte marker.
+/// A byte range inside ONE row, as `(row, char_start, char_end)`. `None` when it straddles
+/// a row boundary — a bug here, not a case: every range converted is a three-byte marker.
 fn row_chars(buf: &Buffer, range: &std::ops::Range<usize>) -> Option<(usize, usize, usize)> {
     for r in 0..buf.row_count() {
         let (start, end) = row_byte_range(buf, r)?;
         if range.start >= start && range.end <= end {
-            // Byte offset within the row -> char index, by walking the row. A
-            // task line can carry multibyte text before its marker, so this is
-            // not the identity and must not be treated as one.
+            // Byte offset -> char index, by walking the row: multibyte text
+            // before a marker makes this not the identity.
             let to_char = |off: usize| -> usize {
                 let mut bytes = 0usize;
                 let mut chars = 0usize;
@@ -83,27 +48,19 @@ fn row_chars(buf: &Buffer, range: &std::ops::Range<usize>) -> Option<(usize, usi
     None
 }
 
-/// The state the cursor is inside, and its index, if the cursor's row is a task.
-///
-/// `row` rather than a position: a task is a line, and being anywhere on that
-/// line means the key acts on it. That is what makes the binding usable without
-/// aiming at the checkbox.
+/// The state the cursor is inside, and its index. A task is a line, so being anywhere on it
+/// acts on it.
 fn task_at(doc: &todo::Doc, row: usize) -> Option<usize> {
     doc.items().iter().position(|it| it.line == row)
 }
 
 impl Editor {
-    /// This buffer as a TODO.md.
-    ///
-    /// Parsed on demand rather than cached: `Doc::parse` is 2.1 ms on a 200-item
-    /// file (measured), which is imperceptible for a keypress and would be a
-    /// liability per frame. If it ever needs to be per-frame, cache it against
-    /// `edit_gen` — the way the wrap table is — and not before.
+    /// This buffer as a TODO.md, parsed on demand: `Doc::parse` is ~2 ms on a 200-item
+    /// file, imperceptible for a keypress and a liability per frame.
     pub(crate) fn todo_doc(&self) -> todo::Doc {
         todo::Doc::parse(&self.bs().buf.text())
     }
 
-    /// Whether this buffer is a TODO.md by name.
     pub(crate) fn is_todo_buffer(&self) -> bool {
         self.bs()
             .buf
@@ -114,22 +71,15 @@ impl Editor {
             .is_some_and(|n| n.eq_ignore_ascii_case("todo.md"))
     }
 
-    /// Replace the buffer text inside `range` with `replacement`, as chars.
-    ///
-    /// The caller has already converted the byte range to a row and char range.
-    /// Assumes `replacement` is the same char count as the range — true for every
-    /// marker, and asserted in the tests rather than hoped for.
+    /// Replace the buffer text inside `range`, as chars. Assumes `replacement`
+    /// is the same char count as the range — true for every marker.
     fn todo_replace(buf: &mut Buffer, row: usize, chars: std::ops::Range<usize>, text: &str) {
         buf.row_mut(row)
             .splice(chars, text.chars().collect::<Vec<_>>());
     }
 
-    /// Apply the schema's edits, as ONE undo step.
-    ///
-    /// Descending by offset, so if a future edit is not length-preserving the
-    /// earlier ones cannot have moved the later ones' positions. Today every edit
-    /// is three bytes for three, so the order does not matter — which is exactly
-    /// why it is not relied on.
+    /// Apply the schema's edits, as ONE undo step, descending by offset so a
+    /// future non-length-preserving edit cannot move the later ones' positions.
     fn apply_todo_edits(&mut self, edits: &[todo::Edit], label: &str) -> usize {
         let mut located: Vec<(usize, std::ops::Range<usize>, String)> = Vec::new();
         {
@@ -138,9 +88,9 @@ impl Editor {
                 match row_chars(buf, &e.range) {
                     Some((row, a, b)) => located.push((row, a..b, e.replacement.clone())),
                     None => {
-                        // A range that is not inside one row means the offsets do
-                        // not match this buffer — a stale parse, not a bad edit.
-                        // Refusing to write is the only safe answer.
+                        // A range not inside one row means the offsets do not match
+                        // this buffer — a stale parse. Refusing to write is the only
+                        // safe answer.
                         self.flash("Todo edit does not line up with this buffer");
                         return 0;
                     }
@@ -160,26 +110,16 @@ impl Editor {
             Self::todo_replace(&mut bs.buf, *row, chars.clone(), text);
         }
         self.finish_step();
-        // Every row's content changed but none its count, and a marker is the
-        // same width before and after — so the wrap table is still right. The
-        // multi-row invalidate is for the diagnostics and the highlight, which
-        // do need to know the document changed.
+        // No row's content changed length, so the wrap table is still right;
+        // the invalidate is for the diagnostics and the highlight.
         self.edit_invalidate();
         self.flash(label);
         located.len()
     }
 
-    /// M-T: toggle the task on the cursor's row between done and not done.
-    ///
-    /// Ancestors follow — that is [`todo::Doc::derive_up`], and it is the half of
-    /// "auto done for the whole subtree" that goes UP: completing the last
-    /// sub-task completes the parent, because the FILE is the transport and a
-    /// parent left `[ ]` above finished children is the file disagreeing with
-    /// itself.
-    ///
-    /// Children are **not** touched. Marking a parent is not a claim about its
-    /// children, and a toggle that quietly rewrote a whole subtree would be a
-    /// surprise; that is what M-C is for.
+    /// M-T: toggle the task on the cursor's row. Ancestors follow ([`todo::Doc::derive_up`]):
+    /// a parent left `[ ]` above finished children is the file disagreeing with itself.
+    /// Children are NOT touched — that is what M-C is for.
     pub(crate) fn todo_toggle(&mut self) {
         let row = self.bs().cursor.row;
         let doc = self.todo_doc();
@@ -191,7 +131,7 @@ impl Editor {
         let to = match from {
             State::Done => State::Open,
             // Declined is not a resting state: any other press means "not done
-            // any more", and Open is what that is. Reaching Declined is M-X.
+            // any more". Reaching Declined is M-X.
             State::Open | State::Declined => State::Done,
         };
         let edits = doc.set_subtree(Some(i), to);
@@ -199,11 +139,8 @@ impl Editor {
         self.apply_todo_edits(&edits, &label);
     }
 
-    /// M-X: toggle the task on the cursor's row between declined and not.
-    ///
-    /// `[-]` is the standard's third state, and it means **declined** — not "in
-    /// progress", which is the reading it usually gets. Keeping it on its own key
-    /// means the common press never passes through it by accident.
+    /// M-X: toggle declined — the standard's third state, which means declined, not "in
+    /// progress". Its own key, so the common press never passes through it.
     pub(crate) fn todo_decline(&mut self) {
         let row = self.bs().cursor.row;
         let doc = self.todo_doc();
@@ -220,20 +157,9 @@ impl Editor {
         self.apply_todo_edits(&edits, state_word(to));
     }
 
-    /// M-C: **the whole unit the cursor is in**, as one command.
-    ///
-    /// On a heading row it targets that heading's whole `section` — every task
-    /// under it, subsections included. On a task row it targets that task's
-    /// subtree. Either way every task inside gets the same state, and the
-    /// ancestors are derived afterwards.
-    ///
-    /// The direction comes from what is there: a unit that is not already all
-    /// done is marked done, one that is all done is cleared. One key both
-    /// completes a section and takes it back.
-    ///
-    /// This is the key for the shape these files actually have. rano's own
-    /// `TODO.md` is 49 headings over 67 flat items — the hierarchy is the
-    /// HEADINGS, and no single item owns it.
+    /// M-C: the whole unit the cursor is in, as one command — a heading's section on a
+    /// heading row, a task's subtree on a task row, ancestors derived after. The direction
+    /// comes from what is there: a unit not all done is marked done, one all done is cleared.
     pub(crate) fn todo_cascade(&mut self) {
         let row = self.bs().cursor.row;
         let doc = self.todo_doc();
@@ -259,9 +185,7 @@ impl Editor {
         let all_done = inside.iter().all(|it| it.state == State::Done);
         let to = if all_done { State::Open } else { State::Done };
         let edits = doc.set_span(span, to);
-        // "Done 2 tasks in this section", not "Done 2 sections" — the count is
-        // of TASKS, and reading it as a count of sections is a lie the wording
-        // made easy.
+        // "Done 2 tasks in this section", not "Done 2 sections": the count is of TASKS.
         let scope = if what == "section" {
             " in this section"
         } else {
@@ -277,18 +201,9 @@ impl Editor {
         self.apply_todo_edits(&edits, &label);
     }
 
-    /// M-}: move the cursor to the next heading, M-{. **Both wrap**, because a
-    /// file is a loop when you are reading it: reaching the end and pressing
-    /// again should take you to the top rather than say there is nothing there.
-    /// The wrap is announced, so it cannot look like a jump into nowhere.
-    ///
-    /// Heading motion rather than folding, chosen deliberately: it reads
-    /// `headings()`, which the schema already builds and tests, and needs no
-    /// renderer change at all. Folding is the expensive half — see §17.7 — and it
-    /// is navigation, not hiding, that a 58-heading file actually wants.
-    ///
-    /// Works in any markdown file, not only a `TODO.md`: headings are markdown's,
-    /// not the todo standard's.
+    /// M-}/M-{: the next/previous heading. Both wrap, announced — a file is a loop when you
+    /// are reading it, and a silent jump into nowhere looks broken. It reads `headings()`,
+    /// which the schema already builds, and works in any markdown file.
     pub(crate) fn todo_next_heading(&mut self) {
         self.heading_motion(true);
     }
@@ -305,9 +220,8 @@ impl Editor {
             self.flash("No headings in this file");
             return;
         }
-        // Deliberately strict: `>` and `<` rather than `>=`, so pressing the key
-        // while sitting ON a heading moves to the next one instead of standing
-        // still. Staying put reads as a broken key.
+        // Strict `>`/`<`, so pressing the key ON a heading moves to the next one
+        // instead of standing still.
         let next = if forward {
             lines.iter().find(|l| **l > row).copied()
         } else {
@@ -331,8 +245,8 @@ impl Editor {
         let text_h = self.text_h;
         self.adjust_scroll(text_h);
         self.adjust_scroll_x();
-        // Named, so a silent jump to a line you were not looking at cannot be
-        // mistaken for a scroll accident.
+        // Named, so a jump to a line you were not looking at cannot be mistaken
+        // for a scroll accident.
         let n = doc.headings().iter().position(|h| h.line == target);
         let title = n
             .map(|i| {
@@ -345,14 +259,9 @@ impl Editor {
         self.flash(&format!("{title}{where_}"));
     }
 
-    /// The task diagnostics for this buffer: its `check()` output, in the same
-    /// tuple shape a tree-sitter error arrives in, so the gutter that already
-    /// renders those renders these.
-    ///
-    /// Empty unless the buffer is a todo file BY NAME. A `[-]` in an ordinary
-    /// markdown file is a legitimate thing to write (Obsidian uses it for
-    /// cancelled), and reporting it there would be the editor inventing a rule
-    /// for somebody else's file.
+    /// The task diagnostics for this buffer: `check()` output in the same tuple shape a
+    /// tree-sitter error arrives in. Empty unless the buffer is a todo file BY NAME — a `[-]`
+    /// in an ordinary markdown file is legitimate, and reporting it invents a rule.
     pub(crate) fn todo_check(&self) -> Vec<(usize, usize, usize, String)> {
         if !self.is_todo_buffer() {
             return Vec::new();
@@ -361,7 +270,6 @@ impl Editor {
     }
 }
 
-/// The word for a state, for the status line.
 fn state_word(s: State) -> &'static str {
     match s {
         State::Open => "Open",
@@ -374,13 +282,8 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// A `Pos` for a byte offset — the inverse of what `row_chars` does, for a
-/// caller that wants to move the cursor to a place the schema named.
-///
-/// `cfg(test)`: the mapping is the one thing in this file that could be silently
-/// wrong, so it is asserted directly (see the tests), and nothing in the editor
-/// needs to convert this way yet — a byte offset from the schema is only ever
-/// *edited*, never navigated to.
+/// A `Pos` for a byte offset, the inverse of [`row_chars`]. `cfg(test)`: the mapping could
+/// be silently wrong, so it is asserted directly; nothing converts this way yet.
 #[cfg(test)]
 pub(crate) fn pos_of_byte(buf: &Buffer, off: usize) -> Option<crate::buffer::Pos> {
     for r in 0..buf.row_count() {
@@ -448,10 +351,8 @@ Prose that belongs to nobody.
 - [ ] three
 ";
 
-    /// **The byte-to-row mapping, which is the one thing here that could be
-    /// silently wrong.** `todo` speaks byte offsets into `text()`; the editor
-    /// speaks rows and char columns, and they differ the moment a line holds a
-    /// multibyte character.
+    /// The byte-to-row mapping — `todo` speaks byte offsets, the editor rows and char
+    /// columns, and they differ the moment a line holds multibyte text.
     #[test]
     fn byte_offsets_map_to_char_columns_through_multibyte_text() {
         let ed = ed("- [ ] 日本語 tail\n");
@@ -459,8 +360,7 @@ Prose that belongs to nobody.
         // The marker is ASCII and sits at bytes 2..5 == chars 2..5.
         assert_eq!(pos_of_byte(buf, 2), Some(Pos { row: 0, col: 2 }));
         assert_eq!(pos_of_byte(buf, 5), Some(Pos { row: 0, col: 5 }));
-        // After the three CJK characters (3 bytes each) the numbers diverge:
-        // byte 6 is the first 日, byte 9 is the space after it.
+        // After the three CJK characters (3 bytes each) the numbers diverge.
         assert_eq!(
             pos_of_byte(buf, 9),
             Some(Pos { row: 0, col: 7 }),
@@ -468,8 +368,8 @@ Prose that belongs to nobody.
         );
     }
 
-    /// The same mapping across rows, where each row costs its bytes plus one for
-    /// the `\n` the join inserts.
+    /// The same mapping across rows: each row costs its bytes plus one for the `\n` the join
+    /// inserts.
     #[test]
     fn byte_offsets_map_across_rows() {
         let ed = ed("ab\n- [ ] x\n");
@@ -504,8 +404,8 @@ Prose that belongs to nobody.
         assert_eq!(rows(&ed), before, "one undo restores it exactly");
     }
 
-    /// **Up: completing the last child completes the parent**, because the file
-    /// leaves `[ ]` above finished children otherwise.
+    /// Up: completing the last child completes the parent, or the file leaves `[ ]` above
+    /// finished children.
     #[test]
     fn completing_the_last_child_completes_the_parent() {
         let mut ed = ed(DOC);
@@ -520,8 +420,7 @@ Prose that belongs to nobody.
         assert_eq!(r[10], "  - [x] child b");
     }
 
-    /// **Up goes both ways**: un-completing a child un-completes the parent, so
-    /// the file cannot say `[x]` above an open child.
+    /// **Up goes both ways**: un-completing a child un-completes the parent.
     #[test]
     fn unchecking_a_child_unchecks_the_parent() {
         let mut ed = ed(DOC);
@@ -537,8 +436,8 @@ Prose that belongs to nobody.
         assert_eq!(r[9], "  - [ ] child a");
     }
 
-    /// **Down, as one command**: M-C marks the whole subtree, and leaves
-    /// everything outside it alone.
+    /// Down, as one command: M-C marks the whole subtree and leaves everything outside it
+    /// alone.
     #[test]
     fn a_cascade_marks_the_subtree_only() {
         let mut ed = ed(DOC);
@@ -557,8 +456,7 @@ Prose that belongs to nobody.
         );
     }
 
-    /// A cascade is one undo step, however many markers it rewrote — which is
-    /// what the whole subtree of edits being one `begin_action` buys.
+    /// A cascade is one undo step, however many markers it rewrote.
     #[test]
     fn a_cascade_is_one_undo_step() {
         let mut ed = ed(DOC);
@@ -570,8 +468,7 @@ Prose that belongs to nobody.
         assert_eq!(rows(&ed), before);
     }
 
-    /// The same key takes a completed subtree back, so one binding covers both
-    /// directions.
+    /// The same key takes a completed subtree back, so one binding covers both directions.
     #[test]
     fn a_cascade_clears_a_subtree_that_is_all_done() {
         let mut ed = ed(DOC);
@@ -585,8 +482,8 @@ Prose that belongs to nobody.
         assert!(ed.status_text().unwrap_or_default().contains("Open"));
     }
 
-    /// Declined is its own key, and it is a toggle in its own right — so the
-    /// common press never passes through it.
+    /// Declined is its own key, and a toggle in its own right, so the common press never
+    /// passes through it.
     #[test]
     fn decline_toggles_the_third_state() {
         let mut ed = ed(DOC);
@@ -598,9 +495,8 @@ Prose that belongs to nobody.
         assert_eq!(rows(&ed)[6], "- [ ] one", "and back");
     }
 
-    /// **The byte-identity property, end to end through the editor**: the
-    /// document after equals the one before except for the marker, so the prose,
-    /// the metadata tails and the blank lines are untouched.
+    /// The byte-identity property, end to end: the document after equals the one before
+    /// except for the marker.
     #[test]
     fn a_toggle_touches_nothing_but_markers() {
         let src = "\
@@ -615,7 +511,6 @@ A description  with two spaces.
   - [ ] child
 ";
         // A LEAF task: exactly one marker moves, so the assertion is arithmetic.
-        // (`leaf`, not `ed`: a local called `ed` would shadow the helper below.)
         let mut leaf = ed(src);
         let before = leaf.bs().buf.text();
         at(&mut leaf, 6);
@@ -639,10 +534,8 @@ A description  with two spaces.
         assert!(after.contains("A description  with two spaces.   "));
         assert!(after.contains("  ~3d #feat @john 2020-03-20  and  double  spaces  "));
 
-        // Now the PARENT, which has one child. `derive_up` forbids `[x]` above an
-        // open child, so ticking it necessarily carries the child — two markers,
-        // two bytes, and still nothing else. That is the rule doing its job, and
-        // it is asserted rather than left as a surprise.
+        // Now the PARENT: `derive_up` forbids `[x]` above an open child, so
+        // ticking it carries the child — two markers, two bytes, nothing else.
         let mut parented = ed(src);
         at(&mut parented, 7);
         parented.todo_toggle();
@@ -671,10 +564,8 @@ A description  with two spaces.
         }
     }
 
-    /// **M-C on a HEADING marks its whole section** — the shape these files
-    /// actually have, where the hierarchy is the headings and no single item owns
-    /// it. This is the operator's ask read at file scale: rano's own `TODO.md` is
-    /// 49 headings over 67 flat items.
+    /// M-C on a HEADING marks its whole section — the shape these files have, where the
+    /// hierarchy is the headings.
     #[test]
     fn a_cascade_on_a_heading_marks_its_whole_section() {
         let mut ed = ed(DOC);
@@ -697,8 +588,7 @@ A description  with two spaces.
         );
     }
 
-    /// A section cascade covers SUBSECTIONS too — `###` inside `##` is still
-    /// under it, which is what a `section` range means.
+    /// A section cascade covers SUBSECTIONS too — `###` inside `##` is still under it.
     #[test]
     fn a_section_cascade_reaches_subsections() {
         let src = "\
@@ -739,8 +629,7 @@ A description  with two spaces.
         assert_eq!(r[9], "  - [ ] child a");
     }
 
-    /// **M-} / M-{ — heading motion.** The navigation half of §17.7, built
-    /// because it needs no renderer change: `headings()` is already there.
+    /// **M-} / M-{** — heading motion, which needs no renderer change.
     #[test]
     fn heading_motion_walks_the_outline() {
         let mut ed = ed(DOC);
@@ -758,8 +647,7 @@ A description  with two spaces.
         assert_eq!(ed.bs().cursor.row, 4);
     }
 
-    /// Pressing it while ON a heading moves on, rather than standing still —
-    /// which is the difference between a working key and one that reads broken.
+    /// Pressing it while ON a heading moves on, rather than standing still.
     #[test]
     fn heading_motion_moves_off_the_current_heading() {
         let mut ed = ed(DOC);
@@ -770,8 +658,7 @@ A description  with two spaces.
         assert_eq!(ed.bs().cursor.row, 4);
     }
 
-    /// It lands at the START of the heading line, and says which one — a jump
-    /// with no label is indistinguishable from a scroll accident.
+    /// It lands at the START of the heading line, and says which one.
     #[test]
     fn heading_motion_lands_on_the_line_and_names_it() {
         let mut ed = ed(DOC);
@@ -782,8 +669,8 @@ A description  with two spaces.
         assert!(st.contains("Now"), "the heading's own text: {st:?}");
     }
 
-    /// A wrap says so, because arriving at the top after aiming downward is
-    /// otherwise a jump into nowhere.
+    /// A wrap says so, or arriving at the top after aiming downward is a jump
+    /// into nowhere.
     #[test]
     fn heading_motion_announces_a_wrap() {
         let mut ed = ed(DOC);
@@ -807,8 +694,8 @@ A description  with two spaces.
         );
     }
 
-    /// Headings are markdown's, not the todo standard's, so this works in any
-    /// markdown file — no `TODO.md` name gate, unlike `check()`.
+    /// Headings are markdown's, not the todo standard's — no `TODO.md` name gate, unlike
+    /// `check()`.
     #[test]
     fn heading_motion_works_outside_a_todo_file() {
         let mut ed = ed_named("notes.md", "# One\n\ntext\n\n## Two\n\nmore\n");
@@ -817,9 +704,8 @@ A description  with two spaces.
         assert_eq!(ed.bs().cursor.row, 4);
     }
 
-    /// **The scrolling follows the cursor.** A heading motion without an
-    /// `adjust_scroll` would move the cursor off screen, which is worse than not
-    /// moving at all — the file's whole point is that you jump to read.
+    /// **The scrolling follows the cursor**: a motion that moved the cursor off
+    /// screen would be worse than not moving at all.
     #[test]
     fn heading_motion_scrolls_the_view_to_follow() {
         let mut body = String::from("# TODO\n\n");
@@ -831,8 +717,7 @@ A description  with two spaces.
         ed.show_line_numbers = false;
         ed.text_w = 40;
         ed.ensure_wrap_prefix();
-        // Rows: 0 "# TODO", 1 blank, then each section is 4 rows, so section k's
-        // heading is at 2 + 4k. Fifty presses from row 0 land on k = 49.
+        // Each section is 4 rows, so section k's heading is at 2 + 4k.
         at(&mut ed, 0);
         for _ in 0..50 {
             ed.todo_next_heading();
@@ -861,10 +746,8 @@ A description  with two spaces.
         );
     }
 
-    /// **`check()` is reported only for a TODO.md.** `[-]` in an ordinary
-    /// markdown file is a legitimate thing to write — Obsidian uses it for
-    /// cancelled — and the editor must not invent a rule for somebody else's
-    /// file.
+    /// `check()` is reported only for a TODO.md: `[-]` in an ordinary markdown file is a
+    /// legitimate thing to write.
     #[test]
     fn an_unknown_marker_is_reported_only_in_a_todo_file() {
         let src = "# TODO\n\n## S\n\n- [ ] fine\n- [/] in progress\n";
@@ -880,9 +763,7 @@ A description  with two spaces.
         assert_eq!(lower.todo_check().len(), 1);
     }
 
-    /// The toggle works in ANY markdown file — being able to tick a box in a
-    /// scratch note is useful and costs nothing — even though `check()` is
-    /// scoped to TODO.md.
+    /// The toggle works in ANY markdown file, even though `check()` is scoped to TODO.md.
     #[test]
     fn toggling_works_outside_a_todo_file_too() {
         let mut ed = ed_named("notes.md", "# Notes\n\n- [ ] a thought\n");
@@ -891,9 +772,8 @@ A description  with two spaces.
         assert_eq!(rows(&ed)[2], "- [x] a thought");
     }
 
-    /// Every state change lands as exactly three characters, so a row's width
-    /// and the document's length are unchanged — which is what lets the
-    /// conversion be computed once, before any edit is applied.
+    /// Every state change is three characters for three, so no row changes
+    /// width — which is what lets the conversion be computed once.
     #[test]
     fn every_marker_is_three_characters_before_and_after() {
         for from in ["- [ ] t\n", "- [x] t\n", "- [-] t\n", "- [X] t\n"] {
@@ -918,9 +798,7 @@ A description  with two spaces.
     }
 
     /// A CRLF buffer parses and toggles the same way: `text()` joins with `\n`
-    /// regardless, so the offsets the schema works in are unaffected — and this
-    /// pins that, because it is the kind of thing that would silently shift every
-    /// offset by the number of preceding rows.
+    /// regardless, so the offsets the schema works in are unaffected.
     #[test]
     fn a_crlf_buffer_toggles_by_the_same_offsets() {
         let mut ed = ed("# TODO\r\n\r\n- [ ] a\r\n- [ ] b\r\n");

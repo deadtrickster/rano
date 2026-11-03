@@ -1,20 +1,11 @@
-//! **The committed `plugin.wasm`, checked as an artifact.**
-//!
-//! The reader's tests run natively and never touch the module the host will actually load, so the
-//! two things that decide whether that module can be *used at all* are checked here, out of the
-//! file: the ABI's exports are present, and every import it declares is one of the two page
-//! renderers — a module that imported anything else would be refused at instantiation and could
-//! not even say why.
-//!
-//! It also pins **which build is committed**: the featured one, which imports both renderers,
-//! because `src/plugin.rs` answers them when the config grants `convert-page`. A build without the
-//! features has no imports and loads anywhere, and that is what this test would catch going out by
-//! mistake.
+//! The committed `plugin.wasm`, checked as an artifact: the ABI's exports are there
+//! and every import is one of the two page renderers. It also pins which build is
+//! committed — the featured one, so a build without the features cannot go out.
 
 use std::path::PathBuf;
 
-/// The exports a host needs to run this plugin: the ABI's two, the three hooks, and the memory the
-/// ABI's pointers are into.
+/// The exports a host needs: the ABI's two, the three hooks, and the memory the
+/// ABI's pointers point into.
 const EXPORTS: [&str; 6] = [
     "memory",
     "rano_abi",
@@ -24,7 +15,8 @@ const EXPORTS: [&str; 6] = [
     "on_key",
 ];
 
-/// The imports this plugin may ever declare.
+/// The imports this plugin may ever declare: a module importing anything else
+/// would be refused at instantiation.
 const IMPORTS: [&str; 2] = ["convert_page", "convert_page_text"];
 
 fn module() -> Vec<u8> {
@@ -54,9 +46,8 @@ fn every_import_it_declares_is_a_page_renderer_from_rano() {
 
 #[test]
 fn the_committed_build_is_the_one_that_runs_against_todays_host() {
-    // Both renderers, in the order the linker imports them: the committed module is built with
-    // `--features page-picture,page-text`, which is the build a host granting `convert-page` can
-    // instantiate.
+    // Both renderers, in the order the linker imports them: the committed module is
+    // the featured build, the one a host granting `convert-page` can instantiate.
     let found = sections(&module());
     let imports: Vec<&str> = found
         .imports
@@ -72,7 +63,7 @@ fn the_committed_build_is_the_one_that_runs_against_todays_host() {
 
 // ---------------------------------------------------------------- the wasm binary
 
-/// The two sections a host's load depends on: what the module imports and what it exports.
+/// The two sections a host's load depends on: imports and exports.
 #[derive(Debug, Default)]
 struct Sections {
     imports: Vec<(String, String)>,

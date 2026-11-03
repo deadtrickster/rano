@@ -1,48 +1,6 @@
-//! TODO.md — the markdown todo standard, as a schema over byte ranges.
-//!
-//! The target is the `todo-md` standard (`github.com/todo-md/todo-md`), read
-//! rather than paraphrased. Its rules, quoted:
-//!
-//! - *"Every todo markdown file starts with the `# TODO` header."*
-//! - *"Each subheader is a todo section."*
-//! - *"The tasks themself are one liners that start with either `'- [ ] '`,
-//!   `'- [-] '` or `'- [x] '`."*
-//! - *"A task can be in the following states: open / declined / done /
-//!   deleted (removed from the document)"* — the fourth is the absence of a
-//!   line, not a marker.
-//! - *"Tasks can be assigned to people using `@USERNAME` format. Tasks can be
-//!   tagged using the `#TAG` format."*
-//!
-//! **`[-]` means DECLINED** — not "in progress", which is the reading the third
-//! state usually gets, and which the wire's `InProgress` would want. The other
-//! repo called TODO.md (`todomd/todo.md`) has only two states and makes
-//! checkboxes optional, so the two differ; this module follows the three-state
-//! one.
-//!
-//! # There is no re-render, and that is the design
-//!
-//! Nothing here turns a model back into markdown. The document is the only
-//! source text; the schema holds **byte ranges into it**, and every operation
-//! yields an [`Edit`] — one `(range, replacement)` splice the caller applies.
-//! Prose between tasks, the `~3d #tag @name 2020-03-20` tail, wrapping and
-//! trailing whitespace are never represented, so they cannot be lost. An `id`
-//! or `dependsOn` field would live in that tail; this module reads only the
-//! marker, so it neither supports nor precludes one.
-//!
-//! A state change is exactly three bytes, because every marker is three bytes
-//! and the range comes from the parse tree. That is what makes a cascade
-//! byte-identical **by construction** rather than by care.
-//!
-//! # The grammar gap, which is why [`Doc::check`] exists
-//!
-//! `tree-sitter-md` has `task_list_marker_checked` and
-//! `task_list_marker_unchecked` — two. The standard has three. `- [-]` is not an
-//! error to the grammar and is not captured: it parses as an ordinary list item
-//! whose paragraph happens to begin with brackets, `has_error == false`. So a
-//! declined task is invisible to every query, and naming it needs a validated
-//! read at a grammar-given offset (the end of the item's own list marker). A
-//! marker the standard does not define is reported by [`Doc::check`] rather than
-//! silently accepted.
+//! TODO.md — the markdown todo standard, as a schema over byte ranges: `# TODO` first,
+//! sections from subheaders, tasks `'- [ ] '` / `'- [-] '` / `'- [x] '`, and `[-]` means
+//! DECLINED. Every operation yields an [`Edit`] splice of three bytes, never a rewrite.
 
 use crate::syntax::{Lang, Node, Stream};
 use std::ops::Range;
@@ -72,10 +30,8 @@ impl State {
     }
 
     /// The state a three-byte marker spells, or `None` when the standard does
-    /// not define it.
-    ///
-    /// `[X]` is accepted as done: the grammar treats it as checked, so refusing
-    /// it would report a file that renders correctly as broken.
+    /// not define it. `[X]` is accepted as done: the grammar treats it as
+    /// checked, so refusing it would report a file that renders correctly.
     pub fn of_marker(marker: &str) -> Option<State> {
         match marker {
             "[ ]" => Some(State::Open),
@@ -94,18 +50,9 @@ pub struct Item {
     pub marker: Range<usize>,
     /// The whole `list_item`, nested sub-tasks included.
     pub item: Range<usize>,
-    /// The task's own text: from the marker's end to the end of its own line.
-    ///
-    /// **Ends at the newline, not at the item's end.** A `list_item` range covers
-    /// its nested children too, so using it here made a *parent's* text swallow
-    /// every sub-task — measured, not theorised: the first version returned
-    /// `" Parent ~3d …\n  - [ ] sub one\n  - [x] sub two\n\n"`. That is wrong for
-    /// the field's own purpose (it is a title) and actively dangerous for a
-    /// caller matching a wire `content` against it, since a blob containing the
-    /// children matches almost anything.
-    ///
-    /// Kept as a range, not a string, because this module never rewrites it — the
-    /// `~3d #tag @name` tail is where future metadata would go.
+    /// The task's own text: from the marker's end to the end of its own line, not the item's end —
+    /// a `list_item` covers its nested children, so a title taken from `n.end` would swallow every
+    /// sub-task. Kept as a range: this module never rewrites it.
     pub text: Range<usize>,
     /// The nearest enclosing task, when this is a sub-task.
     pub parent: Option<usize>,
@@ -146,11 +93,8 @@ impl Edit {
     }
 }
 
-/// Apply several edits to one source.
-///
-/// Applied from the end backwards, so an earlier edit cannot move a later one's
-/// offsets. Every range this module produces is a distinct three-byte marker, so
-/// the edits do not overlap and the result is order-independent.
+/// Apply several edits to one source, from the end backwards so an earlier
+/// edit cannot move a later one's offsets. The ranges never overlap.
 pub fn apply(src: &str, edits: &[Edit]) -> String {
     let mut sorted: Vec<&Edit> = edits.iter().collect();
     sorted.sort_by_key(|e| std::cmp::Reverse(e.range.start));
@@ -168,22 +112,16 @@ pub struct Doc {
     items: Vec<Item>,
     headings: Vec<Heading>,
     line_starts: Vec<usize>,
-    /// Marker-shaped ranges that are NOT a state the standard defines.
-    ///
-    /// Kept separately from `items` because such a line is not a task: there is
-    /// no marker node for it and no state to give it, so it cannot be an `Item`.
-    /// Without this list the violation would be unrepresentable, which is the
-    /// whole reason `check` exists.
+    /// Marker-shaped ranges that are NOT a state the standard defines. Kept
+    /// separately from `items`: such a line has no marker node and no state, so
+    /// without this list the violation would be unrepresentable.
     suspects: Vec<Range<usize>>,
 }
 
 impl Doc {
-    /// Parse `src`.
-    ///
-    /// Never fails. A document that is not a TODO.md parses to a `Doc` with no
-    /// items, and anything the standard does not define is reported by
-    /// [`Doc::check`] rather than refused here — this is a view of a file, and
-    /// the file is allowed to contain anything.
+    /// Parse `src`. Never fails: a non-TODO.md parses to no items, and anything
+    /// the standard does not define is reported by [`Doc::check`] rather than
+    /// refused here.
     pub fn parse(src: &str) -> Doc {
         let line_starts = line_starts(src);
 
@@ -195,10 +133,9 @@ impl Doc {
         let mut headings = Vec::new();
         let mut suspects = Vec::new();
         if let Some(root) = &root {
-            // The walk is a pre-order traversal of an ordered tree, so `items`
-            // comes out in document order and a parent's index is always lower
-            // than its children's — which is what makes `parent` an index at
-            // all, and why nothing here re-derives the relationship afterwards.
+            // Pre-order traversal: `items` comes out in document order and a
+            // parent's index is always lower than its children's, which is what
+            // makes `parent` an index at all.
             let mut walk = Walk {
                 src,
                 items: Vec::new(),
@@ -254,8 +191,8 @@ impl Doc {
         &self.headings
     }
 
-    /// Tasks belonging to `heading` — every task in its section, nested
-    /// sub-tasks included, excluding tasks that belong to a nested section.
+    /// Tasks belonging to `heading` — every task in its section, nested sub-tasks included,
+    /// excluding tasks that belong to a nested section.
     pub fn items_in(&self, heading: usize) -> Vec<usize> {
         self.items
             .iter()
@@ -275,20 +212,10 @@ impl Doc {
         (done, idx.len())
     }
 
-    /// **Down.** Set `item` and every task inside it to `state`, then bring the
-    /// ancestors into line.
-    ///
-    /// `None` cascades over the whole document. Returns one edit per marker
-    /// whose bytes actually change: **a marker already at `state` yields no
-    /// edit at all**, which is what keeps a toggle from dirtying the whole path
-    /// to the root and makes a second cascade a no-op.
-    ///
-    /// The `up` pass is computed from the states the cascade **produced**, not
-    /// from the ones parsed. That distinction is the whole reason this method
-    /// exists rather than being two calls: deriving from the parsed states left
-    /// the parent open after its last child was completed, because it still saw
-    /// the child as it had been. Measured by
-    /// `a_partly_done_parent_is_open_not_done`.
+    /// Down: set `item` and every task inside it to `state`, then bring the ancestors into line;
+    /// `None` cascades over the whole document. One edit per marker whose bytes actually change,
+    /// and the `up` pass reads the states the cascade PRODUCED, or a parent stays open after its
+    /// last child is completed.
     pub fn set_subtree(&self, item: Option<usize>, state: State) -> Vec<Edit> {
         let span = match item {
             Some(i) => match self.items.get(i) {
@@ -300,21 +227,12 @@ impl Doc {
         self.set_span(span, state)
     }
 
-    /// **Down over an arbitrary span** — every task whose own extent lies inside
-    /// it, then the ancestors.
-    ///
-    /// The span is what makes a HEADING a target: a `section` range covers all the
-    /// tasks under it, so the same operation that ticks a task's subtree ticks a
-    /// whole `## section`, which is how a checklist written under headings is
-    /// marked. There is no separate concept for it.
-    ///
-    /// The `up` pass is what makes this correct rather than merely convenient: a
-    /// parent inside the span whose children did not all change is brought into
-    /// line by [`Self::derive_from`], so the file cannot end up saying `[x]` above
-    /// an open child.
+    /// Down over an arbitrary span, then the ancestors. The span is what makes a HEADING a
+    /// target: a `section` range covers all the tasks under it, so the same operation that
+    /// ticks a subtree ticks a whole section. The `up` pass keeps `[x]` off an open child.
     pub fn set_span(&self, span: Range<usize>, state: State) -> Vec<Edit> {
-        // The states the document WOULD have, so the two passes agree about what
-        // they are looking at.
+        // The states the document WOULD have, so the two passes agree about
+        // what they are looking at.
         let mut effective: Vec<State> = self.items.iter().map(|it| it.state).collect();
         for (i, it) in self.items.iter().enumerate() {
             if it.item.start >= span.start && it.item.end <= span.end {
@@ -331,8 +249,7 @@ impl Doc {
         edits
     }
 
-    /// The section of the heading on `line`, as a span — or `None` when there is
-    /// no heading there.
+    /// The section of the heading on `line`, as a span — or `None` when there is no heading there.
     pub fn section_at(&self, line: usize) -> Option<Range<usize>> {
         self.headings
             .iter()
@@ -340,32 +257,16 @@ impl Doc {
             .map(|h| h.section.clone())
     }
 
-    /// **Up, written to the file.** Every task that has sub-tasks has its own
-    /// marker derived from them:
-    ///
-    /// - every sub-task done → the parent is done
-    /// - every sub-task declined → the parent is declined
-    /// - otherwise → the parent is open
-    ///
-    /// A leaf task's marker is the operator's and is never touched. The result
-    /// uses only the standard's three markers, so a plain markdown reader — a
-    /// `git diff`, GitHub, another agent's `read` — sees the roll-up.
-    ///
-    /// The mixed case resolving to *open* is deliberate: a parent with one done
-    /// child and one open child is open, and the alternative — leaving the
-    /// parent `[x]` above an unchecked child — is the file disagreeing with
-    /// itself. Declining a parent is done as a [`Self::set_subtree`] cascade, so
-    /// its children move with it and this rule does not fight it.
+    /// Up, written to the file. A parent's marker is derived from its children: all done → done,
+    /// all declined → declined, otherwise → open. A leaf's marker is the operator's and is never
+    /// touched, and mixed resolving to open is deliberate — `[x]` above an open child disagrees.
     pub fn derive_up(&self) -> Vec<Edit> {
         let parsed: Vec<State> = self.items.iter().map(|it| it.state).collect();
         self.derive_from(&parsed)
     }
 
-    /// The `up` pass over a given set of states.
-    ///
-    /// A child scan per parent, so O(tasks²) in the number of tasks. Fine for a
-    /// todo file (hundreds of lines) and kept obvious rather than indexed; if it
-    /// ever shows up, the children can be grouped once in `parse`.
+    /// The `up` pass over a given set of states. A child scan per parent (O(tasks²)) — fine
+    /// for a todo file, and kept obvious rather than indexed.
     fn derive_from(&self, states: &[State]) -> Vec<Edit> {
         let mut edits = Vec::new();
         for (i, it) in self.items.iter().enumerate() {
@@ -393,13 +294,9 @@ impl Doc {
         self.items.get(item).map(|it| it.item.clone())
     }
 
-    /// What the standard cannot express, in the tuple shape the editor's
-    /// `syntax_errors` already returns, so the existing gutter renders it.
-    ///
-    /// One violation: a bracketed three-byte marker that is neither `[ ]`,
-    /// `[-]` nor `[x]` — an unknown state, such as Obsidian's `[/]`. The
-    /// grammar cannot report it (markdown has no error here) and no query can
-    /// capture it (there is no node), so this is the only place it can be named.
+    /// What the standard cannot express, in the tuple shape the editor's `syntax_errors`
+    /// returns. One violation: a bracketed three-byte marker that is none of `[ ]`, `[-]`,
+    /// `[x]` — the grammar cannot report it and no query can capture it.
     pub fn check(&self) -> Vec<(usize, usize, usize, String)> {
         let at = |off: usize| -> (usize, usize) {
             let line = self
@@ -457,7 +354,7 @@ impl Doc {
     }
 }
 
-/// Line start byte offsets. One entry for an empty document.
+/// Line start byte offsets, one entry for an empty document.
 fn line_starts(src: &str) -> Vec<usize> {
     let mut v = vec![0usize];
     for (i, b) in src.bytes().enumerate() {
@@ -472,10 +369,7 @@ fn child_starting_with<'a>(n: &'a Node, prefix: &str) -> Option<&'a Node> {
     n.children.iter().find(|c| c.kind.starts_with(prefix))
 }
 
-/// Walk the tree, collecting sections and tasks.
-///
-/// A struct rather than a pile of `&mut` parameters, so the walk's own state has
-/// a name and adding a collection later does not change every signature.
+/// Walk the tree, collecting sections and tasks — a struct so the walk's own state has a name.
 struct Walk<'a> {
     src: &'a str,
     items: Vec<Item>,
@@ -523,9 +417,8 @@ impl Walk<'_> {
                     this_parent = Some(idx);
                     this_depth = depth + 1;
                 }
-                // Not a task. If it nevertheless LOOKS like one — a bracketed
-                // three-byte marker the standard does not define — record it:
-                // the grammar will not, and there is no `Item` to carry it.
+                // Not a task, but if it LOOKS like one — a marker the standard
+                // does not define — record it: the grammar will not.
                 None => {
                     if let Some(r) = suspect_marker(n, self.src) {
                         self.suspects.push(r);
@@ -540,12 +433,9 @@ impl Walk<'_> {
     }
 }
 
-/// A bracketed three-byte range after a list marker that is NOT a defined
-/// state, if the line has one.
-///
-/// This is the validated read that names a violation: the item's own list
-/// marker ends exactly where a task marker would begin, so the offset comes from
-/// the grammar even though the contents do not.
+/// A bracketed three-byte range after a list marker that is NOT a defined state. The item's
+/// own list marker ends exactly where a task marker would begin, so the offset comes from the
+/// grammar even though the contents do not.
 fn suspect_marker(n: &Node, src: &str) -> Option<Range<usize>> {
     let bullet = child_starting_with(n, "list_marker")?;
     let at = bullet.end;
@@ -558,16 +448,9 @@ fn suspect_marker(n: &Node, src: &str) -> Option<Range<usize>> {
     }
 }
 
-/// Build an [`Item`] from a `list_item`, or `None` when the line is not a task.
-///
-/// The marker is found two ways, and they are complementary:
-///
-/// - the grammar's nodes, for the two states it has;
-/// - a **validated read** for `[-]`, which has no node — the item's own list
-///   marker ends exactly where a task marker would begin.
-///
-/// A list item with no marker is not a task. (The other TODO.md standard makes
-/// checkboxes optional; this one does not, and a bare bullet is prose.)
+/// Build an [`Item`] from a `list_item`, or `None` when the line is not a task. The marker
+/// is found two ways: the grammar's nodes for the two states it has, and a validated read for
+/// `[-]`, which has no node. A list item with no marker is not a task.
 fn item_of(n: &Node, src: &str) -> Option<Item> {
     let bullet = child_starting_with(n, "list_marker")?;
     let (state, marker) = if let Some(c) = n
@@ -589,8 +472,7 @@ fn item_of(n: &Node, src: &str) -> Option<Item> {
     };
 
     let text_start = marker.end;
-    // The task's own line, not the whole item: `n.end` includes nested children
-    // for a parent, so a title taken from `n.end` would contain the subtree.
+    // The task's own line: `n.end` includes nested children for a parent.
     let text_end = src[text_start.min(n.end)..n.end]
         .find('\n')
         .map(|o| text_start + o)
@@ -609,11 +491,8 @@ fn item_of(n: &Node, src: &str) -> Option<Item> {
     })
 }
 
-/// Drop edits naming a range more than once, keeping the last.
-///
-/// [`Doc::set_subtree`] and [`Doc::derive_up`] can both name a marker: a parent
-/// inside the cascaded subtree whose children also changed. The derived value
-/// wins, because it was computed from the states the cascade produced.
+/// Drop edits naming a range more than once, keeping the last (the derived value —
+/// computed from the states the cascade produced — wins).
 fn dedup(edits: &mut Vec<Edit>) {
     let mut seen: Vec<Range<usize>> = Vec::new();
     let mut out: Vec<Edit> = Vec::new();

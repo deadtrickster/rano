@@ -1,11 +1,6 @@
-//! The non-interactive path: what a second caller — harnessd completing a task,
-//! or the model doing it — actually has to work with.
-//!
-//! The operator's write-back ruling means the surgical toggle gains a caller that
-//! is not a keystroke: nobody has a cursor, a viewport or an open buffer, and the
-//! row it wants to complete arrives as a wire `TodoEntry { content, status }`.
-//! This file measures what that costs, against the real module, so the answer is
-//! a number rather than an assurance.
+//! The non-interactive path: what a second caller — a harness completing a task, or the model
+//! doing it — has to work with. Nobody has a cursor, a viewport or an open buffer, and the row it
+//! wants arrives as a wire `TodoEntry { content, status }`.
 
 use rano::todo::{Doc, State, apply};
 
@@ -27,9 +22,8 @@ A description line that is not a task.
 - [ ] Publish project on GitHub @janikvonrotz
 ";
 
-/// **No interactive state is needed to drive this.** One `&str` in, one `String`
-/// out; no cursor, no buffer, no terminal. This is the property the whole
-/// embed-the-schema decision rests on, so it is asserted rather than assumed.
+/// No interactive state is needed to drive this: one `&str` in, one `String` out — the property
+/// the embed-the-schema decision rests on.
 #[test]
 fn driving_it_needs_no_cursor_or_buffer() {
     // Nothing but the file's bytes.
@@ -47,11 +41,8 @@ fn driving_it_needs_no_cursor_or_buffer() {
     );
 }
 
-/// What a caller holding `TodoEntry { content }` is actually up against: the
-/// wire's `content` is a *trimmed title*, and the file's text is not.
-///
-/// This is the measurement behind the gap below — it is not a guess about what
-/// the text looks like.
+/// What a caller holding `TodoEntry { content }` is up against: the wire's `content` is a trimmed
+/// title, and the file's text is not — measured here, not guessed.
 #[test]
 fn the_file_text_is_not_the_wire_content() {
     let doc = Doc::parse(FILE);
@@ -66,10 +57,8 @@ fn the_file_text_is_not_the_wire_content() {
     assert_eq!(raw[0], " Add readme file with newline #example");
     assert_eq!(raw[2], " Parent ~3d #feat @john 2020-03-20");
 
-    // **A parent's text is its own title, not its subtree.** This was wrong in
-    // the first version: `text` ran to the item's end, which for a parent
-    // includes every sub-task, so the title came out as a blob containing the
-    // children. Measured here rather than assumed.
+    // **A parent's text is its own title, not its subtree** — the ITEM range
+    // covers the children, which is what a cascade needs.
     assert!(
         !raw[2].contains("sub one"),
         "a parent's text must not contain its children: {raw:?}"
@@ -91,19 +80,16 @@ fn the_file_text_is_not_the_wire_content() {
     );
 }
 
-/// So the gap, stated as a failing lookup: there is no supported way to go from
-/// the content a non-interactive caller holds to the item it means.
-///
-/// This test documents the gap rather than asserting a behaviour the module has.
-/// It will be replaced by a positive test when a lookup exists.
+/// The gap, stated as a failing lookup: no supported way to go from the content a
+/// non-interactive caller holds to the item it means. Documents the gap rather than asserting a
+/// behaviour; replaced by a positive test when a lookup exists.
 #[test]
 fn a_caller_holding_content_has_no_lookup() {
     let doc = Doc::parse(FILE);
     let wire_content = "Create Pull Request";
 
-    // What a caller can do today: linear search on its own, comparing against
-    // the raw range with all the caveats above. Something like this — written
-    // HERE, in the test, because the module does not offer it.
+    // What a caller can do today: linear search on its own, written HERE because
+    // the module does not offer it.
     let found: Vec<usize> = doc
         .items()
         .iter()
@@ -117,8 +103,8 @@ fn a_caller_holding_content_has_no_lookup() {
         "a linear search works, but it is the caller's"
     );
 
-    // And it is ambiguous when two tasks share a title, which is the case a
-    // naive implementation gets wrong by taking the first.
+    // And it is ambiguous when two tasks share a title — the case a naive
+    // implementation gets wrong by taking the first.
     let dup = "# TODO\n\n## S\n\n- [ ] same title\n- [ ] same title\n";
     let doc = Doc::parse(dup);
     let hits: Vec<usize> = doc
@@ -136,12 +122,9 @@ fn a_caller_holding_content_has_no_lookup() {
     );
 }
 
-/// The operation a non-interactive caller needs — complete the task with this
-/// content — works end to end **by index found however the caller likes**, and
-/// is still three bytes per changed marker.
-///
-/// The point is that nothing about the *operation* needs interactivity; only
-/// addressing does.
+/// The operation a non-interactive caller needs — complete the task with this content — works end
+/// to end by an index found however the caller likes, and is still three bytes per changed marker.
+/// Nothing about the operation needs interactivity; only addressing does.
 #[test]
 fn completing_by_content_is_surgical() {
     let doc = Doc::parse(FILE);

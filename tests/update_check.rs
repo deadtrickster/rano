@@ -1,9 +1,6 @@
-//! The update check's logic, with no network in it.
-//!
-//! Split out because the interesting parts — is this version newer, is the
-//! feature on, what does a release payload mean — are pure functions, and the
-//! only untestable piece is the HTTP call itself. That is deliberately the
-//! smallest part of the module.
+//! The update check's logic, with no network in it: the interesting parts — is this version newer,
+//! is the feature on, what does a payload mean — are pure functions, and the only untestable piece
+//! is the HTTP call itself.
 
 use rano::update::{self, Get};
 
@@ -28,8 +25,7 @@ const RELEASE: &str = r#"{
   "assets": [{"name": "rano-x86_64-unknown-linux-gnu.tar.gz"}]
 }"#;
 
-/// The request must never carry a secret: this is an unauthenticated GET of a
-/// public release.
+/// A newer release is offered.
 #[test]
 fn a_newer_release_is_offered() {
     let u = update::check_with(true, &Canned(RELEASE)).expect("a newer release");
@@ -39,8 +35,7 @@ fn a_newer_release_is_offered() {
     assert!(u.message().contains(update::CURRENT));
 }
 
-/// **The gate.** Off means not even a request, so a user who turned it off can
-/// see there is no network traffic. Asserted with an url-recording stub.
+/// The gate: off means not even a request — asserted with an url-recording stub.
 #[test]
 fn disabled_does_not_even_ask() {
     struct Recording(std::cell::Cell<bool>);
@@ -76,8 +71,7 @@ fn a_current_build_is_not_offered() {
     assert!(update::check_with(true, &Canned(Box::leak(body.into_boxed_str()))).is_none());
 }
 
-/// Versions are compared numerically, not as text — the bug where `0.10.0` looks
-/// older than `0.9.0`.
+/// Versions are compared numerically, not as text.
 #[test]
 fn versions_compare_numerically() {
     assert!(update::is_newer("0.9.0", "0.10.0"), "10 > 9 numerically");
@@ -90,10 +84,8 @@ fn versions_compare_numerically() {
     assert!(update::is_newer("0.1.0", "1.0.0"));
 }
 
-/// A version that is not `MAJOR.MINOR.PATCH` is not newer than anything.
-///
-/// Strict on purpose: ordering `0.2.0-rc1` by accident would download a
-/// pre-release binary to someone who asked for stable.
+/// A version that is not `MAJOR.MINOR.PATCH` is not newer than anything. Strict on purpose:
+/// ordering `0.2.0-rc1` by accident would download a pre-release to someone who asked for stable.
 #[test]
 fn odd_versions_do_not_trigger_an_update() {
     for odd in [
@@ -112,10 +104,9 @@ fn odd_versions_do_not_trigger_an_update() {
         );
     }
 
-    // **A date-shaped tag IS a triple and does compare.** `2026.09.30` is three
-    // numbers, so it parses and is newer than `0.1.0`. Accepted rather than
+    // **A date-shaped tag IS a triple and does compare** — accepted rather than
     // special-cased: it is a valid version, and a tag like it would only be cut
-    // deliberately. Noted so the behaviour is a decision, not a surprise.
+    // deliberately.
     assert_eq!(update::parse_version("2026.09.30"), Some((2026, 9, 30)));
     assert!(update::is_newer("0.1.0", "2026.09.30"));
     // Leading zeros are fine, and the `v` prefix is optional.
@@ -157,9 +148,9 @@ fn the_asset_url_is_the_repo_we_are() {
     assert!(url.ends_with(&asset));
 }
 
-/// The asset names are the ones `scripts/make-dist.sh` writes and `install.sh`
-/// asks for. `scripts/check-dist-names.sh` compares the shell sides with the
-/// workflow matrix; this is the Rust side of the same contract.
+/// The asset names are the ones `scripts/make-dist.sh` writes and `install.sh` asks for;
+/// `scripts/check-dist-names.sh` compares the shell sides with the workflow matrix, and this is the
+/// Rust side of the same contract.
 #[test]
 fn asset_names_match_the_published_ones() {
     assert_eq!(
@@ -178,16 +169,15 @@ fn asset_names_match_the_published_ones() {
         update::asset_name("macos", "x86_64"),
         Some("rano-x86_64-apple-darwin.tar.gz")
     );
-    // A platform we do not build for gets no asset, and therefore no offer to
-    // install — rather than an offer that downloads a 404.
+    // A platform we do not build for gets no asset, and no offer to install —
+    // rather than an offer that downloads a 404.
     assert_eq!(update::asset_name("windows", "x86_64"), None);
     assert_eq!(update::asset_name("freebsd", "x86_64"), None);
     assert_eq!(update::asset_name("linux", "riscv64"), None);
 }
 
-/// The gate's precedence, and its default. **On by default** — normal software
-/// checks for updates unless told not to — with the config value winning over the
-/// environment.
+/// The gate's precedence, and its default: on by default — normal software checks for updates
+/// unless told not to — with the config value winning over the environment.
 #[test]
 fn the_gate_is_on_by_default_and_the_config_wins() {
     assert!(
@@ -202,7 +192,7 @@ fn the_gate_is_on_by_default_and_the_config_wins() {
     assert!(!update::enabled(Some(false), Some("1")));
     // The environment is a SWITCH, not a truthiness test: `RANO_AUTOUPDATE=0`
     // turns it off for one command, and reading `"0"` as true would make the
-    // switch a lie. Anything outside the off-words leaves the default (on).
+    // switch a lie.
     for off in ["0", "false", "no", "off", " OFF "] {
         assert!(!update::enabled(None, Some(off)), "{off:?} must mean off");
     }
@@ -220,14 +210,9 @@ fn a_non_https_url_is_refused() {
     assert!(err.contains("non-https"), "{err}");
 }
 
-/// **A tarball is only accepted in the shape we publish — and the reader must not
-/// hang.**
-///
-/// This is the test that caught a deadlock in `gunzip`: it wrote to the child's
-/// stdin without closing it, so `gzip` waited for input that never came and the
-/// suite sat here for twelve minutes with a live child. Running the real
-/// extraction on a thread with a deadline is what makes that failure a FAILURE
-/// next time instead of a hang.
+/// A tarball is only accepted in the shape we publish, and the reader must not hang: the
+/// extraction runs on a thread with a deadline, so a pipe deadlock is a FAILURE next time rather
+/// than a hang.
 #[test]
 fn a_tarball_is_only_accepted_in_the_shape_we_publish() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -286,8 +271,8 @@ fn tar_with(members: &[(&str, &[u8], u8)]) -> Vec<u8> {
     out
 }
 
-/// gzip a fixture, through the same library the module reads with — so the test
-/// cannot pass on a fixture the module could not actually handle.
+/// gzip a fixture, through the same library the module reads with — so the test cannot pass on a
+/// fixture the module could not handle.
 fn gzip(data: &[u8]) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -297,22 +282,16 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// **A fixture LARGER than a pipe buffer, because the small one hid a deadlock.**
-///
-/// The extraction used to shell out to `gzip` and pump its pipes by hand, and it
-/// deadlocked on this repo's real 3.4 MB asset: the decompressed tar is ~20 MB,
-/// the stdout pipe holds 64 KB, and once it filled, `gzip` blocked writing while
-/// the caller blocked writing to *its* stdin. The fixture here was a few hundred
-/// bytes — inside the pipe buffer — so the deadlock was unreachable in the test.
-/// This uses 300 KB of compressible payload, which decompresses well past the
-/// buffer, so the shape that broke is exercised rather than assumed away.
+/// A fixture LARGER than a pipe buffer: 300 KB of compressible payload, decompressing well past the
+/// 64 KB pipe buffer, so the shape that once deadlocked a hand-pumped `gzip` is exercised rather
+/// than assumed away.
 #[test]
 fn a_large_asset_extracts() {
     let payload = vec![b'a'; 300 * 1024];
     let tar = tar_with(&[("rano", &payload, b'0')]);
     let gz = gzip(&tar);
-    // Compressible, so the ARCHIVE is small even though the member is not —
-    // which is exactly the real asset\'s shape: 3.4 MB in, 20 MB out.
+    // Compressible, so the ARCHIVE is small even though the member is not — the
+    // real asset's shape: 3.4 MB in, 20 MB out.
     assert!(
         gz.len() < payload.len(),
         "the archive should be smaller than the member: {} vs {}",

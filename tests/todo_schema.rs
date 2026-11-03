@@ -1,19 +1,11 @@
-//! The TODO.md schema, against the standard.
-//!
-//! Written as an INTEGRATION test on purpose: this is the path a library caller
-//! takes (`rano::todo`), so a pass is also evidence that the schema is reachable
-//! from leticl rather than only from the binary — which is the requirement the
-//! whole feature rests on.
-//!
-//! The first test is deliberately not "the toggle worked". It is *"the file
-//! after equals the file before except for the bytes I meant to change"*, and
-//! every other test here keeps that property or chooses a different answer
-//! explicitly.
+//! The TODO.md schema against the standard — an integration test on purpose: this is the path a
+//! library caller takes, so a pass is also evidence the schema is reachable from leticl. The first
+//! test is not "the toggle worked" but "the file after equals the file before except those bytes".
 
 use rano::todo::{Doc, Edit, State, apply};
 
-/// A realistic TODO.md: the standard's own example, plus the two shapes that
-/// matter — a nested sub-task list, and a metadata tail.
+/// A realistic TODO.md: the standard's own example, plus the two shapes that matter — a nested
+/// sub-task list, and a metadata tail.
 const SRC: &str = "\
 # TODO
 
@@ -46,14 +38,9 @@ fn index_of(doc: &Doc, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("no item containing {needle:?}"))
 }
 
-/// Assert the document did not change length, and that **every** byte that
-/// differs lies inside one of `allowed`.
-///
-/// Note the asymmetry with `Edit`: an edit's RANGE is always three bytes,
-/// because a marker is three bytes — but the DIFF need not be. `[ ]` → `[x]`
-/// changes one byte, because only the middle one moves. So the property to
-/// assert is containment, not equality, and the equality version of this test
-/// was wrong when it was written.
+/// Assert the document did not change length, and that every byte that differs lies inside one of
+/// `allowed`. An edit's RANGE is always three bytes but the DIFF need not be (`[ ]` → `[x]` changes
+/// one), so the property to assert is containment, not equality.
 fn assert_changed_only_within(before: &str, after: &str, allowed: &[std::ops::Range<usize>]) {
     assert_eq!(
         before.len(),
@@ -71,8 +58,8 @@ fn assert_changed_only_within(before: &str, after: &str, allowed: &[std::ops::Ra
     }
 }
 
-/// **The hard requirement.** The file after equals the file before except for
-/// the bytes inside the marker that was meant to change.
+/// The hard requirement: the file after equals the file before except for the bytes inside the
+/// marker that was meant to change.
 #[test]
 fn a_toggle_changes_exactly_the_marker_bytes() {
     let doc = Doc::parse(SRC);
@@ -116,8 +103,8 @@ fn a_cascade_changes_only_marker_bytes() {
     assert!(after.contains("Publish project on GitHub @janikvonrotz"));
 }
 
-/// Running the same cascade twice does nothing the second time — no edits at
-/// all, which is what keeps the undo stack honest and a save byte-identical.
+/// Running the same cascade twice does nothing the second time — no edits at all, which keeps the
+/// undo stack honest and a save byte-identical.
 #[test]
 fn a_cascade_is_idempotent() {
     let doc = Doc::parse(SRC);
@@ -134,8 +121,8 @@ fn a_cascade_is_idempotent() {
     assert_eq!(apply(&once, &second), once);
 }
 
-/// **Up, written.** A parent whose sub-tasks are all done becomes done, using
-/// only the standard's own markers so a dumb renderer sees it.
+/// Up, written: a parent whose sub-tasks are all done becomes done, using only the standard's own
+/// markers.
 #[test]
 fn a_parent_is_derived_from_its_children() {
     let src = "\
@@ -162,8 +149,8 @@ fn a_parent_is_derived_from_its_children() {
     assert_eq!(after_doc.items()[p].state, State::Done);
 }
 
-/// An ancestor already correct yields **no** edit. Without this, every child
-/// toggle would dirty the whole path to the root.
+/// An ancestor already correct yields no edit. Without this, every child toggle would dirty the
+/// whole path to the root.
 #[test]
 fn an_ancestor_already_correct_produces_no_edit() {
     let src = "\
@@ -183,7 +170,7 @@ fn an_ancestor_already_correct_produces_no_edit() {
 }
 
 /// Marking one child leaves the parent open — a parent with mixed children is
-/// open, and the file must not say `[x]` above an unchecked child.
+/// open.
 #[test]
 fn a_partly_done_parent_is_open_not_done() {
     let src = "\
@@ -224,8 +211,7 @@ fn all_three_states_parse() {
         "`[-]` has no grammar node and must still be named"
     );
     assert_eq!(doc.items()[2].state, State::Done);
-    // And `[-]` is declined, NOT in progress: it is its own marker, and the
-    // round trip writes it back.
+    // And `[-]` is declined, NOT in progress, and the round trip writes it back.
     assert!(doc.check().is_empty(), "declined is a defined state");
     let i = index_of(&doc, "open");
     let after = apply(src, &doc.set_subtree(Some(i), State::Declined));
@@ -260,15 +246,14 @@ fn every_state_change_is_three_bytes() {
     }
 }
 
-/// **A marker the standard does not define is refused by name**, not treated as
-/// a plain row. `[-]` names declined; `[/]` names nothing, and the grammar is
-/// silent about both.
+/// A marker the standard does not define is refused by name, not treated as a plain row: `[-]`
+/// names declined, `[/]` names nothing.
 #[test]
 fn an_unknown_marker_is_refused_by_name() {
     let src = "# TODO\n\n## S\n\n- [ ] fine\n- [/] in progress\n- [~] odd\n";
     let doc = Doc::parse(src);
     // `[/]` and `[~]` are not tasks at all: the standard defines three markers
-    // and neither is one, so they do not appear as items.
+    // and neither is one.
     let names: Vec<String> = doc
         .items()
         .iter()
@@ -276,8 +261,8 @@ fn an_unknown_marker_is_refused_by_name() {
         .collect();
     assert_eq!(names, vec!["fine"], "{names:?}");
 
-    // `check` is what names them. The grammar reports nothing here (no ERROR
-    // node, has_error false), so this is the only place they can be surfaced.
+    // `check` is what names them: the grammar reports nothing here (no ERROR
+    // node), so this is the only place they can be surfaced.
     let found = doc.check();
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(
@@ -297,8 +282,8 @@ fn an_unknown_marker_is_refused_by_name() {
     );
 }
 
-/// The metadata tail and awkward prose come out byte-identical — which is
-/// leticl's actual complaint, and the reason there is no re-render.
+/// The metadata tail and awkward prose come out byte-identical — the reason there is no
+/// re-render.
 #[test]
 fn prose_and_metadata_survive_untouched() {
     let src = "\
@@ -322,9 +307,8 @@ A description  with two spaces and a trailing space.
     let after = apply(src, &doc.set_subtree(Some(i), State::Done));
     assert_changed_only_within(src, &after, std::slice::from_ref(&marker));
 
-    // Stated positively, on the awkward parts. The toggled line is now `[x]`,
-    // so its tail is asserted without the marker prefix — the point is that the
-    // tail itself is untouched.
+    // Stated positively, on the awkward parts: the tails themselves are
+    // untouched.
     assert!(after.contains("A description  with two spaces and a trailing space.   "));
     assert!(
         after.contains("Task with  ~3d #feat @john 2020-03-20  and  double  spaces  "),
@@ -336,8 +320,8 @@ A description  with two spaces and a trailing space.
     assert!(after.contains("- [ ] Task with a `code span` and a **strong** bit"));
 }
 
-/// An `id`-shaped tail is neither parsed nor disturbed, so a future `id` or
-/// `dependsOn` field can be added without this module having to change.
+/// An `id`-shaped tail is neither parsed nor disturbed, so a future `id` or `dependsOn` field can
+/// be added without this module changing.
 #[test]
 fn an_id_in_the_tail_is_left_alone() {
     let src = "# TODO\n\n## S\n\n- [ ] task id:abc123 dependsOn:def456\n";
@@ -351,8 +335,7 @@ fn an_id_in_the_tail_is_left_alone() {
     );
 }
 
-/// Sections are the standard's grouping, and a task belongs to the innermost
-/// one that contains it.
+/// Sections are the standard's grouping, and a task belongs to the innermost one that contains it.
 #[test]
 fn sections_group_tasks() {
     let src = "\
@@ -401,8 +384,7 @@ fn sections_group_tasks() {
     );
 }
 
-/// An empty edit list leaves the document identical — the trivial case of the
-/// byte-identity rule, and the one a save path hits on every no-op frame.
+/// An empty edit list leaves the document identical — the trivial case of the byte-identity rule.
 #[test]
 fn no_edits_is_no_change() {
     assert_eq!(apply(SRC, &[]), SRC);
@@ -410,8 +392,7 @@ fn no_edits_is_no_change() {
     assert_eq!(apply(SRC, &edits), SRC);
 
     // And the real case that produces an empty list: a document whose parents
-    // already agree with their children has nothing to derive, so a load-time
-    // roll-up pass is free on it.
+    // already agree with their children has nothing to derive.
     let doc = Doc::parse(SRC);
     let derived = doc.derive_up();
     assert!(

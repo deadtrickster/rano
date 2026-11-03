@@ -1,20 +1,6 @@
-//! The update check, in the editor: one request at startup, and the install
-//! behind a confirmation.
-//!
-//! Shape follows the other pollers (`lsp_poll`, `exec_poll`): a `start_*` that
-//! spawns a thread and hands back a receiver, and a `*_poll` that is called every
-//! loop iteration and reports whether anything visible changed. The check never
-//! blocks a frame — the request is made off-thread and collected later.
-//!
-//! # Why the notice appears when you quit
-//!
-//! Installing replaces the running executable, and the running executable is
-//! still mapped. Replacing the file is fine on Unix (the rename swaps the
-//! directory entry; the old inode stays alive until this process exits), so the
-//! current session keeps working — but a notice that vanishes before it can be
-//! read is worse than no notice. So the offer is announced when the editor is
-//! about to exit, where it is the last thing on the status line and cannot be
-//! overwritten by a redraw. `RANO_UPDATE_ON_EXIT=0` turns that off for a run.
+//! The update check, in the editor: one request at startup, the install behind a confirmation.
+//! Shape follows the other pollers — a `start_*` that spawns a thread, a `*_poll` per iteration. The
+//! notice appears when you QUIT, because one that vanishes before it can be read is worse than none.
 
 use crate::update::{self, Update};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -25,22 +11,21 @@ pub struct UpdateCheck {
     rx: Option<Receiver<Option<Update>>>,
     /// The offer, once a check found a newer release.
     pub found: Option<Update>,
-    /// What went wrong, for the one place that wants to say so. A failed check
-    /// is not an editor problem, so nothing shows this unless asked.
+    /// What went wrong, for the one place that wants to say so. A failed check is not an editor
+    /// problem, so nothing shows this unless asked.
     pub error: Option<String>,
 }
 
 impl UpdateCheck {
-    /// Start the check on a thread. No-op when the check is disabled, so the
-    /// decision to make no request is visible at the call site.
+    /// Start the check on a thread. No-op when disabled, so the decision to make no request is
+    /// visible at the call site.
     pub fn start(enabled: bool) -> Self {
         if !enabled {
             return Self::default();
         }
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            // One request, on a thread that does nothing else. The result is the
-            // whole payload of the thread.
+            // One request, on a thread that does nothing else.
             let got = update::check_with(true, &update::Curl);
             let _ = tx.send(got);
         });
@@ -51,8 +36,8 @@ impl UpdateCheck {
         }
     }
 
-    /// Collect the answer if it has arrived. Returns whether anything changed,
-    /// so a caller can decide to redraw.
+    /// Collect the answer if it has arrived; returns whether anything changed, so a caller can
+    /// decide to redraw.
     pub fn poll(&mut self) -> bool {
         let Some(rx) = &self.rx else {
             return false;
@@ -82,11 +67,8 @@ impl UpdateCheck {
     }
 }
 
-/// Install the offered update, replacing this executable.
-///
-/// Called only from an accepted confirmation — nothing here asks. On success the
-/// new binary is in place and takes effect on the next start; this process keeps
-/// running the old image, which is what lets the message say "restart".
+/// Install the offered update. Called only from an accepted confirmation; on success the new
+/// binary takes effect on the next start, which is what lets the message say "restart".
 pub fn install(u: &Update) -> Result<String, String> {
     update::install(u)?;
     Ok(format!("Updated to {}. Restart rano to use it.", u.latest))
@@ -101,9 +83,8 @@ pub fn announce_on_exit() -> bool {
 }
 
 impl crate::editor::Editor {
-    /// Start the startup check, if it is enabled. Called from `run()` rather
-    /// than `Editor::new` so no test makes a network request by constructing an
-    /// editor — the check is a property of RUNNING, not of being.
+    /// Start the startup check, if enabled. Called from `run()` rather than `Editor::new` so no
+    /// test makes a network request by constructing an editor.
     pub fn start_update_check(&mut self) {
         let on = crate::update::enabled(
             self.config.autoupdate,
@@ -112,13 +93,7 @@ impl crate::editor::Editor {
         self.update = UpdateCheck::start(on);
     }
 
-    /// Collect the check's answer, and SAY SO. Returns whether anything visible
-    /// changed.
-    ///
-    /// Flashing here is the whole point of the poller: without it the notice was
-    /// only printed on exit, so the session said nothing and `M-V` was
-    /// undiscoverable — found by running the binary and watching the status line
-    /// stay empty, not by reading the code.
+    /// Collect the check's answer and say so — without the flash, `M-V` is undiscoverable.
     pub(crate) fn update_poll(&mut self) -> bool {
         if !self.update.poll() {
             return false;
@@ -130,8 +105,8 @@ impl crate::editor::Editor {
         true
     }
 
-    /// Whether the exit notice should be printed. Separate from `found` so the
-    /// environment can silence it for a run without disabling the check.
+    /// Whether the exit notice should be printed. Separate from `found` so the environment can
+    /// silence it for a run without disabling the check.
     pub fn update_installable_on_exit(&self) -> bool {
         announce_on_exit()
     }

@@ -1,13 +1,6 @@
-//! Does the schema distinguish an item's BODY from its CHILDREN?
-//!
-//! The question is a correctness one, not a modelling preference. If the
-//! ancestor pass can mistake a body paragraph for a child, a cascade marks the
-//! wrong things. leticl found the same hazard from the other side: *"continuation
-//! lines are indistinguishable from a child's at that level"*, and chose not to
-//! join wrapped lines because doing so pasted 25 lines of prose under one item's
-//! name.
-//!
-//! So this file asserts the distinction rather than observing that it works.
+//! Does the schema distinguish an item's BODY from its CHILDREN? A correctness question, not a
+//! modelling preference: if the ancestor pass can mistake a body paragraph for a child, a cascade
+//! marks the wrong things. This file asserts the distinction rather than observing that it works.
 
 use rano::todo::{Doc, State, apply};
 
@@ -25,8 +18,7 @@ const WITH_BODY: &str = "\
 - [ ] A plain task
 ";
 
-/// **The distinction, asserted.** The body paragraph is not a child, and the
-/// `[x]`/`[ ]` bullets are.
+/// The distinction, asserted: the body paragraph is not a child, and the `[x]`/`[ ]` bullets are.
 #[test]
 fn a_body_paragraph_is_not_a_child() {
     let doc = Doc::parse(WITH_BODY);
@@ -65,8 +57,8 @@ fn a_body_paragraph_is_not_a_child() {
     }
 }
 
-/// **The item's extent includes its body**, which is what a copy needs — and the
-/// parent's extent still stops before the next sibling.
+/// The item's extent includes its body, and the parent's extent still stops before the next
+/// sibling.
 #[test]
 fn an_items_extent_includes_its_body() {
     let doc = Doc::parse(WITH_BODY);
@@ -89,16 +81,15 @@ fn an_items_extent_includes_its_body() {
         "but not the next sibling: {span:?}"
     );
 
-    // `text` is the title only — the asymmetry is deliberate and is what a
-    // content-matching caller needs.
+    // `text` is the title only — deliberate, and what a content-matching caller
+    // needs.
     let title = doc.src()[doc.items()[parent].text.clone()].to_string();
     assert_eq!(title.trim(), "Parent that needs explaining");
     assert!(!title.contains("Why this matters"), "{title:?}");
 }
 
-/// **The cascade marks the children and nothing in the body**, even though the
-/// body sits between the parent and the children — the shape that would break a
-/// line-oriented implementation.
+/// The cascade marks the children and nothing in the body, even though the body sits between the
+/// parent and the children.
 #[test]
 fn a_cascade_does_not_mark_body_text() {
     let doc = Doc::parse(WITH_BODY);
@@ -142,9 +133,8 @@ fn a_cascade_does_not_mark_body_text() {
     assert_eq!(d.items()[p].state, State::Done, "up, written: {after}");
 }
 
-/// **The hazard, pinned**: a body line that LOOKS like a task. Markdown says an
-/// indented `- [ ] x` at the child level IS a child, so this is not a bug in the
-/// schema — but the behaviour has to be stated so nobody is surprised by it.
+/// The hazard, pinned: markdown says an indented `- [ ] x` at the child level IS a child, so this
+/// is not a bug — but the behaviour has to be stated.
 #[test]
 fn a_body_line_that_looks_like_a_task_is_a_task() {
     let src = "\
@@ -167,8 +157,7 @@ fn a_body_line_that_looks_like_a_task_is_a_task() {
     );
     assert!(doc.src()[doc.items()[kids[0]].text.clone()].contains("this is a CHILD"));
 
-    // The way to keep such a line as BODY is to not make it a list item — an
-    // indented continuation of the paragraph above, or a code span.
+    // The way to keep such a line as BODY is to not make it a list item.
     let as_code = "# TODO\n\n## S\n\n- [ ] parent\n  A body line:\n\n      - [ ] this is code\n";
     let d = Doc::parse(as_code);
     let kids: Vec<usize> = (0..d.items().len())
@@ -214,8 +203,8 @@ fn wrapped_prose_does_not_become_items() {
     assert!(!span.contains("next"), "{span:?}");
 }
 
-/// A whole-tree copy is the ruled operation, and it is byte-identical with
-/// bodies present — the property `set_subtree(None, …)` has to have.
+/// A whole-tree copy is the ruled operation, and it is byte-identical with bodies present — the
+/// property `set_subtree(None, …)` has to have.
 #[test]
 fn a_whole_tree_copy_keeps_bodies() {
     let doc = Doc::parse(WITH_BODY);

@@ -1,43 +1,19 @@
-//! Block boundaries for a tailed log, from one rule and no formats.
-//!
-//! A log that is being tailed but not rendered must cost almost nothing
-//! (TODO.md §20.4): no decoded rows, no wrap geometry, no styles — line
-//! bookkeeping and **block heuristics**. And the heuristics are ONE RULE:
-//!
-//! > A row that starts with whitespace continues the block above it;
-//! > anything else starts a new block.
-//!
-//! That single rule already covers the two shapes that matter (§20.5): a stack
-//! trace's frames are indented, so they group under the line that raised them,
-//! and a log's records are not, so each stands alone. It is deliberately not a
-//! format registry — no `at `, no `File "`, no per-logger knowledge — because a
-//! rule per format would be a rule per file, and the first one written from a
-//! sample of one is wrong for the second.
-//!
-//! The cost is the budget's: [`Blocks::push`] looks at the first `char` of the
-//! arriving row and retains nothing per row but the boundary. Boundaries are
-//! computed as rows arrive, so a half-written trace already has its structure
-//! — the block is open, and unsettled, until a row that is not indented
-//! closes it.
+//! Block boundaries for a tailed log, from one rule and no formats: a row that starts with
+//! whitespace continues the block above it, anything else starts a new block. That covers a
+//! stack trace's indented frames and a log's standalone records without a rule per format.
 
-/// Row → block boundaries under the one rule.
-///
-/// Append-only: rows are seen once, in arrival order, through
-/// [`push`](Blocks::push), which is what a tail does. Nothing of a row is
-/// kept — not its text, not its depth, not its kind — only the row index of
-/// each block start and how many rows have been seen.
+/// Row → block boundaries under the one rule. Append-only: nothing of a row is kept — not its
+/// text, not its depth — only each block start and how many rows were seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Blocks {
     /// Row index of the first row of each block, ascending. `starts[0]` is 0
-    /// whenever any row has been seen, because the first row has nothing above
-    /// it to continue.
+    /// whenever any row has been seen.
     starts: Vec<usize>,
     /// Rows seen so far.
     len: usize,
 }
 
 impl Blocks {
-    /// No rows, no blocks.
     pub fn new() -> Self {
         Self {
             starts: Vec::new(),
@@ -54,26 +30,15 @@ impl Blocks {
         blocks
     }
 
-    /// See one more row, in arrival order, and record a boundary if it starts
-    /// a block.
-    ///
-    /// The first row always starts a block (there is nothing above it to
-    /// continue). So does any row whose first `char` is not whitespace; a row
-    /// that *does* start with whitespace continues the block above it. An
-    /// empty row starts a block — it does not start with whitespace.
+    /// See one more row, in arrival order. The first row always starts a block, as does any row
+    /// whose first `char` is not whitespace; an empty row starts a block too.
     pub fn push(&mut self, row: &[char]) {
         self.push_first(row.first().copied());
     }
 
-    /// See one more row **given only its first character** (`None` for an empty
-    /// row) — the second door onto the one rule.
-    ///
-    /// `push` is the whole-row version, for a caller that holds rows. This is
-    /// for a pass that has a row's leading bytes and nothing else, which is what
-    /// a not-rendered log has: [`crate::logtail`] counts a file's rows and works
-    /// out its blocks without ever decoding a row into text, and all the rule
-    /// needs is the first character. One rule, two doors, so the two cannot
-    /// drift apart.
+    /// See one more row given only its first character (`None` for an empty row) — the second
+    /// door onto the one rule, for a pass like [`crate::logtail`] that has a row's leading bytes
+    /// and nothing else. One rule, two doors, so the two cannot drift apart.
     pub fn push_first(&mut self, first: Option<char>) {
         let continues = self.len > 0 && first.is_some_and(char::is_whitespace);
         if !continues {
@@ -82,8 +47,7 @@ impl Blocks {
         self.len += 1;
     }
 
-    /// The bytes `starts` occupies — the whole of what this retains per row, and
-    /// so the whole of the block half of §20.4's budget.
+    /// The bytes `starts` occupies — the whole of what this retains per row.
     pub fn state_bytes(&self) -> usize {
         self.starts.capacity() * std::mem::size_of::<usize>()
     }
@@ -93,7 +57,6 @@ impl Blocks {
         self.len
     }
 
-    /// Whether no rows have been seen.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -108,9 +71,8 @@ impl Blocks {
         &self.starts
     }
 
-    /// The block holding `row`: `(start, end)`, `end` exclusive. `None` for a
-    /// row not yet seen — including one past the last, for which the block is
-    /// still open.
+    /// The block holding `row`: `(start, end)`, `end` exclusive. `None` for a row not yet seen
+    /// — including one past the last, for which the block is still open.
     pub fn block_of(&self, row: usize) -> Option<(usize, usize)> {
         if row >= self.len {
             return None;
@@ -121,7 +83,6 @@ impl Blocks {
         Some((self.starts[i - 1], end))
     }
 
-    /// Every block as `(start, end)`, `end` exclusive, in row order.
     pub fn blocks(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         let len = self.len;
         let starts = &self.starts;
@@ -145,8 +106,7 @@ mod tests {
         spec.iter().map(|s| row(s)).collect()
     }
 
-    /// One shape the rule is for (§20.4): unindented log records — llama.cpp's
-    /// `<dotted-time> <I|W|E> <component>: <message>` — each stand alone.
+    /// One shape the rule is for: unindented log records, each standing alone.
     #[test]
     fn log_records_are_one_block_each() {
         let rows = rows(&[
@@ -169,8 +129,8 @@ mod tests {
         }
     }
 
-    /// The other shape the rule is for (§20.5): an unindented `Error:` line
-    /// with indented frames under it is ONE block.
+    /// The other shape the rule is for: an unindented `Error:` line with
+    /// indented frames under it is ONE block.
     #[test]
     fn a_stack_trace_is_one_block() {
         let rows = rows(&[
@@ -191,10 +151,8 @@ mod tests {
         assert_eq!(blocks.blocks().collect::<Vec<_>>(), vec![(0, 4)]);
     }
 
-    /// A blank row does not start with whitespace, so it STARTS a block: it
-    /// closes the trace above it and is itself a single-row block between the
-    /// two traces. The two traces are two blocks — not one block reaching
-    /// across the blank.
+    /// A blank row STARTS a block: it closes the trace above it and is a
+    /// single-row block between the two traces.
     #[test]
     fn a_blank_row_ends_the_block() {
         let rows = rows(&[
@@ -227,9 +185,7 @@ mod tests {
         assert_eq!(blocks.blocks().filter(|&(s, e)| e - s > 1).count(), 2);
     }
 
-    /// "Whitespace" is `char::is_whitespace` on the first `char`: a tab, a
-    /// space and U+00A0 all continue; a printable non-space and an empty row
-    /// do not.
+    /// "Whitespace" is `char::is_whitespace` on the first `char`.
     #[test]
     fn what_counts_as_whitespace() {
         assert!('\t'.is_whitespace());
@@ -254,9 +210,8 @@ mod tests {
         );
     }
 
-    /// A row that is only whitespace still starts with whitespace, so it
-    /// continues the block above it — the rule looks at the first `char`,
-    /// not the row's content.
+    /// A row of only whitespace still continues — the rule looks at the first `char`, not the
+    /// row's content.
     #[test]
     fn a_row_of_only_whitespace_continues() {
         let rows = rows(&["head", "   ", "\t"]);
@@ -265,8 +220,7 @@ mod tests {
         assert_eq!(blocks.block_of(2), Some((0, 3)));
     }
 
-    /// The first row of a file always starts a block, indented or not — there
-    /// is nothing above it to continue.
+    /// The first row of a file always starts a block, indented or not.
     #[test]
     fn an_indented_first_row_still_starts_a_block() {
         let mut blocks = Blocks::new();
@@ -284,8 +238,7 @@ mod tests {
         assert_eq!(blocks.len(), 2);
     }
 
-    /// The last block's end is the row count: it is open, but it already ends
-    /// at `len()`, so nothing that follows can be wrong about where it ends.
+    /// The last block's end is the row count: it is open, but it already ends at `len()`.
     #[test]
     fn the_last_block_ends_at_the_row_count() {
         let rows = rows(&["a", "  b", "c", "\td", "  e"]);
@@ -297,8 +250,7 @@ mod tests {
         assert_eq!(blocks.blocks().map(|(_, end)| end).max(), Some(5));
     }
 
-    /// `block_of` agrees with `starts` for every seen row, and `None` for any
-    /// row not seen.
+    /// `block_of` agrees with `starts` for every seen row, and `None` for any row not seen.
     #[test]
     fn block_of_agrees_with_starts() {
         let rows = rows(&[
@@ -351,9 +303,8 @@ mod tests {
         assert_eq!(Blocks::of(&[]), blocks, "the batch constructor agrees");
     }
 
-    /// The corpus for the equivalence check: the two real shapes the rule is
-    /// for, a python traceback, and a raggedy mix of the edge cases — a tail
-    /// does not see tidy categories.
+    /// The corpus for the equivalence check: the two real shapes, a python traceback, and a
+    /// raggedy mix of the edge cases — a tail does not see tidy categories.
     fn corpus() -> Vec<Vec<char>> {
         rows(&[
             // llama.cpp-style records
@@ -384,9 +335,8 @@ mod tests {
         ])
     }
 
-    /// The batch constructor and N incremental pushes see the same rows in the
-    /// same order, so they must give identical boundaries — §20.4 computes
-    /// boundaries as rows arrive, and arrival is the only input.
+    /// The batch constructor and N incremental pushes see the same rows in the same order, so
+    /// they must give identical boundaries.
     #[test]
     fn batch_and_incremental_agree() {
         let rows = corpus();
@@ -410,9 +360,8 @@ mod tests {
         assert_eq!(batch.block_of(13), Some((13, 17)));
     }
 
-    /// A python traceback under the one rule: the `Traceback` header and its
-    /// indented `File`/`raise` frames are one block, the unindented exception
-    /// line another. No `File "` anywhere in the rule.
+    /// A python traceback under the one rule: header and frames one block, the unindented
+    /// exception line another. No `File "` anywhere in the rule.
     #[test]
     fn a_python_traceback_is_two_blocks() {
         let rows = rows(&[

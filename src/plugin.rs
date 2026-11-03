@@ -1,62 +1,19 @@
-//! **Plugins: WASM modules that answer hooks.** Stage 1 answers `on_open` and `on_save` — a
-//! file's text in, the text to use out — and the design is the one `plans/S10-wasm-hooks.md`
-//! argues for: the host discovers what a module answers by **enumerating its exports**, so the
-//! next hook is a host-side function and not an ABI change.
-//!
-//! # The ABI (v1)
-//!
-//! ```wat
-//! (memory (export "memory") 1)                              ;; the guest's linear memory
-//! (func (export "rano_abi") (result i32) i32.const 1)       ;; 1; anything else is refused
-//! (func (export "rano_alloc") (param i32) (result i32))     ;; reserve n bytes -> offset
-//! (func (export "on_open") (param i32 i32) (result i32))    ;; (in_ptr, in_len) -> block
-//! (func (export "on_save") (param i32 i32) (result i32))
-//! (func (export "provider_open") (param i32 i32 i32 i32) (result i32))    ;; path, cols, rows
-//! (func (export "provider_picture") (param i32 i32 i32 i32) (result i32)) ;; path, cols, rows
-//! ```
-//!
-//! **An `on_*` export is a text hook, a `provider_*` export takes the viewport too, and a host
-//! that speaks other hook kinds names their prefixes at load** ([`Plugin::load_hooks`]) — a
-//! `pane_dashboard` is the same `(i32, i32) -> i32` call as `on_save`, so a new kind of hook
-//! costs a host-side list and not an ABI version.
-//!
-//! A hook returns the offset of an 8-byte **result block** — `out_ptr` and `out_len` as
-//! little-endian `u32`s — or `0xFFFFFFFF` for **unchanged**. Two integers at an offset is the one
-//! structure every language can write without agreeing on a struct layout, and the version export
-//! is what lets a v2 arrive without guessing. What the block's bytes *mean* is the hook's
-//! business: text for `on_*`/`provider_open`, an RGB picture for [`Plugin::provider_picture`].
-//!
-//! # What this file is not
-//!
-//! Not the policy: **where** the hooks run (the open path, the save path, the loader's decision),
-//! what a failure means to the reader, and the determinism rule are the editor's, in
-//! `editor.rs`/`buffer.rs`. This module answers one question — "run this hook over this text" —
-//! and every way that can fail is a `String` naming the reason.
-//!
-//! Not a sandbox the guest can leave: a module imports **exactly what the config granted** and
-//! nothing by default — a module that imports anything else fails to instantiate, naming the
-//! import. The guest gets [`HOOK_FUEL`] fuel per call, its memory may not grow past
-//! [`HOOK_MEMORY`], and the bytes each way are capped at [`MAX_HOOK_BYTES`]. A capability
-//! ([`Capabilities`]) is a deliberate addition with a test, not a switch.
+//! Plugins: WASM modules that answer hooks — text in, text out. The host discovers what a
+//! module answers by enumerating exports, so a new hook is a host-side function, not an ABI
+//! change. A module imports exactly what the config granted, under the caps below.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
-/// **Fuel per call.** An infinite loop ends in `OutOfFuel` rather than in a hung editor, and it is
-/// deterministic: the same guest does the same work for the same budget on any machine. Measured
-/// on the probe (plans/S10): a trivial call burns 4, a 16 MiB uppercase loop burns a few million —
-/// so this is a ceiling with room, not a tight budget.
+/// Fuel per call: an infinite loop ends in `OutOfFuel`, not a hung editor.
 pub const HOOK_FUEL: u64 = 50_000_000;
 
-/// **Guest memory per call**, refused by the store's limiter when a module grows past it. A hook
-/// works on a text that is at most [`MAX_HOOK_BYTES`] each way, so this is several times what a
-/// working hook needs and well under a decompression bomb.
+/// Guest memory per call, refused by the store's limiter.
 pub const HOOK_MEMORY: usize = 64 << 20;
 
-/// **The largest text handed to a hook, and the largest it may hand back.** Symmetric on purpose:
-/// a 1-line file must not become a gigabyte, and the copy through guest memory stays bounded.
+/// The largest text handed to a hook, and the largest it may hand back.
 pub const MAX_HOOK_BYTES: usize = 16 << 20;
 
 /// The ABI this host speaks. A module that says anything else is refused rather than guessed at.
@@ -65,34 +22,26 @@ pub const ABI: i32 = 1;
 /// The sentinel a hook returns to mean "leave the text as it is".
 const UNCHANGED: i32 = -1;
 
-/// **What the host lets a plugin reach beyond its own text.** Nothing is granted by default; the
-/// config says `capabilities = ["read-dir"]`, and a module that imports anything else is refused
+/// What the host lets a plugin reach beyond its own text. Nothing is granted by default; the
+/// config says `capabilities = ["read-dir"]`, and a module importing anything else is refused
 /// at instantiation, by name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Capabilities {
-    /// The `rano.read_dir` import: **the text of a folder's listing**, rendered by the host with
-    /// the same rules the built-in dired uses (`dirview::rows`: one entry per row, directories
-    /// first and marked `name/`). The plugin decides *whether* and *when* to ask; the format is
-    /// the host's, so a provider and the Rust listing cannot disagree about what a row means.
+    /// `rano.read_dir`: a folder's listing, rendered by the host with the built-in dired's
+    /// rules.
     pub read_dir: bool,
-    /// The `rano.read_file` import: **the bytes of the one file this call is about**, because a
-    /// provider is handed a path and a viewer has to read it itself.
-    ///
-    /// It is not a filesystem door. The host answers only for the path it asked the hook about,
-    /// resolved first, so `..`, a relative spelling and a symlink all land on the same file and
-    /// any *other* path — `/etc/shadow` included — is refused. A text hook is asked about a text
-    /// rather than a path, so it has no file to scope to and `read_file` refuses there too.
+    /// `rano.read_file`: the bytes of the one file this call is about. Not a filesystem
+    /// door: the host answers only for that path, resolved first, and a text hook has no file
+    /// to scope to at all.
     pub read_file: bool,
-    /// **The `rano.convert_page` and `rano.convert_page_text` imports**: one page of the file
-    /// this call is about, rendered or read by the host's own converters. A plugin that shows
-    /// a document asks; the host's deadline, caps and scoping apply, so a grant cannot reach
-    /// another document and a page cannot run unbounded.
+    /// `rano.convert_page`/`rano.convert_page_text`: one page of the file this
+    /// call is about, under the host's converters, deadline, caps and scoping.
     pub convert_page: bool,
 }
 
 impl Capabilities {
-    /// From the config's `capabilities = ["read-dir"]` list: names outside this set are ignored
-    /// there (a misspelt capability is not a grant), and the empty list grants nothing.
+    /// From the config's `capabilities = ["read-dir"]` list: unknown names are ignored (a
+    /// misspelt capability is not a grant), and the empty list grants nothing.
     pub fn from_names(names: &[String]) -> Capabilities {
         let has = |name: &str| names.iter().any(|n| n.trim().eq_ignore_ascii_case(name));
         Capabilities {
@@ -103,11 +52,8 @@ impl Capabilities {
     }
 }
 
-/// **A picture a plugin answered**: `width`×`height` RGB pixels, row-major, three bytes each.
-///
-/// The ABI's payload is `[width u32 LE][height u32 LE][rgb]` — the same result block as every
-/// other hook, with a header the host can check. [`Plugin::provider_picture`] decodes and validates
-/// it, so a host that draws one never has to look at bytes it has not had checked.
+/// A picture a plugin answered: `width`×`height` RGB, row-major. The ABI
+/// payload is `[width u32 LE][height u32 LE][rgb]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picture {
     pub width: u32,
@@ -117,7 +63,6 @@ pub struct Picture {
 }
 
 impl Picture {
-    /// One pixel, or `None` outside the picture.
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;
@@ -127,38 +72,34 @@ impl Picture {
     }
 }
 
-/// **A loaded plugin**: its module, compiled once, and the hooks it answers.
+/// A loaded plugin: its module, compiled once, and the hooks it answers.
 #[derive(Debug)]
 pub struct Plugin {
     engine: Engine,
     module: Module,
     path: PathBuf,
-    /// The export names that are hooks — `on_open`, `on_save`, and whatever a later version adds.
+    /// The export names that are hooks.
     hooks: Vec<String>,
     /// What the config let it import.
     caps: Capabilities,
-    /// Fuel the last [`Plugin::call`] burned. An atomic rather than a `Mutex` because it is one
-    /// number written once per call and read by a status line, and `call` takes `&self`.
+    /// Fuel the last call burned; an atomic because `call` takes `&self`.
     fuel: AtomicU64,
 }
 
 impl Plugin {
-    /// **Load a `.wasm` file.** The module is compiled here (milliseconds, once) and its ABI and
-    /// exports are checked here too, so a module that would fail on every save fails at load with
-    /// one sentence instead.
+    /// Load a `.wasm`: compiled and checked here, so a module that would fail
+    /// on every save fails at load with one sentence instead.
     pub fn load(path: &Path) -> Result<Plugin, String> {
         Self::load_with(path, Capabilities::default())
     }
 
-    /// [`Self::load`] with the capabilities the config granted: the module may import exactly
-    /// those, and a module that imports anything else is refused here rather than at the first
-    /// save.
+    /// [`Self::load`] with granted capabilities; a module importing anything
+    /// else is refused here rather than at the first save.
     pub fn load_with(path: &Path, caps: Capabilities) -> Result<Plugin, String> {
         Self::load_hooks(path, caps, &[])
     }
 
-    /// [`Self::load`] with the capabilities the config granted and the hook prefixes the host
-    /// recognises — see [`Self::from_bytes_hooks`] for what a prefix means.
+    /// [`Self::load`] with granted capabilities and the host's hook prefixes.
     pub fn load_hooks(
         path: &Path,
         caps: Capabilities,
@@ -168,8 +109,7 @@ impl Plugin {
         Self::from_bytes_hooks(&bytes, path.to_path_buf(), caps, prefixes)
     }
 
-    /// The same, from bytes — the seam the WAT fixtures in the tests come through, so a test does
-    /// not need a `wasm32` toolchain or a committed binary to exercise the ABI.
+    /// The same, from bytes — the seam the WAT fixtures come through.
     pub fn from_bytes(bytes: &[u8], path: PathBuf) -> Result<Plugin, String> {
         Self::from_bytes_with(bytes, path, Capabilities::default())
     }
@@ -183,15 +123,9 @@ impl Plugin {
         Self::from_bytes_hooks(bytes, path, caps, &[])
     }
 
-    /// [`Self::from_bytes`] with both the capabilities and the **hook prefixes** the host
-    /// recognises: `on_` and `provider_` are always hooks, and anything named under `prefixes`
-    /// (letibot passes `pane_`, `condition_`, `notice_`, `digest_`, `link_`, `command_`, `tool_`)
-    /// is a text hook — `(i32, i32) -> i32`, refused here if it is not.
-    ///
-    /// The list is the host's, not the module's: a module cannot widen what it answers by naming
-    /// an export `pane_x`, because a host that does not know `pane_` does not see a hook at all.
-    /// An empty prefix is ignored rather than honoured, so a host's mis-built list cannot turn
-    /// every export — `rano_alloc` included — into a hook the load would then refuse.
+    /// [`Self::from_bytes`] with capabilities and the hook prefixes the host recognises:
+    /// `on_`/`provider_` always, anything under `prefixes` a text hook. The list is the host's, not
+    /// the module's, and an empty prefix is ignored.
     pub fn from_bytes_hooks(
         bytes: &[u8],
         path: PathBuf,
@@ -203,8 +137,8 @@ impl Plugin {
         config.consume_fuel(true);
         let engine = Engine::new(&config).map_err(|e| format!("engine: {e}"))?;
         let module = Module::new(&engine, bytes).map_err(|e| format!("not a wasm module: {e}"))?;
-        // **The ABI is checked by calling it**, not by looking for the export: a module that
-        // exports the name and answers 2 is a v2 module and must not be run as v1.
+        // The ABI is checked by calling it: a module answering 2 must not run
+        // as v1.
         let mut store = Self::store(&engine);
         let instance = Self::linker(&engine, caps, None)
             .instantiate(&mut store, &module)
@@ -221,11 +155,8 @@ impl Plugin {
         if got != ABI {
             return Err(format!("ABI {got}, this rano speaks {ABI}"));
         }
-        // The hooks are whatever the module exports under the naming convention — and each one's
-        // SIGNATURE is checked here, so a module whose hook the host could never call is refused at
-        // load rather than failing the first save. (A plugin must not name an unrelated export
-        // `on_…`: the prefix *is* the convention.) A prefix the host passed in is the same kind of
-        // claim as `on_`, so it is held to the same signature.
+        // Each hook's SIGNATURE is checked here, so a hook the host could
+        // never call is refused at load rather than at the first save.
         let mut hooks: Vec<String> = Vec::new();
         for e in module.exports() {
             let name = e.name().to_string();
@@ -276,12 +207,11 @@ impl Plugin {
         &self.hooks
     }
 
-    /// Whether it answers `hook`.
     pub fn has(&self, hook: &str) -> bool {
         self.hooks.iter().any(|h| h == hook)
     }
 
-    /// `on_open`: the text a file should open with, or `None` when the hook left it alone.
+    /// `on_open`/`on_save`: the text to use, or `None` when the hook left it alone.
     pub fn open(&self, text: &str) -> Result<Option<String>, String> {
         self.call("on_open", text)
     }
@@ -291,22 +221,14 @@ impl Plugin {
         self.call("on_save", text)
     }
 
-    /// **Fuel the last [`Self::call`] burned** — `HOOK_FUEL` minus what the store had left, so a
-    /// hook that ran out reads as the whole budget. A host that reports slowness reports this
-    /// beside the time, because fuel is the engine-independent measure of the same work.
+    /// Fuel the last call burned — `HOOK_FUEL` minus what the store had left,
+    /// so an out-of-fuel hook reads as the whole budget.
     pub fn last_fuel(&self) -> u64 {
         self.fuel.load(Ordering::Relaxed)
     }
 
-    /// **`provider_open`: what this path should open as**, or `None` when the plugin does not
-    /// claim it (the host then opens it the ordinary way). This is the hook a folder viewer
-    /// answers — and the one that needs a capability, because the decision is about a path and not
-    /// a text.
-    ///
-    /// **It is told the viewport** (`cols`×`rows`), because a provider's answer is laid out at the
-    /// width it will be drawn at: rano is width-adaptive throughout, and a plugin that renders
-    /// columns has to be told how many there are. `on_open`/`on_save` take a text and need no
-    /// width; a provider takes a path and does.
+    /// `provider_open`: what this path should open as, or `None` when the plugin does not
+    /// claim it, laid out at the viewport's width.
     pub fn provider_open(
         &self,
         path: &str,
@@ -316,15 +238,9 @@ impl Plugin {
         self.call_sized("provider_open", path, cols as i32, rows as i32)
     }
 
-    /// **`provider_picture`: the picture this path should be drawn as**, or `None` when the plugin
-    /// does not claim it. The call shape is [`Self::provider_open`]'s — `(path, cols, rows)` and
-    /// the same result block — and the bytes are `[width u32 LE][height u32 LE][rgb]` rather than
-    /// text: the hook for a viewer that is not a text view.
-    ///
-    /// **The bounds are the host's, not the plugin's to widen.** `width * height * 3` may not pass
-    /// [`MAX_HOOK_BYTES`], and the header must describe exactly the bytes that came with it. An
-    /// oversized or self-contradictory answer is an error — refused, never clipped to fit, because
-    /// a picture silently cropped is a picture that lies about what the file looks like.
+    /// `provider_picture`: the picture this path should be drawn as, or `None` when not
+    /// claimed; `[width u32 LE][height u32 LE][rgb]` within [`MAX_HOOK_BYTES`], the header
+    /// describing exactly the bytes that came. Refused, never clipped.
     pub fn provider_picture(
         &self,
         path: &str,
@@ -339,8 +255,6 @@ impl Plugin {
         Self::decode_picture(&bytes)
     }
 
-    /// The picture payload, checked: `[width][height][rgb]` — an eight-byte header, the size
-    /// inside the cap, and exactly the RGB bytes the header promised.
     fn decode_picture(bytes: &[u8]) -> Result<Option<Picture>, String> {
         if bytes.len() < 8 {
             return Err(format!(
@@ -378,18 +292,12 @@ impl Plugin {
         }))
     }
 
-    /// The linker a module is instantiated with: **one import per granted capability, and nothing
-    /// else**. A module that imports anything not here fails with the import named.
-    ///
-    /// `scope` is the path this call is about, and it is what [`Capabilities::read_file`] is
-    /// scoped to: the host resolves it once, here, and the import answers for that file and no
-    /// other.
+    /// The linker a module is instantiated with: one import per granted capability, and
+    /// nothing else. `scope` is the path this call is about, resolved once here, and it is
+    /// what [`Capabilities::read_file`] is scoped to.
     fn linker(engine: &Engine, caps: Capabilities, scope: Option<PathBuf>) -> Linker<StoreLimits> {
-        // **The one file this call is about**, resolved once: every scoped import answers for
-        // it and for nothing else, so `..`, a relative spelling and a symlink all land on it.
-        // **The part before a `#`**, because a provider keeps its state in a fragment: a reader
-        // answers `paper.pdf#p=4` and the file it is about is `paper.pdf`. Canonicalising the
-        // whole string finds no file, and then every scoped import refuses for no visible reason.
+        // The one file this call is about, resolved once, with the part before a `#` taken:
+        // a provider keeps state in a fragment, so `paper.pdf#p=4` is about `paper.pdf`.
         let scoped = scope.and_then(|p| {
             let text = p.to_string_lossy().into_owned();
             let file = text.split('#').next().unwrap_or(&text);
@@ -397,10 +305,8 @@ impl Plugin {
         });
         let mut linker = Linker::new(engine);
         if caps.read_dir {
-            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed` for a
-            // buffer too small, or `i32::MIN` for an error. The listing itself is the host's
-            // rendering — `dirview::rows`, the same one the built-in dired uses — so a provider
-            // and the Rust listing cannot disagree about what a row means.
+            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`: bytes written, `-needed`, or
+            // `i32::MIN` for an error.
             let f = |mut caller: wasmtime::Caller<'_, StoreLimits>,
                      a: u32,
                      b: u32,
@@ -419,10 +325,8 @@ impl Plugin {
             let _ = linker.func_wrap("rano", "read_dir", f);
         }
         if caps.read_file {
-            // `(path_ptr, path_len, out_ptr, out_cap) -> i32`, the same shape as `read_dir` and
-            // the same answers. What it will not do is read *any* path: the grant is the one file
-            // this call is about, resolved so that `..`, a relative spelling and a symlink all
-            // land on it, and anything else is `i32::MIN`.
+            // The same shape as `read_dir`, but scoped: only the one file this call is about,
+            // resolved; anything else is `i32::MIN`.
             let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           a: u32,
@@ -454,11 +358,8 @@ impl Plugin {
             let _ = linker.func_wrap("rano", "read_file", f);
         }
         if caps.convert_page {
-            // `(page, dpi, out_ptr, out_cap) -> i32`: one page of the file this call is about,
-            // **counted from zero** — the same base `pdf::page_rgb` documents. A reader that
-            // shows "page 1" converts, once, at its own edge,
-            // as a PNG. `pdf::page_png` owns the deadline and the caps, and the path is scoped
-            // exactly as `read_file`'s is, so the grant reaches this document and no other.
+            // One page of the file this call is about, from zero as `pdf::page_rgb` documents.
+            // pdf owns the deadline and caps; the path is scoped as `read_file`'s is.
             let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           page: i32,
@@ -486,8 +387,7 @@ impl Plugin {
                         return i32::MIN;
                     }
                 };
-                // **The same block `provider_picture` answers with**, so a host and a plugin
-                // have one picture format: `[width][height][rgb]`, no decoder between them.
+                // The same block `provider_picture` answers with — one picture format, no decoder.
                 let mut payload = Vec::with_capacity(8 + rgb.len());
                 payload.extend_from_slice(&w.to_le_bytes());
                 payload.extend_from_slice(&h.to_le_bytes());
@@ -519,8 +419,7 @@ impl Plugin {
             };
             let _ = linker.func_wrap("rano", "convert_page", f);
 
-            // `(page, out_ptr, out_cap) -> i32`: the page's text, for a terminal that cannot
-            // draw — the answer a reader falls back to, not a lesser one.
+            // The page's text, for a terminal that cannot draw.
             let want = scoped.clone();
             let f = move |mut caller: wasmtime::Caller<'_, StoreLimits>,
                           page: i32,
@@ -546,15 +445,13 @@ impl Plugin {
         linker
     }
 
-    /// **Run any text hook**: `Ok(None)` when the plugin does not answer it or the hook left the
-    /// text alone. One fresh store per call: the fuel and the memory budget are per call, and
-    /// nothing a guest allocates can accumulate across saves.
+    /// Run any text hook: `Ok(None)` when the plugin does not answer it or left the text
+    /// alone. One fresh store per call, so nothing a guest allocates accumulates across saves.
     pub fn call(&self, hook: &str, text: &str) -> Result<Option<String>, String> {
         self.call_with(hook, text, None)
     }
 
-    /// [`Self::call`] for a hook that takes the viewport too — a provider, whose answer is laid out
-    /// at the width it will be drawn at: `(ptr, len, cols, rows) -> block`.
+    /// [`Self::call`] for a hook that takes the viewport too — a provider.
     fn call_sized(
         &self,
         hook: &str,
@@ -565,8 +462,7 @@ impl Plugin {
         self.call_with(hook, text, Some((cols, rows)))
     }
 
-    /// **One hook call.** The signature is two `i32`s for a text hook and four for a provider; the
-    /// viewport, when there is one, is what picks which.
+    /// One hook call: two `i32`s for a text hook, four for a provider; the viewport picks which.
     fn call_with(
         &self,
         hook: &str,
@@ -581,8 +477,8 @@ impl Plugin {
         Ok(Some(out.to_string()))
     }
 
-    /// **One hook call, in bytes**: the same engine work for a text hook and for a picture, which
-    /// differ only in what the host makes of the answer.
+    /// One hook call, in bytes: a text hook and a picture differ only in what
+    /// the host makes of the answer.
     fn call_bytes(
         &self,
         hook: &str,
@@ -601,9 +497,8 @@ impl Plugin {
                 MAX_HOOK_BYTES >> 20
             ));
         }
-        // **What `read_file` may answer for**: a call with a viewport is a provider, and a
-        // provider's input is a path — so that path is the one file this call is about. A text
-        // hook is asked about a text, so it has no file to scope to and the import refuses.
+        // `read_file`'s scope: a provider's input is a path, so that path is
+        // the one file this call is about; a text hook has none.
         let scope = viewport.map(|_| PathBuf::from(text));
         let mut store = Self::store(&self.engine);
         let instance = Self::linker(&self.engine, self.caps, scope)
@@ -618,8 +513,8 @@ impl Plugin {
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "rano_alloc")
             .map_err(|_| "no `rano_alloc` export (wanted (i32) -> i32)".to_string())?;
-        // The input goes where the guest asked for it, and a guest that answers with an offset
-        // outside its own memory is a broken hook, not a transformed file.
+        // The input goes where the guest asked; an offset outside its own
+        // memory is a broken hook, not a transformed file.
         let at = alloc
             .call(&mut store, text.len() as i32)
             .map_err(|e| format!("`rano_alloc` failed: {e}"))?;
@@ -653,8 +548,8 @@ impl Plugin {
                 f.call(&mut store, (at as i32, text.len() as i32, cols, rows))
             }
         };
-        // Recorded before the trap is turned into a sentence: an out-of-fuel hook and a slow one
-        // are the same measurement, and the gate wants the number either way.
+        // Recorded before the trap becomes a sentence: the gate wants the
+        // number either way.
         let left = store.get_fuel().unwrap_or(0);
         self.fuel
             .store(HOOK_FUEL.saturating_sub(left), Ordering::Relaxed);
@@ -689,7 +584,7 @@ impl Plugin {
         Ok(Some(data[out_ptr..end].to_vec()))
     }
 
-    /// A store with the budget this host allows a hook: fuel, and a memory cap the guest's own
+    /// A store with the budget this host allows: fuel, and a memory cap the guest's own
     /// `memory.grow` cannot pass.
     fn store(engine: &Engine) -> Store<StoreLimits> {
         let limits = StoreLimitsBuilder::new().memory_size(HOOK_MEMORY).build();
@@ -701,9 +596,7 @@ impl Plugin {
         store
     }
 
-    /// **Why a module could not be instantiated, when the reason is the sandbox rather than a
-    /// mistake**: an import is the one thing a stage-1 plugin may not have, and the message says
-    /// which import and that none are granted.
+    /// Why a module could not be instantiated when the reason is the sandbox, not a mistake.
     fn refusal(e: &wasmtime::Error) -> Option<String> {
         let text = e.to_string();
         if text.contains("unknown import") || text.contains("incompatible import type") {
@@ -715,7 +608,6 @@ impl Plugin {
         }
     }
 
-    /// A one-line description for a status line: the file and what it answers.
     pub fn summary(&self) -> String {
         if self.hooks.is_empty() {
             format!("{} (no hooks)", self.path.display())
@@ -725,8 +617,7 @@ impl Plugin {
     }
 }
 
-/// The path a capability import was handed, read out of the guest's own memory: a range inside
-/// `memory` that is text, or nothing.
+/// The path an import was handed, read out of the guest's own memory.
 fn guest_path(
     caller: &mut wasmtime::Caller<'_, StoreLimits>,
     ptr: u32,
@@ -743,8 +634,7 @@ fn guest_path(
     Some(PathBuf::from(text))
 }
 
-/// A capability import's answer: the bytes written, `-needed` when the guest's buffer is too
-/// small for them, `i32::MIN` when there is no guest memory to write into at all.
+/// An import's answer: bytes written, `-needed` for a small buffer, `i32::MIN` for no memory.
 fn write_guest(
     caller: &mut wasmtime::Caller<'_, StoreLimits>,
     out_ptr: u32,
@@ -763,8 +653,7 @@ fn write_guest(
     -(bytes.len() as i32)
 }
 
-/// A WAT fixture, compiled with the `wat` dev-dependency. Tests only: production loads `.wasm`
-/// bytes, so no WAT parser rides in the binary.
+/// A WAT fixture (tests only: no WAT parser rides in the binary).
 #[cfg(test)]
 fn wat(src: &str) -> Vec<u8> {
     wat::parse_str(src).expect("the fixture is valid wat")
@@ -778,8 +667,7 @@ mod tests {
         Plugin::from_bytes(&wat(src), PathBuf::from("fixture.wasm")).expect("loads")
     }
 
-    /// The shape every fixture starts from: memory, the ABI, an allocator that hands out a fixed
-    /// arena at offset 1024 (nothing here needs a real one).
+    /// The shape every fixture starts from: memory, ABI, a fixed arena at 1024.
     const BASE: &str = r#"
         (memory (export "memory") 4)
         (func (export "rano_abi") (result i32) i32.const 1)
@@ -838,9 +726,8 @@ mod tests {
 
     #[test]
     fn a_result_block_replaces_the_text() {
-        // Answers the block {1024, 5} — the input's own bytes, unchanged in place — so a save
-        // through it returns exactly the text it was given, by the block path rather than the
-        // sentinel.
+        // The block points at the input's own bytes, so the save returns its
+        // text by the block path rather than the sentinel.
         let p = plugin(&format!(
             r#"{BASE}
             (func (export "on_save") (param i32 i32) (result i32)
@@ -903,8 +790,6 @@ mod tests {
         assert!(e.contains("cap"), "{e}");
     }
 
-    /// **The committed example module loads and transforms** — the artifact half of
-    /// `examples/plugin-upper`, so a change to the ABI that breaks real modules is caught here.
     #[test]
     fn the_example_module_loads_and_uppercases() {
         let p = Plugin::from_bytes(
@@ -920,13 +805,9 @@ mod tests {
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
-    /// **The dired example, through the ABI**: without the grant its import is refused (the
-    /// sandbox is real), and with it `provider_open` answers a folder's listing — the same rows
-    /// the built-in dired renders.
     #[test]
     fn the_dired_example_needs_read_dir_and_then_lists_a_folder() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-dired/plugin.wasm");
-        // Ungranted: refused at load, and the sentence names the import, not the plugin's wishes.
         let e = Plugin::from_bytes_with(wasm, PathBuf::from("dired.wasm"), Capabilities::default())
             .unwrap_err();
         assert!(e.contains("imports are not granted"), "{e}");
@@ -953,7 +834,7 @@ mod tests {
             listing,
             format!("{}\n", crate::dirview::rows(&dir).unwrap().join("\n"))
         );
-        // A file is not claimed: `provider_open` answers the sentinel, which is `None` here.
+        // A file is not claimed: `provider_open` answers the sentinel.
         assert_eq!(
             p.provider_open(&dir.join("a.txt").to_string_lossy(), 80, 24)
                 .unwrap(),
@@ -962,7 +843,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **What a hook call costs after the module is compiled** — the number the save path pays.
     #[test]
     fn a_hook_call_is_cheap_once_the_module_is_compiled() {
         let p = Plugin::from_bytes_with(
@@ -971,7 +851,7 @@ mod tests {
             Capabilities::default(),
         )
         .expect("loads");
-        // Warm: one call to register, then time a run of them.
+        // Warm: one call to register, then a run of them.
         p.save("hello").unwrap();
         let n = 20;
         let t = std::time::Instant::now();
@@ -986,8 +866,6 @@ mod tests {
         );
     }
 
-    /// **The TypeScript example** (AssemblyScript, built by `asc`): the same plugin as the Rust one,
-    /// through the same ABI — the point being that a plugin is not a wasm-authoring problem.
     #[test]
     fn the_typescript_example_loads_and_uppercases() {
         let p = Plugin::from_bytes(
@@ -1003,8 +881,6 @@ mod tests {
         assert_eq!(p.save("abc").unwrap().as_deref(), Some("ABC"));
     }
 
-    /// **The TypeScript dired**: the same plugin as the Rust one, in AssemblyScript — refused
-    /// without the grant, listing a folder with it, not claiming a file.
     #[test]
     fn the_typescript_dired_needs_read_dir_and_then_lists_a_folder() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-dired-as/plugin.wasm");
@@ -1069,8 +945,6 @@ mod tests {
         );
     }
 
-    /// A pane hook as letibot writes one: `(i32, i32) -> i32`, answering a fixed block. The text it
-    /// answers (`"pane:x"`, at 4096) is not the input, so the test can tell the two apart.
     const PANE: &str = r#"
         (memory (export "memory") 4)
         (func (export "rano_abi") (result i32) i32.const 1)
@@ -1082,8 +956,6 @@ mod tests {
           i32.const 8192)
     "#;
 
-    /// **A prefix is the host's claim, not the module's**: without `pane_` passed, `pane_x` is an
-    /// ordinary export that answers nothing; with it, the same module is a pane hook.
     #[test]
     fn a_prefixed_export_is_a_hook_only_when_the_host_names_the_prefix() {
         let p = plugin(PANE);
@@ -1104,7 +976,6 @@ mod tests {
         );
     }
 
-    /// The prefixes are added beside the two the ABI already defines, and hide neither.
     #[test]
     fn prefixes_are_added_beside_on_and_provider() {
         let src = format!(
@@ -1125,9 +996,6 @@ mod tests {
         );
     }
 
-    /// A prefixed export the host could never call is refused **at load, naming it** — the same rule
-    /// `on_` already has, for the same reason: a hook that fails on every call is a plugin that
-    /// fails at the first frame instead of at load.
     #[test]
     fn a_prefixed_export_with_the_wrong_signature_is_refused_naming_it() {
         let src = r#"(module
@@ -1142,7 +1010,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("pane_x") && e.contains("signature"), "{e}");
-        // The same module without the prefix names nothing to check, so it loads.
         Plugin::from_bytes_hooks(
             &wat(src),
             PathBuf::from("pane.wasm"),
@@ -1152,8 +1019,6 @@ mod tests {
         .expect("loads when nothing claims pane_");
     }
 
-    /// [`Plugin::load_hooks`] is the file half of the same thing: a name in the list is what makes a
-    /// pane hook reachable from a `.wasm` on disk.
     #[test]
     fn load_hooks_sees_the_prefixed_hooks_of_a_file() {
         let path = std::env::temp_dir().join(format!("rano_pane_{}.wasm", std::process::id()));
@@ -1167,8 +1032,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// **`last_fuel` is the call's cost**, which is what the gate reports beside the wall time. A
-    /// hook that was not called reports nothing rather than the previous call's number.
     #[test]
     fn last_fuel_is_what_the_last_call_burned() {
         let p = plugin(&format!(
@@ -1183,10 +1046,6 @@ mod tests {
         assert_eq!(p.last_fuel(), 0, "a hook it does not export is not a call");
     }
 
-    // -- `read_file`, and what it will not read ----------------------------------------------
-
-    /// A module with the `read_file` import and two answers, `ok` and `no`, so a test reads the
-    /// host's decision rather than a plugin's opinion.
     const READ_FILE: &str = r#"
         (import "rano" "read_file" (func $read_file (param i32 i32 i32 i32) (result i32)))
         (memory (export "memory") 4)
@@ -1203,7 +1062,6 @@ mod tests {
         }
     }
 
-    /// A fresh directory for a test, named so two runs cannot collide.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rano_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1211,8 +1069,6 @@ mod tests {
         dir
     }
 
-    /// A provider that reads the path it was handed — the one file the call is about — and answers
-    /// those bytes, or `no` when the host refused.
     fn self_reader() -> Plugin {
         let src = format!(
             r#"{READ_FILE}
@@ -1237,7 +1093,6 @@ mod tests {
         .expect("loads with the grant")
     }
 
-    /// A provider that reads one path compiled into it, whatever path the call was about.
     fn other_reader(path: &str) -> Plugin {
         let src = format!(
             r#"{READ_FILE}
@@ -1274,9 +1129,6 @@ mod tests {
         );
     }
 
-    /// **The grant is the file the call is about, not a filesystem door.** The same module, called
-    /// the same way, is answered for the path it was handed and refused for every other one — a
-    /// sibling, `/etc/shadow`, or a path a text hook would have liked to read.
     #[test]
     fn read_file_answers_only_for_the_file_the_call_was_about() {
         let dir = temp_dir("read_file_scope");
@@ -1293,7 +1145,7 @@ mod tests {
             Some("A\n")
         );
 
-        // A sibling in the same folder: refused, because it is not the file that was asked about.
+        // A sibling in the same folder: refused.
         let p = other_reader(&b.to_string_lossy());
         assert_eq!(
             p.provider_open(&a_text, 80, 24).unwrap().as_deref(),
@@ -1355,8 +1207,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file above [`MAX_HOOK_BYTES`] is refused rather than handed over in pieces: the guest
-    /// asked for a buffer it cannot fill, and the host says no instead of clipping.
     #[test]
     fn read_file_will_not_answer_a_file_above_the_cap() {
         let dir = temp_dir("read_file_cap");
@@ -1372,9 +1222,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- `provider_picture` ------------------------------------------------------------------
-
-    /// The fixture, from the crate root, so the test does not depend on the working directory.
     fn stl_fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("examples/plugin-stl/fixtures")
@@ -1390,9 +1237,6 @@ mod tests {
         .expect("the STL example loads with read-file")
     }
 
-    /// **The Zig example, through both new capabilities**: refused without `read-file`, and with
-    /// it a `.stl` path is a picture and, for a terminal with no graphics protocol, a character
-    /// ramp. Anything else is "not mine".
     #[test]
     fn the_stl_example_needs_read_file_and_then_renders() {
         let wasm: &[u8] = include_bytes!("../examples/plugin-stl/plugin.wasm");
@@ -1409,7 +1253,7 @@ mod tests {
             vec!["provider_open".to_string(), "provider_picture".to_string()]
         );
 
-        // Not an STL: not mine, either way.
+        // Not an STL: not mine.
         let txt = stl_fixture("cube.stl").with_extension("txt");
         assert_eq!(
             p.provider_picture(&txt.to_string_lossy(), 80, 24).unwrap(),
@@ -1473,8 +1317,6 @@ mod tests {
         eprintln!("provider_open fuel: {}", p.last_fuel());
     }
 
-    /// A `provider_picture` that answers a header and nothing else, so the bounds can be tested
-    /// without a renderer.
     fn picture_answer(width: u32, height: u32, out_len: u32) -> Plugin {
         plugin(&format!(
             r#"{BASE}
@@ -1487,7 +1329,6 @@ mod tests {
         ))
     }
 
-    /// **Refused, never clipped**: 4096×4096 is 48 MiB of RGB, and the header alone says so.
     #[test]
     fn an_oversized_picture_is_refused_rather_than_clipped() {
         let p = picture_answer(4096, 4096, 12);
@@ -1495,8 +1336,6 @@ mod tests {
         assert!(e.contains("cap") && e.contains("4096x4096"), "{e}");
     }
 
-    /// A header is a claim about the bytes that follow it, and a claim that does not hold is an
-    /// error rather than a picture the host has to guess the shape of.
     #[test]
     fn a_picture_header_that_disagrees_with_its_bytes_is_refused() {
         let p = picture_answer(2, 2, 12);
@@ -1525,11 +1364,6 @@ mod tests {
         assert!(e.contains("0x4"), "{e}");
     }
 
-    /// **The example's picture buffer is three bytes a pixel**, and this is a source check on
-    /// purpose: the overflow it guards was silent. `rgb: [max_pixels]u8` bounds BYTES where
-    /// `fits()` bounds PIXELS, so the largest viewport it admits writes 262,144 bytes past the
-    /// array, and `ReleaseSmall` has no runtime safety to trap it. The build's memory minimum is
-    /// the only place it shows: 54 pages with the defect, 58 with the fix.
     #[test]
     fn the_stl_examples_rgb_buffer_is_three_bytes_a_pixel() {
         let src = include_str!("../examples/plugin-stl/src/main.zig");
@@ -1540,7 +1374,6 @@ mod tests {
         );
     }
 
-    /// A plugin that answers no picture claims nothing — the hook is found by name like any other.
     #[test]
     fn a_plugin_with_no_picture_hook_claims_nothing() {
         let p = Plugin::from_bytes(
@@ -1551,8 +1384,6 @@ mod tests {
         assert_eq!(p.provider_picture("/tmp/model.stl", 80, 24).unwrap(), None);
     }
 
-    /// **The fuel budget is the call's, whatever hook it is**: a picture that never finishes ends
-    /// in `OutOfFuel` rather than in a hung editor, and the whole budget is what it burnt.
     #[test]
     fn a_picture_that_never_finishes_runs_out_of_fuel() {
         let p = plugin(&format!(
@@ -1567,9 +1398,6 @@ mod tests {
         assert_eq!(p.last_fuel(), HOOK_FUEL, "the whole budget was burnt");
     }
 
-    /// **The memory cap is the call's too.** The guest tries to grow 125 MiB and answers a 1×1
-    /// picture when the limiter says no — which it does, so the picture comes back rather than a
-    /// grown memory.
     #[test]
     fn a_picture_hook_cannot_grow_past_the_memory_cap() {
         let p = plugin(&format!(
@@ -1596,8 +1424,6 @@ mod tests {
 mod convert_page_tests {
     use super::*;
 
-    /// A module that merely IMPORTS the hook: the grant is decided at instantiation, so an
-    /// import with no call is exactly the shape that tells a refusal from an admission.
     fn importer(import: &str, params: &str) -> Vec<u8> {
         wat::parse_str(format!(
             r#"(module
@@ -1611,8 +1437,6 @@ mod convert_page_tests {
         .to_vec()
     }
 
-    /// **A grant is a capability, not a default**: a module importing `convert_page` is refused
-    /// at instantiation without it, which is the same rule `read_dir` and `read_file` follow.
     #[test]
     fn the_grant_is_required_to_import_it() {
         let wasm = importer("convert_page", "i32 i32 i32 i32");
@@ -1641,7 +1465,6 @@ mod convert_page_tests {
         );
     }
 
-    /// The name in the config, and its spellings.
     #[test]
     fn the_capability_is_named_convert_page() {
         for name in ["convert-page", "CONVERT-PAGE"] {

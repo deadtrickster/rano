@@ -1,69 +1,33 @@
-//! **A picture read off the disk**, for M-P's picture view and for a markdown
-//! preview's `![…](path)`: the bytes the kitty graphics protocol carries, and
-//! the size the cells are cut from.
-//!
-//! # PNG is what is carried; anything else is converted first
-//!
-//! The protocol carries PNG (`f=100`) and a terminal that speaks it decodes PNG and
-//! nothing else — Ghostty's loader (`terminal/kitty/graphics_image.zig`) has a PNG
-//! path and raw-pixel paths and no JPEG, GIF or WebP decoder at all. So a picture in
-//! another format is turned into a PNG *here*, and the conversion is **delegated to a
-//! converter on the machine** rather than carried as a decoder inside rano: a
-//! rasterizer in the binary is what the operator ruled out for SVG (`TODO.md` §19.2,
-//! +2.4 MiB), and the same argument holds for a JPEG decoder. ImageMagick, `sips`,
-//! `ffmpeg` and Python with Pillow are all asked for in turn ([`CONVERTERS`]), the
-//! first that works is remembered, and `RANO_IMAGE_CONVERT` names one directly (a
-//! command line with `{in}`, `{out}`, `{w}`, `{h}`).
-//!
-//! What that buys beyond JPEG: on a machine where the converter rasterizes SVG — as
-//! macOS's `sips` does — an SVG previews as the picture it is without rano carrying a
-//! rasterizer at all.
-//!
-//! # The size comes out of the header
-//!
-//! A PNG's IHDR is the first chunk and carries the pixels, so the size is a
-//! fixed read and no decoder is involved — the same eight bytes letibot's
-//! `transcript::media` reads. A converted picture's size comes from the PNG the
-//! converter wrote, which is why a conversion is asked to fit the box it will be
-//! drawn in: nothing larger than the view ever reaches the terminal.
+//! A picture read off the disk, for M-P's picture view and a markdown preview's `![…](path)`: the
+//! bytes the kitty protocol carries and the cell size they are cut to. The terminal decodes PNG and
+//! nothing else, so another format goes through a converter on the machine.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// **How long a converter may take**, and this is a convenience feature rather than a
-/// service: a picture is something the reader asked to look at, and a conversion that has
-/// not finished by now is one they would rather not wait for. A conversion runs on the
-/// frame's own thread, so this is also the longest the editor can be held up by one — and
-/// the budget for **a whole document's** conversions, which a page naming twenty
-/// photographs would otherwise spend twenty times over (see `Editor::document_images`).
-/// `sips` on a 900×525 JPEG measures ~60 ms; two seconds is thirty times that.
+/// How long a converter may take — a convenience, not a service, and the budget for a
+/// whole document's conversions too (`Editor::document_images`). It runs on the frame's
+/// own thread, so this is the longest one may hold the editor up.
 pub const CONVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// **How much memory a converter may hold**, sampled as it runs and enforced by the
-/// kernel where the kernel will. A 16 MiB file can be a decompression bomb — a hundred
-/// million pixels is 400 MiB of RGBA — and a picture preview that takes the machine
-/// down is worse than no preview at all. A converter for anything this side of a bomb
-/// needs a few tens of MiB.
+/// How much memory a converter may hold, sampled as it runs: a 16 MiB file can be a
+/// decompression bomb, and a preview that takes the machine down is worse than none.
 const CONVERT_RSS_CAP: u64 = 256 * 1024 * 1024;
 
-/// The address space a converter may map, which is **not** its memory budget: a threaded
-/// encoder maps far more than it holds, so a limit at the RSS number refuses work that fits.
-/// The RSS sampler is what actually bounds memory.
+/// The address space a converter may map, not its memory budget: a threaded encoder
+/// maps far more than it holds, and the RSS sampler is what bounds memory.
 const CONVERT_ADDRESS_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 
-/// The most a converter may *write* (the PNG): the box it was asked to fit is under two
-/// megapixels, so a file past this is a converter that ignored the request, and it is
-/// stopped before it fills the disk with one.
+/// The most a converter may write: the box it was asked to fit is under two
+/// megapixels, so a file past this is a converter that ignored the request.
 const CONVERT_OUTPUT_CAP: u64 = 32 * 1024 * 1024;
 
-/// The most a picture may be. letibot's cap, kept for the same reason: the
-/// terminal decodes it into RGBA and holds it, and a 200 MB PNG is a picture
-/// nobody asked to see at that size. It is also what keeps a *conversion* bounded —
-/// the converter reads the whole file, so a file nobody would draw is not handed to it.
+/// The most a picture may be: the terminal decodes it into RGBA and holds it, and this
+/// also keeps a conversion bounded — a file nobody would draw is not handed over.
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-/// **A picture ready to hand over**: the file's bytes (a PNG), and the pixel
-/// size its header states.
+/// A picture ready to hand over: the file's bytes (a PNG), and the pixel size its
+/// header states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pic {
     pub png: Vec<u8>,
@@ -71,28 +35,17 @@ pub struct Pic {
     pub height: u32,
 }
 
-/// What a name says a file is, as far as a picture is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A PNG: what the protocol carries, drawn without touching a converter.
     Png,
-    /// An image in another format — drawn if a converter can turn it into a PNG,
-    /// and said to be undrawable when none can.
+    /// An image in another format: drawn if a converter can turn it into a PNG, and
+    /// said to be undrawable when none can.
     Other,
 }
 
-/// **The converters rano knows, in the order it tries them**, as (program, the rest
-/// of the command line).
-///
-/// `{in}`, `{out}`, `{w}` and `{h}` are replaced by the picture, the file to write
-/// the PNG to, and the box to fit it in; every argument is passed to the program
-/// directly, never through a shell, so a path with a space or a `;` in it is a path.
-///
-/// The order is by how much of the job each does rather than by popularity: ImageMagick
-/// first (every format, still frames of an animated one, SVG through its own delegate),
-/// then macOS's `sips` (which rasterizes SVG too), then `ffmpeg`, then Python with
-/// Pillow — the operator's own suggestion: *"it can be as simple as a standard python
-/// script or imagemagic command"*.
+/// The converters rano knows, in the order it tries them: `{in}`, `{out}`, `{w}`,
+/// `{h}` and `{max}` are replaced, and every argument goes to the program directly,
+/// never through a shell. ImageMagick first, then `sips` (which rasterizes SVG too).
 pub const CONVERTERS: &[(&str, &[&str])] = &[
     (
         "magick",
@@ -150,9 +103,8 @@ pub const CONVERTERS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// **What `name` looks like**, by its extension: `None` for a file whose name
-/// says nothing about pictures. The bytes decide in [`read`]; this decides
-/// whether to try at all.
+/// What `name` looks like, by its extension: this decides whether to try at all,
+/// and the bytes decide in [`read`].
 pub fn kind(name: Option<&Path>) -> Option<Kind> {
     let ext = name
         .and_then(Path::extension)
@@ -166,23 +118,19 @@ pub fn kind(name: Option<&Path>) -> Option<Kind> {
     }
 }
 
-/// Whether `name` is a PNG, by its extension.
 pub fn is_png(name: Option<&Path>) -> bool {
     kind(name) == Some(Kind::Png)
 }
 
-/// **`target` as a picture**: an absolute path, a `~/` one, or one relative to
-/// `dir` (the file the reference was written in). A PNG is read as it is; anything
-/// else a converter turns into one ([`convert`]), fitted to `max_px` — no picture
-/// larger than the box it is drawn in ever reaches the terminal. The `Err` is a
-/// sentence for the reader — what was wrong, named — because a picture that does not
-/// appear is the one failure a reader cannot diagnose from the screen.
+/// `target` as a picture: absolute, `~/`, or relative to `dir`. A PNG is read as it
+/// is, anything else a converter turns into one fitted to `max_px`. The `Err` is a
+/// sentence, because a picture that does not appear cannot be diagnosed from the screen.
 pub fn read(target: &str, dir: Option<&Path>, max_px: u32) -> Result<Pic, String> {
     read_with(target, dir, max_px, None)
 }
 
 /// [`read`] with the converter named: `RANO_IMAGE_CONVERT`'s value, or a test's own
-/// stand-in for a converter. `None` asks the machine ([`converter`]).
+/// stand-in. `None` asks the machine.
 pub fn read_with(
     target: &str,
     dir: Option<&Path>,
@@ -211,8 +159,8 @@ pub fn read_with(
     png(&converted).map_err(|e| format!("{}: {e}", shown()))
 }
 
-/// **What a document's reference needs**: its own directory, and the pixel box the
-/// picture may fill at this view width.
+/// What a document's reference needs: its own directory, and the pixel box the picture
+/// may fill at this view width.
 pub fn box_px(width: usize) -> u32 {
     // The box in cells, at the same `CELL_PX`-sized cells a rasterized picture is cut
     // for. It is an upper bound rather than an exact fit: a converter is asked to fit
@@ -220,11 +168,8 @@ pub fn box_px(width: usize) -> u32 {
     crate::term::graphics::image_box(width) * 16
 }
 
-/// **The caps a conversion runs under**, as a value rather than constants read where they
-/// are used: the defaults are [`CONVERT_TIMEOUT`], [`CONVERT_RSS_CAP`] and
-/// [`CONVERT_OUTPUT_CAP`]. A test tightens one to watch a guard fire without making a real
-/// conversion slow, fat or enormous — and `rss` and `address_space` are separate because
-/// the sampler and the kernel are separate guards, whichever answers first.
+/// The caps a conversion runs under, as a value so a test can tighten one. `rss` and
+/// `address_space` are separate because the sampler and the kernel are separate guards.
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     timeout: std::time::Duration,
@@ -245,13 +190,9 @@ impl Default for Limits {
     }
 }
 
-/// **A converter: a program and the arguments it takes**, before the placeholders are
-/// filled in.
-///
-/// A tool from the table keeps its arguments as they are written — one of them is a
-/// Python program with spaces in it, and splitting *that* into twenty arguments is how a
-/// `-c` script stops being a script. A tool named on the command line ([`Tool::line`])
-/// is the other way round: a person writes a command line, so it is split.
+/// A converter: a program and its arguments, placeholders unfilled. A table entry
+/// keeps its arguments as written (one is a Python program with spaces in it); a
+/// command line is split, because a person wrote it as one.
 #[derive(Debug, Clone)]
 pub struct Tool {
     pub program: String,
@@ -269,7 +210,6 @@ impl Tool {
         }
     }
 
-    /// The table's entry for `name`, or `None` when the table has no such tool.
     pub fn named(name: &str) -> Option<Tool> {
         CONVERTERS
             .iter()
@@ -280,10 +220,8 @@ impl Tool {
             })
     }
 
-    /// **This tool's argv for one picture**: `{in}`, `{out}`, `{w}`, `{h}` and `{max}`
-    /// replaced, arg by arg. `{w}`×`{h}` is the box at 4:3 for a format whose picture has
-    /// no size of its own to ask about (an SVG): the converter's own ideas are as good as
-    /// ours, and the cells are cut from what it writes either way.
+    /// This tool's argv for one picture: the placeholders replaced, arg by arg.
+    /// `{w}`×`{h}` is the box at 4:3 for a format with no size of its own (an SVG).
     pub fn spelled(&self, input: &Path, out: &Path, max_px: u32) -> (String, Vec<String>) {
         let (w, h) = ((max_px as u64).max(1), (max_px as u64) * 3 / 4);
         let fill = |a: &str| {
@@ -300,13 +238,9 @@ impl Tool {
     }
 }
 
-/// **The converters to try, in order, for a picture**: the one that worked last time
-/// first (a machine's answer does not change), then the table's entries that are on PATH.
-///
-/// A converter that is *present* is not a converter that *works* — `python3` without
-/// Pillow is on every machine — so the order is a preference and the loop in
-/// [`convert_with`] is what settles it: the first that reads the picture wins and is
-/// remembered, the rest are not asked again.
+/// The converters to try, in order: the one that worked last time first, then the
+/// table's entries on PATH. Present is not the same as working (`python3` without
+/// Pillow), so [`convert_with`] keeps the first that reads the picture.
 fn candidates() -> Vec<Tool> {
     let last = WORKED
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -339,15 +273,9 @@ fn remember(tool: &Tool) {
 
 static WORKED: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
-/// **`path` as a PNG, through a converter on the machine**: the bytes of the file the
-/// converter wrote, or a sentence naming what was tried. `named` is a command line to use
-/// instead of the machine's own (see [`CONVERTERS`]) — the environment variable's value, or
-/// a test's stand-in; `None` asks the machine.
-///
-/// **Bounded on every side, because this is a convenience.** The input by [`MAX_BYTES`],
-/// the output by [`CONVERT_OUTPUT_CAP`], the memory by [`CONVERT_RSS_CAP`], the time by
-/// [`CONVERT_TIMEOUT`] — a converter that runs past any of them is killed and reported,
-/// rather than leaving a preview that never appears or a machine that stops answering.
+/// `path` as a PNG through a converter on the machine; `named` is a command line to
+/// use instead of the machine's own. Bounded on every side — input, output, memory,
+/// time — and a converter that runs past any of them is killed and reported.
 pub fn convert(path: &Path, max_px: u32, named: Option<&str>) -> Result<Vec<u8>, String> {
     convert_with(path, max_px, named, Limits::default())
 }
@@ -363,8 +291,8 @@ fn convert_with(
     let tools = match named {
         Some(line) => vec![Tool::line(line)],
         None => match std::env::var("RANO_IMAGE_CONVERT") {
-            // An empty one is a person saying *no conversions here* — the same answer as
-            // a machine with no converter on it, and the caller says so.
+            // An empty one is a person saying *no conversions here* — the same
+            // answer as a machine with no converter on it.
             Ok(v) if !v.trim().is_empty() => vec![Tool::line(&v)],
             Ok(_) => Vec::new(),
             Err(_) => candidates(),
@@ -394,8 +322,8 @@ fn convert_with(
                 let _ = std::fs::remove_file(&out);
                 return bytes;
             }
-            // The next candidate is asked, so a present-but-useless tool (a `python3`
-            // with no Pillow) does not stand in the way of one that works.
+            // The next candidate is asked, so a present-but-useless tool does not
+            // stand in the way of one that works.
             Err(e) => last = e,
         }
     }
@@ -403,12 +331,9 @@ fn convert_with(
     Err(last)
 }
 
-/// **Run one converter, watched.** It gets the box to fit, a memory cap and a wall-clock
-/// deadline; it is sampled as it runs, killed when it passes either, and its own exit is
-/// what says whether the file it wrote is a picture.
-///
-/// **No shell**: every argument is passed to the program as it stands, so a picture whose
-/// name has a space, a quote or a `;` in it is a name and not a command.
+/// Run one converter, watched: a box to fit, a memory cap and a deadline, sampled and
+/// killed as it runs. No shell — an argument with a space, a quote or a `;` in it is
+/// still an argument.
 fn run(tool: &Tool, input: &Path, out: &Path, max_px: u32, limits: Limits) -> Result<(), String> {
     let (program, args) = tool.spelled(input, out, max_px);
     if program.is_empty() {
@@ -417,14 +342,12 @@ fn run(tool: &Tool, input: &Path, out: &Path, max_px: u32, limits: Limits) -> Re
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&args)
         .stdin(std::process::Stdio::null())
-        // Its own words go nowhere: a converter's complaint is not the reader's, and a
-        // pipe nobody drains is a child that blocks for ever on a full one.
+        // Its own words go nowhere, and a pipe nobody drains is a child that
+        // blocks for ever on a full one.
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // **The kernel's half of the cap**, where the kernel keeps it: an address space and a
-    // file size the child cannot pass even if the sampler below never runs (a machine
-    // under load is exactly when a converter goes wrong). Best effort — a platform that
-    // will not take them still has the sampler, and the sampler still has the deadline.
+    // The kernel's half of the cap, best effort: a platform that refuses still has
+    // the sampler, and the sampler the deadline.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -463,9 +386,8 @@ fn run(tool: &Tool, input: &Path, out: &Path, max_px: u32, limits: Limits) -> Re
             Ok(None) => {}
             Err(e) => return Err(format!("{program}: {e}")),
         }
-        // **Sampled, not assumed**: the memory is read off the process itself while it
-        // runs, because a converter that has run away is one the kernel will not stop by
-        // itself on every platform.
+        // Sampled, not assumed: the kernel will not stop a runaway converter on every
+        // platform.
         if sampled.elapsed() >= std::time::Duration::from_millis(25) {
             sampled = std::time::Instant::now();
             if let Some(rss) = rss(child.id())
@@ -496,10 +418,9 @@ fn stop(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// **A process's resident memory in bytes**, or `None` where this platform will not say.
-/// `/proc/<pid>/statm` on Linux, `proc_pidinfo` on macOS — the two rano's own terminal
-/// layer already treats as its platforms, and a `None` here leaves the kernel's cap and
-/// the deadline as the guards, which is what a machine with neither would have anyway.
+/// A process's resident memory, or `None` where the platform will not say
+/// (`/proc/<pid>/statm` on Linux, `proc_pidinfo` on macOS); a `None` leaves the
+/// kernel's cap and the deadline as the guards.
 fn rss(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -514,9 +435,8 @@ fn rss(pid: u32) -> Option<u64> {
     {
         let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
         let want = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
-        // SAFETY: the buffer is this struct and `want` is exactly its size; the call
-        // answers the number of bytes it wrote, and anything short of `want` is a
-        // process this cannot describe (gone, or not ours).
+        // SAFETY: the buffer is this struct and `want` exactly its size; anything
+        // short of `want` is a process this cannot describe.
         let got = unsafe {
             libc::proc_pidinfo(
                 pid as libc::c_int,
@@ -535,8 +455,8 @@ fn rss(pid: u32) -> Option<u64> {
     }
 }
 
-/// Whether `program` is on PATH and executable. A name with a `/` in it is a path and is
-/// tried as one.
+/// Whether `program` is on PATH and executable; a name with a `/` is tried as
+/// a path.
 fn on_path(program: &str) -> bool {
     let is_exe = |p: &Path| {
         let Ok(meta) = std::fs::metadata(p) else {
@@ -563,17 +483,16 @@ fn on_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The file a conversion is written to, in the temp directory: the process id and a
-/// counter, so two previews of two files cannot write over one another.
+/// The temp file a conversion is written to: pid and counter, so two previews
+/// cannot write over one another.
 fn temp_png() -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("rano-picture-{}-{n}.png", std::process::id()))
 }
 
-/// **A file read off the disk, as a picture**: the PNG's bytes and its size.
-/// The bytes decide, never the name — a `.png` that is something else is
-/// refused by the signature, and a PNG named `.dat` is drawn.
+/// A file read off the disk as a picture: the PNG's bytes and its size. The bytes
+/// decide, never the name.
 pub fn png(bytes: &[u8]) -> Result<Pic, String> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err("not a PNG: the terminal draws PNG, and this is something else".to_string());
@@ -596,9 +515,8 @@ pub fn png(bytes: &[u8]) -> Result<Pic, String> {
     })
 }
 
-/// **Where a reference points**: `~/` is the home directory, an absolute path is
-/// itself, and anything else is relative to `dir` — the directory of the file the
-/// reference was written in, or the working directory when there is none.
+/// **Where a reference points**: `~/` is home, an absolute path is itself,
+/// anything else is relative to `dir`.
 pub fn resolve(target: &str, dir: Option<&Path>) -> PathBuf {
     if let Some(rest) = target.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
@@ -616,8 +534,8 @@ pub fn resolve(target: &str, dir: Option<&Path>) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// A PNG-shaped buffer: signature, then a real IHDR carrying `w` and `h`.
-    /// The bytes need not decode — nothing here decodes a PNG.
+    /// A PNG-shaped buffer: signature, then a real IHDR carrying `w` and `h`. The
+    /// bytes need not decode, because nothing here decodes a PNG.
     fn png_header(w: u32, h: u32) -> Vec<u8> {
         let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
         v.extend_from_slice(&13u32.to_be_bytes()); // IHDR length
@@ -685,9 +603,8 @@ mod tests {
         assert!(e.contains("is not a file"), "{e}");
     }
 
-    /// A converter of our own: a shell script that does what it says and nothing else, so
-    /// the machinery can be exercised where ImageMagick, `sips` and Python are not —
-    /// **Linux and macOS alike**, which is why the stand-in is `sh` and not a tool.
+    /// A converter of our own: a shell script, so the machinery can be exercised
+    /// where ImageMagick, `sips` and Python are not. `sh`, because both platforms have it.
     fn fake_converter(d: &TempDir, name: &str, body: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         let path = d.0.join(name);
@@ -696,8 +613,8 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    /// **A template's placeholders all land where they were spelled**, and an argument is an
-    /// argument: a picture whose name has a space in it is one argument and not two.
+    /// A template's placeholders all land where they were spelled, and an argument is
+    /// an argument: a name with a space is one argument.
     #[test]
     fn a_converter_line_spells_the_picture_the_output_and_the_box() {
         let tool = Tool::line("tool {in} {out} {w} {h} {max}");
@@ -707,14 +624,13 @@ mod tests {
             args,
             vec!["/a b/c.jpg", "/tmp/o.png", "1280", "960", "1280"]
         );
-        // **The table's own arguments are kept whole**, spaces and all: one of them is a
-        // Python program, and splitting it is how a `-c` script stops being a script.
+        // **The table's own arguments are kept whole**: one is a Python program,
+        // and splitting it is how a `-c` script stops being a script.
         let python = Tool::named("python3").expect("the table has one");
         assert_eq!(python.args[0], "-c");
         assert!(python.args[1].contains("from PIL import Image"));
         assert_eq!(python.args.len(), 6, "-c, script, in, out, w, h");
-        // The machine's own table spells each tool correctly — a name and at least one
-        // argument per converter, no shell metacharacters anywhere in it.
+        // Each table entry spells a name, an input, an output and a size.
         for (name, args) in CONVERTERS {
             assert!(!name.is_empty());
             assert!(!args.is_empty(), "{name} has no arguments");
@@ -738,9 +654,8 @@ mod tests {
         assert!(!on_path("/nonexistent/never"));
     }
 
-    /// **A picture that is not a PNG is converted and read back**: what comes out is the
-    /// converter's PNG — its size read from its own header, exactly as for a file that was
-    /// a PNG all along — and the temp file it wrote does not survive the call.
+    /// A picture that is not a PNG is converted and read back: what comes out is the
+    /// converter's PNG, and the temp file it wrote does not survive the call.
     #[test]
     fn a_converter_turns_a_picture_into_the_png_the_terminal_takes() {
         let d = temp_dir("convert");
@@ -748,9 +663,8 @@ mod tests {
         std::fs::write(&source, b"\xff\xd8\xff\xe0 not really a jpeg").unwrap();
         let ready = d.0.join("ready.png");
         std::fs::write(&ready, png_header(200, 150)).unwrap();
-        // The stand-in: write the prepared picture where it was told to — `$2` is the
-        // output in the line below (`{in} {out} {max}`) — found beside the script itself,
-        // so the test needs no environment and no tool but `sh`.
+        // The stand-in: write the prepared picture where it was told to — `$2`
+        // is the output — found beside the script itself.
         let script = fake_converter(&d, "fake.sh", "cp \"$(dirname \"$0\")/ready.png\" \"$2\"");
         let line = format!("{script} {{in}} {{out}} {{max}}");
         let bytes = convert(&source, 320, Some(&line)).expect("converted");
@@ -767,8 +681,8 @@ mod tests {
             .filter(|n| n.starts_with(&format!("rano-picture-{}", std::process::id())))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        // **A PNG is never handed to a converter**: this one does not exist, so being read
-        // as it is, is what proves the fast path.
+        // **A PNG is never handed to a converter**: this one does not exist, so
+        // being read as it is proves the fast path.
         let real = d.0.join("real.png");
         std::fs::write(&real, png_header(9, 4)).unwrap();
         let pic = read_with(
@@ -788,8 +702,8 @@ mod tests {
         );
     }
 
-    /// **A converter that hangs is killed and said to have been** — the reader gets a
-    /// sentence, not a frozen editor. The deadline is the guard; the sleep is longer.
+    /// A converter that hangs is killed and said to have been — a sentence, not a
+    /// frozen editor.
     #[test]
     fn a_converter_that_hangs_is_stopped_by_the_clock() {
         let d = temp_dir("hang");
@@ -810,16 +724,14 @@ mod tests {
         );
     }
 
-    /// **A converter that goes for memory is killed before the machine notices.** The
-    /// kernel's cap is lifted out of the way for this one, so what stops it is the sampler —
-    /// the guard that has to work where the kernel will not keep one.
+    /// A converter that goes for memory is killed before the machine notices; the
+    /// kernel's cap is lifted out of the way, so the sampler is the guard.
     #[test]
     fn a_converter_that_runs_away_with_memory_is_stopped() {
         let d = temp_dir("fat");
         let source = d.0.join("bomb.tiff");
         std::fs::write(&source, b"II*\0").unwrap();
-        // A shell holding 8 MB in a variable: `/dev/zero` through `tr`, which is on both of
-        // rano's platforms and needs nothing installed.
+        // A shell holding 8 MB in a variable, via tools both platforms have.
         let script = fake_converter(
             &d,
             "fat.sh",
@@ -835,8 +747,8 @@ mod tests {
         assert!(e.contains("(the cap is 2 MiB)"), "{e}");
     }
 
-    /// The sampler answers on the platforms rano runs on, and says nothing about a process
-    /// it cannot see: past that, the kernel's cap and the deadline are the guards.
+    /// The sampler answers on the platforms rano runs on, and says nothing
+    /// about a process it cannot see.
     #[test]
     fn the_memory_sampler_reads_a_process_it_can_see() {
         let me = rss(std::process::id()).expect("this process's own memory");
@@ -844,14 +756,8 @@ mod tests {
         assert_eq!(rss(u32::MAX), None, "a pid that is not a process");
     }
 
-    /// **The real thing, on a machine that has one.** Ignored by default because it needs a
-    /// converter rano did not install: on this machine `sips` answers, on a Linux box with
-    /// ImageMagick or Python with Pillow it is one of those, and with none of them there is
-    /// nothing to measure. `cargo test -- --ignored a_converter_on_this_machine`
-    ///
-    /// An SVG is the strongest form of the question — it is not a raster at all — and the
-    /// answer proves the shape of the whole thing: a file that is not a PNG, a converter on
-    /// the machine, and a PNG with a size its header states.
+    /// The real thing, on a machine that has one: `cargo test -- --ignored
+    /// a_converter_on_this_machine`. An SVG is the strongest form — not a raster at all.
     #[test]
     #[ignore = "needs a converter on PATH (sips, ImageMagick, ffmpeg or Python with Pillow)"]
     fn a_converter_on_this_machine_draws_a_document_that_is_not_a_raster() {
@@ -878,12 +784,9 @@ mod tests {
                 .join(", ")
         );
         let pic = read(&svg.to_string_lossy(), None, 320).expect("converted");
-        // **The box reached the tool, and the document's own shape came back.** `sips -Z`
-        // *resamples to* the longest side rather than merely fitting inside it — this 120×60
-        // document came back 320×160 — and here that is the good answer: a vector drawn at
-        // the size it will be shown is sharper than one drawn at 120 px and scaled up by
-        // the terminal. What matters is that the aspect is the document's own. Whoever the
-        // converter is, the cells are cut from what it writes.
+        // **The box reached the tool, and the document's own shape came back.**
+        // `sips -Z` *resamples to* the longest side, and a vector drawn at the
+        // size it will be shown is sharper than one scaled up by the terminal.
         assert_eq!(
             pic.png[..8],
             b"\x89PNG\r\n\x1a\n"[..],

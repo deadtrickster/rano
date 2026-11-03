@@ -108,6 +108,13 @@ pub fn commands() -> &'static [Command] {
                 |e| e.start_write(),
             ),
             cmd(
+                "diff-copy",
+                "Copy from the View",
+                Mark,
+                "Copy the selected text of a preview to the clipboard.",
+                |e| e.copy_view_selection(),
+            ),
+            cmd(
                 "dir",
                 "Directory",
                 File,
@@ -856,7 +863,8 @@ impl Keymaps {
         g.name_prefix("M-t", "todo");
 
         let mut diff = Keymap::new("diff");
-        diff.bind("s", "diff-toggle-split")
+        diff.bind("M-6", "diff-copy")
+            .bind("s", "diff-toggle-split")
             .bind("TAB", "diff-toggle-split")
             .bind("<up>", "diff-scroll-up")
             .bind("C-p", "diff-scroll-up")

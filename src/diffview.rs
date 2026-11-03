@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::conflict::{Compare, Take};
 use crate::diff::DiffConfig;
-use crate::render::{Line, Span};
+use crate::render::{Line, Span, Style};
 use crate::sidediff::{EditView, edit_view, render_edit_view};
-use crate::style::Palette;
+use crate::style::{Palette, Role};
 
 use crate::buffer::Pos;
 use crate::editor::{ActionKind, Editor};
@@ -83,6 +83,19 @@ pub struct DiffView {
     pub top: usize,
     width: usize,
     pub lines: Vec<Line>,
+    /// **A selection over the RENDERED lines**, not over the buffer: a preview's rows are what the
+    /// renderer made of the text (wrapped, folded, bulleted), so its seventh row is not the file's
+    /// seventh line. The position is a **line index into `lines`** and a **char index into that
+    /// line's plain text**, which is what makes a drop of the mouse and a `put` at a screen column
+    /// agree in one coordinate system.
+    pub sel: Option<(ViewPos, ViewPos)>,
+}
+
+/// A position in a rendered view: which line, and which character of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ViewPos {
+    pub line: usize,
+    pub col: usize,
 }
 
 impl DiffView {
@@ -93,6 +106,7 @@ impl DiffView {
             top: 0,
             width: 0,
             lines: Vec::new(),
+            sel: None,
         };
         v.render(width);
         v
@@ -222,6 +236,118 @@ impl DiffView {
 /// Rows of the text area the diff lines get: all of it but the header.
 pub(crate) fn body_rows(text_h: usize) -> usize {
     text_h.saturating_sub(1).max(1)
+}
+
+impl DiffView {
+    /// **Whether a selection means anything here.** A picture's "lines" are placeholder cells
+    /// naming an image, so there is no text under them to select; every other view is text the
+    /// renderer made.
+    pub fn selectable(&self) -> bool {
+        !matches!(self.source, Source::Picture { .. })
+    }
+
+    /// The plain text of rendered line `line`, as the reader sees it (spans joined).
+    pub fn line_text(&self, line: usize) -> String {
+        match self.lines.get(line) {
+            Some(l) => l.spans.iter().map(|s| s.content.as_ref() as &str).collect(),
+            None => String::new(),
+        }
+    }
+
+    /// **The char index at display column `x`** of rendered line `line` — where a click lands. A
+    /// preview shows every character at its own width (a tab is expanded by the renderer, a wide
+    /// char takes two cells), so the mapping goes through the same width code as the text view.
+    pub fn char_at(&self, line: usize, x: usize) -> usize {
+        let chars: Vec<char> = self.line_text(line).chars().collect();
+        crate::ui::char_at_display(&chars, x, 8).min(chars.len())
+    }
+
+    /// The selection, in order, when it covers more than a point.
+    pub fn selection(&self) -> Option<(ViewPos, ViewPos)> {
+        let (a, b) = self.sel?;
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        (a != b).then_some((a, b))
+    }
+
+    /// **The selected text**: the rendered lines' characters between the two ends, joined with
+    /// newlines — exactly what is on the screen, which is the point of selecting in a preview.
+    pub fn selection_text(&self) -> Option<String> {
+        let (a, b) = self.selection()?;
+        let mut out = String::new();
+        for line in a.line..=b.line {
+            let text = self.line_text(line);
+            let chars: Vec<char> = text.chars().collect();
+            let from = if line == a.line {
+                a.col.min(chars.len())
+            } else {
+                0
+            };
+            let to = if line == b.line {
+                b.col.min(chars.len())
+            } else {
+                chars.len()
+            };
+            if line > a.line {
+                out.push('\n');
+            }
+            out.extend(&chars[from..to]);
+        }
+        Some(out)
+    }
+
+    /// **The char range of the selection on `line`**, when it covers any of it — what the painter
+    /// needs, in the same coordinates the text of the line uses.
+    pub fn selection_on(&self, line: usize) -> Option<(usize, usize)> {
+        let (a, b) = self.selection()?;
+        if line < a.line || line > b.line {
+            return None;
+        }
+        let len = self.line_text(line).chars().count();
+        let from = if line == a.line { a.col.min(len) } else { 0 };
+        let to = if line == b.line { b.col.min(len) } else { len };
+        (to > from).then_some((from, to))
+    }
+}
+
+/// **`line` with `from..to` (char indices) painted in the selection style** — the overlay a view
+/// needs, since its spans carry syntax styles and the selection must win over them without
+/// destroying them for the rest of the line.
+pub fn highlight_selection(line: &Line, from: usize, to: usize) -> Line {
+    let style = Style::of(Role::Selection);
+    let mut spans: Vec<Span> = Vec::new();
+    let mut at = 0usize;
+    for span in &line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let len = chars.len();
+        let (lo, hi) = (at, at + len);
+        at = hi;
+        // Outside the selection: as it was.
+        if hi <= from || lo >= to {
+            spans.push(span.clone());
+            continue;
+        }
+        // The part before, the selected part, the part after — any of which may be empty.
+        let sel_lo = from.max(lo) - lo;
+        let sel_hi = to.min(hi) - lo;
+        if sel_lo > 0 {
+            spans.push(Span::styled(
+                chars[..sel_lo].iter().collect::<String>(),
+                span.style.clone(),
+            ));
+        }
+        let merged = span.style.clone().patch(&style);
+        spans.push(Span::styled(
+            chars[sel_lo..sel_hi].iter().collect::<String>(),
+            merged,
+        ));
+        if sel_hi < len {
+            spans.push(Span::styled(
+                chars[sel_hi..].iter().collect::<String>(),
+                span.style.clone(),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 /// The cells a picture of `intrinsic` pixels fills at this width — the one call the

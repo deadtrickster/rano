@@ -796,9 +796,30 @@ fn run(cmd: &Cmd, out: &Path, limits: Limits) -> Run {
 }
 
 /// Kill the child and reap it, so a timed-out one is not left running behind us.
+/// **Stop the child — and never wait for one that could not be signalled.** The deadline is a
+/// promise to the reader; a child this process may not kill must not turn 300 ms into the child's
+/// whole lifetime.
+///
+/// That is not hypothetical: on a box where signals to a child are refused (`kill` answers EPERM —
+/// a sandbox, a different session), the old `kill(); wait()` blocked for the child's own end. A
+/// `sleep 30` under a 300 ms deadline therefore took 30 s to report, which is the one thing this
+/// timeout exists to prevent.
 fn stop(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    if child.kill().is_ok() {
+        // A SIGKILLed child is reaped at once; the loop only guards against the signal racing an
+        // exit that has already happened.
+        for _ in 0..50 {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    } else {
+        // It could not be signalled, so it is still running and waiting would block: ask once
+        // whether it has gone on its own, then let it go. Its zombie is reaped when this process
+        // exits, and the caller gets its error now rather than whenever the child finishes.
+        let _ = child.try_wait();
+    }
 }
 
 /// A process's resident memory in bytes, or `None` where the platform will not say.

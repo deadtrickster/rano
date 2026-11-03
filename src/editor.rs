@@ -1567,6 +1567,12 @@ impl Editor {
                     self.diff_act(DiffAct::Scroll(WHEEL_LINES));
                     true
                 }
+                // **A preview's text is selectable**, with the mouse, exactly as the buffer's is:
+                // press places one end, drag extends, release puts the selected *rendered* text on
+                // the clipboard. A click (no drag) clears the selection.
+                MouseKind::Press(MouseButton::Left) => self.view_select(m.y, m.x, true),
+                MouseKind::Drag(MouseButton::Left) => self.view_select(m.y, m.x, false),
+                MouseKind::Release(MouseButton::Left) => self.view_release(),
                 _ => false,
             };
         }
@@ -1622,6 +1628,55 @@ impl Editor {
             },
             _ => false,
         }
+    }
+
+    /// **A view position under the mouse**, or `None` when the pointer is not over the view's
+    /// body. The view draws a header on the text area's first row and one rendered line per row
+    /// below it, from `top`; the column is a display column, mapped to a char by the view.
+    fn view_pos(&self, pane_row: u16, pane_col: u16) -> Option<(usize, usize)> {
+        let v = self.diff_view.as_ref()?;
+        if !v.selectable() {
+            return None;
+        }
+        let top = self.chrome.top();
+        // The header row is not selectable text, and the body starts under it.
+        let body_row = (pane_row as usize).checked_sub(top as usize + 1)?;
+        let line = v.top + body_row;
+        if line >= v.lines.len() {
+            return None;
+        }
+        Some((line, pane_col as usize))
+    }
+
+    /// Press or drag inside a view: `fresh` places both ends (a new selection), otherwise the far
+    /// end follows the pointer.
+    fn view_select(&mut self, pane_row: u16, pane_col: u16, fresh: bool) -> bool {
+        let Some((line, x)) = self.view_pos(pane_row, pane_col) else {
+            return false;
+        };
+        let Some(v) = self.diff_view.as_mut() else {
+            return false;
+        };
+        let col = v.char_at(line, x);
+        let at = crate::diffview::ViewPos { line, col };
+        match (fresh, v.sel) {
+            (false, Some((anchor, _))) => v.sel = Some((anchor, at)),
+            _ => v.sel = Some((at, at)),
+        }
+        true
+    }
+
+    /// Let go: a selection with more than a point goes to the clipboard (the preview's text is
+    /// what the reader selected, so that is what is copied), and one with nothing in it is cleared.
+    fn view_release(&mut self) -> bool {
+        let Some(text) = self.diff_view.as_ref().and_then(|v| v.selection_text()) else {
+            if let Some(v) = self.diff_view.as_mut() {
+                v.sel = None;
+            }
+            return true;
+        };
+        self.clipboard_out = Some(text);
+        true
     }
 
     fn wheel(&mut self, delta: i64) -> bool {
@@ -2039,6 +2094,20 @@ impl Editor {
 
     /// M-6: copy the current line (or marked region) without deleting it; the
     /// mark stays and the region also goes to the system clipboard.
+    /// **M-6 in a preview**: the selection's rendered text to the clipboard, and to the cutbuffer so
+    /// pasting into the buffer works too. A view has no line to fall back on, so a copy with nothing
+    /// selected says so rather than copying a line the reader cannot see.
+    pub(crate) fn copy_view_selection(&mut self) {
+        let Some(text) = self.diff_view.as_ref().and_then(|v| v.selection_text()) else {
+            self.flash("Nothing selected in this view");
+            return;
+        };
+        self.cut = text.lines().map(|l| l.chars().collect()).collect();
+        self.cut_line = false;
+        self.clipboard_out = Some(text);
+        self.flash("Copied the selection");
+    }
+
     pub(crate) fn copy(&mut self) {
         if let Some(mark) = self.bs().mark {
             let (a, b) = normalize(mark, self.bs().cursor);

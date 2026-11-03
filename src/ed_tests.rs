@@ -1660,6 +1660,114 @@ fn the_example_plugin_transforms_through_the_editor() {
     assert_eq!(lines(&ed), vec!["HELLO RANOabc"]);
 }
 
+/// **A preview's text is selectable with the mouse**, and letting go puts *that* text — the
+/// rendered text, not the buffer's — on the clipboard.
+#[test]
+fn a_mouse_drag_in_a_markdown_preview_copies_the_rendered_text() {
+    let text = "# Title\n\nSome prose here.\n\n- a bullet\n";
+    let mut ed = named_ed(text, "notes.md");
+    ed.text_w = 60;
+    ed.text_h = 20;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    assert!(ed.diff_view.is_some(), "a markdown preview");
+    let rows = picture_rows(&ed);
+    let line = rows
+        .iter()
+        .position(|r| r.contains("Some prose here."))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    // The view draws a header on the text area's first row, then one rendered line per row.
+    let pane_row = (crate::editor::Chrome::default().top() as usize + 1 + line) as u16;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), pane_row, 0)));
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), pane_row, 4)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), pane_row, 4));
+    assert_eq!(
+        ed.take_clipboard().as_deref(),
+        Some("Some"),
+        "the rendered characters the drag covered"
+    );
+    // A click with no drag clears it, and queues nothing.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), pane_row, 2)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), pane_row, 2));
+    assert!(ed.take_clipboard().is_none());
+    assert_eq!(ed.diff_view.as_ref().unwrap().sel, None);
+}
+
+/// **The selection is drawn where it was made** — on the view's rendered line, in the theme's
+/// selection look, on top of the syntax styles.
+#[test]
+fn a_preview_selection_is_painted() {
+    let text = "# Title\n\nSome prose here.\n";
+    let mut ed = named_ed(text, "notes.md");
+    ed.text_w = 60;
+    ed.text_h = 20;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rows = picture_rows(&ed);
+    let line = rows
+        .iter()
+        .position(|r| r.contains("prose"))
+        .expect("the prose line");
+    let v = ed.diff_view.as_mut().unwrap();
+    v.sel = Some((
+        crate::diffview::ViewPos { line, col: 5 },
+        crate::diffview::ViewPos { line, col: 10 },
+    ));
+    let rect = crate::render::Rect::new(0, 0, 60, 26);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let pane_row = (crate::editor::Chrome::default().top() as usize + 1 + line) as u16;
+    let sel = crate::render::Style::of(crate::style::Role::Selection);
+    let inside = buf.cell(7, pane_row).expect("a cell").style.clone();
+    assert_eq!(inside, sel, "the selected cell wears the selection style");
+    let outside = buf.cell(1, pane_row).expect("a cell").style.clone();
+    assert_ne!(outside, sel, "the rest of the line does not");
+}
+
+/// **M-6 in a preview copies the selection** and says so; with nothing selected it says that
+/// instead of copying a line nobody can see.
+#[test]
+fn m_six_copies_a_preview_selection() {
+    let text = "# Title\n\nSome prose here.\n";
+    let mut ed = named_ed(text, "notes.md");
+    ed.text_w = 60;
+    ed.text_h = 20;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('6'), Mods::ALT);
+    assert!(
+        ed.status_text().unwrap().contains("Nothing selected"),
+        "{:?}",
+        ed.status_text()
+    );
+    let rows = picture_rows(&ed);
+    let line = rows
+        .iter()
+        .position(|r| r.contains("prose"))
+        .expect("the prose line");
+    let v = ed.diff_view.as_mut().unwrap();
+    v.sel = Some((
+        crate::diffview::ViewPos { line, col: 0 },
+        crate::diffview::ViewPos { line, col: 4 },
+    ));
+    press(&mut ed, KeyCode::Char('6'), Mods::ALT);
+    assert_eq!(ed.take_clipboard().as_deref(), Some("Some"));
+}
+
+/// **A picture has no text to select**: a drag over it does nothing rather than selecting
+/// placeholder cells.
+#[test]
+fn a_picture_view_takes_no_selection() {
+    let d = temp_dir("view_picture_sel");
+    let file = d.0.join("sun.png");
+    write_png(&file, SUN_PNG_W, SUN_PNG_H);
+    let mut ed = test_ed("");
+    ed.text_w = 60;
+    ed.text_h = 20;
+    ed.images = true;
+    assert!(ed.open_at(&file, 1, None).is_ok());
+    assert!(ed.diff_view.is_some());
+    assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 1)));
+    assert_eq!(ed.diff_view.as_ref().unwrap().sel, None);
+}
+
 #[test]
 fn m_p_on_plain_text_says_there_is_nothing_to_render() {
     let mut ed = test_ed("just text");
@@ -3514,7 +3622,16 @@ fn the_wheel_scrolls_a_preview_and_leaves_the_text_under_it_alone() {
         was,
         "the text under it did not move"
     );
-    assert!(!ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 3)));
+    // A press in a view now starts a selection (it says so by returning true); what it must not
+    // do is move the text's cursor, which is what the rest of this test checks.
+    let cursor_was = ed.bs().cursor;
+    let _ = ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 3));
+    assert_eq!(
+        ed.bs().cursor,
+        cursor_was,
+        "the text under the view keeps its cursor"
+    );
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 3, 3));
     assert_eq!(ed.bs().mark, None);
     assert_eq!(ed.bs().cursor, was.1);
 }

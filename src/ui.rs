@@ -560,7 +560,17 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         band(buf, at(0, t0, width, 1), Line::from(v.header()), head());
         let rows = crate::diffview::body_rows(text_h);
         for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            put(buf, at(0, t0 + 1 + k as u16, width, 1), l);
+            // **The selection is drawn where it was made**: over the rendered line, in the theme's
+            // selection look, on top of the syntax styles the renderer gave it.
+            let line = v.top + k;
+            match v.selection_on(line) {
+                Some((from, to)) => put(
+                    buf,
+                    at(0, t0 + 1 + k as u16, width, 1),
+                    &crate::diffview::highlight_selection(l, from, to),
+                ),
+                None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
+            }
         }
     }
 

@@ -2457,6 +2457,9 @@ impl Editor {
         if self.refuse_read_only("writing") {
             return;
         }
+        if self.refuse_partial_save(&path) {
+            return;
+        }
         if self.changed_on_disk(&path) {
             self.pending_write = Some(path);
             self.prompt = Some(Prompt {
@@ -2467,6 +2470,33 @@ impl Editor {
             return;
         }
         self.write_file(path);
+    }
+
+    /// Whether `path` is the buffer's own file and the buffer holds only the part of it
+    /// that was read: writing would replace the file with that part.
+    fn partial_own_file(&self, path: &Path) -> bool {
+        let bs = self.bs();
+        let Some(name) = bs.buf.name.as_deref() else {
+            return false;
+        };
+        bs.partial && canonical(name) == canonical(path)
+    }
+
+    /// Refuse a save that would shrink the buffer's own file to what has arrived, saying
+    /// why; saving under another name is the way out.
+    fn refuse_partial_save(&mut self, path: &Path) -> bool {
+        if !self.partial_own_file(path) {
+            return false;
+        }
+        let rows = self.bs().buf.row_count();
+        self.quit_after_save = false;
+        self.close_after_save = false;
+        self.flash(&format!(
+            "Only {rows} line{} were read - not saving over {}; save under another name",
+            plural(rows),
+            path.display()
+        ));
+        true
     }
 
     /// Whether `path` is the buffer's own file and no longer looks the way it did
@@ -2633,6 +2663,10 @@ impl Editor {
     }
 
     fn write_file(&mut self, path: PathBuf) {
+        // The one door every write goes through: a partial buffer never truncates its file.
+        if self.refuse_partial_save(&path) {
+            return;
+        }
         // A save into a missing directory is offered rather than failed: the
         // reader typed the path on purpose.
         if let Some(dir) = path
@@ -2671,6 +2705,8 @@ impl Editor {
                     bs.buf.disk = DiskStamp::of(&path);
                     bs.buf.name = Some(path);
                     bs.buf.modified = false;
+                    // What is on disk is now the whole buffer.
+                    bs.partial = false;
                     // The file's name changed, so its language may have too.
                     bs.hl.refresh(&bs.buf);
                     refresh_syntax_diags(bs);
@@ -3331,6 +3367,7 @@ impl Editor {
         let mut state = BufferState::new(buf);
         if log {
             state.pending_load = Some(path.clone());
+            state.partial = true;
         }
         if (self.config.multibuffer && !scratch) || kept {
             self.buffers.push(state);
@@ -3795,6 +3832,8 @@ impl Editor {
             let mut bs = BufferState::new(buf);
             if p.exists() {
                 bs.pending_load = Some(p.clone());
+                // Named but never read: a save would write an empty file over it.
+                bs.partial = true;
             }
             bs.goto = *at;
             self.buffers.push(bs);

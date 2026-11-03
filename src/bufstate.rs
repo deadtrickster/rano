@@ -83,6 +83,9 @@ pub struct BufferState {
     pub(crate) edit_gen: u64,
     /// A file still arriving from disk; None once it has.
     pub(crate) load: Option<crate::loader::LoadJob>,
+    /// The file is not whole here: a load in flight, pending, cancelled or failed. A
+    /// save over the buffer's own path would write back only the part that arrived.
+    pub(crate) partial: bool,
     /// A file named on the command line but not read yet: it loads when the buffer
     /// first becomes current.
     pub(crate) pending_load: Option<PathBuf>,
@@ -171,6 +174,7 @@ impl BufferState {
             wrap_extend_from: None,
             edit_gen: 0,
             load: None,
+            partial: false,
             pending_load: None,
             goto: None,
             review: None,

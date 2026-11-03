@@ -49,6 +49,7 @@ impl Editor {
         bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
         bs.scroll = 0;
         bs.load = None;
+        bs.partial = false;
         bs.tail = None;
         bs.read_only = false;
         bs.lines_before = Some(0);
@@ -86,6 +87,8 @@ impl Editor {
             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
             bs.scroll = 0;
             bs.load = Some(job);
+            // Until the whole file has arrived, the buffer is a prefix of it.
+            bs.partial = true;
             // A new document: the previous view's flags are cleared.
             bs.tail = None;
             bs.read_only = false;
@@ -267,6 +270,7 @@ impl Editor {
                             bs.buf.set_rows(read.take_rows());
                             bs.buf.crlf = read.crlf;
                             bs.buf.encoding = read.encoding;
+                            bs.partial = false;
                             bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
                             bs.scroll = 0;
                             bs.edit_gen = bs.edit_gen.wrapping_add(1);
@@ -288,6 +292,7 @@ impl Editor {
                 let rows = {
                     let bs = self.bs_mut();
                     bs.load = None;
+                    bs.partial = false;
                     bs.buf.crlf = crlf;
                     if bs.buf.rows_is_empty() {
                         bs.buf.push_row(Vec::new());
@@ -413,6 +418,7 @@ impl Editor {
             Ok(buf) => {
                 let bs = self.bs_mut();
                 bs.load = None;
+                bs.partial = false;
                 bs.buf = buf;
                 bs.edit_gen = bs.edit_gen.wrapping_add(1);
                 bs.wrap_extend_from = None;
@@ -554,6 +560,123 @@ mod tests {
         assert_ne!(
             ed.bs().hl.styled_window(),
             Some(crate::syntax::Window::rows(0, 0))
+        );
+    }
+
+    /// A body big enough that the load is still in flight after ten rows.
+    fn a_slow_body() -> String {
+        (0..300_000).map(|i| format!("row {i}\n")).collect()
+    }
+
+    /// Start a load and poll until rows have arrived and more are still coming.
+    fn start_partial(ed: &mut Editor, t: &Temp) {
+        ed.start_load(&t.0).expect("start");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ed.bs().buf.row_count() < 10 {
+            assert!(Instant::now() < deadline, "no rows adopted");
+            ed.load_poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ed.loading(), "still arriving");
+        assert!(ed.bs().partial, "the buffer is a prefix of the file");
+    }
+
+    /// The flash on the status line, which a load in flight would otherwise cover.
+    fn flash_text(ed: &Editor) -> String {
+        ed.status
+            .as_ref()
+            .map(|f| f.text.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_save_during_a_load_leaves_the_file_byte_identical() {
+        let body = a_slow_body();
+        let t = Temp::new("save_loading.txt", body.as_bytes());
+        let mut ed = ed();
+        start_partial(&mut ed, &t);
+        ed.save_to(t.0.clone());
+        let on_disk = std::fs::read(&t.0).expect("read back");
+        assert_eq!(on_disk, body.as_bytes(), "the file is untouched");
+        assert!(
+            flash_text(&ed).contains("not saving over"),
+            "it says why: {:?}",
+            flash_text(&ed)
+        );
+    }
+
+    #[test]
+    fn a_save_after_an_edit_cancelled_the_load_leaves_the_file_identical() {
+        let body = a_slow_body();
+        let t = Temp::new("save_edited.txt", body.as_bytes());
+        let mut ed = ed();
+        start_partial(&mut ed, &t);
+        ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+        ed.insert_char('X');
+        assert!(!ed.loading(), "an edit cancels the load");
+        ed.save_to(t.0.clone());
+        let on_disk = std::fs::read(&t.0).expect("read back");
+        assert_eq!(on_disk, body.as_bytes(), "the file is untouched");
+        assert!(ed.bs().buf.modified, "still unsaved");
+    }
+
+    #[test]
+    fn a_save_after_a_cancelled_load_leaves_the_file_identical() {
+        let body = a_slow_body();
+        let t = Temp::new("save_cancelled.txt", body.as_bytes());
+        let mut ed = ed();
+        start_partial(&mut ed, &t);
+        ed.cancel_load();
+        ed.save_to(t.0.clone());
+        let on_disk = std::fs::read(&t.0).expect("read back");
+        assert_eq!(on_disk, body.as_bytes(), "the file is untouched");
+    }
+
+    #[test]
+    fn a_whole_buffer_still_saves_over_its_file() {
+        let t = Temp::new("save_whole.txt", b"one\ntwo\n");
+        let mut ed = ed();
+        ed.start_load(&t.0).expect("start");
+        finish(&mut ed);
+        assert!(!ed.bs().partial, "a fully read buffer is not partial");
+        ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+        ed.insert_char('X');
+        ed.save_to(t.0.clone());
+        assert_eq!(std::fs::read(&t.0).unwrap(), b"Xone\ntwo\n");
+        assert!(!ed.bs().buf.modified);
+    }
+
+    #[test]
+    fn a_partial_buffer_saves_under_another_name() {
+        let body = a_slow_body();
+        let t = Temp::new("save_as_partial.txt", body.as_bytes());
+        let mut ed = ed();
+        start_partial(&mut ed, &t);
+        let out = std::env::temp_dir().join("rano_loadctrl_partial_as.txt");
+        let _ = std::fs::remove_file(&out);
+        ed.save_to(out.clone());
+        let saved = std::fs::read(&out).expect("the copy is written");
+        assert!(
+            saved.starts_with(b"row 0\nrow 1\n"),
+            "the rows that arrived"
+        );
+        assert_eq!(std::fs::read(&t.0).unwrap(), body.as_bytes());
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn a_pending_load_is_not_saved_over_its_file() {
+        let t = Temp::new("pending_save.txt", b"one\ntwo\n");
+        let mut ed = ed();
+        ed.add_deferred_buffers(std::slice::from_ref(&t.0));
+        ed.set_current(1);
+        assert!(ed.bs().pending_load.is_some());
+        ed.save_to(t.0.clone());
+        assert_eq!(std::fs::read(&t.0).unwrap(), b"one\ntwo\n");
+        assert!(
+            flash_text(&ed).contains("not saving over"),
+            "{:?}",
+            flash_text(&ed)
         );
     }
 

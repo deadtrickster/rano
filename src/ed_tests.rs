@@ -848,6 +848,27 @@ fn m_p_on_a_png_hands_the_terminal_a_picture_to_fill_the_cells_with() {
 /// A markdown preview draws the pictures the document names, under the row that
 /// names them.
 #[test]
+fn a_markdown_preview_in_a_wide_pane_keeps_a_readable_column_centred() {
+    let long = "word ".repeat(60);
+    let mut ed = test_ed(&format!("# Title\n\n{long}"));
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_wide.md"));
+    ed.text_w = 240;
+    ed.text_h = 20;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rows = diff_view_text(&ed);
+    assert_eq!(rows[0], format!("{}# Title", " ".repeat(70)), "{rows:?}");
+    let prose: Vec<&String> = rows.iter().filter(|r| r.contains("word")).collect();
+    assert!(
+        prose.len() >= 3,
+        "wrapped to the column, not the pane: {rows:?}"
+    );
+    for r in prose {
+        assert!(r.starts_with(&" ".repeat(70)), "{r:?}");
+        assert!(r.trim_end().chars().count() <= 170, "{r:?}");
+    }
+}
+
+#[test]
 fn a_markdown_preview_draws_the_pictures_the_document_names() {
     let d = temp_dir("md_img");
     write_png(&d.0.join("sun.png"), SUN_PNG_W, SUN_PNG_H);
@@ -863,7 +884,10 @@ fn a_markdown_preview_draws_the_pictures_the_document_names() {
         .iter()
         .position(|r| r.contains("the sun"))
         .unwrap_or_else(|| panic!("{rows:?}"));
-    assert!(rows[reference + 1].starts_with('\u{10EEEE}'), "{rows:?}");
+    assert!(
+        rows[reference + 1].starts_with(&format!("{}\u{10EEEE}", " ".repeat(10))),
+        "centred with the prose: {rows:?}"
+    );
     assert!(rows[0].contains("Intro"), "{rows:?}");
     let out = graphics(&mut ed);
     assert_eq!(out.len(), 2, "{out:?}");

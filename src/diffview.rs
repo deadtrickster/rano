@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::conflict::{Compare, Take};
 use crate::diff::DiffConfig;
-use crate::render::Line;
+use crate::render::{Line, Span};
 use crate::sidediff::{EditView, edit_view, render_edit_view};
 use crate::style::Palette;
 
@@ -118,12 +118,14 @@ impl DiffView {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             Source::Markdown { text, images, .. } => {
+                let (column, margin) = prose_column(width);
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
-                    width,
+                    column,
                     &crate::markdown::RenderOptions::default(),
                 );
-                splice_pictures(&mut rows, images, width);
+                splice_pictures(&mut rows, images, column);
+                indent(&mut rows, margin);
                 rows
             }
             Source::Picture {
@@ -230,6 +232,24 @@ fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
         Some(intrinsic.1),
         crate::term::graphics::image_box(width),
     )
+}
+
+/// Prose wider than this reads worse than the source it came from.
+const PROSE_MAX: usize = 100;
+
+/// The column a preview wraps prose to, and the margin that centres it.
+fn prose_column(width: usize) -> (usize, usize) {
+    let column = width.min(PROSE_MAX);
+    (column, (width - column) / 2)
+}
+
+fn indent(rows: &mut [Line], margin: usize) {
+    if margin == 0 {
+        return;
+    }
+    for row in rows.iter_mut().filter(|r| !r.spans.is_empty()) {
+        row.spans.insert(0, Span::raw(" ".repeat(margin)));
+    }
 }
 
 /// Splice each picture in under the first row that shows its reference, as

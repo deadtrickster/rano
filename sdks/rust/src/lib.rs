@@ -25,6 +25,9 @@ static mut MEM: [u8; 18 << 20] = [0; 18 << 20];
 /// Where the arena starts, past the result block (the block is two `u32`s at offset 0).
 const ARENA: u32 = 8;
 
+/// What the arena holds, in bytes: the static's size less the block.
+const ARENA_BYTES: u32 = (18 << 20) - ARENA;
+
 static NEXT: AtomicU32 = AtomicU32::new(ARENA);
 
 /// The address of this module's memory — `addr_of_mut!` because edition 2024
@@ -35,10 +38,15 @@ fn base() -> u32 {
 
 /// **`rano_alloc`: reserve `n` bytes and answer their offset.** A fresh
 /// instance per call means the bump never has to be rewound.
+///
+/// Past the arena it panics instead of walking off it: a store past the end is
+/// a wasm trap either way, and this one names itself.
 pub fn alloc(n: u32) -> u32 {
-    // The arena never grows back, so an overflow is a plugin that asked for
-    // more than the arena at once — far above the host's own text cap.
-    NEXT.fetch_add(n.max(1), Ordering::Relaxed) + base()
+    let at = NEXT.fetch_add(n.max(1), Ordering::Relaxed) + base();
+    if at.saturating_add(n) > base() + ARENA_BYTES {
+        panic!("rano: alloc past the plugin's arena");
+    }
+    at
 }
 
 /// Where the result block lives: the first bytes of memory, deliberately not
@@ -188,13 +196,34 @@ pub fn read_dir(path: &str) -> Option<String> {
             return None;
         }
         let needed = n.unsigned_abs() as usize;
-        if needed > cap {
+        // A listing the arena cannot hold is not this plugin's to claim: a retry would
+        // allocate past the end and trap, where `None` opens the path the ordinary way.
+        if needed > cap && needed <= ARENA_BYTES as usize - (1 << 20) {
             cap = needed;
         } else {
             return None;
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_alloc_inside_the_arena_answers_a_usable_offset() {
+        let at = alloc(64);
+        assert!(at >= base() && at + 64 <= base() + ARENA_BYTES);
+    }
+
+    #[test]
+    #[should_panic(expected = "past the plugin's arena")]
+    fn an_alloc_past_the_arena_panics_rather_than_walking_off_it() {
+        // One more than the arena, in one go: the store would be past the end and wasm would
+        // trap with no reason at all.
+        let _ = alloc(ARENA_BYTES + 1);
+    }
 }
 
 /// The two exports every plugin has: `rano_abi` and `rano_alloc`.

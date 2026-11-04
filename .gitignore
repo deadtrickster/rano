@@ -5,3 +5,4 @@ examples/*/target
 # Zig's own build outputs, for the examples that are not Rust.
 examples/*/.zig-cache
 examples/*/zig-out
+sdks/*/target

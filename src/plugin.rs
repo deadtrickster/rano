@@ -262,8 +262,9 @@ impl Plugin {
                 bytes.len()
             ));
         }
-        let width = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let height = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        // The length check above is the invariant; `expect` says so if it ever stops holding.
+        let width = u32::from_le_bytes(bytes[0..4].try_into().expect("4-byte header"));
+        let height = u32::from_le_bytes(bytes[4..8].try_into().expect("4-byte header"));
         if width == 0 || height == 0 {
             return Err(format!(
                 "`provider_picture` answered a {width}x{height} picture"
@@ -565,8 +566,11 @@ impl Plugin {
             .checked_add(8)
             .filter(|end| *end <= data.len())
             .ok_or_else(|| format!("`{hook}` answered outside the guest's memory"))?;
-        let out_ptr = u32::from_le_bytes(data[block..block + 4].try_into().unwrap()) as usize;
-        let out_len = u32::from_le_bytes(data[block + 4..head].try_into().unwrap()) as usize;
+        // `block + 8` was checked to be inside the memory above.
+        let out_ptr =
+            u32::from_le_bytes(data[block..block + 4].try_into().expect("4-byte block")) as usize;
+        let out_len =
+            u32::from_le_bytes(data[block + 4..head].try_into().expect("4-byte block")) as usize;
         if out_len == 0 {
             return Ok(None);
         }

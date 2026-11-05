@@ -26,6 +26,7 @@ pub mod card;
 pub mod composer;
 pub mod config;
 pub mod decision;
+mod diffbody;
 pub mod fit;
 pub mod header;
 pub mod help;

@@ -8,6 +8,7 @@ use crate::term::links::file_url;
 
 use super::card::{EditDiff, Verb, indent};
 use super::decision::{SettledDecision, decision_lines};
+use super::diffbody;
 use super::outcome::Outcome;
 use super::text::{
     clean, clean_line, duration, first_sentence, is_envelope, one, shorten_subject, step_in,
@@ -320,7 +321,18 @@ impl ToolRow {
         // The payload's block is faint, and a coloured run inside it stacks its own role over that
         // and closes back to faint.
         let faint = Style::of(Role::Faint);
-        out.extend(kept[page..end].iter().map(|(l, _)| {
+        // A command's diff or diffstat is painted here: its stdout is not a terminal, so git sent
+        // no colour. Only a line the command left unstyled is repainted.
+        let diff = if matches!(verb_kind, Verb::Run) {
+            diffbody::paint(&lines)
+        } else {
+            Vec::new()
+        };
+        out.extend(kept[page..end].iter().enumerate().map(|(n, (l, _))| {
+            let unstyled = l.spans.iter().all(|s| s.style == Style::new());
+            if let (true, Some(Some(p))) = (unstyled, diff.get(page + n)) {
+                return indent(p.clone(), 2);
+            }
             let mut row = indent((*l).clone(), 2);
             row.style = faint.patch(&row.style);
             row
@@ -727,5 +739,29 @@ mod tests {
         assert!(!rows.join("").contains("?1000"), "{rows:?}");
         assert!(plain(&r.lines(80))[1].ends_with("red"));
         assert_eq!(role_of(&r.lines(80)[1], "red"), Some(Role::Faint));
+    }
+
+    #[test]
+    fn a_commands_diff_body_is_painted_and_a_flag_list_is_not() {
+        let body = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut r = ToolRow::new("bash", "c", Outcome::Ok, payload_lines(body));
+        r.fold = Fold::Open;
+        let out = r.lines(80);
+        assert_eq!(role_of(&out[5], "-old"), Some(Role::Failure));
+        assert_eq!(role_of(&out[6], "+new"), Some(Role::Success));
+        let mut flags = ToolRow::new(
+            "bash",
+            "c",
+            Outcome::Ok,
+            payload_lines("-rw-r--r-- 1 u g 3 a\n-h, --help  show help\n"),
+        );
+        flags.fold = Fold::Open;
+        let out = flags.lines(80);
+        assert_eq!(role_of(&out[1], "-rw"), Some(Role::Faint));
+        assert_eq!(role_of(&out[2], "--help"), Some(Role::Faint));
+        // A tool that is not a command keeps its body plain.
+        let mut read = ToolRow::new("read", "c", Outcome::Ok, payload_lines(body));
+        read.fold = Fold::Open;
+        assert_eq!(role_of(&read.lines(80)[5], "-old"), Some(Role::Faint));
     }
 }

@@ -474,7 +474,11 @@ pub fn legacy_bytes(raw: &[u8]) -> Vec<u8> {
             if j < raw.len() && raw[j] == b'u' {
                 let params = &raw[i + 2..j];
                 let legacy = kitty_fields(params).and_then(|(code, mods)| {
-                    if code == 13 && mods & 1 != 0 {
+                    // Legacy has no spelling for super, and cmd belongs to the host, so a
+                    // super chord reaches the pane as nothing rather than as its plain key.
+                    if mods & 8 != 0 {
+                        None
+                    } else if code == 13 && mods & 1 != 0 {
                         Some(vec![b'\r'])
                     } else {
                         kitty_legacy(code, mods)
@@ -857,6 +861,12 @@ mod tests {
         assert_eq!(legacy_bytes(b"\x1b[57414u"), b"\r".to_vec());
         assert_eq!(legacy_bytes(b"\x1b[57401u\x1b[57413u"), b"2+".to_vec());
         assert_eq!(legacy_bytes(b"\x1b[57420u"), b"\x1b[B".to_vec());
+        // A super chord is swallowed: cmd-c is not a `c`, and ctrl-c still is `0x03`.
+        assert_eq!(legacy_bytes(b"\x1b[99;9u"), Vec::<u8>::new());
+        assert_eq!(legacy_bytes(b"\x1b[99;13u"), Vec::<u8>::new());
+        assert_eq!(legacy_bytes(b"a\x1b[99;9ub"), b"ab".to_vec());
+        assert_eq!(legacy_bytes(b"\x1b[99u"), b"c".to_vec());
+        assert_eq!(legacy_bytes(b"\x1b[99;5u"), vec![3]);
         // Everything that is not a `CSI … u` passes untouched.
         assert_eq!(
             legacy_bytes(b"\x1b[A\x1b[1;5C"),

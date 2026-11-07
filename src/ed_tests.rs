@@ -976,10 +976,14 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
         assert!(ed.diff_view.is_none());
         let msg = ed.status_text().unwrap();
         assert!(msg.contains(nonsense), "{msg}");
+        // **The reason depends on the machine**: no converter, a converter that refuses, a PNG
+        // that is not one, or - on a loaded gate - a converter that ran out of its two seconds.
+        // What the test is for is that the reader is told, by name, and that nothing is drawn.
         assert!(
             msg.contains("not a PNG")
                 || msg.contains("could not read it")
-                || msg.contains("no converter found"),
+                || msg.contains("no converter found")
+                || msg.contains("took more than"),
             "{msg}"
         );
         assert!(graphics(&mut ed).is_empty());

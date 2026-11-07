@@ -1314,6 +1314,10 @@ mod tests {
         );
         let caps = Limits {
             output: 64 * 1024,
+            // **The cap is what this tests, so the clock must not be able to answer first.**
+            // A gate run at 4 GiB of parallel work blew the page deadline and reported a
+            // timeout in place of the cap: the test said red about the wrong guard.
+            timeout: std::time::Duration::from_secs(120),
             ..Limits::page()
         };
         let r = page_png_with(&pdf, 0, 150, caps, Some(vec![stand_in(&sh, &["{out}"])]));

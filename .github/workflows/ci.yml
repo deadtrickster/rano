@@ -14,12 +14,23 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: this workflow only reads the repository, so its token can read and nothing more.
+# A branch whose own copy of this file asks for more is a change under review, not a property of
+# this file — what bounds that case is the repository's default workflow-permission setting.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: fmt, clippy, test, release
     runs-on: ubuntu-latest
     steps:
+      # The token the workflow gets is read-only and is not left where the checked-out tree can reach
+      # it: `checkout` otherwise writes it into .git/config, so a test body or a `build.rs` could push
+      # with it. Nothing in this workflow pushes.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -122,6 +133,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

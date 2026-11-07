@@ -699,39 +699,60 @@ mod tail_tests {
         assert_eq!(got[4], "line 299");
     }
 
-    /// The cost is the tail, not the file: the scan goes backwards from the end.
+    /// The cost is the tail, not the file: the scan goes backwards from the end, so twelve times
+    /// the file costs the same window.
     #[test]
     fn a_large_file_costs_the_window_not_the_file() {
         let body: Vec<u8> = (0..400_000)
             .map(|i| format!("2026-10-09T12:00:00 INFO row {i}\n"))
             .collect::<String>()
             .into_bytes();
+        let small: Vec<u8> = (0..35_000)
+            .map(|i| format!("2026-10-09T12:00:00 INFO row {i}\n"))
+            .collect::<String>()
+            .into_bytes();
         let t = Temp::new("large.txt", &body);
-        let size = body.len() as u64;
+        let s = Temp::new("small.txt", &small);
+        let (size, small_size) = (body.len() as u64, small.len() as u64);
         assert!(
             size > 10 * 1024 * 1024,
             "the fixture must be big: {size} bytes"
         );
+        assert!(
+            small_size * 10 < size,
+            "the pair must differ in size: {small_size} and {size} bytes"
+        );
+        // What the scan finds, in the file that matters.
         let mut f = File::open(t.path()).expect("open");
-        // Every sample runs to completion and the least contended one is judged: a gate running
-        // several suites at once can stretch any single read, and 200 ms is four thousand times
-        // what 64 KiB of a warm file costs — the number is not the test, the offset is.
-        let (off, dt) = crate::timing::best(3, || {
-            let t0 = std::time::Instant::now();
-            let off = tail_offset(&mut f, size, 40, 64 * 1024).expect("tail_offset");
-            (off, t0.elapsed())
-        });
-        // The last 40 rows of `row 399xxx` lines.
+        let off = tail_offset(&mut f, size, 40, 64 * 1024).expect("tail_offset");
         assert!(
             off > size - 64 * 1024,
             "the offset should be in the tail: {off}"
         );
-        let want = reference(&body, 40);
-        assert_eq!(off, want);
-        // The point: the bound is not proportional to the file (64 KiB of a 12 MB file).
+        assert_eq!(off, reference(&body, 40));
+        // What it costs, as a RATIO: both sides read the same window of the same line format, so the
+        // claim — the cost does not grow with the file — is a ratio, and a loaded gate stretching
+        // both samples together cannot answer it. An absolute bound can, which is why this test went
+        // red for the machine twice with the number that used to stand in for the claim.
+        let (big_ns, small_ns) = crate::timing::best_ratio(3, || {
+            let mut bf = File::open(t.path()).expect("open");
+            let mut sf = File::open(s.path()).expect("open");
+            let t0 = std::time::Instant::now();
+            tail_offset(&mut bf, size, 40, 64 * 1024).expect("tail_offset");
+            let big = t0.elapsed().as_nanos();
+            let t1 = std::time::Instant::now();
+            tail_offset(&mut sf, small_size, 40, 64 * 1024).expect("tail_offset");
+            (big, t1.elapsed().as_nanos())
+        });
+        println!(
+            "tail scan: {:.1} µs of {size} bytes, {:.1} µs of {small_size} bytes",
+            big_ns as f64 / 1e3,
+            small_ns as f64 / 1e3
+        );
         assert!(
-            dt.as_millis() < 200,
-            "tail_offset took {dt:?} on a {size}-byte file — that is not a tail scan"
+            big_ns < small_ns.max(1) * 3,
+            "the scan cost {big_ns} ns on {size} bytes and {small_ns} ns on {small_size} — that is \
+             proportional to the file"
         );
     }
 }

@@ -7,31 +7,16 @@
 //! code costs, and that is the sample the assertion judges.
 //!
 //! A test that asserts a deadline FIRED is the other shape and stays tight — there the slow answer
-//! is the one under test, and a generous bound would stop testing anything.
+//! is the one under test, and a generous bound would stop testing anything. And a test that can
+//! assert a COUNT — bytes read, rows returned, work done — needs no clock at all.
 
-use std::time::Duration;
-
-/// Run `f` up to `tries` times and keep the least contended sample: its value, and its time.
+/// The least contended of `tries` samples of a comparison between two costs: the pair whose ratio
+/// is smallest, in thousandths.
 ///
-/// `f` runs to completion each time, so it has to be safe to repeat — a read, a scan, a
-/// conversion. The value comes back with the time so a caller that also checks the result is
-/// checking the sample it is asserting on.
-pub(crate) fn best<T>(tries: usize, mut f: impl FnMut() -> (T, Duration)) -> (T, Duration) {
-    let mut best: Option<(T, Duration)> = None;
-    for _ in 0..tries.max(1) {
-        let sample = f();
-        if best.as_ref().is_none_or(|(_, t)| sample.1 < *t) {
-            best = Some(sample);
-        }
-    }
-    best.expect("tries.max(1) runs at least once")
-}
-
-/// [`best`] for a measurement that compares two costs: the sample with the smallest ratio wins.
-///
-/// A stall that lands on one side of a ratio moves the ratio even though neither number is the
-/// code's, which is how a speed-up test goes red on a loaded machine. The ratio is in thousandths
-/// so it stays integer; `denominator` is the side that only ever inflates.
+/// `f` runs to completion each time, so it has to be safe to repeat. A stall that lands on one side
+/// of a ratio moves the ratio even though neither number is the code's, which is how a speed-up
+/// test goes red on a loaded machine; two sides that inflate together cannot answer it, and that is
+/// the whole point of judging a ratio rather than an absolute.
 pub(crate) fn best_ratio(tries: usize, mut f: impl FnMut() -> (u128, u128)) -> (u128, u128) {
     let mut best: Option<((u128, u128), u128)> = None;
     for _ in 0..tries.max(1) {

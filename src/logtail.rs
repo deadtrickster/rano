@@ -249,7 +249,7 @@ fn decode(bytes: &[u8], encoding: crate::encoding::Encoding) -> Vec<char> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     /// A scratch file, removed when the test that made it ends.
     struct Temp(PathBuf);
@@ -481,23 +481,27 @@ mod tests {
         let tail = LogTail::open(t.path()).expect("open");
         assert_eq!(tail.lines, 100_000);
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        // The least contended of a few reads: a gate running several suites at once can stretch any
-        // single one, and this asserts speed, so a slow sample is the machine's answer.
-        let (rows, dt) = crate::timing::best(3, || {
-            let t0 = Instant::now();
-            let rows = tail.last_rows(40).expect("rows");
-            (rows, t0.elapsed())
-        });
-        assert!(Instant::now() < deadline);
+        // What was READ, not how long it took: the rows come from one tail window at the end of the
+        // file, and "not the file" is a count. A clock is printed because it is worth seeing, and
+        // not asserted, because a busy machine answers a clock and cannot answer a count.
+        let t0 = Instant::now();
+        let rows = tail.last_rows(40).expect("rows");
+        let dt = t0.elapsed();
         assert_eq!(rows.len(), 40);
         assert_eq!(
             rows[39].iter().collect::<String>(),
             "2026-10-09T12:00:00 INFO a row of a log 99999"
         );
-        // Generous: 4 MB read backwards from the end, and it must not be the
-        // whole file.
-        assert!(dt.as_millis() < 500, "a screenful took {dt:?}");
+        let size = body.len() as u64;
+        let mut f = File::open(t.path()).expect("open");
+        let from = crate::loader::tail_offset(&mut f, size, 40, crate::loader::TAIL_WINDOW)
+            .expect("tail_offset");
+        let read = size - from;
+        println!("a screenful: {read} of {size} bytes read in {dt:?}");
+        assert!(
+            read <= crate::loader::TAIL_WINDOW,
+            "a screenful read {read} of {size} bytes — more than one tail window"
+        );
     }
 
     /// The bookkeeping pass over a large file is one forward read; the timing

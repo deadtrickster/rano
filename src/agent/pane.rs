@@ -10,6 +10,10 @@
 //! The stop rows are a record and not arithmetic: a click handler doing arithmetic over the list
 //! (`line - header`) while the pane drew something else is exactly the bug that made the arrows and
 //! the mouse disagree, so the drawing writes the record both of them read.
+//!
+//! What draws it is the head's panes — letibot's `crates/tui/src/ui/panes/`, which owns the scroll and
+//! the cursor — so nothing in this crate calls a window: the windows here are the contract that host
+//! draws against, and a signature change is a change to that contract.
 
 use crate::render::{Buffer, Line, Rect, Span, Widget};
 use crate::style::Role;
@@ -104,7 +108,9 @@ impl PaneLayout {
     /// drawn row, and it is guarded on the window: a row below the last drawn one, a pad and the seam
     /// are not rows anybody can land on.
     pub fn stop_at(&self, y: usize) -> Option<usize> {
-        if y >= self.room.min(self.lines.len()) {
+        // The frame is `room` rows now, so this is the bounds check; what keeps a click off a pad and
+        // off the seam is the content test under the offset.
+        if y >= self.room {
             return None;
         }
         // A seam at the head pushes the content down one row. That offset is read off the record the
@@ -195,17 +201,24 @@ pub fn window(content: PaneLines, w: usize, scroll: usize, room: usize) -> PaneL
     }
 }
 
-/// The row that counts what the window could not draw. The words are `card_window`'s
-/// (agent/decision.rs): one sentence for one situation wherever a reader meets it. A pane too narrow
-/// for the sentence drops the key hint before it drops the count, which is the part a reader cannot
-/// get anywhere else.
-fn seam_line(above: usize, below: usize, w: usize) -> Line {
-    let said = match (above, below) {
+/// The sentence that counts what a viewport could not draw: what is out of view and which key moves
+/// toward it. One producer, because two views metering the same thing drift apart — `card_window`
+/// (agent/decision.rs) draws this sentence too, over its own arithmetic.
+///
+/// Never "there is more": a reader has to know whether one row or four hundred are missing.
+pub(crate) fn seam_said(above: usize, below: usize) -> String {
+    match (above, below) {
         (0, below) => format!("  … {below} line(s) out of view · pgdn scrolls"),
         (above, 0) => format!("  … {above} line(s) out of view · pgup scrolls"),
         (above, below) => format!("  … {above} above, {below} below · pgup/pgdn scrolls"),
-    };
-    let mut line = Line::new(vec![Span::role(said, Role::Faint)]);
+    }
+}
+
+/// The row that counts what the window could not draw, cut to the pane it is drawn in. A pane too
+/// narrow for the sentence drops the key hint before it drops the count, which is the part a reader
+/// cannot get anywhere else, and only then lets the renderer's `…` take the cut.
+fn seam_line(above: usize, below: usize, w: usize) -> Line {
+    let mut line = Line::new(vec![Span::role(seam_said(above, below), Role::Faint)]);
     if line.width() > w {
         line = Line::new(vec![Span::role(
             format!("  … {} out of view", above + below),

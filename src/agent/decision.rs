@@ -540,6 +540,11 @@ pub struct CardWindow {
 /// of view and which key moves toward them — never "there is more", since a reader must know
 /// whether one line or four hundred are missing. It starts at the head and its seam changes ends
 /// with the scroll, and the scroll is clamped here because the drawn length is the width's.
+///
+/// It keeps its own arithmetic rather than calling `pane::window`, and the two differences are the
+/// reasons: a card never pads — its box is the room exactly — and its seam spends a row of `room`
+/// that the host reads back as `shown`, where a pane has to place that row and record it for its
+/// click map. The SENTENCE is [`crate::agent::pane::seam_said`]'s, so one situation reads one way.
 pub fn card_window(content: &[Line], room: usize, scroll: usize) -> CardWindow {
     let len = content.len();
     if content.is_empty() || room == 0 {
@@ -564,16 +569,7 @@ pub fn card_window(content: &[Line], room: usize, scroll: usize) -> CardWindow {
     let at = scroll.min(len - shown);
     let above = at;
     let below = len - (at + shown);
-    let seam = one(
-        if below == 0 {
-            format!("  … {above} line(s) out of view · pgup scrolls")
-        } else if above == 0 {
-            format!("  … {below} line(s) out of view · pgdn scrolls")
-        } else {
-            format!("  … {above} above, {below} below · pgup/pgdn scrolls")
-        },
-        Role::Faint,
-    );
+    let seam = one(crate::agent::pane::seam_said(above, below), Role::Faint);
     let mut lines = Vec::with_capacity(room);
     if below == 0 {
         lines.push(seam.clone());

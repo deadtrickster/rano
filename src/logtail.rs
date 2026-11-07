@@ -176,17 +176,26 @@ impl LogTail {
     /// something is drawing them and not before. Reuses [`crate::loader::tail_offset`], so a
     /// 2 GiB log's last screenful costs a few hundred KiB of reading.
     pub fn last_rows(&self, n: usize) -> io::Result<Vec<Vec<char>>> {
+        Ok(self.last_rows_counted(n)?.0)
+    }
+
+    /// [`last_rows`], and how many bytes of the file that read covered.
+    ///
+    /// The count is returned rather than derived, because the test that asserts it is asserting what
+    /// this read — a count the test worked out for itself would agree with any implementation of
+    /// this one, including one that read the whole file.
+    pub(crate) fn last_rows_counted(&self, n: usize) -> io::Result<(Vec<Vec<char>>, u64)> {
         if n == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let mut file = File::open(&self.path)?;
         let size = file.metadata()?.len();
         if size == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let from = crate::loader::tail_offset(&mut file, size, n, crate::loader::TAIL_WINDOW)?;
         let bytes = crate::loader::read_from(&mut file, from)?;
-        Ok(split_rows(&bytes, self.encoding))
+        Ok((split_rows(&bytes, self.encoding), size - from))
     }
 
     /// The bytes this holds, from the two vectors' capacity and nothing else. Not the file:
@@ -482,10 +491,12 @@ mod tests {
         assert_eq!(tail.lines, 100_000);
 
         // What was READ, not how long it took: the rows come from one tail window at the end of the
-        // file, and "not the file" is a count. A clock is printed because it is worth seeing, and
-        // not asserted, because a busy machine answers a clock and cannot answer a count.
+        // file, and "not the file" is a count. The count comes back with the rows, so it is the read
+        // that happened and not one the test worked out for itself. A clock is printed because it is
+        // worth seeing, and not asserted, because a busy machine answers a clock and cannot answer a
+        // count.
         let t0 = Instant::now();
-        let rows = tail.last_rows(40).expect("rows");
+        let (rows, read) = tail.last_rows_counted(40).expect("rows");
         let dt = t0.elapsed();
         assert_eq!(rows.len(), 40);
         assert_eq!(
@@ -493,10 +504,6 @@ mod tests {
             "2026-10-09T12:00:00 INFO a row of a log 99999"
         );
         let size = body.len() as u64;
-        let mut f = File::open(t.path()).expect("open");
-        let from = crate::loader::tail_offset(&mut f, size, 40, crate::loader::TAIL_WINDOW)
-            .expect("tail_offset");
-        let read = size - from;
         println!("a screenful: {read} of {size} bytes read in {dt:?}");
         assert!(
             read <= crate::loader::TAIL_WINDOW,

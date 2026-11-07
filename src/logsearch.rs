@@ -675,10 +675,34 @@ mod tests {
         assert!(out.hits.is_empty());
     }
 
+    /// One scan of `path`, cancelled `wait` after it starts. The block is a single byte, so the
+    /// scan's cost is syscalls rather than CPU speed: it cannot finish inside any wait used here,
+    /// on any machine, which is what makes "the flag lands mid-scan" a property of the fixture
+    /// rather than a hope about the box (the 30 ms this test used to rely on was the box's answer,
+    /// and under a gate it was wrong).
+    fn cancelled_after(file: &Temp, wait: Duration) -> Outcome {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let path = file.to_path_buf();
+        let worker = std::thread::spawn(move || {
+            scan(
+                &path,
+                &lit(b"hit"),
+                Dir::Forward,
+                0,
+                1,
+                usize::MAX,
+                &worker_cancel,
+            )
+            .unwrap()
+        });
+        std::thread::sleep(wait);
+        cancel.store(true, Ordering::Relaxed);
+        worker.join().unwrap()
+    }
+
     #[test]
     fn interrupt_mid_scan_returns_partial_prefix() {
-        // A full scan takes orders of magnitude longer than the 30 ms wait,
-        // so the flag always lands mid-scan.
         let data: Vec<u8> = b"hit\n"
             .iter()
             .copied()
@@ -686,32 +710,39 @@ mod tests {
             .take(4 * 1024 * 1024)
             .collect();
         let p = tmp("cancel-mid", &data);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let path = p.to_path_buf();
-        let worker = std::thread::spawn(move || {
-            scan(
-                &path,
-                &lit(b"hit"),
-                Dir::Forward,
-                0,
-                16,
-                usize::MAX,
-                &worker_cancel,
-            )
-            .unwrap()
-        });
-        std::thread::sleep(Duration::from_millis(30));
-        cancel.store(true, Ordering::Relaxed);
-        let out = worker.join().unwrap();
-        assert!(out.interrupted, "the scan takes far longer than 30 ms");
-        assert!(!out.hits.is_empty(), "30 ms of scanning finds something");
-        assert!(out.hits.len() < 1024 * 1024, "and not everything");
-        // A true prefix: hit k is at offset 4k on row k.
-        for (k, h) in out.hits.iter().enumerate() {
-            assert_eq!(h.offset, (4 * k) as u64, "hit {}", k);
-            assert_eq!(h.row, k as u64, "hit {}", k);
+        // The wait escalates until one attempt lands MID-scan. A starved worker can be scheduled so
+        // late that the flag arrives before it has read a block, and that is the machine answering,
+        // not the scan; every attempt that lands must still hold the invariant — interrupted, a true
+        // prefix in order, and not the whole file — so the escalation buys a fair sample and weakens
+        // nothing. The flag winning the race outright is what `interrupt_before_any_block` covers.
+        let mut landed = false;
+        for wait_ms in [30u64, 100, 300] {
+            let out = cancelled_after(&p, Duration::from_millis(wait_ms));
+            assert!(
+                out.interrupted,
+                "a 4 MB scan read four bytes at a time cannot finish in {wait_ms} ms"
+            );
+            // A true prefix: hit k is at offset 4k on row k.
+            for (k, h) in out.hits.iter().enumerate() {
+                assert_eq!(h.offset, (4 * k) as u64, "hit {k} after {wait_ms} ms");
+                assert_eq!(h.row, k as u64, "hit {k} after {wait_ms} ms");
+            }
+            if out.hits.is_empty() {
+                continue;
+            }
+            assert!(
+                out.hits.len() < 1024 * 1024,
+                "{} hits after {wait_ms} ms is the whole file, not a partial scan",
+                out.hits.len()
+            );
+            landed = true;
+            break;
         }
+        assert!(
+            landed,
+            "no attempt interrupted the scan after it had found anything, so the worker never ran: \
+             the machine, not the scan"
+        );
     }
 
     #[test]

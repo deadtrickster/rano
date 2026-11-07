@@ -3192,29 +3192,12 @@ mod stream_tests {
         (last.0, full)
     }
 
-    /// The least contended of a few attempts. Contention only ever makes a sample SLOWER, so the
-    /// smallest ratio is the one closest to what the code costs — which is the question the test
-    /// asks, and the one a gate running several suites at once cannot answer from a single sample:
-    /// it reported red on this test for the machine, not for a change.
-    fn least_contended(tries: usize, mut f: impl FnMut() -> (u128, u128)) -> (u128, u128) {
-        let mut best = (0, 0);
-        let mut best_ratio = u128::MAX;
-        for _ in 0..tries {
-            let (last, full) = f();
-            let ratio = last.saturating_mul(1000) / full.max(1);
-            if ratio < best_ratio {
-                best = (last, full);
-                best_ratio = ratio;
-            }
-        }
-        best
-    }
-
     #[test]
     fn an_incremental_push_beats_a_full_reparse() {
         // Rust: reuse works, so the last pushes stay far below a full parse.
         let doc = big_rust();
-        let (last, full) = least_contended(3, || push_against_reparse(Lang::Rust, &doc, 400));
+        let (last, full) =
+            crate::timing::best_ratio(3, || push_against_reparse(Lang::Rust, &doc, 400));
         println!(
             "rust: one-shot full parse of {} KB = {:.1} µs",
             doc.len() / 1000,
@@ -3227,7 +3210,8 @@ mod stream_tests {
 
         // Markdown refuses reuse, so the honest assertion is weaker (see the ignored `per_push_cost_stays_flat`).
         let doc = md_doc();
-        let (last, full) = least_contended(3, || push_against_reparse(Lang::Markdown, &doc, 200));
+        let (last, full) =
+            crate::timing::best_ratio(3, || push_against_reparse(Lang::Markdown, &doc, 200));
         println!(
             "markdown: one-shot full parse of {} KB = {:.1} µs",
             doc.len() / 1000,

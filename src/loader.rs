@@ -713,9 +713,14 @@ mod tail_tests {
             "the fixture must be big: {size} bytes"
         );
         let mut f = File::open(t.path()).expect("open");
-        let t0 = std::time::Instant::now();
-        let off = tail_offset(&mut f, size, 40, 64 * 1024).expect("tail_offset");
-        let dt = t0.elapsed();
+        // Every sample runs to completion and the least contended one is judged: a gate running
+        // several suites at once can stretch any single read, and 200 ms is four thousand times
+        // what 64 KiB of a warm file costs — the number is not the test, the offset is.
+        let (off, dt) = crate::timing::best(3, || {
+            let t0 = std::time::Instant::now();
+            let off = tail_offset(&mut f, size, 40, 64 * 1024).expect("tail_offset");
+            (off, t0.elapsed())
+        });
         // The last 40 rows of `row 399xxx` lines.
         assert!(
             off > size - 64 * 1024,

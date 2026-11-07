@@ -102,3 +102,5 @@ mod update_ctrl;
 mod bench;
 #[cfg(test)]
 mod ed_tests;
+#[cfg(test)]
+mod timing;

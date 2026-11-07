@@ -182,8 +182,11 @@ mod tests {
         let (code, out, _err) = wait_finish(&mut job);
         assert_eq!(code, Some(0));
         assert_eq!(out.trim(), "hi");
+        // The claim is that the finish does not wait for the pipe holder, and the pipe holder sleeps
+        // three seconds — so two is a bound on the wrong shape and not on a loaded machine's spawn
+        // and read. At one second this went red for a busier host, not for a job that waited.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(2),
             "took {:?}",
             started.elapsed()
         );

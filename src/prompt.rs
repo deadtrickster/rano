@@ -15,6 +15,8 @@ pub enum PromptKind {
     OpenName,
     /// M-g: a folder to list (the dired).
     DirName,
+    /// M-A: a question about the place - the selection, the file, the ask, in one gesture.
+    Ask,
     Search,
     ReplaceFind,
     ReplaceWith,
@@ -48,6 +50,7 @@ pub(crate) fn prompt_label(kind: PromptKind) -> &'static str {
         PromptKind::ReadName => "Read File: ",
         PromptKind::OpenName => "Open: ",
         PromptKind::DirName => "Directory: ",
+        PromptKind::Ask => "Ask: ",
         PromptKind::Search => "Search: ",
         PromptKind::ReplaceFind => "Find: ",
         PromptKind::ReplaceWith => "Replace With: ",
@@ -208,6 +211,7 @@ impl Editor {
                     PromptKind::WriteName => self.do_write(p.text),
                     PromptKind::ReadName => self.do_read(p.text),
                     PromptKind::DirName => self.do_dir(p.text),
+                    PromptKind::Ask => self.send_ask(p.text),
                     PromptKind::OpenName => {
                         // `name:line[:col]` jumps there, as on the command line. A
                         // failed read keeps the prompt open for editing.

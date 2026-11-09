@@ -3211,6 +3211,15 @@ impl Editor {
         crate::term::graphics::is_placeholder_row(bs.buf.row_opt(row)?).then(|| picture_id(name))
     }
 
+    /// M-A: the ask prompt.
+    pub(crate) fn start_ask(&mut self) {
+        self.prompt = Some(Prompt {
+            kind: PromptKind::Ask,
+            text: String::new(),
+            cursor: 0,
+        });
+    }
+
     pub(crate) fn start_dir(&mut self) {
         let from = self
             .bs()

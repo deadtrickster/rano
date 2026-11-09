@@ -108,6 +108,13 @@ pub fn commands() -> &'static [Command] {
                 |e| e.start_write(),
             ),
             cmd(
+                "ask-position",
+                "Ask",
+                Mark,
+                "Ask about the place: the question, the selection and the file, sent together.",
+                |e| e.start_ask(),
+            ),
+            cmd(
                 "diff-copy",
                 "Copy from the View",
                 Mark,
@@ -826,6 +833,7 @@ impl Keymaps {
             .bind("M-l", "buffer-list")
             .bind("M-w", "close-buffer")
             .bind("M-s", "send-position")
+            .bind("M-q", "ask-position")
             .bind("M-v", "install-update")
             // Todo lists are a prefix: the first real submode.
             .bind("M-t t", "todo-tick")
@@ -920,6 +928,7 @@ impl Keymaps {
         let mut review = Keymap::new("review");
         review
             .bind("M-s", "send-position")
+            .bind("M-q", "ask-position")
             .bind("M-p", "diff-close");
 
         let mut list = Keymap::new("list");

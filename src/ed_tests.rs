@@ -1664,6 +1664,63 @@ fn the_example_plugin_transforms_through_the_editor() {
     assert_eq!(lines(&ed), vec!["HELLO RANOabc"]);
 }
 
+/// **M-Q asks about the place**: the question, the selection and the file in one event, so a host
+/// can discuss the snippet without the reader copying it anywhere.
+#[test]
+fn m_a_sends_the_question_with_the_place() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut ed = test_ed("fn a() {\n    body();\n}\n");
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_ask.rs"));
+    let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
+    let sink = got.clone();
+    ed.on_send = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("asked".into())
+    }));
+    // Nothing typed: no send, a question instead.
+    press(&mut ed, KeyCode::Char('q'), Mods::ALT);
+    assert_eq!(ed.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Ask));
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.prompt.is_none());
+    assert!(got.borrow().is_empty(), "an empty ask sends nothing");
+    // A selection and a question: one event with both.
+    ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+    ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
+    ed.bs_mut().cursor = Pos { row: 1, col: 8 };
+    press(&mut ed, KeyCode::Char('q'), Mods::ALT);
+    for ch in "complete this".chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].ask.as_deref(), Some("complete this"));
+        assert_eq!(
+            g[0].selection.as_ref().map(|s| s.text.as_str()),
+            Some("fn a() {\n    body")
+        );
+        let expected = std::path::Path::new("/tmp/rano_ask.rs")
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/rano_ask.rs"));
+        assert_eq!(g[0].path.as_deref(), Some(expected.as_path()));
+    }
+    // M-S is still a place, not an ask.
+    press(&mut ed, KeyCode::Char('s'), Mods::ALT);
+    assert_eq!(got.borrow()[1].ask, None);
+    // Nowhere to ask is said, not failed silently.
+    let mut ed = test_ed("x");
+    ed.on_send = None;
+    press(&mut ed, KeyCode::Char('q'), Mods::ALT);
+    for ch in "why".chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(msg.contains("Nowhere to ask"), "{msg}");
+}
+
 /// **A scrollbar says where the viewport sits, and only when there is anywhere to sit.**
 #[test]
 fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
@@ -3068,6 +3125,7 @@ fn send_command_gets_the_event_as_json_and_in_its_environment() {
         cursor: crate::send::Point { line: 4, column: 2 },
         selection: None,
         modified: false,
+        ask: None,
     };
     assert_eq!(send(&e).unwrap(), "Sent line 4, column 2");
     let deadline = Instant::now() + Duration::from_secs(5);

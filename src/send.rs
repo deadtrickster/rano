@@ -29,6 +29,10 @@ pub struct SendEvent {
     /// The buffer has edits not yet saved, so the file on disk may differ from
     /// what `cursor` and `selection` point at.
     pub modified: bool,
+    /// **A question about the place** (`M-A`): the ask, as typed, for a host that discusses the
+    /// selection with an agent rather than only noting where the reader is. Absent for `M-S` -
+    /// a send that says nothing is a place, not an ask.
+    pub ask: Option<String>,
 }
 
 impl SendEvent {
@@ -54,6 +58,7 @@ mod tests {
                 text: "fn a() {\n    ".into(),
             }),
             modified: true,
+            ask: Some("complete this".into()),
         };
         let v: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
         assert_eq!(v["path"], "/src/a.rs");
@@ -61,9 +66,11 @@ mod tests {
         assert_eq!(v["selection"]["start"]["column"], 1);
         assert_eq!(v["selection"]["text"], "fn a() {\n    ");
         assert_eq!(v["modified"], true);
+        assert_eq!(v["ask"], "complete this");
         let none = SendEvent {
             path: None,
             selection: None,
+            ask: None,
             ..e
         };
         let v: serde_json::Value = serde_json::from_str(&none.to_json()).unwrap();

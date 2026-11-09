@@ -137,7 +137,12 @@ impl Editor {
     pub(crate) fn send_position(&mut self) {
         let event = self.send_event();
         let Some(send) = self.on_send.as_mut() else {
-            self.flash("Nowhere to send: set send_command in the config");
+            self.flash(
+                "Nowhere to send: no send_command in the config, and no host answering sends. \
+                 Add `send_command = \"your-tool\"` - it gets the event on stdin and \
+                 RANO_FILE/RANO_LINE/RANO_COLUMN - or ask from letibot's editor pane, which \
+                 answers sends itself.",
+            );
             return;
         };
         match send(&event) {

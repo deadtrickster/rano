@@ -1865,7 +1865,11 @@ impl Editor {
                         Ok(msg) => self.push_chat("reply", &msg),
                         Err(e) => self.push_chat("error", &format!("send failed: {e}")),
                     },
-                    None => self.push_chat("error", "nowhere to send: set send_command"),
+                    None => self.push_chat(
+                        "error",
+                        "nowhere to send: no send_command in the config, and no host answering \
+                         sends - set send_command, or ask from letibot's pane",
+                    ),
                 }
                 true
             }

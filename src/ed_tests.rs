@@ -1719,6 +1719,10 @@ fn m_a_sends_the_question_with_the_place() {
     press(&mut ed, KeyCode::Enter, Mods::NONE);
     let msg = ed.status_text().unwrap_or_default();
     assert!(msg.contains("Nowhere to ask"), "{msg}");
+    assert!(
+        msg.contains("send_command"),
+        "the message names the key: {msg}"
+    );
 }
 
 /// **The sidebar splits the pane and holds a conversation**, letibot's rooms-sidebar shape: the

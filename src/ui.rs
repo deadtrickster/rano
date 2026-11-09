@@ -109,18 +109,28 @@ fn at_rect(buf: &Buffer, x: u16, y: u16, w: u16, h: u16) -> Rect {
 /// **The sidebar: the exchange, and the compose line at its foot.** Entries wrap at the
 /// sidebar's width; `who` is the faint lead-in; the compose line is the bottom row with its
 /// cursor, reversed when the sidebar holds the keyboard.
-fn draw_sidebar(buf: &mut Buffer, area: Rect, ed: &Editor) {
+fn draw_sidebar(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
     let sb = &ed.sidebar;
     let w = area.width as usize;
     let h = area.height as usize;
     if w < 4 || h < 3 {
-        return;
+        return None;
     }
     let head = || Style::of(Role::Strong);
     band(
         buf,
         Rect::new(area.x, area.y, area.width, 1),
-        Line::styled(" ask", head()),
+        Line::styled(
+            format!(
+                " ask{}",
+                if sb.lines.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \u{b7} {} lines", sb.lines.len())
+                }
+            ),
+            head(),
+        ),
         Style::new(),
     );
     // The exchange, wrapped to the width, into the rows between the header and the compose line.
@@ -141,7 +151,7 @@ fn draw_sidebar(buf: &mut Buffer, area: Rect, ed: &Editor) {
         rows.push((line, false));
     }
     // `follow` pins the end on screen; a scroll that left the end overrides it.
-    let body_h = h - 2;
+    let body_h = h.saturating_sub(3);
     let start = if sb.follow {
         rows.len().saturating_sub(body_h)
     } else {
@@ -154,25 +164,38 @@ fn draw_sidebar(buf: &mut Buffer, area: Rect, ed: &Editor) {
             &Line::styled(text.clone(), Style::new()),
         );
     }
-    // The compose line, at the foot, with its cursor: the row the keyboard is in when focused.
+    // A faint rule, then the compose line: the row the keyboard is in when focused, with its
+    // cursor, because an input field nobody can see is not one.
+    band(
+        buf,
+        Rect::new(area.x, area.y + area.height - 2, area.width, 1),
+        Line::styled("\u{2500}".repeat(w), Style::of(Role::Faint)),
+        Style::new(),
+    );
     let (before, at, after) = sb.input_parts();
+    let row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+    if sb.input.is_empty() {
+        // The label stands where the cursor would be typed: what the row is for, said once.
+        band(
+            buf,
+            row,
+            Line::styled("\u{203a} ask about this", Style::of(Role::Faint)),
+            Style::new(),
+        );
+        if sb.focus {
+            return Some((area.x, area.y + area.height - 1));
+        }
+        return None;
+    }
     let mut line = String::from("\u{203a} ");
     line.push_str(&before);
     let cursor_at = line.chars().count() as u16;
     line.push(at);
     line.push_str(&after);
     let style = if sb.focus { rev() } else { Style::new() };
-    band(
-        buf,
-        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
-        Line::styled(line, style),
-        Style::new(),
-    );
-    if sb.focus {
-        // The cursor cell, drawn as a block by the host's own convention: the position is what
-        // the head asked for, so it lands where the compose line's cursor is.
-        let _ = cursor_at;
-    }
+    band(buf, row, Line::styled(line, style), Style::new());
+    sb.focus
+        .then(|| (area.x.saturating_add(cursor_at), area.y + area.height - 1))
 }
 
 pub(crate) fn gutter_width(rows: usize) -> usize {
@@ -401,7 +424,10 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
         crate::sidebar::Fit::Wide(sbw) if area.width > sbw as u16 + 1 => {
             let main_w = area.width - sbw as u16 - 1;
             let left = Rect::new(area.x, area.y, main_w, area.height);
-            let cursor = draw_in(buf, left, ed);
+            // **The body, not another split**: `draw_in` would ask `sidebar_fit` again and the
+            // left rect is still wide enough to split, so the pane drew two sidebars - and a
+            // third where that left rect was wide enough again.
+            let cursor = draw_in_alone(buf, left, ed);
             // The border column: the rule between the two, and the drag handle.
             for y in area.y..area.y + area.height {
                 put(

@@ -1832,6 +1832,78 @@ fn the_drawn_frame_shows_the_border_and_the_exchange() {
     );
 }
 
+/// A frame dumped as text, for looking at: `cargo test dump_sidebar_frame -- --nocapture
+/// --ignored`. Not a test of anything, which is why it is ignored.
+#[test]
+#[ignore]
+fn dump_sidebar_frame() {
+    let mut ed = test_ed("body line one\nbody line two\n");
+    ed.show_line_numbers = false;
+    ed.set_area(crate::editor::Area::new(0, 0, 120, 24));
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    ed.push_chat("you", "what does this do");
+    ed.push_chat("reply", "it wraps the text at the pane's width");
+    press(&mut ed, KeyCode::Char('j'), Mods::ALT);
+    let rect = crate::render::Rect::new(0, 0, 120, 24);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    for y in 0..24 {
+        let row: String = (0..120)
+            .map(|x| buf.cell(x, y).map(|c| c.symbol.clone()).unwrap_or_default())
+            .collect();
+        eprintln!("{y:02}|{row}|");
+    }
+}
+
+/// **The border resizes on a drag and does nothing on a click**, and a press inside the sidebar
+/// takes the keyboard there - letibot's rooms border, same three gestures.
+#[test]
+fn the_border_resizes_on_a_drag_and_not_on_a_click() {
+    let mut ed = test_ed("x\n");
+    ed.set_area(crate::editor::Area::new(0, 0, 120, 24));
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    let width = |ed: &Editor| match ed.sidebar_fit() {
+        crate::sidebar::Fit::Wide(w) => w,
+        f => panic!("wide, not {f:?}"),
+    };
+    let w0 = width(&ed);
+    assert_eq!(w0, 40);
+    let border = (120 - w0 - 1) as u16;
+    // A click: press and release on the rule. Nothing resizes, and the drag is not left armed.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 5, border)));
+    assert!(ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 5, border)));
+    assert_eq!(width(&ed), w0, "a click is not a resize");
+    assert!(
+        !ed.sidebar.dragging,
+        "and it does not leave the border held"
+    );
+    // A drag leftwards: wider, and it sticks after the release.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 5, border)));
+    assert!(ed.sidebar.dragging);
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 5, 60)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 5, 60));
+    assert!(width(&ed) > w0, "dragging left widens it: {}", width(&ed));
+    assert!(!ed.sidebar.dragging);
+    // A drag past the end: the text keeps MAIN_MIN and the sidebar stops at SIDE_MIN.
+    let border = (120 - width(&ed) - 1) as u16;
+    ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 5, border));
+    ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 5, 119));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), 5, 119));
+    assert!(
+        width(&ed) >= crate::sidebar::SIDE_MIN,
+        "still a sidebar: {}",
+        width(&ed)
+    );
+    assert_eq!(
+        ed.text_w,
+        120 - width(&ed) - 1,
+        "the text and the rule agree about the split"
+    );
+    // A press inside the sidebar: the keyboard there, not a resize.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 5, 119)));
+    assert!(ed.sidebar.focus, "a click in the exchange enters it");
+}
+
 /// **A scrollbar says where the viewport sits, and only when there is anywhere to sit.**
 #[test]
 fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {

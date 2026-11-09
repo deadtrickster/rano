@@ -1664,6 +1664,131 @@ fn the_example_plugin_transforms_through_the_editor() {
     assert_eq!(lines(&ed), vec!["HELLO RANOabc"]);
 }
 
+/// **A scrollbar says where the viewport sits, and only when there is anywhere to sit.**
+#[test]
+fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
+    let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let mut ed = test_ed(&text);
+    ed.wrap = false;
+    ed.show_line_numbers = false;
+    ed.text_w = 40;
+    ed.text_h = 10;
+    let rect = crate::render::Rect::new(0, 0, 40, 14);
+    let col = |buf: &crate::render::Buffer| -> String {
+        (0..10)
+            .map(|r| {
+                buf.cell(39, 1 + r as u16)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    // At the top: the thumb is the first rows, the rest track.
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let at_top = col(&buf);
+    assert!(at_top.starts_with('\u{2588}'), "{at_top:?}");
+    assert!(
+        at_top.contains('\u{2502}'),
+        "track below the thumb: {at_top:?}"
+    );
+    assert_eq!(ed.scroll_total(10), 100, "buffer rows, wrap off");
+    // At the bottom: the thumb is the last rows.
+    ed.bs_mut().scroll = 90;
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let at_bot = col(&buf);
+    assert!(at_bot.ends_with('\u{2588}'), "{at_bot:?}");
+    // A file that fits has no scrollbar at all.
+    let mut small = test_ed("one\ntwo\n");
+    small.wrap = false;
+    small.show_line_numbers = false;
+    small.text_w = 40;
+    small.text_h = 10;
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &small);
+    assert_eq!(col(&buf), "          ", "nothing to scroll");
+    // A press low in the column jumps near the end, and the cursor stays where it was: the
+    // scrollbar is the view's, not the text's.
+    let mut ed = test_ed(&text);
+    ed.wrap = false;
+    ed.show_line_numbers = false;
+    ed.text_w = 40;
+    ed.text_h = 10;
+    let cursor_was = ed.bs().cursor;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 10, 39)));
+    assert_eq!(
+        ed.bs().cursor,
+        cursor_was,
+        "the text's cursor does not move"
+    );
+    assert!(ed.bs().scroll >= 70, "jumped low: {}", ed.bs().scroll);
+    assert!(
+        ed.bs().scroll <= 90,
+        "and not past the end: {}",
+        ed.bs().scroll
+    );
+    // The column next to it is still a click into the text.
+    let mut ed = test_ed(&text);
+    ed.wrap = false;
+    ed.show_line_numbers = false;
+    ed.text_w = 40;
+    ed.text_h = 10;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 38)));
+    assert_eq!(ed.bs().cursor.row, 1, "one row into the text");
+}
+
+/// **Under wrap the scrollbar counts visual rows**, so a long line is several of them
+/// and the thumb says where the view is in what is on screen, not in the file's rows.
+#[test]
+fn a_scrollbar_counts_visual_rows_under_wrap() {
+    let mut ed = test_ed(&format!("{}\n", "x".repeat(800)));
+    ed.wrap = true;
+    ed.show_line_numbers = false;
+    ed.text_w = 40;
+    ed.text_h = 10;
+    ed.ensure_wrap_prefix();
+    assert!(
+        ed.scroll_total(10) > 5,
+        "200 cols in a 40-col view is several rows"
+    );
+    let max = ed.max_scroll(10);
+    assert_eq!(max, ed.scroll_total(10) - 10);
+    // And jumping works in those rows too.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 10, 39)));
+    assert!(ed.bs().scroll > 0, "in visual rows: {}", ed.bs().scroll);
+    assert!(ed.bs().scroll <= max, "bounded: {}", ed.bs().scroll);
+}
+
+/// **A preview gets one too** - a rendered view scrolls as much as a file does.
+#[test]
+fn a_preview_has_a_scrollbar() {
+    let text: String = (0..60).map(|i| format!("para {i}\n\n")).collect();
+    let mut ed = named_ed(&text, "notes.md");
+    ed.text_w = 40;
+    ed.text_h = 10;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let v = ed.diff_view.as_ref().unwrap();
+    assert!(
+        v.lines.len() > crate::diffview::body_rows(10),
+        "more than a view"
+    );
+    let rect = crate::render::Rect::new(0, 0, 40, 14);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let col: String = (0..9)
+        .map(|r| {
+            buf.cell(39, 2 + r as u16)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        col.contains('\u{2588}') && col.contains('\u{2502}'),
+        "{col:?}"
+    );
+}
+
 /// **A preview's text is selectable with the mouse**, and letting go puts *that* text — the
 /// rendered text, not the buffer's — on the clipboard.
 #[test]

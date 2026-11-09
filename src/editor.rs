@@ -1576,6 +1576,16 @@ impl Editor {
                 _ => false,
             };
         }
+        // The scrollbar column is not text: it is the one place a press means "go there".
+        if matches!(
+            m.kind,
+            MouseKind::Press(MouseButton::Left) | MouseKind::Drag(MouseButton::Left)
+        ) && {
+            self.ensure_wrap_prefix();
+            self.scrollbar_jump(m.y, m.x)
+        } {
+            return true;
+        }
         self.ensure_wrap_prefix();
         match m.kind {
             MouseKind::WheelUp => self.wheel(-WHEEL_LINES as i64),
@@ -1676,6 +1686,62 @@ impl Editor {
             return true;
         };
         self.clipboard_out = Some(text);
+        true
+    }
+
+    /// **How much there is to scroll through**: visual rows under wrap (a long line is several),
+    /// buffer rows otherwise. The scrollbar's `total`, and the one honest answer to "how far
+    /// below" - which is why it is the same number `wheel` bounds itself by.
+    pub fn scroll_total(&self, _text_h: usize) -> usize {
+        let bs = self.bs();
+        if self.wrap {
+            // The table is built by the frame; reading it stale only ever under-reports by the
+            // rows not yet measured, which the next frame corrects.
+            bs.wrap_prefix
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .max(bs.buf.row_count())
+        } else {
+            bs.buf.row_count()
+        }
+    }
+
+    /// The viewport's first row: visual under wrap, a buffer row otherwise.
+    pub fn scroll_pos(&self) -> usize {
+        self.bs().scroll
+    }
+
+    /// The furthest `scroll` may go: the end minus a view.
+    pub fn max_scroll(&self, text_h: usize) -> usize {
+        self.scroll_total(text_h).saturating_sub(text_h)
+    }
+
+    /// **A press or drag on the scrollbar column jumps there**: the thumb's whole travel mapped
+    /// onto the content's. The same gesture the wheel answers, pointed instead of counted - "no
+    /// idea at which place in the file i am" is a question of getting somewhere as much as of
+    /// knowing where you are.
+    fn scrollbar_jump(&mut self, pane_row: u16, pane_col: u16) -> bool {
+        if pane_col + 1 != self.text_w as u16 || self.diff_view.is_some() {
+            return false;
+        }
+        let top = self.chrome.top();
+        let body = self.text_h as u16;
+        if pane_row <= top || pane_row > top + body {
+            return false;
+        }
+        if self.max_scroll(self.text_h) == 0 {
+            return false;
+        }
+        // The viewport's top row for a thumb-centre at this pane row, clamped by the same bound
+        // the wheel uses.
+        let into = (pane_row - top).saturating_sub(1) as usize;
+        let frac = (into as f64 / (body as f64 - 1.0).max(1.0)).clamp(0.0, 1.0);
+        let scroll = (frac * self.max_scroll(self.text_h) as f64).round() as usize;
+        if self.bs().scroll != scroll {
+            self.bs_mut().scroll = scroll;
+            self.highlight_dirty = true;
+        }
         true
     }
 

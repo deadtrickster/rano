@@ -67,6 +67,45 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
 
 /// Gutter columns for a buffer of `rows` lines: the number right-aligned, then a
 /// space.
+/// **The scrollbar: where the viewport sits in what there is.** One column, the rightmost,
+/// drawn only when the content outruns the view - a file that fits has nothing to say about
+/// position. Track `│` faint, thumb `█` plain, thumb as tall as the viewport's share of the
+/// whole (at least one row) at the viewport's offset.
+///
+/// The question it answers is the operator's: *"no idea at which place in the file i am, how far
+/// below - i guess because no scroll bar"*. `pos` is the viewport's first row, `total` the rows
+/// there are (visual rows under wrap, buffer rows otherwise), `h` the viewport's own height.
+pub(crate) fn scrollbar(buf: &mut Buffer, x: u16, y: u16, h: usize, pos: usize, total: usize) {
+    if h < 2 || total <= h {
+        return;
+    }
+    let thumb = ((h * h) / total).clamp(1, h);
+    // The travel the thumb can make, and this viewport's place in it.
+    let travel = h - thumb;
+    let max = total - h;
+    let at = (pos.min(max) * travel) / max.max(1);
+    for i in 0..h {
+        let ch = if i >= at && i < at + thumb {
+            '\u{2588}'
+        } else {
+            '\u{2502}'
+        };
+        let role = if i >= at && i < at + thumb {
+            Role::Plain
+        } else {
+            Role::Faint
+        };
+        let cell = at_rect(buf, x, y + i as u16, 1, 1);
+        put(buf, cell, &Line::styled(ch.to_string(), Style::of(role)));
+    }
+}
+
+/// A one-cell rectangle at pane-relative `(x, y)`, clipped to the buffer.
+fn at_rect(buf: &Buffer, x: u16, y: u16, w: u16, h: u16) -> Rect {
+    let area = buf.area();
+    Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
+}
+
 pub(crate) fn gutter_width(rows: usize) -> usize {
     std::cmp::max(2, rows.to_string().len()) + 1
 }
@@ -456,6 +495,14 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
     for (i, l) in lines.iter().enumerate() {
         put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
     }
+    scrollbar(
+        buf,
+        width - 1,
+        t0,
+        text_h,
+        ed.scroll_pos(),
+        ed.scroll_total(text_h),
+    );
 
     // ---- completion popup (LSP) ----
     // A small block below the word being completed, or above it near the bottom.
@@ -572,6 +619,7 @@ pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> 
                 None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
             }
         }
+        scrollbar(buf, width - 1, t0 + 1, rows, v.top, v.lines.len());
     }
 
     // ---- status line (row height-3) ----

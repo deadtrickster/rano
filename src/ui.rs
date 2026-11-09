@@ -106,6 +106,75 @@ fn at_rect(buf: &Buffer, x: u16, y: u16, w: u16, h: u16) -> Rect {
     Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
 }
 
+/// **The sidebar: the exchange, and the compose line at its foot.** Entries wrap at the
+/// sidebar's width; `who` is the faint lead-in; the compose line is the bottom row with its
+/// cursor, reversed when the sidebar holds the keyboard.
+fn draw_sidebar(buf: &mut Buffer, area: Rect, ed: &Editor) {
+    let sb = &ed.sidebar;
+    let w = area.width as usize;
+    let h = area.height as usize;
+    if w < 4 || h < 3 {
+        return;
+    }
+    let head = || Style::of(Role::Strong);
+    band(
+        buf,
+        Rect::new(area.x, area.y, area.width, 1),
+        Line::styled(" ask", head()),
+        Style::new(),
+    );
+    // The exchange, wrapped to the width, into the rows between the header and the compose line.
+    let mut rows: Vec<(String, bool)> = Vec::new(); // (text, is_input_row)
+    for e in &sb.lines {
+        let lead = format!("{} ", e.who);
+        let lead_w = lead.chars().count();
+        let mut line = String::new();
+        for (i, ch) in e.text.chars().enumerate() {
+            if i == 0 {
+                line.push_str(&lead);
+            } else if line.chars().count() >= w.saturating_sub(1) {
+                rows.push((std::mem::take(&mut line), false));
+                line.push_str(&" ".repeat(lead_w));
+            }
+            line.push(ch);
+        }
+        rows.push((line, false));
+    }
+    // `follow` pins the end on screen; a scroll that left the end overrides it.
+    let body_h = h - 2;
+    let start = if sb.follow {
+        rows.len().saturating_sub(body_h)
+    } else {
+        sb.scroll.min(rows.len().saturating_sub(1))
+    };
+    for (i, (text, _)) in rows.iter().skip(start).take(body_h).enumerate() {
+        put(
+            buf,
+            Rect::new(area.x, area.y + 1 + i as u16, area.width, 1),
+            &Line::styled(text.clone(), Style::new()),
+        );
+    }
+    // The compose line, at the foot, with its cursor: the row the keyboard is in when focused.
+    let (before, at, after) = sb.input_parts();
+    let mut line = String::from("\u{203a} ");
+    line.push_str(&before);
+    let cursor_at = line.chars().count() as u16;
+    line.push(at);
+    line.push_str(&after);
+    let style = if sb.focus { rev() } else { Style::new() };
+    band(
+        buf,
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+        Line::styled(line, style),
+        Style::new(),
+    );
+    if sb.focus {
+        // The cursor cell, drawn as a block by the host's own convention: the position is what
+        // the head asked for, so it lands where the compose line's cursor is.
+        let _ = cursor_at;
+    }
+}
+
 pub(crate) fn gutter_width(rows: usize) -> usize {
     std::cmp::max(2, rows.to_string().len()) + 1
 }
@@ -324,6 +393,34 @@ pub fn draw(buf: &mut Buffer, ed: &Editor) -> Option<(u16, u16)> {
 /// laid out from `area`'s origin and clipped to it, and every cell is painted so
 /// one buffer can be reused across frames. Returns the cursor cell as `(col, row)`.
 pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
+    // **The sidebar splits the pane**, as letibot's rooms sidebar splits the frame: the editor
+    // whole - chrome, text, status - into the left of the border, the exchange beside it. Below
+    // the text's minimum the sidebar is not drawn (letibot's Collapsed), and the editor keeps
+    // the pane to itself.
+    match ed.sidebar_fit() {
+        crate::sidebar::Fit::Wide(sbw) if area.width > sbw as u16 + 1 => {
+            let main_w = area.width - sbw as u16 - 1;
+            let left = Rect::new(area.x, area.y, main_w, area.height);
+            let cursor = draw_in(buf, left, ed);
+            // The border column: the rule between the two, and the drag handle.
+            for y in area.y..area.y + area.height {
+                put(
+                    buf,
+                    Rect::new(area.x + main_w, y, 1, 1),
+                    &Line::styled("\u{2502}", Style::of(Role::Faint)),
+                );
+            }
+            let side = Rect::new(area.x + main_w + 1, area.y, sbw as u16, area.height);
+            buf.fill(side, &Style::new());
+            draw_sidebar(buf, side, ed);
+            cursor
+        }
+        _ => draw_in_alone(buf, area, ed),
+    }
+}
+
+/// The editor with the whole pane, sidebar or not: the body `draw_in` splits around.
+fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
     // Pane-relative rectangles: the layout below was written for a frame at
     // (0, 0), and the intersection keeps "outside the area is untouched" true.
     let at = |x: u16, y: u16, w: u16, h: u16| {

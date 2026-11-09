@@ -108,6 +108,20 @@ pub fn commands() -> &'static [Command] {
                 |e| e.start_write(),
             ),
             cmd(
+                "sidebar",
+                "Chat Sidebar",
+                View,
+                "The chat beside the text: on or off. M-J enters it, Esc returns to the text.",
+                |e| e.toggle_sidebar(),
+            ),
+            cmd(
+                "sidebar-enter",
+                "Enter the Sidebar",
+                View,
+                "The keyboard into the chat sidebar, or back out of it with Esc.",
+                |e| e.enter_sidebar(),
+            ),
+            cmd(
                 "ask-position",
                 "Ask",
                 Mark,
@@ -834,6 +848,8 @@ impl Keymaps {
             .bind("M-w", "close-buffer")
             .bind("M-s", "send-position")
             .bind("M-q", "ask-position")
+            .bind("M-c", "sidebar")
+            .bind("M-j", "sidebar-enter")
             .bind("M-v", "install-update")
             // Todo lists are a prefix: the first real submode.
             .bind("M-t t", "todo-tick")
@@ -929,6 +945,8 @@ impl Keymaps {
         review
             .bind("M-s", "send-position")
             .bind("M-q", "ask-position")
+            .bind("M-c", "sidebar")
+            .bind("M-j", "sidebar-enter")
             .bind("M-p", "diff-close");
 
         let mut list = Keymap::new("list");

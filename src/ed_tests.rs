@@ -1721,6 +1721,117 @@ fn m_a_sends_the_question_with_the_place() {
     assert!(msg.contains("Nowhere to ask"), "{msg}");
 }
 
+/// **The sidebar splits the pane and holds a conversation**, letibot's rooms-sidebar shape: the
+/// text keeps its minimum, the border is the rule, and M-J takes the keyboard into the compose
+/// line.
+#[test]
+fn the_sidebar_splits_the_pane_and_carries_the_exchange() {
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let mut ed = test_ed(&text);
+    ed.show_line_numbers = false;
+    // A pane wide enough for the two minimums.
+    ed.set_area(crate::editor::Area::new(0, 0, 120, 24));
+    assert_eq!(ed.text_w, 120, "closed: the text keeps the pane");
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    let (sbw, main_w) = match ed.sidebar_fit() {
+        crate::sidebar::Fit::Wide(w) => (w, 120 - w - 1),
+        f => panic!("wide, not {f:?}"),
+    };
+    assert_eq!(sbw, 40, "a third of 120");
+    assert_eq!(ed.text_w, main_w, "the text gives the columns up");
+    // M-J: the keyboard goes in, a typed ask sends one event with the question, and the
+    // exchange shows it and the reply the host pushed.
+    press(&mut ed, KeyCode::Char('j'), Mods::ALT);
+    assert!(ed.sidebar.focus);
+    for ch in "why is this here".chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    let asked: std::rc::Rc<std::cell::RefCell<Vec<crate::send::SendEvent>>> = Default::default();
+    let sink = asked.clone();
+    ed.on_send = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("because".into())
+    }));
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert_eq!(asked.borrow().len(), 1);
+    assert_eq!(asked.borrow()[0].ask.as_deref(), Some("why is this here"));
+    assert_eq!(
+        ed.sidebar
+            .lines
+            .last()
+            .map(|l| (l.who.as_str(), l.text.as_str())),
+        Some(("reply", "because"))
+    );
+    assert!(
+        ed.sidebar.input.is_empty(),
+        "sent: the compose line cleared"
+    );
+    // A push from the host lands and pins the end.
+    ed.push_chat("reply", "one\ntwo");
+    assert_eq!(ed.sidebar.lines.len(), 4);
+    assert!(ed.sidebar.follow);
+    // Esc hands the keyboard back; the exchange stays drawn.
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(!ed.sidebar.focus);
+    assert!(ed.sidebar.on);
+    // M-C again closes it and the text has its pane back.
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    assert!(!ed.sidebar.on);
+    assert_eq!(ed.text_w, 120);
+}
+
+/// **Below the text's minimum the sidebar is not drawn**, and the text keeps the pane: a
+/// squeeze that fits neither is worse than a sidebar that waits.
+#[test]
+fn a_narrow_pane_collapses_the_sidebar() {
+    let mut ed = test_ed("x\n");
+    ed.set_area(crate::editor::Area::new(0, 0, 60, 24));
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    assert!(ed.sidebar.on, "on, but");
+    assert!(matches!(ed.sidebar_fit(), crate::sidebar::Fit::Collapsed));
+    assert_eq!(ed.text_w, 60, "the text keeps the pane it has");
+}
+
+/// **The drawn frame shows the split**: a border column, the ask in the sidebar's rows, and the
+/// compose line reversed while it holds the keyboard.
+#[test]
+fn the_drawn_frame_shows_the_border_and_the_exchange() {
+    let mut ed = test_ed("body\n");
+    ed.show_line_numbers = false;
+    ed.set_area(crate::editor::Area::new(0, 0, 120, 24));
+    press(&mut ed, KeyCode::Char('c'), Mods::ALT);
+    ed.push_chat("you", "what does this do");
+    ed.push_chat("reply", "it wraps");
+    press(&mut ed, KeyCode::Char('j'), Mods::ALT);
+    let rect = crate::render::Rect::new(0, 0, 120, 24);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let border = buf
+        .cell(79, 5)
+        .map(|c| c.symbol.clone())
+        .unwrap_or_default();
+    assert_eq!(border, "\u{2502}", "the rule at the split");
+    let head: String = (0..38)
+        .map(|x| {
+            buf.cell(80 + x, 0)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(head.contains("ask"), "{head:?}");
+    let first: String = (0..38)
+        .map(|x| {
+            buf.cell(80 + x, 1)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        first.contains("what does this do"),
+        "the ask is drawn: {first:?}"
+    );
+}
+
 /// **A scrollbar says where the viewport sits, and only when there is anywhere to sit.**
 #[test]
 fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {

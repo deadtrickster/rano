@@ -174,6 +174,10 @@ pub struct Editor {
     /// The pictures the terminal holds, separate from `images_held` so the two cannot
     /// free each other's.
     pub(crate) pictures: Pictures,
+    /// **The sidebar: a chat beside the text** (M-C on/off, M-J into it). The exchange is the
+    /// asks - typed here or sent by `M-Q` - and the replies the host pushes with
+    /// [`Self::push_chat`]; the compose line at its foot sends the same event `M-Q` sends.
+    pub sidebar: crate::sidebar::Sidebar,
     pub plugin: Option<crate::plugin::Plugin>,
     pub builtins: Vec<crate::plugin::Plugin>,
     pub(crate) plugin_note: Option<String>,
@@ -293,6 +297,7 @@ impl Editor {
             diff_view: None,
             diff_split: false,
             images: false,
+            sidebar: crate::sidebar::Sidebar::default(),
             proto: Proto::None,
             picture_view: None,
             pictures: Pictures::new(Proto::None),
@@ -1470,7 +1475,7 @@ impl Editor {
             return false;
         }
         self.area = area;
-        self.text_w = area.w as usize;
+        self.retake_sidebar_columns();
         self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
         // A picture's box follows the frame, as a PNG's view does in
         // `refresh_diff_view`.
@@ -1575,6 +1580,42 @@ impl Editor {
                 MouseKind::Release(MouseButton::Left) => self.view_release(),
                 _ => false,
             };
+        }
+        // **The sidebar's half of the pane**: the border is the drag handle (a held press resizes,
+        // as letibot's rooms border does), the wheel over the exchange scrolls it, and a press
+        // into it takes the keyboard there.
+        if let crate::sidebar::Fit::Wide(sbw) = self.sidebar_fit() {
+            let main_w = (self.area.w as usize).saturating_sub(sbw + 1);
+            let x = m.x as usize;
+            if self.sidebar.dragging {
+                if matches!(m.kind, MouseKind::Drag(MouseButton::Left)) {
+                    let w = (self.area.w as usize).saturating_sub(x + 1).clamp(
+                        crate::sidebar::SIDE_MIN,
+                        (self.area.w as usize).saturating_sub(crate::sidebar::MAIN_MIN + 1),
+                    );
+                    if Some(w) != self.sidebar.width {
+                        self.sidebar.width = Some(w);
+                        self.retake_sidebar_columns();
+                    }
+                } else if matches!(m.kind, MouseKind::Release(MouseButton::Left)) {
+                    self.sidebar.dragging = false;
+                }
+                return true;
+            }
+            if x == main_w && matches!(m.kind, MouseKind::Press(MouseButton::Left)) {
+                self.sidebar.dragging = true;
+                return true;
+            }
+            if x > main_w {
+                match m.kind {
+                    MouseKind::Press(MouseButton::Left) => {
+                        self.enter_sidebar();
+                        return true;
+                    }
+                    MouseKind::Release(_) => return true,
+                    _ => return false,
+                }
+            }
         }
         // The scrollbar column is not text: it is the one place a press means "go there".
         if matches!(
@@ -1743,6 +1784,125 @@ impl Editor {
             self.highlight_dirty = true;
         }
         true
+    }
+
+    /// The sidebar's fit in the pane the host gave, or Off: the one place the width is decided,
+    /// so the draw, the mouse and `text_w` cannot disagree about where the border is.
+    pub fn sidebar_fit(&self) -> crate::sidebar::Fit {
+        self.sidebar.fit(self.area.w as usize)
+    }
+
+    /// The text gives the sidebar its columns up. Called wherever either changes: `set_area`,
+    /// a toggle, a drag of the border. The wrap table is keyed on the width, so the next frame
+    /// re-wraps at the new one.
+    pub(crate) fn retake_sidebar_columns(&mut self) {
+        let take = match self.sidebar.fit(self.area.w as usize) {
+            crate::sidebar::Fit::Wide(w) => w + 1,
+            _ => 0,
+        };
+        self.text_w = (self.area.w as usize).saturating_sub(take);
+    }
+
+    /// **M-C: the sidebar on or off** (letibot's alt-l). Opening it does not take the keyboard:
+    /// `M-J` enters it, as letibot's alt-j does, and Esc hands the keyboard back with the
+    /// exchange still drawn.
+    pub(crate) fn toggle_sidebar(&mut self) {
+        self.sidebar.on = !self.sidebar.on;
+        if !self.sidebar.on {
+            self.sidebar.focus = false;
+        }
+        self.retake_sidebar_columns();
+    }
+
+    /// **M-J: the keyboard into the sidebar**, and back out with Esc. Into an off sidebar turns
+    /// it on, because the key says where you want to be.
+    pub(crate) fn enter_sidebar(&mut self) {
+        self.sidebar.on = true;
+        self.sidebar.focus = true;
+        self.retake_sidebar_columns();
+    }
+
+    /// **A reply arrives** - the host's half of the exchange. Appended, the view pinned to it,
+    /// and the sidebar opened if it was closed: an answer nobody can see is one that was never
+    /// asked for.
+    pub fn push_chat(&mut self, who: &str, text: &str) {
+        self.sidebar.on = true;
+        self.retake_sidebar_columns();
+        for line in text.split('\n') {
+            self.sidebar.lines.push(crate::sidebar::ChatEntry {
+                who: who.to_string(),
+                text: line.to_string(),
+            });
+        }
+        self.sidebar.scroll_to_end();
+    }
+
+    /// **A key for the sidebar**, when it holds the keyboard. Enter sends the same event `M-Q`
+    /// sends - file, cursor, selection - with the compose line as the ask, so the host sees one
+    /// gesture from either door.
+    pub(crate) fn sidebar_key(&mut self, key: &crate::term::KeyEvent) -> bool {
+        use crate::term::KeyCode as C;
+        if key.mods != crate::term::Mods::NONE {
+            return false;
+        }
+        match key.code {
+            C::Esc => {
+                self.sidebar.focus = false;
+                true
+            }
+            C::Enter => {
+                let ask = self.sidebar.input.trim().to_string();
+                if ask.is_empty() {
+                    return true;
+                }
+                self.sidebar.input.clear();
+                self.sidebar.cursor = 0;
+                self.push_chat("you", &ask);
+                let mut event = self.send_event();
+                event.ask = Some(ask);
+                match self.on_send.as_mut() {
+                    Some(send) => match send(&event) {
+                        Ok(msg) => self.push_chat("reply", &msg),
+                        Err(e) => self.push_chat("error", &format!("send failed: {e}")),
+                    },
+                    None => self.push_chat("error", "nowhere to send: set send_command"),
+                }
+                true
+            }
+            C::Backspace => {
+                if self.sidebar.cursor > 0 {
+                    self.sidebar.cursor -= 1;
+                    self.sidebar.input.remove(self.sidebar.cursor);
+                }
+                true
+            }
+            C::Left => {
+                self.sidebar.cursor = self.sidebar.cursor.saturating_sub(1);
+                true
+            }
+            C::Right => {
+                if self.sidebar.cursor < self.sidebar.input.chars().count() {
+                    self.sidebar.cursor += 1;
+                }
+                true
+            }
+            C::Up => {
+                self.sidebar.scroll = self.sidebar.scroll.saturating_sub(1);
+                self.sidebar.follow = false;
+                true
+            }
+            C::Down => {
+                self.sidebar.scroll += 1;
+                self.sidebar.follow = false;
+                true
+            }
+            C::Char(c) => {
+                self.sidebar.input.insert(self.sidebar.cursor, c);
+                self.sidebar.cursor += 1;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn wheel(&mut self, delta: i64) -> bool {

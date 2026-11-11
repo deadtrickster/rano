@@ -973,7 +973,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
 
     // ---- which-key: a pending prefix's card, above the status row ----
     if let Some((m, keys)) = ed.pending_card() {
-        let nano = ed.config.nano_keys;
+        let nano = ed.config.notation;
         let entries = crate::commands::entries_of(m, nano);
         let rows = crate::help::card_rows(&entries, width as usize, &Style::of(Role::Key));
         let n = rows.len().min(text_h.saturating_sub(1));
@@ -1401,7 +1401,7 @@ mod tests {
         assert!(bottom.contains("C-r Read File"), "{bottom}");
         // key_notation = nano: nano's own bar.
         let mut e = ed("x");
-        e.config.nano_keys = true;
+        e.config.notation = crate::keymap::Notation::Nano;
         let terminal = Screen::of(&e, terminal.buf.area().width, terminal.buf.area().height);
         let buf = &terminal;
         let row = |y: u16| -> String {

@@ -190,6 +190,33 @@ impl Key {
         s
     }
 
+    /// The long spelling both programs share: `ctrl-x`, `alt-x`, `esc`, `<f1>`. letibot's
+    /// hint row and help pages write keys this way, and it is the one spelling that cannot be
+    /// mistaken for a letter typed into a file.
+    pub fn words(&self) -> String {
+        let mut s = String::new();
+        if self.ctrl {
+            s.push_str("ctrl-");
+        }
+        if self.alt {
+            s.push_str("alt-");
+        }
+        if self.shift {
+            s.push_str("shift-");
+        }
+        s.push_str(&match self.code {
+            KeyCode::Enter => "enter".into(),
+            KeyCode::Tab => "tab".into(),
+            KeyCode::Esc => "esc".into(),
+            KeyCode::Backspace => "backspace".into(),
+            KeyCode::Char(' ') => "space".into(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::F(n) => format!("f{n}"),
+            other => format!("<{other:?}>").to_lowercase(),
+        });
+        s
+    }
+
     /// nano's notation, for its bar: `^X`, `M-U`, `F8`, arrows as glyphs.
     pub fn nano(&self) -> String {
         let base = match self.code {
@@ -234,6 +261,33 @@ pub fn seq_emacs(keys: &[Key]) -> String {
 /// A sequence in nano notation.
 pub fn seq_nano(keys: &[Key]) -> String {
     keys.iter().map(Key::nano).collect::<Vec<_>>().join(" ")
+}
+
+/// A sequence in the shared long spelling.
+pub fn seq_words(keys: &[Key]) -> String {
+    keys.iter().map(Key::words).collect::<Vec<_>>().join(" ")
+}
+
+/// How keys are written to the reader: `key_notation` in the config.
+///
+/// Emacs and nano are each program's own bar. `Words` is the long spelling the two programs
+/// share — letibot sets it on the embedded editor, so a hint row cannot misspell a key that
+/// `agent::keys::SHARED` promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Notation {
+    #[default]
+    Emacs,
+    Nano,
+    Words,
+}
+
+/// `keys` in notation `n`.
+pub fn seq_in(n: Notation, keys: &[Key]) -> String {
+    match n {
+        Notation::Emacs => seq_emacs(keys),
+        Notation::Nano => seq_nano(keys),
+        Notation::Words => seq_words(keys),
+    }
 }
 
 /// What a key leads to.
@@ -419,6 +473,23 @@ mod tests {
         );
         assert_eq!(Key::parse("<nope>"), None);
         assert_eq!(Key::parse("ab"), None);
+    }
+
+    /// The long spelling the two programs share: `ctrl-x`, not `C-x`, so a hint row cannot
+    /// disagree with a key the head advertises.
+    #[test]
+    fn words_notation_spells_the_modifiers_out() {
+        assert_eq!(Key::ctrl('x').words(), "ctrl-x");
+        assert_eq!(Key::meta('i').words(), "alt-i");
+        assert_eq!(Key::parse("<f1>").unwrap().words(), "f1");
+        assert_eq!(Key::parse("ESC").unwrap().words(), "esc");
+        assert_eq!(seq_words(&[Key::ctrl(']')]), "ctrl-]");
+        assert_eq!(
+            seq_in(Notation::Words, &[Key::parse("M-k").unwrap()]),
+            "alt-k"
+        );
+        assert_eq!(seq_in(Notation::Emacs, &[Key::ctrl('x')]), "C-x");
+        assert_eq!(seq_in(Notation::Nano, &[Key::meta('u')]), "M-U");
     }
 
     #[test]

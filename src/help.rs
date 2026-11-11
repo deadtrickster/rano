@@ -1,16 +1,17 @@
 //! Finding a command: `M-x` (the palette), the help pages and `describe-key`.
 //! Everything here reads the command table and the keymaps in `commands.rs`.
 
-use crate::keymap::{Key, Keymap, seq_emacs, seq_nano, where_is};
+use crate::keymap::{Key, Keymap, where_is};
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
 
 use crate::commands::{Group, command, commands};
 use crate::editor::Editor;
 
-/// How keys are written to the reader: emacs's `C-x M-p`, or nano's `^X M-P`.
-pub fn notation(nano: bool, seq: &[Key]) -> String {
-    if nano { seq_nano(seq) } else { seq_emacs(seq) }
+/// How keys are written to the reader: emacs's `C-x M-p`, nano's `^X M-P`, or the long
+/// spelling the two programs share (`ctrl-x`).
+pub fn notation(n: crate::keymap::Notation, seq: &[Key]) -> String {
+    crate::keymap::seq_in(n, seq)
 }
 
 // ---------- M-x ----------
@@ -120,7 +121,7 @@ impl Editor {
     pub(crate) fn keys_for(&self, name: &str) -> String {
         where_is(&[&self.keymaps.global], name)
             .iter()
-            .map(|s| notation(self.config.nano_keys, s))
+            .map(|s| notation(self.config.notation, s))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -202,7 +203,7 @@ impl Editor {
 
     /// What `seq` does, on a page of its own.
     pub(crate) fn show_description(&mut self, seq: &[Key], name: Option<&str>) {
-        let keys = notation(self.config.nano_keys, seq);
+        let keys = notation(self.config.notation, seq);
         let strong = Style::of(Role::Strong);
         let faint = Style::of(Role::Faint);
         let key = Style::of(Role::Key).bold();
@@ -260,7 +261,7 @@ impl Editor {
 
     /// Every key in effect as cards: the global commands by group, then each mode's.
     fn binding_cards(&self, width: usize) -> Vec<Line> {
-        let nano = self.config.nano_keys;
+        let nano = self.config.notation;
         let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
         for g in [
             Group::Help,
@@ -305,7 +306,7 @@ impl Editor {
 }
 
 /// A mode's keys, every key per command joined.
-fn mode_entries(maps: &[&Keymap], nano: bool) -> Vec<(String, String)> {
+fn mode_entries(maps: &[&Keymap], nano: crate::keymap::Notation) -> Vec<(String, String)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for m in maps {
         for (seq, name) in m.flatten() {

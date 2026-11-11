@@ -30,7 +30,7 @@ capabilities = []
 | `multibuffer` | `true`, `false` | `F8` pushes a new buffer instead of replacing the current one |
 | `wrap` | `true`, `false` | Soft line wrap. `M-\` toggles it at runtime |
 | `autoupdate` | `true`, `false` | Check GitHub for a newer release at startup |
-| `key_notation` | `emacs`, `nano` | Write keys `C-x` / `M-p` or `^X` / `M-P` in the bar and the help pages |
+| `key_notation` | `emacs`, `nano`, `words` | Write keys `C-x` / `M-p`, `^X` / `M-P`, or `ctrl-x` / `alt-p` in the bar and the help pages. `words` is the spelling the two programs share, and letibot sets it on the embedded editor |
 | `send_command` | a shell command | What `M-s` runs (see [embedding](embedding.md)) |
 | `theme` | a name | `themes/NAME.toml` beside this file |
 | `plugin` | a path | A `.wasm` plugin (see [plugins](plugins.md)) |

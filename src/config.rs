@@ -21,8 +21,9 @@ pub struct Config {
     /// M-S: a shell command (`sh -c`) that gets the cursor, the file and the
     /// selection as JSON, plus `RANO_FILE`/`RANO_LINE`/`RANO_COLUMN`. `None`: nowhere to send.
     pub send_command: Option<String>,
-    /// Write keys nano's way (`^X`, `M-U`) instead of emacs's: `key_notation = nano`.
-    pub nano_keys: bool,
+    /// How keys are written: `key_notation = emacs` (the default), `nano` (`^X`, `M-U`), or
+    /// `words` (`ctrl-x`, `alt-u`) — the spelling the two programs share.
+    pub notation: crate::keymap::Notation,
     /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file.
     pub theme: Option<String>,
     /// The WASM plugin: a `.wasm` whose `on_open`/`on_save` hooks run at the two
@@ -116,7 +117,7 @@ impl Default for Config {
             wrap: true,
             autoupdate: None,
             send_command: None,
-            nano_keys: false,
+            notation: crate::keymap::Notation::default(),
             theme: None,
             plugin: None,
             capabilities: Vec::new(),
@@ -212,8 +213,9 @@ fn parse_config(text: &str) -> Config {
                 }
             }
             "key_notation" => match value {
-                "nano" => cfg.nano_keys = true,
-                "emacs" => cfg.nano_keys = false,
+                "nano" => cfg.notation = crate::keymap::Notation::Nano,
+                "emacs" => cfg.notation = crate::keymap::Notation::Emacs,
+                "words" => cfg.notation = crate::keymap::Notation::Words,
                 _ => {}
             },
             "send_command" => {

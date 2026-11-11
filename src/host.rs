@@ -277,6 +277,26 @@ mod tests {
         );
     }
 
+    /// Standalone rano ignores `Unhandled`, so its picture does not change — but the value itself is
+    /// what the embedded pane reads to move focus, and it has to be honest about having no work.
+    #[test]
+    fn esc_with_nothing_to_cancel_is_handed_back() {
+        let mut ed = ed("abc");
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Esc, Mods::NONE)),
+            KeyOutcome::Unhandled,
+            "no mark, no view, no prompt: Esc is the host's"
+        );
+        // With a mark it is the editor's own, and it clears it.
+        ed.handle_key(key(KeyCode::Char('a'), Mods::CTRL));
+        assert!(ed.bs().mark.is_some(), "C-a set the mark");
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Esc, Mods::NONE)),
+            KeyOutcome::Handled
+        );
+        assert!(ed.bs().mark.is_none(), "Esc cleared it");
+    }
+
     #[test]
     fn c_g_cancels_a_prompt_rather_than_typing_g() {
         let mut ed = ed("abc");

@@ -32,6 +32,7 @@ pub mod header;
 pub mod help;
 pub mod hint_bar;
 pub mod jobs;
+pub mod keys;
 pub mod loading;
 pub mod logpane;
 pub mod monitors;

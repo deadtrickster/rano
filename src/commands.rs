@@ -805,6 +805,14 @@ impl Keymaps {
                 .bind(&format!("{h} x"), "execute-extended-command");
             g.name_prefix(h, "help");
         }
+        // The keys both programs promise come from one table, so the head cannot advertise a key
+        // rano does not bind: `crate::agent::keys::SHARED`. A row here rebinds (or binds) the
+        // same command the chain below names, so the two cannot disagree.
+        for row in crate::agent::keys::editor_rows() {
+            if command(row.action).is_some() {
+                g.bind(row.key, row.action);
+            }
+        }
         g.bind("C-x", "exit")
             .bind("C-o", "write-out")
             .bind("C-r", "insert-file")
@@ -1146,6 +1154,13 @@ impl Editor {
             }
             Decision::Run(name) if describing => self.show_description(&seq, Some(&name)),
             Decision::Run(name) if command(&name).is_none() => return KeyOutcome::Host(name),
+            // The editor hands back a key it has no use for (`keys.rs:8-21`). With no mark, no view
+            // and no prompt there is nothing of the editor's to cancel, so Esc belongs to the host:
+            // the embedded pane moves focus, and standalone rano ignores `Unhandled`, which is why
+            // its own behaviour does not change.
+            Decision::Run(name) if name == "deactivate-mark" && !self.something_to_cancel() => {
+                return KeyOutcome::Unhandled;
+            }
             Decision::Run(name) => self.run_command(&name),
             Decision::Unbound if describing => self.show_description(&seq, None),
             Decision::Unbound => {
@@ -1177,6 +1192,16 @@ impl Editor {
             }
         }
         KeyOutcome::Handled
+    }
+
+    /// Whether Esc has something of the editor's own to back out of — a mark, a view, a prompt.
+    /// What is not here belongs to the host: see the `deactivate-mark` arm in the dispatcher.
+    pub(crate) fn something_to_cancel(&self) -> bool {
+        self.bs().mark.is_some()
+            || self.info.is_some()
+            || self.palette.is_some()
+            || self.diff_view.is_some()
+            || self.prompt.is_some()
     }
 
     /// Run a command by name, and remember it for `M-x`'s ordering.
@@ -1216,7 +1241,7 @@ impl Editor {
     /// The bar's entries for what is in effect, `(key, title)` in the configured
     /// notation: a pending prefix, the global layer's [`BAR`], or a mode's maps.
     pub(crate) fn bar_items(&self) -> Vec<(String, String)> {
-        let nano = self.config.nano_keys;
+        let nano = self.config.notation;
         let note = |seq: &[Key]| crate::help::notation(nano, seq);
         let stack = self.active_keymaps();
         if !self.pending.keys.is_empty()
@@ -1274,7 +1299,7 @@ pub(crate) fn prefix_title(m: &Keymap) -> String {
 }
 
 /// A map's entries as `(key, title)`, one per command (its first key).
-pub(crate) fn entries_of(m: &Keymap, nano: bool) -> Vec<(String, String)> {
+pub(crate) fn entries_of(m: &Keymap, nano: crate::keymap::Notation) -> Vec<(String, String)> {
     let key = |k: &Key| crate::help::notation(nano, std::slice::from_ref(k));
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();

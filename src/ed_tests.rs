@@ -688,8 +688,8 @@ fn describe_key_says_what_a_key_runs_even_through_a_prefix() {
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     press(&mut ed, KeyCode::Char('g'), Mods::CTRL);
     press(&mut ed, KeyCode::Char('k'), Mods::NONE);
-    press(&mut ed, KeyCode::Char('z'), Mods::CTRL);
-    assert!(page(&ed).contains("C-z is not bound"), "{}", page(&ed));
+    press(&mut ed, KeyCode::Char('y'), Mods::ALT);
+    assert!(page(&ed).contains("M-y is not bound"), "{}", page(&ed));
 }
 
 #[test]

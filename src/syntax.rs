@@ -3795,6 +3795,29 @@ mod markdown_tests {
     use super::*;
     use std::time::Instant;
 
+    /// The two sizes, measured in the same loop and reduced to the least contended sample of each.
+    ///
+    /// Contention only ever inflates a sample, so the smallest is the one closest to what the code
+    /// costs — and taking an average of three let a loaded gate report 11.6× for work that is 4.0×
+    /// idle, which reads as quadratic code. The sizes alternate so a stall lands on both sides
+    /// rather than on the one being measured when it arrived.
+    fn refresh_pair(small: &Buffer, big: &Buffer) -> (f64, f64) {
+        let mut hl = Highlighter::new();
+        hl.refresh(small); // warm the query and the tree
+        hl.refresh(big);
+        let once = |hl: &mut Highlighter, buf: &Buffer| {
+            let t = Instant::now();
+            hl.refresh(buf);
+            t.elapsed().as_secs_f64()
+        };
+        let (mut a, mut b) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            a = a.min(once(&mut hl, small));
+            b = b.min(once(&mut hl, big));
+        }
+        (a, b)
+    }
+
     #[test]
     fn the_markdown_two_pass_is_linear_in_the_document() {
         let build = |paras: usize| {
@@ -3809,19 +3832,10 @@ mod markdown_tests {
             buf.name = Some(std::path::PathBuf::from("x.md"));
             buf
         };
-        let time = |buf: &Buffer| {
-            let mut hl = Highlighter::new();
-            hl.refresh(buf); // warm the query and the tree
-            let t = Instant::now();
-            for _ in 0..3 {
-                hl.refresh(buf);
-            }
-            t.elapsed().as_secs_f64() / 3.0
-        };
         let small = build(300);
         let big = build(1_200);
         assert!(big.row_count() == small.row_count() * 4);
-        let (a, b) = (time(&small), time(&big));
+        let (a, b) = refresh_pair(&small, &big);
         println!(
             "markdown refresh: {:.1} ms at {} lines, {:.1} ms at {} lines ({:.1}× for 4×)",
             a * 1e3,
@@ -3830,7 +3844,9 @@ mod markdown_tests {
             big.row_count(),
             b / a
         );
-        // 4× the document: quadratic would be 16×, so a bound of 8× separates them widely.
+        // 4× the document: quadratic would be 16×, so a bound of 8× separates them widely — and
+        // with the least contended sample of each, 8× now means the shape of the work rather than
+        // the mood of the machine.
         assert!(
             b < a * 8.0,
             "the two-pass highlight looks quadratic: {a:.4} s → {b:.4} s for 4× the text"

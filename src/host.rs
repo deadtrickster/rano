@@ -278,6 +278,22 @@ mod tests {
     }
 
     #[test]
+    fn c_g_cancels_a_prompt_rather_than_typing_g() {
+        let mut ed = ed("abc");
+        ed.prompt = Some(crate::prompt::Prompt {
+            kind: crate::prompt::PromptKind::Search,
+            text: String::new(),
+            cursor: 0,
+        });
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('g'), Mods::CTRL)),
+            KeyOutcome::Handled
+        );
+        assert!(ed.prompt.is_none(), "C-g closes the prompt");
+        assert_eq!(text(&ed), vec!["abc"], "and types nothing into the file");
+    }
+
+    #[test]
     fn a_host_map_does_not_stop_typing_and_can_rebind() {
         let mut ed = ed("");
         let mut map = Keymap::new("host");

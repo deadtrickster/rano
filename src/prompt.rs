@@ -374,7 +374,10 @@ impl Editor {
                 p.cursor = p.text.chars().count();
                 self.prompt = Some(p);
             }
-            KeyCode::Char(c) if !c.is_control() => {
+            // A chord is not text: C-g cancels (see `cancel` above), and a control chord the
+            // prompt does not bind must not arrive as the letter it was pressed with — that is how
+            // C-g typed a `g` into a search prompt behind the reader's back.
+            KeyCode::Char(c) if !c.is_control() && !ctrl => {
                 prompt_insert(&mut p, c);
                 self.prompt = Some(p);
             }

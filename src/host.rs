@@ -294,6 +294,27 @@ mod tests {
     }
 
     #[test]
+    fn a_host_chord_bound_to_an_editor_command_runs_it_over_a_prompt() {
+        let mut ed = ed("abc");
+        let mut map = Keymap::new("host");
+        map.bind("C-q", "exit");
+        ed.push_keymap(map);
+        ed.prompt = Some(crate::prompt::Prompt {
+            kind: crate::prompt::PromptKind::Search,
+            text: String::new(),
+            cursor: 0,
+        });
+        // The chord is the host's and the command it names is the editor's own: it runs, and the
+        // prompt does not get to type the `q` it was pressed with.
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('q'), Mods::CTRL)),
+            KeyOutcome::Handled
+        );
+        assert!(ed.wants_quit(), "the host's chord reached `exit`");
+        assert_eq!(text(&ed), vec!["abc"], "and typed nothing into the file");
+    }
+
+    #[test]
     fn a_host_map_does_not_stop_typing_and_can_rebind() {
         let mut ed = ed("");
         let mut map = Keymap::new("host");

@@ -160,14 +160,26 @@ impl Editor {
             }
         }
         // A host's own chord reaches the host even over a prompt: the prompt stays
-        // open. Everything else is the prompt's.
+        // open. A chord the host bound to one of the editor's OWN commands runs that
+        // command here, exactly as it does when no prompt is open — otherwise the
+        // prompt would take the chord and type the letter it was pressed with.
         if self.prompt.is_some() && !self.host_keymaps.is_empty() {
             let host: Vec<&crate::keymap::Keymap> = self.host_keymaps.iter().rev().collect();
             if let crate::keymap::Lookup::Command(name) =
                 crate::keymap::lookup(&host, &[Key::from_event(&key)])
-                && crate::commands::command(name).is_none()
             {
-                return KeyOutcome::Host(name.to_string());
+                if crate::commands::command(name).is_none() {
+                    return KeyOutcome::Host(name.to_string());
+                }
+                let name = name.to_string();
+                let held = self.prompt.take();
+                self.run_command(&name);
+                // A command that keeps the prompt (a flash, a search) gets it back; one that
+                // closes it (C-g, a quit) has already decided.
+                if self.prompt.is_none() && !self.wants_quit() && self.status_text().is_none() {
+                    self.prompt = held;
+                }
+                return KeyOutcome::Handled;
             }
         }
         // A prompt edits its own line; everything else goes through the keymaps.

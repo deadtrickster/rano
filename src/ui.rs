@@ -75,7 +75,10 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
 /// The question it answers is the operator's: *"no idea at which place in the file i am, how far
 /// below - i guess because no scroll bar"*. `pos` is the viewport's first row, `total` the rows
 /// there are (visual rows under wrap, buffer rows otherwise), `h` the viewport's own height.
-pub(crate) fn scrollbar(buf: &mut Buffer, x: u16, y: u16, h: usize, pos: usize, total: usize) {
+///
+/// `pane` is where it is drawn: the column is that rect's right edge, and `y` counts from its
+/// top, so a host's pane sits where its own area says rather than at the buffer's origin.
+pub(crate) fn scrollbar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, total: usize) {
     if h < 2 || total <= h {
         return;
     }
@@ -95,15 +98,14 @@ pub(crate) fn scrollbar(buf: &mut Buffer, x: u16, y: u16, h: usize, pos: usize, 
         } else {
             Role::Faint
         };
-        let cell = at_rect(buf, x, y + i as u16, 1, 1);
+        let cell = at_rect(pane, pane.width - 1, y + i as u16);
         put(buf, cell, &Line::styled(ch.to_string(), Style::of(role)));
     }
 }
 
-/// A one-cell rectangle at pane-relative `(x, y)`, clipped to the buffer.
-fn at_rect(buf: &Buffer, x: u16, y: u16, w: u16, h: u16) -> Rect {
-    let area = buf.area();
-    Rect::new(area.x.saturating_add(x), area.y.saturating_add(y), w, h).intersection(area)
+/// A one-cell rectangle at pane-relative `(x, y)`, clipped to the pane.
+fn at_rect(pane: Rect, x: u16, y: u16) -> Rect {
+    Rect::new(pane.x.saturating_add(x), pane.y.saturating_add(y), 1, 1).intersection(pane)
 }
 
 /// **The sidebar: the exchange, and the compose line at its foot.** Entries wrap at the
@@ -619,8 +621,8 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
         put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
     }
     scrollbar(
+        area,
         buf,
-        width - 1,
         t0,
         text_h,
         ed.scroll_pos(),
@@ -742,7 +744,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
                 None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
             }
         }
-        scrollbar(buf, width - 1, t0 + 1, rows, v.top, v.lines.len());
+        scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
     }
 
     // ---- status line (row height-3) ----

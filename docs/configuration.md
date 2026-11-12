@@ -36,6 +36,29 @@ capabilities = []
 | `plugin` | a path | A `.wasm` plugin (see [plugins](plugins.md)) |
 | `capabilities` | `["read-dir", "read-file", "convert-page"]` | What the plugin may import. Empty grants nothing |
 | `color.ROLE` | a look | One role overridden on top of the theme |
+| `ask.ID.FIELD` | see below | One field of a quick ask |
+
+## Quick asks
+
+The `M-k` presets are four compiled in — `explain`, `fact-check`, `fill-gap`, `rewrite` — and the
+file changes any field of one, or adds one of its own. A field the file does not mention keeps
+what it had, so changing only a prompt does not cost the key.
+
+```toml
+ask.fact-check.prompt = "Check each claim. One note per claim: ok, warn or wrong, and why."
+ask.fact-check.key = "f"
+ask.translate.key = "t"
+ask.translate.label = "translate"
+ask.translate.answer = suggest
+ask.translate.prompt = "Translate the selection into French. Answer with the translation only."
+```
+
+| Field | Values | What it does |
+|---|---|---|
+| `key` | one chord, `f` or `C-f` | The second key of `M-k <key>`. A preset without one is not bound |
+| `label` | text | What the key bar and the help page call it |
+| `answer` | `chat`, `notes`, `suggest` | Where the answer lands: the conversation, `note` marks on the selection, or a `suggest` hunk |
+| `prompt` | text | What the host sends. Quote it: a prompt holds `#` and commas |
 
 ## Themes
 

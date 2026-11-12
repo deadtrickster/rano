@@ -69,6 +69,28 @@ JSON object:
 The binary's callback runs `send_command` with `sh -c`, the event on stdin and `RANO_FILE`,
 `RANO_LINE` and `RANO_COLUMN` set. It does not wait, and output is discarded.
 
+## Asking about a selection
+
+`Editor::on_ask` takes a callback over `rano::ask::AskEvent`: the `send` a host already knows,
+the preset's `id`, its `answer` mode (`Chat`, `Notes` or `Suggest`) and the `prompt` to send.
+
+```rust
+ed.on_ask = Some(Box::new(move |ask| {
+    // `ask.send` is the selection, or the paragraph or line the cursor is on; the
+    // head sends `ask.prompt` with that place as the prompt's context.
+    Ok(format!("asked {} about {}", ask.preset, ask.send.cursor.line))
+}));
+```
+
+It is the whole of `M-k`: the prefix, its entries and the target rule are rano's, and the
+answer comes back by whatever path the host already has (a conversation reply, marks on the
+buffer). `M-k k` is the same event with an empty `prompt`, where the host's composer takes the
+question. A host without `on_ask` still hears an ask through `on_send`, with its prompt as
+`SendEvent::ask`.
+
+`Editor::bind_ask()` rebuilds the `M-k` keys from `config.ask`, so a host that replaces the
+presets at runtime calls it after the change.
+
 ## Reviewing a change
 
 `Editor::open_review(path, Change { before, after, before_start, after_start })` opens the file

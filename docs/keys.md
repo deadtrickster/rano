@@ -9,7 +9,7 @@ prints them nano's way (`^X`, `M-X`). The keys do not change.
   Recent commands come first, each with its key.
 - `C-g` (or `F1`) is the help prefix: `?` for the help page, `k` then a key to see what it
   runs, `b` for every key in effect, `m` for rano's own manual, `x` for `M-x`.
-- A prefix key (`M-t`, `C-g`) shows a card of what can follow. `Esc` abandons it.
+- A prefix key (`M-t`, `M-k`, `C-g`) shows a card of what can follow. `Esc` abandons it.
 - The bottom bar shows the keys of the current mode.
 
 ## Text
@@ -125,6 +125,26 @@ marker.
 |---|---|
 | `M-s` | Send the file, cursor and selection to `send_command` (see [embedding](embedding.md)) |
 | `M-v` | Install the newer release the startup check found |
+| `M-q` | Ask a question about the place, typed at the prompt |
+
+## Quick asks
+
+`M-k` is a prefix whose second key picks an ask. The selection is what it is about; with no
+mark set it is the paragraph around the cursor in prose and that line in code.
+
+| Key | What it asks | Where the answer goes |
+|---|---|---|
+| `M-k e` | Explain the selection | The conversation |
+| `M-k f` | Fact check it, one note per claim | Notes on the selection |
+| `M-k g` | Fill the gap it leaves | A suggested hunk |
+| `M-k r` | Rewrite it | A suggested hunk |
+| `M-k k` | Ask what you like: the question is typed | The conversation |
+| `M-k c` | Clear every mark on this file | - |
+
+A host that answers asks (letibot's editor pane) sends them; standalone rano hands them to
+`send_command`, and `M-k k` opens the chat beside the text to type in. The presets are
+`ask.<id>.<field>` lines in the config (see [configuration](configuration.md)): the keys,
+labels, prompts and answer modes are the reader's.
 
 ## In a view
 

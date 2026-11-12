@@ -119,10 +119,12 @@ pub const SHARED: &[Shared] = &[
         hint: "zoom the focused surface to full width",
         also: &[],
     },
+    // rano owns the ask prefix: the menu is its key bar, and the host hears the pick through
+    // `on_ask` - so standalone rano asks the same way the embedded pane does.
     Shared {
-        action: "host-ask",
+        action: "ask",
         key: "M-k",
-        scope: Scope::Host,
+        scope: Scope::Editor,
         hint: "quick ask on the selection",
         also: &[],
     },

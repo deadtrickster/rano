@@ -462,14 +462,17 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
     let whole = area.intersection(buf.area());
     buf.fill(whole, &Style::new());
     let chrome = ed.chrome;
-    if (area.height as usize) < chrome.rows() + 1 {
+    // The editor's own count, not `chrome.rows()`: a `WhenBusy` row that has nothing to say is
+    // the text's, and the click mapping measures against the same number.
+    let chrome_rows = ed.chrome_rows();
+    if (area.height as usize) < chrome_rows + 1 {
         Paragraph::new("Terminal too small").render(whole, buf);
         return None;
     }
-    let text_h = area.height as usize - chrome.rows();
+    let text_h = area.height as usize - chrome_rows;
     let t0 = chrome.top();
     let head = || {
-        if chrome == crate::editor::Chrome::BARE {
+        if chrome.bare() {
             Style::of(Role::Strong)
         } else {
             rev()
@@ -751,80 +754,81 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
     // nano's statusline: the prompt bar is a full reverse strip with the label and
     // answer at column 0; a message sits centered, only its bracketed text reversed.
     let status_row = area.height - 1 - if chrome.keys { 2 } else { 0 };
-    // Bare, the status row is not a reversed strip either: the host draws its own
-    // look.
-    let strip = if chrome == crate::editor::Chrome::BARE {
-        Style::new()
-    } else {
-        rev()
-    };
-    if let Some(p) = &ed.prompt {
-        let flash = ed
-            .status
-            .as_ref()
-            .filter(|fl| fl.until > std::time::Instant::now())
-            .map(|fl| vec![format!(" {}", fl.text)]);
-        let hints = ed
-            .prompt_hints
-            .as_ref()
-            .filter(|(k, t, n)| *k == p.kind && *t == p.text && !n.is_empty())
-            .map(|(_, _, n)| hint_rows(n, width as usize, text_h.min(HINT_ROWS)));
-        if let Some(rows) = flash.or(hints) {
-            let top = status_row - rows.len() as u16;
-            for (k, r) in rows.iter().enumerate() {
-                band(
-                    buf,
-                    at(0, top + k as u16, width, 1),
-                    Line::from(r.as_str()),
-                    strip.clone(),
-                );
+    // `WhenBusy` with nothing to say draws no row here at all: the text has those rows, and the
+    // host's own status line has the place.
+    if ed.status_shown() {
+        // Bare, the status row is not a reversed strip either: the host draws its own
+        // look.
+        let strip = if chrome.bare() { Style::new() } else { rev() };
+        if let Some(p) = &ed.prompt {
+            let flash = ed
+                .status
+                .as_ref()
+                .filter(|fl| fl.until > std::time::Instant::now())
+                .map(|fl| vec![format!(" {}", fl.text)]);
+            let hints = ed
+                .prompt_hints
+                .as_ref()
+                .filter(|(k, t, n)| *k == p.kind && *t == p.text && !n.is_empty())
+                .map(|(_, _, n)| hint_rows(n, width as usize, text_h.min(HINT_ROWS)));
+            if let Some(rows) = flash.or(hints) {
+                let top = status_row - rows.len() as u16;
+                for (k, r) in rows.iter().enumerate() {
+                    band(
+                        buf,
+                        at(0, top + k as u16, width, 1),
+                        Line::from(r.as_str()),
+                        strip.clone(),
+                    );
+                }
             }
-        }
-        let (text, _) = prompt_text(p, width as usize);
-        let mut s: Vec<char> = text.chars().collect();
-        s.resize(width as usize, ' ');
-        put(
-            buf,
-            at(0, status_row, width, 1),
-            &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
-        );
-    } else {
-        let cur = &ed.bs().cursor;
-        // `?` and not `1`: a tail's row is not the file's line until the count has
-        // said which line it is.
-        let pos_txt = if ed.bs().synthetic {
-            format!("Row {}", cur.row + 1)
-        } else {
-            match ed.bs().line_number(cur.row) {
-                Some(n) => format!("Ln {}, Col {}", n, cur.col + 1),
-                None => format!("Ln ?, Col {}", cur.col + 1),
-            }
-        };
-        let pos_w = pos_txt.chars().count();
-        if let Some(msg) = ed.status_text() {
-            let avail = (width as usize).saturating_sub(pos_w + 1);
-            let len = msg.chars().count();
-            let start = avail.saturating_sub(len) / 2;
-            let (text, pos) = if start > 1 {
-                (format!("[ {msg} ]"), start - 2)
-            } else {
-                (msg.clone(), start)
-            };
+            let (text, _) = prompt_text(p, width as usize);
+            let mut s: Vec<char> = text.chars().collect();
+            s.resize(width as usize, ' ');
             put(
                 buf,
-                at(0, status_row, (avail as u16).max(1), 1),
-                &Line::new(vec![
-                    Span::raw(" ".repeat(pos)),
-                    Span::styled(text, strip.clone()),
-                ]),
+                at(0, status_row, width, 1),
+                &Line::styled(s.into_iter().collect::<String>(), strip.clone()),
+            );
+        } else {
+            // One definition of the place, shared with `Editor::position`.
+            let p = ed.position();
+            // `Row` and not `Ln`: a tail's row is not the file's line until the count has
+            // said which line it is.
+            let pos_txt = if ed.bs().synthetic {
+                format!("Row {}", ed.bs().cursor.row + 1)
+            } else {
+                match p.line {
+                    Some(n) => format!("Ln {n}, Col {}", p.column),
+                    None => format!("Ln ?, Col {}", p.column),
+                }
+            };
+            let pos_w = pos_txt.chars().count();
+            if let Some(msg) = ed.status_text() {
+                let avail = (width as usize).saturating_sub(pos_w + 1);
+                let len = msg.chars().count();
+                let start = avail.saturating_sub(len) / 2;
+                let (text, pos) = if start > 1 {
+                    (format!("[ {msg} ]"), start - 2)
+                } else {
+                    (msg.clone(), start)
+                };
+                put(
+                    buf,
+                    at(0, status_row, (avail as u16).max(1), 1),
+                    &Line::new(vec![
+                        Span::raw(" ".repeat(pos)),
+                        Span::styled(text, strip.clone()),
+                    ]),
+                );
+            }
+            let x = (width as usize).saturating_sub(pos_w);
+            put(
+                buf,
+                at(x as u16, status_row, pos_w as u16, 1),
+                &Line::raw(pos_txt),
             );
         }
-        let x = (width as usize).saturating_sub(pos_w);
-        put(
-            buf,
-            at(x as u16, status_row, pos_w as u16, 1),
-            &Line::raw(pos_txt),
-        );
     }
 
     // ---- function bar (last two rows, reversed) ----
@@ -1690,16 +1694,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_pane_is_text_and_a_status_row_and_nothing_reversed() {
+    fn a_bare_pane_is_text_and_nothing_reversed() {
         let mut e = ed("aa\nbb\ncc\ndd");
         e.show_line_numbers = true;
         e.set_chrome(crate::editor::Chrome::BARE);
         e.set_area(PANE.into());
-        assert_eq!(
-            e.text_h,
-            PANE.height as usize - 1,
-            "every row but the status row"
-        );
+        // `BARE` is `WhenBusy`: idle, the status row is the text's too.
+        assert_eq!(e.text_h, PANE.height as usize, "the whole pane is text");
         e.bs_mut().cursor = Pos { row: 2, col: 1 };
         let t = draw_pane(&e);
         outside_is_untouched(&t);
@@ -1711,7 +1712,7 @@ mod tests {
             "text on the first row"
         );
         assert_eq!(buf[(PANE.x + g, PANE.y + 2)].symbol.as_str(), "c");
-        let status: String = (PANE.x..PANE.right())
+        let bottom: String = (PANE.x..PANE.right())
             .map(|x| {
                 buf[(x, PANE.y + PANE.height - 1)]
                     .symbol
@@ -1719,7 +1720,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert!(status.trim_end().ends_with("Ln 3, Col 2"), "{status:?}");
+        assert!(bottom.trim().is_empty(), "no status row: {bottom:?}");
         assert_eq!(t.cursor, Some((PANE.x + g + 1, PANE.y + 2)));
         for y in PANE.y..PANE.bottom() {
             for x in PANE.x..PANE.right() {
@@ -1741,6 +1742,106 @@ mod tests {
         let title = e.frame_title();
         assert!(!title.modified && !title.read_only);
         assert!(!e.key_hints().is_empty(), "the bar's keys");
+    }
+
+    /// `WhenBusy`: the row is the text's while it has nothing to say, and comes back for the
+    /// prompt — which is the only reason it is rano's at all.
+    #[test]
+    fn a_when_busy_status_row_is_absent_idle_and_present_under_a_prompt() {
+        let mut e = ed(&"x\n".repeat(30));
+        e.show_line_numbers = false;
+        e.set_chrome(crate::editor::Chrome::BARE);
+        e.set_area(PANE.into());
+        assert_eq!(e.text_h, PANE.height as usize, "the whole pane is text");
+        let t = draw_pane(&e);
+        outside_is_untouched(&t);
+        let bottom = |t: &Screen| -> String {
+            (PANE.x..PANE.right())
+                .map(|x| t[(x, PANE.y + PANE.height - 1)].symbol.as_str().to_string())
+                .collect()
+        };
+        // The last line of the text is on the row the status line would have taken, and no
+        // `Ln` readout is anywhere in the pane.
+        assert!(bottom(&t).trim_end().starts_with('x'), "{:?}", bottom(&t));
+        let all: String = (PANE.y..PANE.bottom())
+            .flat_map(|y| (PANE.x..PANE.right()).map(move |x| (x, y)))
+            .map(|(x, y)| t[(x, y)].symbol.as_str().to_string())
+            .collect();
+        assert!(!all.contains("Ln "), "{all:?}");
+
+        e.prompt = Some(Prompt {
+            kind: crate::prompt::PromptKind::Search,
+            text: "ab".into(),
+            cursor: 2,
+        });
+        // A host ticks between the key that opened the prompt and the frame that draws it.
+        e.tick(std::time::Instant::now());
+        assert_eq!(
+            e.text_h,
+            PANE.height as usize - 1,
+            "the row is the prompt's now"
+        );
+        let t = draw_pane(&e);
+        outside_is_untouched(&t);
+        assert!(bottom(&t).starts_with("Search: ab"), "{:?}", bottom(&t));
+        assert_eq!(
+            t.cursor,
+            Some((PANE.x + 10, PANE.y + PANE.height - 1)),
+            "the caret is in the prompt"
+        );
+
+        // Closed again, the row goes back to the text.
+        e.prompt = None;
+        e.tick(std::time::Instant::now());
+        assert_eq!(e.text_h, PANE.height as usize);
+        let t = draw_pane(&e);
+        assert!(bottom(&t).trim_end().starts_with('x'), "{:?}", bottom(&t));
+    }
+
+    /// Two editors in one process, each drawn and emitted under its own rano theme: two looks,
+    /// and the process's theme back in force after both.
+    #[test]
+    fn two_editors_in_one_process_emit_under_their_own_themes() {
+        let pane = |text: &str| {
+            let mut e = ed(text);
+            e.show_line_numbers = true;
+            e.set_area(PANE.into());
+            e
+        };
+        let (first, second) = (pane("aa\nbb\ncc\ndd"), pane("ww\nxx\nyy\nzz"));
+        let theme = |name: &str, spec: &str| crate::theme::Theme::parse(name, spec).0;
+        let (grey_theme, amber_theme) = (
+            theme("grey", "faint = \"fg:#808080\"\n"),
+            theme("amber", "faint = \"fg:#ffb000\"\n"),
+        );
+        crate::theme::set_active(Some(theme("process", "faint = \"fg:#0000ff\"\n")));
+        // The rows as the terminal takes them, built where the theme is in force: the gutter's
+        // numbers are the one role a plain pane draws.
+        let emit = |e: &Editor, t: Option<crate::theme::Theme>| {
+            crate::theme::scoped(t, || draw_pane(e).buf.emit(crate::style::Palette::Colour))
+                .join("")
+        };
+        let (grey, amber) = (
+            emit(&first, Some(grey_theme)),
+            emit(&second, Some(amber_theme)),
+        );
+        assert!(
+            grey.contains("\x1b[38;2;128;128;128m"),
+            "the first pane's gutter in grey"
+        );
+        assert!(
+            amber.contains("\x1b[38;2;255;176;0m"),
+            "the second pane's gutter in amber"
+        );
+        assert!(
+            !grey.contains("\x1b[38;2;255;176;0m") && !amber.contains("\x1b[38;2;128;128;128m"),
+            "neither pane took the other's theme"
+        );
+        // And the next draw, scoped to nothing, is the process's own again.
+        let after = emit(&first, None);
+        assert!(after.contains("\x1b[38;2;0;0;255m"), "blue, the process's");
+        crate::theme::set_active(None);
+        assert_eq!(crate::theme::active_name(), None);
     }
 
     #[test]

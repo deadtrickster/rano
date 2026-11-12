@@ -44,7 +44,7 @@ if ed.wants_quit() { /* ^X: close the pane */ }
 |---|---|
 | `Editor::new(Buffer::new(), config::load())` | Build an editor with its configuration |
 | `set_area(Area)` | Give the editor its pane; returns whether the area changed |
-| `set_chrome(Chrome)` | Show or hide the title bar and the key bar (`Chrome::BARE` for neither) |
+| `set_chrome(Chrome)` | Show or hide the title bar, the key bar and the status row. `Chrome::BARE` is neither bar, and the status row only while it has a prompt or a message (`Chrome.status`: `Always` or `WhenBusy`) |
 | `open_at(path, line, column)` | Open or switch to a file, cursor on that 1-based line and column, centred. A file with unsaved edits gets its own buffer, so a jump never discards work |
 | `handle_key(KeyEvent)` | One key. `KeyOutcome` is `Handled`, `Unhandled`, or `Host(name)` for a key a host keymap bound to a command the editor does not have |
 | `handle_mouse(MouseEvent)`, `paste_text(&str)` | Input that is not a key |
@@ -54,6 +54,8 @@ if ed.wants_quit() { /* ^X: close the pane */ }
 | `wants_quit()` | The editor was asked to exit; tearing down is the host's |
 | `ui::draw_in(&mut Buffer, Rect, &Editor)` | Draw the editor into a pane; returns where the cursor goes |
 | `set_read_only(bool)`, `open_dir(&Path)` | A view that cannot be edited, and a folder listing |
+| `frame_title()`, `position()` | What the pane's status row says: the file and whether it is modified, and the cursor's 1-based column with the file's line when the buffer can state one |
+| `chrome_rows()`, `status_shown()` | The rows the chrome takes this frame, and whether the status row is among them — what a host laying out around a `Chrome::BARE` pane measures |
 
 ## Sending the reader's place
 
@@ -134,6 +136,22 @@ again from what a snapshot replays. An edit inside a marked range drops a `cite`
 and makes a `suggest` or an `edit` stale — drawn as a hint, saying so on the status row, and
 refused by `a`: the anchor, not a guess about line shifts, is what decides. `marks()` and
 `mark_stale(id)` answer the same two questions from outside, for a host that draws its own.
+
+## One process, two themes
+
+`rano::theme::set_active` is the process's theme. A host that draws more than one editor in one
+process lends each pane its own by wrapping that pane's draw — and its emit — in
+`rano::theme::scoped`, which puts everything back afterwards, even if the draw panics:
+
+```rust
+let rows = rano::theme::scoped(Some(gray), || {
+    let cursor = ui::draw_in(&mut frame, pane, &ed);
+    frame.emit(rano::style::Palette::Colour)
+});
+```
+
+`None` is no override, so a pane inherits whatever is active. The scope is the thread's, so both
+halves of one pane's frame must be drawn on it.
 
 ## Pieces without the editor
 

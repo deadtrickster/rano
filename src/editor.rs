@@ -79,10 +79,19 @@ pub(crate) struct UndoStep {
 
 const WHEEL_LINES: isize = 3;
 
+/// When the chrome's status row is drawn. `WhenBusy` is for a pane a host frames itself: the row
+/// is where rano's prompts and messages live, and the host's own status line has the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusMode {
+    Always,
+    WhenBusy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chrome {
     pub title: bool,
     pub keys: bool,
+    pub status: StatusMode,
 }
 
 impl Default for Chrome {
@@ -90,6 +99,7 @@ impl Default for Chrome {
         Chrome {
             title: true,
             keys: true,
+            status: StatusMode::Always,
         }
     }
 }
@@ -98,14 +108,31 @@ impl Chrome {
     pub const BARE: Chrome = Chrome {
         title: false,
         keys: false,
+        status: StatusMode::WhenBusy,
     };
+
+    /// No chrome of its own: the host draws the frame, so nothing here is reversed either.
+    pub(crate) fn bare(&self) -> bool {
+        !self.title && !self.keys
+    }
 
     pub fn top(&self) -> u16 {
         u16::from(self.title)
     }
 
+    /// The rows this chrome takes at most — what a host should leave it, whatever the mode.
     pub fn rows(&self) -> usize {
-        usize::from(self.title) + 1 + if self.keys { 2 } else { 0 }
+        self.rows_when(true)
+    }
+
+    /// The rows it takes with the status row drawn or not: `WhenBusy` gives the row back to the
+    /// text while the row has nothing to say. [`Editor::chrome_rows`] is the answer to ask for.
+    pub(crate) fn rows_when(&self, status: bool) -> usize {
+        let status = match self.status {
+            StatusMode::Always => 1,
+            StatusMode::WhenBusy => usize::from(status),
+        };
+        usize::from(self.title) + status + if self.keys { 2 } else { 0 }
     }
 }
 
@@ -114,6 +141,13 @@ pub struct FrameTitle {
     pub name: String,
     pub modified: bool,
     pub read_only: bool,
+}
+
+/// The cursor's place: 1-based, with `line` absent where the buffer cannot state one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Position {
+    pub line: Option<u64>,
+    pub column: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1493,7 +1527,7 @@ impl Editor {
         }
         self.area = area;
         self.retake_sidebar_columns();
-        self.text_h = (area.h as usize).saturating_sub(self.chrome.rows());
+        self.text_h = (area.h as usize).saturating_sub(self.chrome_rows());
         // A picture's box follows the frame, as a PNG's view does in
         // `refresh_diff_view`.
         self.recut_picture();
@@ -1503,7 +1537,32 @@ impl Editor {
     pub fn set_chrome(&mut self, chrome: Chrome) {
         self.chrome = chrome;
         if !self.area.is_empty() {
-            self.text_h = (self.area.h as usize).saturating_sub(chrome.rows());
+            self.text_h = (self.area.h as usize).saturating_sub(self.chrome_rows());
+        }
+    }
+
+    /// Whether the status row is on this frame: `WhenBusy` shows it only while it has a prompt or
+    /// a message, and gives the row to the text otherwise.
+    pub fn status_shown(&self) -> bool {
+        self.chrome.status == StatusMode::Always
+            || self.prompt.is_some()
+            || self.status_text().is_some()
+    }
+
+    /// The rows the chrome takes this frame. The draw, the click mapping and the scroll all come
+    /// through here, so they cannot disagree about where the text ends.
+    pub fn chrome_rows(&self) -> usize {
+        self.chrome.rows_when(self.status_shown())
+    }
+
+    /// Where the cursor is, as the status row says it: a 1-based column, and the file's line when
+    /// the buffer can state one — a tail's row is not the file's line until the count has said
+    /// which line it is.
+    pub fn position(&self) -> Position {
+        let cur = self.bs().cursor;
+        Position {
+            line: self.bs().line_number(cur.row),
+            column: cur.col + 1,
         }
     }
 

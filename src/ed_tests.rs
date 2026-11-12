@@ -5345,6 +5345,22 @@ fn the_gutter_and_the_status_line_wait_for_the_count() {
     );
 }
 
+/// `Editor::position` is the number the status row would show, for a host drawing its own:
+/// 1-based, and the line absent in the one state the row says `Ln ?` in.
+#[test]
+fn the_position_is_the_status_rows_own_number() {
+    let mut ed = test_ed("a\nbb\nccc\n");
+    ed.bs_mut().cursor = Pos { row: 2, col: 1 };
+    let p = ed.position();
+    assert_eq!((p.line, p.column), (Some(3), 2), "line and column, 1-based");
+
+    // A tail before its count: the row is known and the file's line is not, which is exactly
+    // the frame the status row leaves blank.
+    ed.bs_mut().lines_before = None;
+    assert_eq!(ed.position().line, None);
+    assert_eq!(ed.position().column, 2, "the column does not wait for it");
+}
+
 /// Rows past the settled boundary are never parsed, asserted on the parse window.
 /// A `.rs` name: `syntax::detect` has no language for `.log`.
 #[test]

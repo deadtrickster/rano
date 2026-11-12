@@ -12,7 +12,11 @@
 //! A line the reader cannot use is reported, never silently skipped — a typo and a deliberate
 //! default must not draw the same screen. [`Palette::None`] ignores the theme, so a replay diff
 //! and a CI log stay plain whatever is installed.
+//!
+//! [`set_active`] is the process's theme; [`scoped`] lends one to a single draw, so a host that
+//! draws two editors in one process can draw each under its own.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -56,21 +60,68 @@ pub fn set_active(theme: Option<Theme>) {
     })
 }
 
-/// The active theme's name, when there is one.
+thread_local! {
+    // Themes a draw borrowed for its own duration, innermost last. Thread-local even in the
+    // build the binary ships: one process draws two editors, each under its own theme.
+    static SCOPED: RefCell<Vec<Option<Theme>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Draw the rest of this thread's frame under `theme`: its roles win for the duration of `f`, over
+/// whatever [`set_active`] named, and are put back even if `f` panics.
+///
+/// `None` is no override — the active theme, which is what a host that resolved no rano theme of
+/// its own wants. The scope is this thread's, so a head can wrap one pane's draw and its emit and
+/// leave every other pane under the theme it had.
+pub fn scoped<T>(theme: Option<Theme>, f: impl FnOnce() -> T) -> T {
+    let theme = theme.filter(|t| !t.roles.is_empty());
+    SCOPED.with(|s| s.borrow_mut().push(theme));
+    // Popped by a guard, because a draw that panics must not leave the frame's theme behind.
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            SCOPED.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+    }
+    let _pop = Pop;
+    f()
+}
+
+/// The active theme's name, when there is one — a scope's while `scoped` is drawing.
 pub fn active_name() -> Option<String> {
+    let name = |t: &Option<Theme>| t.as_ref().map(|t| t.name.clone()).filter(|n| !n.is_empty());
+    if let Some(name) = scoped_with(name) {
+        return Some(name);
+    }
     with_active(|a| a.read().ok()?.as_ref().map(|t| t.name.clone()))
 }
 
-/// The active theme's look for `r`, when it overrides it. [`Palette::look`]'s first question.
+/// The look for `r` from the innermost scope that names it. `None` when no scope does.
+fn scoped_with<T>(mut f: impl Fn(&Option<Theme>) -> Option<T>) -> Option<T> {
+    SCOPED.with(|s| {
+        let s = s.borrow();
+        s.iter().rev().find_map(&mut f)
+    })
+}
+
+/// The look for `r`: the drawing theme's first, then the process's. [`Palette::look`]'s first
+/// question.
 pub(crate) fn override_for(r: Role) -> Option<Look> {
-    with_active(|a| {
-        let a = a.read().ok()?;
-        a.as_ref()?
+    let look = |t: &Option<Theme>| -> Option<Look> {
+        t.as_ref()?
             .roles
             .iter()
             .rev()
             .find(|(role, _)| *role == r)
             .map(|(_, look)| *look)
+    };
+    if let Some(look) = scoped_with(look) {
+        return Some(look);
+    }
+    with_active(|a| {
+        let a = a.read().ok()?;
+        look(&a)
     })
 }
 
@@ -382,6 +433,85 @@ mod tests {
         assert_eq!(active_name().as_deref(), Some("t"));
         set_active(None);
         assert_eq!(Palette::Colour.look(Role::Heading), default);
+        assert_eq!(active_name(), None);
+    }
+
+    /// One process, two themes: the scope is the draw's, and the process's theme comes back
+    /// after it — nesting down to the innermost scope that names the role.
+    #[test]
+    fn a_scoped_theme_is_the_draws_and_the_active_one_survives_it() {
+        let (red, _) = Theme::parse("red", "heading = \"fg:#ff0000\"\ncode = \"fg:#ff0000\"\n");
+        let (blue, _) = Theme::parse("blue", "heading = \"fg:#0000ff\"\n");
+        let (green, _) = Theme::parse("green", "heading = \"fg:#00ff00\"\n");
+        set_active(Some(red.clone()));
+        assert_eq!(
+            Palette::Colour.look(Role::Heading).fg,
+            Some(Hue::Rgb(255, 0, 0))
+        );
+
+        let (first, second) = (
+            scoped(Some(blue.clone()), || Palette::Colour.look(Role::Heading)),
+            scoped(Some(green.clone()), || Palette::Colour.look(Role::Heading)),
+        );
+        assert_eq!(first.fg, Some(Hue::Rgb(0, 0, 255)));
+        assert_eq!(second.fg, Some(Hue::Rgb(0, 255, 0)));
+        assert_eq!(
+            Palette::Colour.look(Role::Heading).fg,
+            Some(Hue::Rgb(255, 0, 0)),
+            "the frame after the two draws"
+        );
+
+        // The innermost scope names the draw, and each scope is underneath only its own roles.
+        scoped(Some(blue), || {
+            assert_eq!(active_name().as_deref(), Some("blue"));
+            scoped(Some(green), || {
+                assert_eq!(active_name().as_deref(), Some("green"))
+            });
+        });
+    }
+
+    #[test]
+    fn a_scope_naming_no_role_falls_through_to_the_one_around_it() {
+        let (red, _) = Theme::parse("red", "code = \"fg:#ff0000\"\n");
+        let (green, _) = Theme::parse("green", "heading = \"fg:#00ff00\"\n");
+        scoped(Some(red), || {
+            scoped(Some(green), || {
+                assert_eq!(
+                    Palette::Colour.look(Role::Code).fg,
+                    Some(Hue::Rgb(255, 0, 0)),
+                    "the enclosing scope's `code`"
+                );
+            });
+            assert_eq!(
+                Palette::Colour.look(Role::Heading),
+                Palette::Colour.base_look(Role::Heading),
+                "green is gone"
+            );
+        });
+    }
+
+    #[test]
+    fn a_scope_of_none_is_no_override_and_a_panic_leaves_nothing_behind() {
+        let (red, _) = Theme::parse("red", "heading = \"fg:#ff0000\"\n");
+        set_active(Some(red));
+        assert_eq!(
+            scoped(None, || Palette::Colour.look(Role::Heading).fg),
+            Some(Hue::Rgb(255, 0, 0)),
+            "None inherits the active theme"
+        );
+        let (green, _) = Theme::parse("green", "heading = \"fg:#00ff00\"\n");
+        let panicked = std::panic::catch_unwind(|| {
+            scoped(Some(green), || {
+                panic!("a draw that fails");
+            });
+        });
+        assert!(panicked.is_err());
+        assert_eq!(
+            Palette::Colour.look(Role::Heading).fg,
+            Some(Hue::Rgb(255, 0, 0)),
+            "the scope popped on the way out"
+        );
+        set_active(None);
         assert_eq!(active_name(), None);
     }
 

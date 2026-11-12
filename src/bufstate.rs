@@ -35,6 +35,9 @@ pub struct BufferState {
     /// TODO.md markers the format cannot express, in the same shape as
     /// `syntax_diags` so the gutter and M-D work on them unchanged.
     pub todo_diags: Vec<lsp::Diagnostic>,
+    /// A host's marks for this file's lines: citations, notes, suggested and applied
+    /// hunks. They ride `all_diags`, so the gutter and M-D reach them unchanged.
+    pub marks: Vec<crate::marks::Mark>,
     pub lsp_dirty: bool,
     pub lsp_last_send: Instant,
     /// Handshake in flight: the `buf.name` it was started for, so a mismatch on
@@ -144,6 +147,7 @@ impl BufferState {
             lsp_diags: Vec::new(),
             syntax_diags: Vec::new(),
             todo_diags: Vec::new(),
+            marks: Vec::new(),
             lsp_dirty: false,
             lsp_last_send: Instant::now(),
             lsp_starting: None,

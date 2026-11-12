@@ -219,6 +219,12 @@ pub struct Editor {
     pub(crate) highlight_dirty: bool,
     pub(crate) diag_dirty: bool,
     pub(crate) diag_last_edit: Instant,
+    /// What the operator decided about a hunk since the last prompt, for
+    /// [`Editor::take_mark_outcomes`]: the host says each one once.
+    pub(crate) mark_outcomes: Vec<(String, crate::marks::Outcome)>,
+    /// The id of the mark whose hunk the open view draws, so leaving it is leaving the
+    /// hunk rather than a host's review.
+    pub(crate) mark_view: Option<String>,
 }
 
 pub struct CompletionPopup {
@@ -336,6 +342,8 @@ impl Editor {
             highlight_dirty: true,
             diag_dirty: true,
             diag_last_edit: Instant::now(),
+            mark_outcomes: Vec::new(),
+            mark_view: None,
         };
         ed.lsp_sync();
         ed
@@ -896,6 +904,9 @@ impl Editor {
             bs.lsp_dirty = true;
             bs.wrap_dirty_row = row;
         }
+        // A citation about lines that no longer say what they said is gone; a hunk
+        // stays and turns stale, because it is work not yet done.
+        self.marks_after_edit();
         // Not highlighted here: the frame does it once, so a burst of keystrokes
         // between frames costs one highlight.
         self.highlight_dirty = true;
@@ -903,11 +914,12 @@ impl Editor {
         self.diag_last_edit = Instant::now();
     }
 
-    /// The union of tree-sitter and LSP diagnostics, row-major.
+    /// The union of tree-sitter, mark and LSP diagnostics, row-major.
     pub fn all_diags(&self) -> Vec<lsp::Diagnostic> {
         let bs = self.bs();
         let mut out = bs.syntax_diags.clone();
         out.extend(bs.todo_diags.iter().cloned());
+        out.extend(self.mark_diags());
         out.extend(bs.lsp_diags.iter().cloned());
         out.sort_by_key(|d| (d.line, d.col, d.end_col));
         out
@@ -4135,6 +4147,9 @@ impl Editor {
         }
         if let Some(job) = &self.bs().exec_job {
             return Some(format!("Running: {}", job.cmd));
+        }
+        if let Some(s) = self.mark_status() {
+            return Some(s);
         }
         if let Some(s) = self.lsp_status() {
             return Some(s);

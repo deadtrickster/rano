@@ -220,7 +220,8 @@ impl Editor {
     }
 
     /// M-D: the next diagnostic below the cursor, wrapping to the first. Cols are
-    /// UTF-16 units and can exceed the char count.
+    /// UTF-16 units and can exceed the char count. Landing on a mark that carries a hunk
+    /// draws it, so a suggestion is read before it is taken.
     pub(crate) fn jump_next_diag(&mut self) {
         let ds_all = self.all_diags();
         if ds_all.is_empty() {
@@ -238,5 +239,10 @@ impl Editor {
         let bs = self.bs_mut();
         bs.cursor = target;
         bs.mark = None;
+        // A hunk is shown, a plain diagnostic is not: chasing one mark closes the last
+        // mark's view instead of walking the file under a stale picture.
+        if !self.show_mark_hunk() && self.mark_view.is_some() {
+            self.close_view();
+        }
     }
 }

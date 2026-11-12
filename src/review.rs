@@ -45,10 +45,12 @@ impl Editor {
         Ok(())
     }
 
-    /// The current buffer's review, drawn as a diff view. False when it has none.
+    /// The current buffer's review, drawn as a diff view: the change a host handed over,
+    /// or the hunk under the cursor when there is none. False when there is neither.
     pub(crate) fn show_review(&mut self) -> bool {
-        let Some(change) = self.bs().review.clone() else {
-            return false;
+        let change = match self.bs().review.clone() {
+            Some(c) => c,
+            None => return self.show_mark_hunk(),
         };
         let name = self.buffer_name(self.cur);
         self.open_view(Source::Review { name, change });

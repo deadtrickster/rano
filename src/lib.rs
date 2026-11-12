@@ -78,6 +78,9 @@ mod linecount;
 mod load_ctrl;
 mod loader;
 pub mod logblocks;
+// Marks a host puts beside the text: citations, notes, suggested and applied hunks, and
+// the accept/reject the editor alone can carry out because it holds the buffer.
+pub mod marks;
 // Log search: pattern-matching a file's BYTES in blocks, forward or backward, interruptible —
 // over what the FILE holds, not the buffer. `pub` because it has no caller in the editor yet.
 pub mod logsearch;

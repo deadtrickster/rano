@@ -77,6 +77,42 @@ text, `M-p` shows the change again, and `M-s` sends the reader's place from eith
 
 The change is the host's snapshot of the edit, not a re-diff against the buffer.
 
+## Marks
+
+`rano::marks` puts line-addressed things beside the text and lets the editor decide them,
+because only the editor holds the buffer a decision has to land in.
+
+```rust
+use rano::marks::{Mark, Severity};
+
+// A reply cited these lines, and suggests what they should say instead.
+ed.set_marks(
+    Path::new("/src/article.md"),
+    "reply:item-42",
+    vec![Mark::suggest("m1", 41, 47, anchor_lines, "the replacement, as many lines as it takes")],
+);
+ed.set_marks(path, "reply:item-42", vec![Mark::note("n1", 3, 3, anchor, Severity::Warn, "no source")]);
+ed.clear_marks(Some("reply:item-42")); // or None for every mark
+for (id, outcome) in ed.take_mark_outcomes() {
+    // Accepted | Rejected | Reverted, once each, for the next prompt
+}
+```
+
+A mark is 1-based inclusive lines, an optional char range on one line, a kind (`cite`,
+`note`, `suggest`, `edit`), a severity, the one line of text the status row shows at it, and
+the lines it expects to find — its anchor. `M-d` walks marks with the diagnostics and draws a
+hunk (a `suggest` or an `edit`) as a review; `a` takes it, `r` drops it, `A` and `R` do that
+for every hunk in the file, and the palette has the wider scopes — one reply's hunks, or every
+file's. A suggestion taken replaces the lines as one undo step, unsaved; an edit reverted puts
+its `before` back the same way.
+
+Marks ride the diagnostics, so the gutter signs every line of a range without any drawing
+code of its own. They are not stored: closing the buffer drops them, and a host sets them
+again from what a snapshot replays. An edit inside a marked range drops a `cite` or a `note`,
+and makes a `suggest` or an `edit` stale — drawn as a hint, saying so on the status row, and
+refused by `a`: the anchor, not a guess about line shifts, is what decides. `marks()` and
+`mark_stale(id)` answer the same two questions from outside, for a host that draws its own.
+
 ## Pieces without the editor
 
  `rano::buffer` (the text model), `rano::syntax`

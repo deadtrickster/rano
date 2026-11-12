@@ -10,6 +10,7 @@ use crate::keys::KeyOutcome;
 
 use crate::diffview::{ConflictAct, DiffAct, DiffKind};
 use crate::editor::Editor;
+use crate::marks::MarkAct;
 use crate::picker::PickAct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -661,6 +662,69 @@ pub fn commands() -> &'static [Command] {
                 "Resolve with both sides, theirs first.",
                 |e| e.diff_act(DiffAct::Conflict(ConflictAct::Take(Take::TheirsThenOurs))),
             ),
+            cmd(
+                "mark-accept",
+                "Accept Hunk",
+                Diff,
+                "Take the suggestion under the cursor, or keep the edit already on disk.",
+                |e| e.mark_act(MarkAct::Accept),
+            ),
+            cmd(
+                "mark-reject",
+                "Reject Hunk",
+                Diff,
+                "Drop the suggestion under the cursor, or put the edited lines back.",
+                |e| e.mark_act(MarkAct::Reject),
+            ),
+            cmd(
+                "mark-accept-all",
+                "Accept Every Hunk",
+                Diff,
+                "Take every suggestion and keep every edit this file's marks hold.",
+                |e| e.mark_act(MarkAct::AcceptAll),
+            ),
+            cmd(
+                "mark-reject-all",
+                "Reject Every Hunk",
+                Diff,
+                "Drop every suggestion and revert every edit this file's marks hold.",
+                |e| e.mark_act(MarkAct::RejectAll),
+            ),
+            cmd(
+                "mark-accept-reply",
+                "Accept This Reply's Hunks",
+                Edit,
+                "Take every suggestion and keep every edit one reply or call set, in every file.",
+                |e| e.mark_act(MarkAct::AcceptReply),
+            ),
+            cmd(
+                "mark-reject-reply",
+                "Reject This Reply's Hunks",
+                Edit,
+                "Drop or revert every hunk one reply or call set, in every file.",
+                |e| e.mark_act(MarkAct::RejectReply),
+            ),
+            cmd(
+                "mark-accept-every",
+                "Accept Every Hunk in Every File",
+                Edit,
+                "Take every suggestion and keep every edit, in every open file.",
+                |e| e.mark_act(MarkAct::AcceptEvery),
+            ),
+            cmd(
+                "mark-reject-every",
+                "Reject Every Hunk in Every File",
+                Edit,
+                "Drop or revert every hunk, in every open file.",
+                |e| e.mark_act(MarkAct::RejectEvery),
+            ),
+            cmd(
+                "mark-clear",
+                "Clear Marks",
+                Edit,
+                "Drop every mark in every open file, decided or not.",
+                |e| e.clear_marks(None),
+            ),
             cmd("list-up", "Up", List, "Select the previous item.", |e| {
                 e.picker_act(PickAct::Move(-1))
             }),
@@ -955,6 +1019,11 @@ impl Keymaps {
             .bind("M-q", "ask-position")
             .bind("M-c", "sidebar")
             .bind("M-j", "sidebar-enter")
+            // A hunk decided where it is read: the letters the conflicts map uses.
+            .bind("a", "mark-accept")
+            .bind("r", "mark-reject")
+            .bind("A", "mark-accept-all")
+            .bind("R", "mark-reject-all")
             .bind("M-p", "diff-close");
 
         let mut list = Keymap::new("list");

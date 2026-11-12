@@ -79,7 +79,7 @@ In the search prompt `M-C` toggles case sensitivity and `M-R` toggles regex.
 | `M-.` | Jump to the definition of the symbol at the cursor (LSP) |
 | `M-?` | List every usage of the symbol at the cursor (LSP). Enter jumps to one |
 | `M-,` | Jump back, one press per jump, from a definition or a usage |
-| `M-d` | Jump to the next diagnostic, wrapping |
+| `M-d` | Jump to the next mark or diagnostic, wrapping |
 
 `M-x set-mode` sets the current buffer's language. `plain` stops the guessing, `auto` puts it
 back.
@@ -138,6 +138,24 @@ Previews, diffs, pictures, reviews and the conflict view replace the text's keys
 | `Esc`, `q`, `RET`, `C-g`, `C-c`, `M-p` | Back to the text |
 
 A markdown view and a picture are one column, so `s` says there is nothing to split.
+
+## Hunks
+
+A mark a host set — a suggested replacement, or an edit already on disk — is drawn as a
+review: `before` against `after`, over the file. `M-d` walks them with the diagnostics.
+
+| Key | What it does |
+|---|---|
+| `a` | Take the suggestion, or keep the edit: the hunk's mark goes |
+| `r` | Drop the suggestion, or put the edited lines back |
+| `A` / `R` | The same for every hunk in the file |
+| `M-d` | The next hunk or diagnostic |
+
+Taking a suggestion and reverting an edit are each one undo step (`M-u`), and neither saves:
+the buffer is left modified for you to read before `C-o`.
+
+The palette (`M-x`) has the wider scopes: accept or reject every hunk one reply set, accept or
+reject every hunk in every open file, and clear every mark.
 
 ## Merge conflicts
 

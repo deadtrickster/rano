@@ -206,7 +206,7 @@ impl DiffView {
                 cells.0, cells.1
             ),
             Source::Review { name, .. } => format!(
-                " Review {name} ({view})   s: split/unified  M-s: send your place  Esc: to the change in the text"
+                " Review {name} ({view})   s: split/unified  a/r: accept/reject  A/R: every hunk  M-s: send your place  Esc: to the text"
             ),
             Source::Conflict {
                 current,
@@ -454,6 +454,7 @@ impl Editor {
 
     /// A view belongs to the buffer it was opened on: making another current closes it.
     pub(crate) fn close_view(&mut self) {
+        self.mark_view = None;
         if self.diff_view.take().is_some() {
             self.sync_image();
         }

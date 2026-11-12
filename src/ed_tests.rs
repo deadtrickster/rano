@@ -1725,6 +1725,175 @@ fn m_a_sends_the_question_with_the_place() {
     );
 }
 
+/// **`M-k f` asks the fact check about the selection**: the preset, where its answer lands
+/// and the place, in one event. `M-k k` is the same event with nothing to send yet.
+#[test]
+fn m_k_f_sends_the_preset_the_answer_mode_and_the_selection() {
+    use crate::ask::{Answer, AskEvent};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut ed = test_ed("The sky is green.\nWater is wet.\n");
+    let got: Rc<RefCell<Vec<AskEvent>>> = Rc::default();
+    let sink = got.clone();
+    ed.on_ask = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("asked".into())
+    }));
+    ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
+    ed.bs_mut().cursor = Pos { row: 0, col: 17 };
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('f'), Mods::NONE);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 1, "one ask, one event");
+        assert_eq!(g[0].preset, "fact-check");
+        assert_eq!(g[0].answer, Answer::Notes);
+        assert!(g[0].prompt.contains("factual claim"), "{}", g[0].prompt);
+        let s = g[0].send.selection.as_ref().expect("the selection");
+        assert_eq!(s.text, "The sky is green.");
+        assert_eq!((s.start.line, s.start.column), (1, 1));
+        assert_eq!((s.end.line, s.end.column), (1, 18));
+        assert_eq!(g[0].send.cursor.line, 1);
+        assert_eq!(g[0].send.path, None, "an unnamed buffer has no path");
+        assert_eq!(g[0].send.ask, None, "the prompt travels in the event");
+    }
+    // `M-k k`: no prompt of its own, because the operator types the question.
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('k'), Mods::NONE);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[1].preset, "ask");
+        assert!(g[1].prompt.is_empty());
+        assert_eq!(g[1].answer, Answer::Chat);
+        assert!(g[1].send.selection.is_some(), "the place stays attached");
+    }
+    // `M-k c` is the clear-marks door, which marks (R3) own; the stub is honest about it.
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('c'), Mods::NONE);
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(msg.contains("marks"), "{msg}");
+}
+
+/// **A host that only takes sends still hears an ask**, with the prompt as the question; and
+/// with neither callback the reader is told, rather than getting silence.
+#[test]
+fn an_ask_falls_back_to_the_send_callback_and_says_when_there_is_none() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut ed = test_ed("one line\n");
+    let got: Rc<RefCell<Vec<crate::send::SendEvent>>> = Rc::default();
+    let sink = got.clone();
+    ed.on_send = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("sent".into())
+    }));
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('r'), Mods::NONE);
+    {
+        let g = got.borrow();
+        assert_eq!(g.len(), 1);
+        assert!(g[0].ask.as_deref().is_some_and(|a| a.contains("Rewrite")));
+        assert_eq!(
+            g[0].selection.as_ref().map(|s| s.text.as_str()),
+            Some("one line")
+        );
+    }
+    let mut ed = test_ed("x\n");
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::NONE);
+    let msg = ed.status_text().unwrap_or_default();
+    assert!(msg.contains("Nowhere to ask"), "{msg}");
+    assert!(
+        msg.contains("send_command"),
+        "the message names the key: {msg}"
+    );
+}
+
+/// **The key bar lists the presets after `M-k`**, so the chord and the menu are one thing:
+/// a second key picks, and the labels are the config's own.
+#[test]
+fn the_key_bar_lists_the_ask_presets_after_m_k() {
+    let mut ed = test_ed("x\n");
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    let bar = ed.bar_items();
+    for label in [
+        "explain",
+        "fact check",
+        "fill the gap",
+        "rewrite",
+        "Ask…",
+        "Clear marks",
+    ] {
+        assert!(
+            bar.iter().any(|(_, t)| t == label),
+            "{label} is not in the bar: {bar:?}"
+        );
+    }
+    assert!(
+        bar.iter().any(|(k, t)| k == "f" && t == "fact check"),
+        "the preset's own key: {bar:?}"
+    );
+    // A prefixed key is abandonable, as every other prefix is.
+    assert!(ed.pending_card().is_some() || ed.card_due().is_some());
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    assert!(
+        ed.bar_items().iter().any(|(k, _)| k == "M-k"),
+        "the bar names M-k"
+    );
+    // The notation setting spells what it shows; the keys themselves do not change.
+    ed.config.notation = crate::keymap::Notation::Nano;
+    assert!(
+        ed.bar_items().iter().any(|(k, _)| k == "M-K"),
+        "nano's spelling"
+    );
+}
+
+/// **With no mark the target is the paragraph in prose and the line in code**, which is
+/// what an ask is about when the reader has only put the cursor somewhere.
+#[test]
+fn with_no_mark_an_ask_targets_the_paragraph_or_the_line() {
+    use crate::ask::AskEvent;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let got: Rc<RefCell<Vec<AskEvent>>> = Rc::default();
+    let sink = got.clone();
+    let mut ed =
+        test_ed("First thing said.\nStill the first.\n\nA second paragraph,\nover two lines.\n");
+    ed.on_ask = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("asked".into())
+    }));
+    ed.bs_mut().cursor = Pos { row: 3, col: 4 };
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::NONE);
+    {
+        let g = got.borrow();
+        let s = g[0].send.selection.as_ref().expect("the paragraph");
+        assert_eq!(s.text, "A second paragraph,\nover two lines.");
+        assert_eq!((s.start.line, s.start.column), (4, 1));
+        assert_eq!((s.end.line, s.end.column), (5, 16));
+        assert_eq!(g[0].send.cursor.line, 4, "the cursor stays where it was");
+    }
+    // A code buffer asks about its line, not the block around it.
+    let mut ed = test_ed("fn a() {\n    body();\n}\n");
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/rano_ask_target.rs"));
+    let got: Rc<RefCell<Vec<AskEvent>>> = Rc::default();
+    let sink = got.clone();
+    ed.on_ask = Some(Box::new(move |e| {
+        sink.borrow_mut().push(e.clone());
+        Ok("asked".into())
+    }));
+    ed.bs_mut().cursor = Pos { row: 1, col: 4 };
+    press(&mut ed, KeyCode::Char('k'), Mods::ALT);
+    press(&mut ed, KeyCode::Char('e'), Mods::NONE);
+    let g = got.borrow();
+    let s = g[0].send.selection.as_ref().expect("the line");
+    assert_eq!(s.text, "    body();");
+    assert_eq!((s.start.line, s.start.column), (2, 1));
+    assert_eq!((s.end.line, s.end.column), (2, 12));
+}
+
 /// **The sidebar splits the pane and holds a conversation**, letibot's rooms-sidebar shape: the
 /// text keeps its minimum, the border is the rule, and M-J takes the keyboard into the compose
 /// line.

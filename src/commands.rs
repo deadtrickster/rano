@@ -514,6 +514,21 @@ pub fn commands() -> &'static [Command] {
                 |e| e.send_position(),
             ),
             cmd(
+                "ask",
+                "Ask…",
+                Host,
+                "Ask about the selection, typing the question: it goes to the host's composer \
+                 with the place attached.",
+                |e| e.ask_free(),
+            ),
+            cmd(
+                "clear-marks",
+                "Clear marks",
+                Host,
+                "Drop every mark on this buffer.",
+                |e| e.ask_clear_marks(),
+            ),
+            cmd(
                 "install-update",
                 "Install Update",
                 Host,
@@ -1074,7 +1089,7 @@ impl Keymaps {
             .bind("C-g", "palette-cancel")
             .bind("M-x", "palette-cancel");
 
-        Keymaps {
+        let mut k = Keymaps {
             global: g,
             diff,
             save,
@@ -1089,7 +1104,22 @@ impl Keymaps {
             buffers,
             page,
             palette,
+        };
+        // The compiled-in presets, so `Keymaps::standard()` alone has a working M-k;
+        // `Editor::new` binds the host's config over them.
+        k.bind_ask(&crate::ask::default_presets());
+        k
+    }
+
+    /// `M-k` from the presets: a key each, then ask… and clear marks. The map is
+    /// replaced whole, so a key a newer config dropped does not linger.
+    pub fn bind_ask(&mut self, presets: &[crate::ask::AskPreset]) {
+        let mut ask = Keymap::new("ask");
+        for p in presets {
+            ask.bind(&p.key.emacs(), &format!("{}{}", crate::ask::BIND, p.id));
         }
+        ask.bind("k", "ask").bind("c", "clear-marks");
+        self.global.set_prefix("M-k", ask);
     }
 }
 
@@ -1131,6 +1161,7 @@ pub const BAR: &[&str] = &[
     "buffer-list",
     "close-buffer",
     "diff-preview",
+    "@M-k",
     "send-position",
 ];
 
@@ -1222,6 +1253,12 @@ impl Editor {
                 self.pending.describe = describing;
             }
             Decision::Run(name) if describing => self.show_description(&seq, Some(&name)),
+            // A preset's key binds `ask:<id>`: presets are config, not table commands, so the
+            // dispatcher runs them before an unknown name is handed to the host.
+            Decision::Run(name) if crate::ask::preset_of(&name).is_some() => {
+                let id = crate::ask::preset_of(&name).unwrap_or_default().to_owned();
+                self.ask(&id)
+            }
             Decision::Run(name) if command(&name).is_none() => return KeyOutcome::Host(name),
             // The editor hands back a key it has no use for (`keys.rs:8-21`). With no mark, no view
             // and no prompt there is nothing of the editor's to cancel, so Esc belongs to the host:
@@ -1316,7 +1353,7 @@ impl Editor {
         if !self.pending.keys.is_empty()
             && let Lookup::Prefix(m) = lookup(&stack, &self.pending.keys)
         {
-            return entries_of(m, nano);
+            return entries_of(m, self);
         }
         if self
             .editor_keymaps()
@@ -1367,8 +1404,10 @@ pub(crate) fn prefix_title(m: &Keymap) -> String {
     format!("{first}{}…", c.as_str())
 }
 
-/// A map's entries as `(key, title)`, one per command (its first key).
-pub(crate) fn entries_of(m: &Keymap, nano: crate::keymap::Notation) -> Vec<(String, String)> {
+/// A map's entries as `(key, title)`, one per command (its first key). The title of
+/// an `ask:<id>` entry is its preset's label, which only the editor can find.
+pub(crate) fn entries_of(m: &Keymap, ed: &Editor) -> Vec<(String, String)> {
+    let nano = ed.config.notation;
     let key = |k: &Key| crate::help::notation(nano, std::slice::from_ref(k));
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -1376,8 +1415,8 @@ pub(crate) fn entries_of(m: &Keymap, nano: crate::keymap::Notation) -> Vec<(Stri
         match e {
             Entry::Command(c) if !seen.contains(&c.as_str()) => {
                 seen.push(c);
-                if let Some(cmd) = command(c) {
-                    out.push((key(k), cmd.title.to_string()));
+                if let Some(title) = ed.entry_title(c) {
+                    out.push((key(k), title));
                 }
             }
             Entry::Prefix(p) => out.push((key(k), prefix_title(p))),
@@ -1416,14 +1455,51 @@ mod tests {
         let k = Keymaps::standard();
         for m in all_maps(&k) {
             for (seq, c) in m.flatten() {
+                // A preset's key binds `ask:<id>`, which is config rather than a table
+                // command; the dispatcher runs one itself.
                 assert!(
-                    command(&c).is_some(),
+                    command(&c).is_some() || crate::ask::preset_of(&c).is_some(),
                     "{} in {} names no command {c}",
                     seq_emacs(&seq),
                     m.name
                 );
             }
         }
+    }
+
+    /// Every `ask:<id>` the standard map binds names a compiled-in preset, and the two
+    /// fixed keys are there: a typo would otherwise be a key that flashes and does nothing.
+    #[test]
+    fn the_ask_prefix_binds_the_presets_and_its_two_fixed_keys() {
+        let k = Keymaps::standard();
+        let ask = match lookup(&[&k.global], &crate::keymap::parse_seq("M-k").unwrap()) {
+            Lookup::Prefix(m) => m,
+            other => panic!("M-k is not a prefix: {other:?}"),
+        };
+        let defaults = crate::ask::default_presets();
+        let mut seen: usize = 0;
+        for (_, name) in ask.flatten() {
+            match crate::ask::preset_of(&name) {
+                Some(id) => {
+                    assert!(
+                        defaults.iter().any(|p| p.id == id),
+                        "{id} is no compiled-in preset"
+                    );
+                    seen += 1;
+                }
+                None => assert!(
+                    command(&name).is_some(),
+                    "{name} is neither a command nor a preset"
+                ),
+            }
+        }
+        assert_eq!(seen, defaults.len(), "every preset has a key");
+        let fixed = ask.flatten();
+        assert!(fixed.iter().any(|(_, n)| n == "ask"), "no free-text key");
+        assert!(
+            fixed.iter().any(|(_, n)| n == "clear-marks"),
+            "no clear-marks key"
+        );
     }
 
     /// Every global command is reachable by a key or by `M-x`, and the bar's

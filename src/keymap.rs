@@ -360,6 +360,36 @@ impl Keymap {
         map
     }
 
+    /// Put `map` under `seq` as a prefix, replacing what led there. A prefix a config
+    /// decides (`M-k`) is rebuilt whole, so a key the newer set dropped really goes.
+    pub fn set_prefix(&mut self, seq: &str, map: Keymap) -> &mut Keymap {
+        let keys = parse_seq(seq).unwrap_or_else(|| panic!("bad key sequence {seq:?}"));
+        assert!(!keys.is_empty(), "empty key sequence");
+        self.set_prefix_keys(&keys, map);
+        self
+    }
+
+    fn set_prefix_keys(&mut self, keys: &[Key], map: Keymap) {
+        let (first, rest) = (keys[0], &keys[1..]);
+        if rest.is_empty() {
+            let entry = Entry::Prefix(map);
+            match self.entries.iter_mut().find(|(k, _)| *k == first) {
+                Some((_, e)) => *e = entry,
+                None => self.entries.push((first, entry)),
+            }
+            return;
+        }
+        if !self.entries.iter().any(|(k, _)| *k == first) {
+            let name = first.emacs();
+            self.entries
+                .push((first, Entry::Prefix(Keymap::new(&name))));
+        }
+        match self.entries.iter_mut().find(|(k, _)| *k == first) {
+            Some((_, Entry::Prefix(m))) => m.set_prefix_keys(rest, map),
+            _ => panic!("a prefix path goes through {}, a command", first.emacs()),
+        }
+    }
+
     /// The entry for one key, with a letter's case folded when only the other
     /// case is bound.
     pub fn get(&self, key: Key) -> Option<&Entry> {

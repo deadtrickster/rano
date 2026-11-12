@@ -188,6 +188,9 @@ pub struct Editor {
     pub(crate) images_held: std::collections::HashMap<u32, (u32, u32)>,
     pub(crate) mouse_arm: bool,
     pub on_send: Option<crate::send_ctrl::OnSend>,
+    /// `M-k`: a quick ask about the selection, preset and answer mode included. A
+    /// host that answers asks sets it; see [`crate::ask`].
+    pub on_ask: Option<crate::ask::OnAsk>,
     pub replace: Option<ReplaceState>,
     pub replace_pos: Option<Pos>,
     pub replace_count: usize,
@@ -316,6 +319,7 @@ impl Editor {
             images_held: std::collections::HashMap::new(),
             mouse_arm: false,
             on_send: None,
+            on_ask: None,
             replace: None,
             replace_pos: None,
             replace_count: 0,
@@ -346,6 +350,7 @@ impl Editor {
             mark_view: None,
         };
         ed.lsp_sync();
+        ed.bind_ask();
         ed
     }
 

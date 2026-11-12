@@ -233,10 +233,19 @@ impl Editor {
                     lines.push(Line::from(Span::styled(also, faint.clone())));
                 }
             }
-            None => lines.push(Line::from(vec![
-                Span::styled(format!("  {keys}"), key),
-                Span::raw(" is not bound to anything here."),
-            ])),
+            // A preset has no command row to name, but it is bound, and saying
+            // otherwise would send the reader looking for a key that works.
+            None => match name.and_then(|n| self.entry_title(n)) {
+                Some(title) => lines.push(Line::from(vec![
+                    Span::styled(format!("  {keys}"), key),
+                    Span::raw(" asks "),
+                    Span::styled(title, strong),
+                ])),
+                None => lines.push(Line::from(vec![
+                    Span::styled(format!("  {keys}"), key),
+                    Span::raw(" is not bound to anything here."),
+                ])),
+            },
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -290,6 +299,18 @@ impl Editor {
                 })
                 .collect();
             sections.push((g.title().to_string(), entries));
+        }
+        // The ask presets are config, not commands in the table: their keys and labels
+        // come from the editor, which is also what the key bar reads.
+        if !self.config.ask.is_empty() {
+            let prefix = Key::meta('k');
+            let entries = self
+                .config
+                .ask
+                .iter()
+                .map(|p| (notation(nano, &[prefix, p.key]), p.label.clone()))
+                .collect();
+            sections.push(("Asks".to_string(), entries));
         }
         let k = &self.keymaps;
         for (title, maps) in [

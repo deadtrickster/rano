@@ -974,7 +974,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
     // ---- which-key: a pending prefix's card, above the status row ----
     if let Some((m, keys)) = ed.pending_card() {
         let nano = ed.config.notation;
-        let entries = crate::commands::entries_of(m, nano);
+        let entries = crate::commands::entries_of(m, ed);
         let rows = crate::help::card_rows(&entries, width as usize, &Style::of(Role::Key));
         let n = rows.len().min(text_h.saturating_sub(1));
         let top = status_row.saturating_sub(n as u16 + 1);

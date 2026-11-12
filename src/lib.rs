@@ -5,6 +5,8 @@
 // The agent UI's widgets as rano-owned view models drawn on `render`; nothing
 // here depends on a host's crates.
 pub mod agent;
+// Quick asks on a selection: the presets, and the event a host receives.
+pub mod ask;
 pub mod buffer;
 // Scripts that ship in the binary and unpack into the reader's folder, so a
 // builtin is a file they can read and replace.
@@ -58,6 +60,8 @@ pub mod width;
 // The editor. `editor` and `ui` are the surface a host uses; the rest are the editor's
 // controllers — `impl Editor` blocks split by concern — and private.
 
+// `M-k`: the ask controller, and the target rule.
+mod ask_ctrl;
 // One open document's state, named `crate::BufferState` by the controllers.
 mod bufstate;
 pub use bufstate::BufferState;

@@ -34,6 +34,9 @@ pub struct Config {
     pub capabilities: Vec<String>,
     /// `color.ROLE = "look"` lines, in file order; [`crate::theme::resolve`] reads them.
     pub colors: Vec<(String, String)>,
+    /// The `M-k` presets, compiled in and then changed field by field by
+    /// `ask.<id>.<field>` lines. In the order the key bar shows them.
+    pub ask: Vec<crate::ask::AskPreset>,
 }
 
 /// What a Tab inserts: Go and the Makefile world want a tab, most everything else
@@ -122,6 +125,7 @@ impl Default for Config {
             plugin: None,
             capabilities: Vec::new(),
             colors: Vec::new(),
+            ask: crate::ask::default_presets(),
         }
     }
 }
@@ -153,6 +157,9 @@ pub fn load_from(path: &Path) -> Config {
 
 fn parse_config(text: &str) -> Config {
     let mut cfg = Config::default();
+    // A preset edited field by field: a file that changes only the prompt keeps the
+    // compiled-in key, and a preset it invents needs a key of its own to reach.
+    let mut ask: Vec<(String, Draft)> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -242,10 +249,73 @@ fn parse_config(text: &str) -> Config {
                 cfg.colors
                     .push((key["color.".len()..].to_string(), value.to_string()));
             }
+            _ if key.starts_with("ask.") => {
+                let Some((id, field)) = key["ask.".len()..].rsplit_once('.') else {
+                    continue;
+                };
+                if !ask.iter().any(|(i, _)| i == id) {
+                    ask.push((id.to_string(), Draft::default()));
+                }
+                let Some((_, d)) = ask.iter_mut().find(|(i, _)| i == id) else {
+                    continue;
+                };
+                match field {
+                    "key" => d.key = crate::keymap::Key::parse(value),
+                    "label" => d.label = (!value.is_empty()).then(|| value.to_string()),
+                    "answer" => d.answer = crate::ask::Answer::parse(value),
+                    "prompt" => d.prompt = (!value.is_empty()).then(|| value.to_string()),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
+    cfg.ask = asked(ask);
     cfg
+}
+
+/// The presets as the file left them: the compiled-in ones edited in place, then the
+/// ones it added, in file order — so the key bar's order is the reader's.
+fn asked(drafts: Vec<(String, Draft)>) -> Vec<crate::ask::AskPreset> {
+    let mut presets = crate::ask::default_presets();
+    for (id, d) in drafts {
+        let p = match presets.iter_mut().find(|p| p.id == id) {
+            Some(p) => p,
+            None => {
+                let Some(key) = d.key else { continue };
+                presets.push(crate::ask::AskPreset {
+                    id: id.clone(),
+                    key,
+                    label: id.clone(),
+                    answer: crate::ask::Answer::Chat,
+                    prompt: String::new(),
+                });
+                presets.last_mut().expect("just pushed")
+            }
+        };
+        if let Some(k) = d.key {
+            p.key = k;
+        }
+        if let Some(l) = d.label {
+            p.label = l;
+        }
+        if let Some(a) = d.answer {
+            p.answer = a;
+        }
+        if let Some(t) = d.prompt {
+            p.prompt = t;
+        }
+    }
+    presets
+}
+
+/// One preset's fields as the file gave them; `None` is a field it did not mention.
+#[derive(Default)]
+struct Draft {
+    key: Option<crate::keymap::Key>,
+    label: Option<String>,
+    answer: Option<crate::ask::Answer>,
+    prompt: Option<String>,
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -275,6 +345,39 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_ask_line_changes_one_field_and_can_add_a_preset() {
+        use crate::ask::Answer;
+        use crate::keymap::Key;
+        use crate::term::KeyCode;
+        // One field of a compiled-in preset: the rest stays, so a file that changes
+        // only the prompt does not lose the key or where the answer goes.
+        let c = parse_config("ask.fact-check.prompt = \"Just the wrong ones. # no comment\"\n");
+        let p = c.ask.iter().find(|p| p.id == "fact-check").expect("kept");
+        assert_eq!(p.prompt, "Just the wrong ones. # no comment");
+        assert_eq!(p.key, Key::plain(KeyCode::Char('f')));
+        assert_eq!(p.answer, Answer::Notes);
+
+        // A preset of the file's own, after the compiled-in ones in file order.
+        let c = parse_config(
+            "ask.translate.key = \"t\"\nask.translate.label = \"translate\"\n\
+             ask.translate.answer = suggest\nask.translate.prompt = \"Translate it.\"\n",
+        );
+        let p = c.ask.iter().find(|p| p.id == "translate").expect("added");
+        assert_eq!(p.label, "translate");
+        assert_eq!(p.answer, Answer::Suggest);
+        assert_eq!(c.ask.last().map(|p| p.id.as_str()), Some("translate"));
+        assert_eq!(c.ask.len(), crate::ask::default_presets().len() + 1);
+
+        // No key means no way to reach it; a bad mode or key keeps what was there.
+        let c = parse_config("ask.nokey.label = \"no key\"\n");
+        assert!(c.ask.iter().all(|p| p.id != "nokey"));
+        let c = parse_config("ask.rewrite.answer = poetry\nask.rewrite.key = not-a-key\n");
+        let p = c.ask.iter().find(|p| p.id == "rewrite").expect("kept");
+        assert_eq!(p.answer, Answer::Suggest);
+        assert_eq!(p.key, Key::plain(KeyCode::Char('r')));
+    }
 
     #[test]
     fn send_command_keeps_a_quoted_hash_and_drops_a_trailing_comment() {

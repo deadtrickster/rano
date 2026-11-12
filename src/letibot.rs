@@ -1362,6 +1362,21 @@ mod tests {
 
     /// The verb is a later letibot package's, so its absence is an answer of its own kind and not a
     /// missing daemon: nothing here can start a daemon that this rano could not ask about.
+    /// `ask_with` for a launcher this test just wrote. Another test thread forking while the
+    /// script's write descriptor is still open makes the exec fail with ETXTBSY; that is the
+    /// harness racing itself, so it is retried, and every other answer is returned as it was.
+    fn ask_fresh(folder: &Path, launcher: &Path) -> Result<Where, NoDaemon> {
+        for _ in 0..50 {
+            match ask_with(folder, launcher) {
+                Err(e) if e.to_string().contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => return other,
+            }
+        }
+        ask_with(folder, launcher)
+    }
+
     #[test]
     fn a_launcher_that_is_not_there_is_not_installed() {
         let gone = ask_with(Path::new("/"), Path::new("/nonexistent/letibot"));
@@ -1390,7 +1405,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&launcher, perms).unwrap();
 
-        let said = ask_with(&dir, &launcher).unwrap();
+        let said = ask_fresh(&dir, &launcher).unwrap();
         assert_eq!(said.socket, dir.join("s.sock"));
         assert_eq!(said.workspace, dir.display().to_string());
         assert!(said.up);
@@ -1419,7 +1434,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&launcher, perms).unwrap();
 
-        let said = ask_with(&dir, &launcher).unwrap();
+        let said = ask_fresh(&dir, &launcher).unwrap();
         assert!(!said.up);
         assert!(
             NoDaemon::NotRunning {
@@ -1450,7 +1465,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&launcher, perms).unwrap();
 
-        let said = ask_with(&dir, &launcher);
+        let said = ask_fresh(&dir, &launcher);
         assert_eq!(
             said,
             Err(NoDaemon::NoVerb {
@@ -1496,7 +1511,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&launcher, perms).unwrap();
 
-        let said = ask_with(&dir, &launcher).unwrap();
+        let said = ask_fresh(&dir, &launcher).unwrap();
         assert_eq!(said.socket, dir.join("s.sock"));
         assert!(said.up);
         let _ = std::fs::remove_dir_all(&dir);

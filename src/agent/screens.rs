@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(segment_mark("compacted").plain(), "─── compacted ───");
         assert_eq!(
             unanswered_call("Read", "TODO.md", 2).to_ansi(Palette::Colour),
-            "  \x1b[1;33m→ Read TODO.md · no result\x1b[0m"
+            "  \x1b[1;4;33m→ Read TODO.md · no result\x1b[0m"
         );
         assert_eq!(
             plain(&system_row("Harness", "a\x1b[31mb", 80)),

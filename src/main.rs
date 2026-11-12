@@ -274,7 +274,9 @@ fn run(
         mouse: term::Mouse::Buttons,
         block_cursor: false,
     })?;
-    let mut palette = Palette::Colour;
+    // The OSC 11 answer below picks light or dark; the environment says whether the terminal draws
+    // exact colours, which is where the severity table gets its orange.
+    let mut palette = Palette::detected(false);
     let mut ed = Editor::new(buf, cfg);
     // A picture is drawn as placeholder cells a terminal may fill with garbage, so
     // M-P is refused by name where the protocol is not kitty.
@@ -397,11 +399,7 @@ fn run(
                 }
                 Event::Mouse(m) => dirty |= ed.handle_mouse(m),
                 Event::Background { light } => {
-                    palette = if light {
-                        Palette::Light
-                    } else {
-                        Palette::Colour
-                    };
+                    palette = Palette::detected(light);
                     dirty = true;
                 }
                 Event::FocusGained | Event::FocusLost => {}

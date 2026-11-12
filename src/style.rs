@@ -5,13 +5,15 @@
 //! for renderers that build lines, the emitter for a cell buffer). The no-colour palette is not a
 //! theme: it is the `--replay`, pipe-to-a-file and CI case, which must be byte-identical everywhere.
 //!
-//! Every look is a basic attribute or one of the terminal's sixteen slots. The xterm cube is absolute
-//! RGB, so a role painted `38;5;167` is the same salmon under every theme — beside the theme rather
-//! than within it. Roles that had to be told apart differ by an attribute instead of a second shade,
-//! which is stronger: two shades are indistinguishable under half the themes on this box.
+//! Every look is a basic attribute or one of the terminal's sixteen slots. An absolute colour — the
+//! xterm cube, an exact RGB — is the same under every theme, beside the theme rather than within
+//! it, so it is spent only where a slot cannot do the job and only by name: the diff tints below,
+//! and `Warning`'s orange on a terminal that said it draws exact colours. Roles that had to be told
+//! apart differ by an attribute instead of a second shade, which is stronger: two shades are
+//! indistinguishable under half the themes on this box.
 //!
-//! The exceptions are the diff tints ([`Role::Added`], [`Role::Removed`]): the cube's darkest green
-//! and red as a background only, so the text keeps its foreground and the sign carries the colour.
+//! The diff tints ([`Role::Added`], [`Role::Removed`]) are the cube's darkest green and red as a
+//! background only, so the text keeps its foreground and the sign carries the colour.
 
 /// What a piece of text means. Callers name these; only [`Palette`] knows what they look like.
 ///
@@ -38,10 +40,19 @@ pub enum Role {
     /// accent glyph is what survives.
     UserBlock,
     Success,
+    /// Information: something happened and nothing is asked of the reader. Cyan, so it cannot be
+    /// read as the yellow of work in progress or the red of a failure.
+    Info,
+    /// Work in progress: running, retrying, not finished. Yellow.
     Pending,
-    Failure,
-    /// Something that needs a person: a decision request, a warning.
+    /// Something went wrong and recovered, or is worth knowing before it does: orange where the
+    /// terminal draws exact colours, and a `Pending` yellow an underline tells apart where it does
+    /// not.
+    Warning,
+    /// Something that needs a person: a decision request, a prompt for the reader. The loudest role
+    /// short of [`Role::Failure`], and never "is happening" or "went wrong on its own".
     Attention,
+    Failure,
     /// A model's own reasoning, which must never read like its answer.
     Reasoning,
     Code,
@@ -83,7 +94,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, for tests and for anything that lists them.
-    pub const ALL: [Role; 32] = [
+    pub const ALL: [Role; 34] = [
         Role::Plain,
         Role::Faint,
         Role::Strong,
@@ -92,9 +103,11 @@ impl Role {
         Role::UserAccent,
         Role::UserBlock,
         Role::Success,
+        Role::Info,
         Role::Pending,
-        Role::Failure,
+        Role::Warning,
         Role::Attention,
+        Role::Failure,
         Role::Reasoning,
         Role::Code,
         Role::Added,
@@ -136,8 +149,9 @@ pub enum Hue {
     Slot(u8),
     /// An absolute xterm-cube index. Only the diff tints use one.
     Cube(u8),
-    /// An exact colour, written as truecolor: the default table never uses one, and a
-    /// [`crate::theme::Theme`] may, to look the same whatever the terminal's palette.
+    /// An exact colour, written as truecolor: the default table spends one only for
+    /// [`Role::Warning`], and a [`crate::theme::Theme`] may, to look the same whatever the
+    /// terminal's palette.
     Rgb(u8, u8, u8),
 }
 
@@ -331,17 +345,46 @@ fn push_u8(out: &mut String, n: u8) {
 /// A mapping from roles to looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Palette {
-    /// A colour terminal.
+    /// A colour terminal: the theme's sixteen slots and the attributes.
     Colour,
     /// The same, on a terminal that said its background is light (OSC 11): every role but three is a
     /// theme slot or an attribute and needs no change, and the diff's backgrounds swap to the cube's
     /// palest.
     Light,
+    /// A colour terminal that said it draws exact colours (`COLORTERM=truecolor`): the sixteen
+    /// slots, plus the one orange the severity ramp has no slot for ([`Role::Warning`]).
+    Exact,
+    /// [`Palette::Exact`] on a light background, where the orange is a darker one.
+    ExactLight,
     /// No look at all: the output is plain text, which is what a replay diff and a CI log need.
     None,
 }
 
 impl Palette {
+    /// The palette for a terminal: `light` from its OSC 11 answer, `exact` from whether it draws
+    /// exact colours. The one place the two axes pick a variant.
+    pub fn terminal(light: bool, exact: bool) -> Palette {
+        match (light, exact) {
+            (false, false) => Palette::Colour,
+            (true, false) => Palette::Light,
+            (false, true) => Palette::Exact,
+            (true, true) => Palette::ExactLight,
+        }
+    }
+
+    /// [`Palette::terminal`] with the exact-colour question put to `COLORTERM`, which is the one
+    /// statement terminals share — a terminal that says nothing gets the sixteen slots.
+    pub fn detected(light: bool) -> Palette {
+        Palette::detected_with(light, |k| std::env::var(k).ok())
+    }
+
+    /// [`Palette::detected`] with the environment read through `get`, so a test can answer for it
+    /// without touching the process's.
+    pub fn detected_with(light: bool, get: impl Fn(&str) -> Option<String>) -> Palette {
+        let said = get("COLORTERM").unwrap_or_default().to_ascii_lowercase();
+        Palette::terminal(light, said.contains("truecolor") || said.contains("24bit"))
+    }
+
     /// What `r` looks like: the active [`crate::theme::Theme`]'s look when it names the role, the
     /// default table otherwise — and [`Look::PLAIN`] for [`Palette::None`], whatever is installed.
     pub fn look(self, r: Role) -> Look {
@@ -359,7 +402,8 @@ impl Palette {
         if self == Palette::None {
             return Look::PLAIN;
         }
-        let light = self == Palette::Light;
+        let light = self.is_light();
+        let exact = self.is_exact();
         match r {
             Role::Plain => Look::PLAIN,
             // Dim, not a grey: "bright black" sits within a hair of the background in several light
@@ -379,11 +423,22 @@ impl Palette {
                 ..Look::PLAIN
             },
             Role::Success => Look::fg(Slot(2)),
+            // Cyan, the slot the reference theme gives information: neither the yellow of work in
+            // progress nor the red of a failure, so an unknown code can be told from a real one.
+            Role::Info => Look::fg(Slot(6)),
             Role::Pending => Look::fg(Slot(3)),
+            // Orange only where the terminal said it draws exact colours: no theme slot is one, so
+            // a palette without them keeps the yellow and tells it apart with an underline.
+            Role::Warning if exact => Look::fg(if light {
+                Hue::Rgb(0xb3, 0x5c, 0x00)
+            } else {
+                Hue::Rgb(0xff, 0x87, 0x00)
+            }),
+            Role::Warning => Look::fg(Slot(3)).with(A::UNDERLINE),
+            // Bold and underlined against `Pending`'s plain yellow: weight alone was what let
+            // "needs a person" and "is happening" share one look.
+            Role::Attention => Look::fg(Slot(3)).with(A::BOLD.union(A::UNDERLINE)),
             Role::Failure => Look::fg(Slot(1)),
-            // Bold yellow against `Pending`'s plain yellow: "needs a person" and "is happening" are
-            // close enough that weight is the right distinction.
-            Role::Attention => Look::fg(Slot(3)).with(A::BOLD),
             // Dim italic: de-emphasis by colour is a no-op under a terminal-native palette, so the
             // attribute is what carries it.
             Role::Reasoning => Look::attrs(A::DIM.union(A::ITALIC)),
@@ -431,8 +486,19 @@ impl Palette {
         }
     }
 
+    /// Whether this palette draws colour at all: everything but [`Palette::None`].
     pub fn is_colour(self) -> bool {
-        matches!(self, Palette::Colour | Palette::Light)
+        self != Palette::None
+    }
+
+    /// Whether this palette may spend an exact colour: the terminal said it draws truecolor.
+    pub fn is_exact(self) -> bool {
+        matches!(self, Palette::Exact | Palette::ExactLight)
+    }
+
+    /// Whether this palette is the one for a light background.
+    pub fn is_light(self) -> bool {
+        matches!(self, Palette::Light | Palette::ExactLight)
     }
 
     /// A role as a [`crate::render::Style`] under this palette: the role itself on a colour palette,
@@ -502,11 +568,11 @@ mod tests {
     }
 
     /// The port's parity check: the sequences spelled from the look are letibot's table, byte for
-    /// byte, so a caller moving here sees no change. The rows from `Punctuation` on are the editor's
-    /// own roles, which letibot never had.
+    /// byte, so a caller moving here sees no change — `Info` and `Warning` are the two it is about to
+    /// read. The rows from `Punctuation` on are the editor's own roles, which letibot never had.
     #[test]
     fn the_spelled_sequences_are_letibots_table() {
-        let table: [(Role, &str); 32] = [
+        let table: [(Role, &str); 34] = [
             (Role::Plain, ""),
             (Role::Faint, "\x1b[2m"),
             (Role::Strong, "\x1b[1m"),
@@ -515,9 +581,11 @@ mod tests {
             (Role::UserAccent, "\x1b[34m"),
             (Role::UserBlock, "\x1b[40m"),
             (Role::Success, "\x1b[32m"),
+            (Role::Info, "\x1b[36m"),
             (Role::Pending, "\x1b[33m"),
+            (Role::Warning, "\x1b[4;33m"),
+            (Role::Attention, "\x1b[1;4;33m"),
             (Role::Failure, "\x1b[31m"),
-            (Role::Attention, "\x1b[1;33m"),
             (Role::Reasoning, "\x1b[2;3m"),
             (Role::Code, "\x1b[36m"),
             (Role::Added, "\x1b[48;5;22m"),
@@ -635,12 +703,40 @@ mod tests {
         assert_eq!(Palette::Colour.look(Role::Failure).fg, Some(Hue::Slot(1)));
     }
 
+    /// The table every caller asks: each role resolves under each palette, and no palette has a hole
+    /// where a role should be — a role it forgot would fall to `Plain` and draw as prose.
+    #[test]
+    fn every_role_has_a_look_in_every_palette() {
+        const PALETTES: [Palette; 5] = [
+            Palette::Colour,
+            Palette::Light,
+            Palette::Exact,
+            Palette::ExactLight,
+            Palette::None,
+        ];
+        for p in PALETTES {
+            for r in Role::ALL {
+                let l = p.look(r);
+                if p == Palette::None {
+                    assert_eq!(l, Look::PLAIN, "{r:?} under the no-colour palette");
+                } else if !matches!(r, Role::Plain | Role::Punctuation) {
+                    assert!(!l.is_plain(), "{p:?} has no look for {r:?}");
+                }
+            }
+        }
+    }
+
     /// Roles that mean different things have to look different, or moving to sixteen slots would
-    /// have traded one defect for another.
+    /// have traded one defect for another. Every palette is asked, since the orange is what tells a
+    /// warning from work in progress on the ones that can draw it.
     #[test]
     fn roles_a_reader_has_to_tell_apart_still_differ() {
-        for (a, b) in [
+        const PAIRS: &[(Role, Role)] = &[
             (Role::Heading, Role::Subheading),
+            (Role::Info, Role::Pending),
+            (Role::Info, Role::Failure),
+            (Role::Pending, Role::Warning),
+            (Role::Warning, Role::Attention),
             (Role::Attention, Role::Pending),
             (Role::Reasoning, Role::Plain),
             (Role::Success, Role::Failure),
@@ -651,13 +747,62 @@ mod tests {
             (Role::Match, Role::Selection),
             (Role::DiagError, Role::DiagWarning),
             (Role::DiagWarning, Role::DiagNote),
+        ];
+        for p in [
+            Palette::Colour,
+            Palette::Light,
+            Palette::Exact,
+            Palette::ExactLight,
         ] {
-            assert_ne!(
-                Palette::Colour.look(a),
-                Palette::Colour.look(b),
-                "{a:?} {b:?}"
-            );
+            for (a, b) in PAIRS {
+                assert_ne!(p.look(*a), p.look(*b), "{p:?}: {a:?} and {b:?}");
+            }
         }
+    }
+
+    /// `Warning` is the one role that spends an exact colour, and only where the terminal said it
+    /// draws them; the sixteen-slot palettes keep a yellow an underline tells from the others.
+    #[test]
+    fn warning_is_orange_where_the_terminal_draws_exact_colours() {
+        assert_eq!(Palette::Exact.open(Role::Warning), "\x1b[38;2;255;135;0m");
+        assert_eq!(
+            Palette::ExactLight.open(Role::Warning),
+            "\x1b[38;2;179;92;0m"
+        );
+        for p in [Palette::Colour, Palette::Light] {
+            assert_eq!(p.open(Role::Warning), "\x1b[4;33m", "{p:?}");
+        }
+        // An exact palette is a colour one with the orange in it, and nothing else moved.
+        for r in Role::ALL {
+            if r != Role::Warning {
+                assert_eq!(Palette::Exact.look(r), Palette::Colour.look(r), "{r:?}");
+            }
+        }
+    }
+
+    /// The capability the orange hangs on is read from `COLORTERM`, through a door a test can answer
+    /// for: a terminal that says it draws truecolor gets the exact palette.
+    #[test]
+    fn a_terminal_that_says_truecolor_gets_the_exact_palette() {
+        let says = |v: &'static str| move |k: &str| (k == "COLORTERM").then(|| v.to_string());
+        assert_eq!(
+            Palette::detected_with(false, says("truecolor")),
+            Palette::Exact
+        );
+        assert_eq!(
+            Palette::detected_with(true, says("TrueColor")),
+            Palette::ExactLight
+        );
+        assert_eq!(
+            Palette::detected_with(true, says("24bit")),
+            Palette::ExactLight
+        );
+        assert_eq!(Palette::detected_with(false, says("")), Palette::Colour);
+        assert_eq!(Palette::detected_with(true, |_| None), Palette::Light);
+        assert_eq!(Palette::terminal(false, false), Palette::Colour);
+        assert_eq!(Palette::terminal(true, false), Palette::Light);
+        assert_eq!(Palette::terminal(false, true), Palette::Exact);
+        assert_eq!(Palette::terminal(true, true), Palette::ExactLight);
     }
 
     /// A light theme changes the two absolute colours and the user band, and nothing else. The band

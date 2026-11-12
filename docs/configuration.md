@@ -64,7 +64,8 @@ ask.translate.prompt = "Translate the selection into French. Answer with the tra
 
 A theme is a set of role overrides, one `role = "look"` line each, read from
 `themes/NAME.toml` beside the config. Without one, roles use the terminal's sixteen
-colours.
+colours - and, on a terminal that says it draws truecolor (`COLORTERM`), the exact orange
+`warning` needs, no theme slot being one.
 
 ```toml
 # ~/.config/rano/themes/gray.toml

@@ -26,6 +26,8 @@ pub mod image;
 // Keys and keymaps, emacs-shaped: pure data — command names, not functions —
 // so a host can stack its own map over the editor's.
 pub mod keymap;
+// The chat panel's wire: letibot's socket, in NDJSON, and only the frames the panel reads.
+pub mod letibot;
 // A model's markdown reply, rendered while it streams.
 pub mod markdown;
 // Unified diffs read back in: a patch parsed into files and hunks (the editor's M-P view of a

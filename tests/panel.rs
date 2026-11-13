@@ -296,8 +296,8 @@ fn openpty(cols: u16, rows: u16) -> (File, File) {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            &ws as *const libc::winsize as *mut libc::winsize,
         )
     };
     assert_eq!(ok, 0, "a pty");

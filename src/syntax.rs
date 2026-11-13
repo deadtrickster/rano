@@ -3240,10 +3240,16 @@ mod stream_tests {
                 times.push(t.elapsed().as_nanos());
                 at += 64;
             }
-            let med = median_p95(times).0;
+            // The LEAST contended sample, not the median: the claim here is that the cost grows
+            // with the document, and contention only ever inflates a sample — so a median measures
+            // how busy the box was while the small side ran, which is how the gate read 1.16x for
+            // work that is 1.5x-plus on a quiet one.
+            times.sort_unstable();
+            let med = times[0];
             println!(
-                "markdown doc={n} B: 64 B append med={:.1} µs",
-                med as f64 / 1e3
+                "markdown doc={n} B: 64 B append min={:.1} µs (median {:.1} µs)",
+                med as f64 / 1e3,
+                times[times.len() / 2] as f64 / 1e3
             );
             per_push.push(med);
         }

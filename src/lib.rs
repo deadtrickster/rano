@@ -7,6 +7,7 @@
 pub mod agent;
 // Quick asks on a selection: the presets, and the event a host receives.
 pub mod ask;
+pub mod bottomterm;
 pub mod buffer;
 // Scripts that ship in the binary and unpack into the reader's folder, so a
 // builtin is a file they can read and replace.

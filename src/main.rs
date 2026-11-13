@@ -728,6 +728,8 @@ struct Layout {
     editor: Option<Rect>,
     border: Option<Rect>,
     panel: Option<Rect>,
+    /// The bottom terminal's strip, when it is open: the rows it takes off the frame's foot.
+    bottom: Option<Rect>,
 }
 
 /// How a `w`×`h` frame splits between the text and the panel. `want` is the width the operator
@@ -735,6 +737,15 @@ struct Layout {
 /// its minimum.
 fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     let whole = Rect::new(0, 0, w, h);
+    // The terminal is a strip off the foot, taken before the editor/panel split: twelve rows, or a
+    // third of a short frame, and never the whole frame.
+    let (whole, bottom) = if ed.bottom.open && h > 6 {
+        let strip = 12.min(h / 3);
+        let (above, below) = whole.split_top(h - strip);
+        (above, Some(below))
+    } else {
+        (whole, None)
+    };
     if !ed.panel.open || w == 0 || h == 0 {
         return Layout {
             editor: Some(whole),
@@ -760,9 +771,10 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     let pw = want.unwrap_or(default).clamp(PANEL_MIN, w - EDITOR_MIN - 1);
     let ew = w - pw - 1;
     Layout {
-        editor: Some(Rect::new(0, 0, ew, h)),
-        border: Some(Rect::new(ew, 0, 1, h)),
-        panel: Some(Rect::new(ew + 1, 0, pw, h)),
+        editor: Some(Rect::new(0, whole.y, ew, whole.height)),
+        border: Some(Rect::new(ew, whole.y, 1, whole.height)),
+        panel: Some(Rect::new(ew + 1, whole.y, pw, whole.height)),
+        bottom,
     }
 }
 
@@ -777,6 +789,14 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         let rule = Line::styled("\u{2502}", Style::of(Role::Faint));
         for y in area.y..area.y + area.height {
             buf.set_line(area.x, y, &rule, 1);
+        }
+    }
+    if let Some(area) = lay.bottom {
+        ed.bottom.feed();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let lines = ed.bottom.lines(area.width as usize, &cwd);
+        for (i, l) in lines.iter().take(area.height as usize).enumerate() {
+            buf.set_line(area.x, area.y + i as u16, l, area.width as usize);
         }
     }
     if let Some(area) = lay.panel {

@@ -211,6 +211,9 @@ pub struct Editor {
     /// **The panel: one conversation with a letibot session** (`alt-i`, the `panel` keymap mode).
     /// Its state is here and its socket is the host's; see [`crate::panel`].
     pub panel: crate::panel::Panel,
+    /// **The bottom terminal**: shells in tabs at the foot of the frame (`` ctrl-` `` toggles).
+    /// Each tab is a pty and a `vt100` parser; see [`crate::bottomterm`].
+    pub bottom: crate::bottomterm::BottomTerm,
     pub plugin: Option<crate::plugin::Plugin>,
     pub builtins: Vec<crate::plugin::Plugin>,
     pub(crate) plugin_note: Option<String>,
@@ -340,6 +343,7 @@ impl Editor {
             diff_split: false,
             images: false,
             panel: crate::panel::Panel::default(),
+            bottom: crate::bottomterm::BottomTerm::default(),
             proto: Proto::None,
             picture_view: None,
             pictures: Pictures::new(Proto::None),

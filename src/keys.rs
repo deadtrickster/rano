@@ -110,6 +110,11 @@ impl Editor {
         if self.on_key_to_plugin(&key) {
             return KeyOutcome::Handled;
         }
+        // **The bottom terminal's keyboard** (`` ctrl-` `` toggles it): while it holds focus its
+        // own chords switch tabs and everything else is the shell's.
+        if self.bottom_key(&key) {
+            return KeyOutcome::Handled;
+        }
         // **The panel's keyboard**, when it holds it (`alt-i` in, Esc out): its map, then the
         // composer's line, ahead of the maps the way a prompt's keys are.
         if self.panel.focus
@@ -191,6 +196,77 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// The bottom terminal's keys. `false` means the key was not for it, so it falls through to the
+    /// editor's own maps. While the terminal is focused, everything but its own chords goes to the
+    /// shell — that is what a terminal panel is for.
+    fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
+        let ctrl = key.mods.ctrl();
+        let alt = key.mods.alt();
+        if ctrl && matches!(key.code, crate::term::KeyCode::Char('`')) {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let _ = self.bottom.toggle(&cwd, self.text_w as u16, 12);
+            return true;
+        }
+        if !self.bottom.open || !self.bottom.focus {
+            return false;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        match (ctrl, alt, key.code) {
+            (false, false, crate::term::KeyCode::Esc) => {
+                self.bottom.focus = false;
+                true
+            }
+            (false, true, crate::term::KeyCode::Char('n')) => {
+                let _ = self.bottom.new_tab(&cwd, self.text_w as u16, 12);
+                true
+            }
+            (false, true, crate::term::KeyCode::Char('w')) => {
+                self.bottom.close_active();
+                true
+            }
+            (false, true, crate::term::KeyCode::Char('[')) => {
+                self.bottom.prev();
+                true
+            }
+            (false, true, crate::term::KeyCode::Char(']')) => {
+                self.bottom.next();
+                true
+            }
+            _ => {
+                let Some(bytes) = key_bytes(key) else {
+                    return false;
+                };
+                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    tab.send(&bytes);
+                }
+                true
+            }
+        }
+    }
+}
+
+/// A key as the shell's bytes: a character is itself, Enter is CR, arrows are the ANSI motion the
+/// terminal expects. Nothing else is translated — the point is that the pty hears the key, not rano.
+fn key_bytes(key: &crate::term::KeyEvent) -> Option<Vec<u8>> {
+    use crate::term::KeyCode;
+    let plain = !key.mods.ctrl() && !key.mods.alt();
+    Some(match key.code {
+        KeyCode::Char(c) if plain => {
+            let mut b = [0u8; 4];
+            c.encode_utf8(&mut b).as_bytes().to_vec()
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        _ => return None,
+    })
+}
 #[cfg(test)]
 mod key_text_tests {
     use super::*;

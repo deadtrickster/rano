@@ -422,7 +422,9 @@ impl Panel {
                 if let Some(Row::Reply(reply)) = self.rows.last_mut() {
                     reply.push(text);
                 }
-                self.follow = true;
+                // The view is left where the operator put it: a reader who scrolled up to an
+                // earlier reply is not dragged to the end by every delta. Their own message, or a
+                // new conversation, is what pins it again.
                 self.state = PanelState::Thinking;
             }
             // Thinking and the model's raw call markup are not prose: the panel folds both.
@@ -431,7 +433,6 @@ impl Panel {
                 self.running
                     .push((call_id.clone(), self.rows.len(), name.clone()));
                 self.rows.push(Row::Note(format!("{name} …")));
-                self.follow = true;
             }
             Event::ToolFinished {
                 call_id,
@@ -483,7 +484,6 @@ impl Panel {
                     card.kind, card.summary
                 )));
                 self.state = PanelState::Waiting;
-                self.follow = true;
             }
             // A citation becomes a mark on the text, which is a later package's work.
             Event::Citations { .. } | Event::Unknown { .. } => {}

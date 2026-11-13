@@ -400,6 +400,51 @@ fn inline_spans(src: &str, root: &Node, bytes_lexed: &mut u64, lex_calls: &mut u
     spans
 }
 
+/// One line of foreign text with only its `code` spans read: a tool's prose names paths, globs and
+/// regexes, where a `*` or `_` is literal far more often than it is emphasis.
+pub fn code_runs(text: &str) -> Vec<Run> {
+    let mut found = Vec::new();
+    if text.contains('`') {
+        let mut stream = Stream::new(Lang::MarkdownInline);
+        stream.push(text);
+        if let Some(root) = stream.root() {
+            code_spans_in(&root, &mut found);
+        }
+    }
+    let mut out = Vec::new();
+    let mut pos = 0;
+    let plain = |out: &mut Vec<Run>, t: &str| {
+        // Not `push_text`: outside a code span a backslash is the tool's, not an escape.
+        if !t.is_empty() {
+            out.push(run(t.to_string(), InlineStyle::Plain));
+        }
+    };
+    for (outer, (a, b)) in found {
+        if let (Some(t), Some(c)) = (slice(text, pos, outer.0), slice(text, a, b)) {
+            plain(&mut out, t);
+            push_text(&mut out, c, InlineStyle::Code, None);
+            pos = outer.1;
+        }
+    }
+    plain(&mut out, slice(text, pos, text.len()).unwrap_or(""));
+    out
+}
+
+/// Every code span in order: its whole range and its interior.
+type CodeSpan = ((usize, usize), (usize, usize));
+
+fn code_spans_in(node: &Node, out: &mut Vec<CodeSpan>) {
+    if node.kind == "code_span" {
+        if let Some(inner) = code_span_inner(node) {
+            out.push(((node.start, node.end), inner));
+        }
+        return;
+    }
+    for c in &node.children {
+        code_spans_in(c, out);
+    }
+}
+
 /// Whether `text` holds anything the inline grammar could read as a
 /// construct; if none, the range can be left alone. `&` is not in the set —
 /// an entity reference shows as written either way.

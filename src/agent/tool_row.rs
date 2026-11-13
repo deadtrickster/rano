@@ -1,8 +1,10 @@
 //! A tool's result row in the transcript: the header, the diff or the payload's window, the decision
 //! that gated it, and the picture it returned.
 
+use crate::markdown::code_runs;
+use crate::markdown::render::runs_spans;
 use crate::render::text::truncate_owned;
-use crate::render::{Line, Span, Style};
+use crate::render::{Line, Span, Style, wrap};
 use crate::style::Role;
 use crate::term::links::file_url;
 
@@ -12,7 +14,7 @@ use super::diffbody;
 use super::outcome::Outcome;
 use super::text::{
     clean, clean_line, duration, first_sentence, is_envelope, one, shorten_subject, step_in,
-    strip_gutter, visible_width, wrap,
+    strip_gutter, visible_width,
 };
 use super::{Fold, lines_widget};
 
@@ -72,6 +74,24 @@ pub fn payload_lines(text: &str) -> Vec<Line> {
     text.lines().map(|l| Line::raw(clean_line(l))).collect()
 }
 
+/// A line of a tool's prose with its `code` spans drawn the way the assistant's reply draws them.
+fn prose(text: &str, role: Role) -> Line {
+    Line::new(runs_spans(&code_runs(text), role))
+}
+
+/// Whether a payload line only restates a one-line reason the row already prints, bare or as
+/// `reason: ...`. Hosts counting the payload skip the same lines.
+pub fn restates_reason(line: &str, outcome: &Outcome) -> bool {
+    let Some(why) = outcome.reason().map(|r| clean(r).trim().to_string()) else {
+        return false;
+    };
+    if why.is_empty() || why.contains('\n') {
+        return false;
+    }
+    let l = line.trim();
+    l.strip_prefix("reason:").map_or(l, str::trim) == why
+}
+
 /// A size that is worth a fold: the line count turns [`Role::Strong`] from here.
 const BIG: usize = 40;
 
@@ -120,11 +140,13 @@ impl ToolRow {
             .payload
             .iter()
             .zip(texts.iter())
-            .filter(|(_, t)| !is_envelope(t))
+            .filter(|(_, t)| !is_envelope(t) && !restates_reason(t, &self.outcome))
             .map(|(l, t)| (l, t.as_str()))
             .collect();
         let lines: Vec<&str> = kept.iter().map(|(_, t)| *t).collect();
         let bad = !matches!(self.outcome, Outcome::Ok);
+        // A tool's own prose is read for `code` spans; a command's output and a file's text are not.
+        let is_prose = !matches!(Verb::of(&self.name), Verb::Run | Verb::Read);
         let mark = if self.fold.is_open() { "▾" } else { "▸" };
         // The verb and the target are the two words a person scans a settled call for; the id takes
         // their place only when the target is not known.
@@ -170,7 +192,13 @@ impl ToolRow {
             head.spans.push(Span::role("▌", Role::UserAccent));
             head.spans.push(Span::raw(" "));
         }
-        head.spans.push(Span::role(mark, outcome_role));
+        // Only the outcome word carries the outcome's whole register: the arrow takes its colour
+        // without Attention's underline, and the separators stay structural.
+        let mark_role = match outcome_role {
+            Role::Attention => Role::Pending,
+            r => r,
+        };
+        head.spans.push(Span::role(mark, mark_role));
         head.spans
             .push(Span::role(format!(" {verb} "), Role::Faint));
         // The file as a link (OSC 8) where the terminal speaks it: the full target the shortened
@@ -183,8 +211,13 @@ impl ToolRow {
             subject_style = subject_style.link(url);
         }
         head.spans.push(Span::styled(subject, subject_style));
-        head.spans
-            .push(Span::role(format!(" · {word}"), outcome_role));
+        if outcome_role == Role::Faint {
+            head.spans
+                .push(Span::role(format!(" · {word}"), Role::Faint));
+        } else {
+            head.spans.push(Span::role(" · ", Role::Faint));
+            head.spans.push(Span::role(word, outcome_role));
+        }
         // Pushed even when empty: a host printing strings writes the faint run's open and close
         // around nothing.
         head.spans.push(Span::role(took.clone(), Role::Faint));
@@ -202,7 +235,11 @@ impl ToolRow {
         .filter(|l| head.width() + 3 + visible_width(l) <= w);
         if let Some(l) = inline {
             head.spans.push(Span::role(" · ", Role::Faint));
-            head.spans.push(Span::raw(l));
+            if is_prose {
+                head.spans.extend(prose(&l, Role::Plain).spans);
+            } else {
+                head.spans.push(Span::raw(l));
+            }
             let mut out = vec![truncate_owned(head, w)];
             // The approval rides the one-line form too.
             if let Some(d) = &self.decision {
@@ -244,11 +281,20 @@ impl ToolRow {
                 why_folded = gist.len() < why.len();
                 gist.into_owned()
             };
-            out.extend(
-                wrap(&shown, w.saturating_sub(2))
-                    .into_iter()
-                    .map(|l| one(format!("  {l}"), outcome_role)),
-            );
+            // The reason is body text, plain: the header's word is the only place the outcome's
+            // register shows. A faint outcome (backgrounded) keeps its reason faint too.
+            let role = if outcome_role == Role::Faint {
+                Role::Faint
+            } else {
+                Role::Plain
+            };
+            for para in shown.lines() {
+                out.extend(
+                    wrap(&prose(para, role), w.saturating_sub(2))
+                        .into_iter()
+                        .map(|l| indent(l, 2)),
+                );
+            }
         }
         // The decision it was gated by, carried across with the card: without it the approval leaves
         // the screen the moment the result row takes the call over.
@@ -333,7 +379,12 @@ impl ToolRow {
             if let (true, Some(Some(p))) = (unstyled, diff.get(page + n)) {
                 return indent(p.clone(), 2);
             }
-            let mut row = indent((*l).clone(), 2);
+            let line = if unstyled && is_prose {
+                prose(&l.plain(), Role::Plain)
+            } else {
+                (*l).clone()
+            };
+            let mut row = indent(line, 2);
             row.style = faint.patch(&row.style);
             row
         }));
@@ -528,9 +579,9 @@ mod tests {
         );
         let out = r.lines(120);
         assert_eq!(role_of(&out[0], " · backgrounded"), Some(Role::Faint));
-        assert_eq!(role_of(&out[1], "as `j4`"), Some(Role::Faint));
+        assert_eq!(role_of(&out[1], "as "), Some(Role::Faint));
         let f = ToolRow::new("bash", "c", Outcome::Failed("exit 1".into()), vec![]);
-        assert_eq!(role_of(&f.lines(120)[0], " · failed"), Some(Role::Failure));
+        assert_eq!(role_of(&f.lines(120)[0], "failed"), Some(Role::Failure));
     }
 
     /// The seam names the key that reaches the rest on this row.
@@ -637,10 +688,8 @@ mod tests {
         open.fold = Fold::Open;
         let joined = plain(&open.lines(120)).join("\n");
         assert!(joined.contains("parameter_expansion"), "{joined}");
-        assert_eq!(
-            role_of(&r.lines(120)[1], "this command"),
-            Some(Role::Attention)
-        );
+        // The reason is body text; the header's word carries the refusal.
+        assert_eq!(role_of(&r.lines(120)[1], "this command"), Some(Role::Plain));
     }
 
     #[test]
@@ -763,5 +812,78 @@ mod tests {
         let mut read = ToolRow::new("read", "c", Outcome::Ok, payload_lines(body));
         read.fold = Fold::Open;
         assert_eq!(role_of(&read.lines(80)[5], "-old"), Some(Role::Faint));
+    }
+
+    /// The operator's grep that matched nothing, as the transcript holds it.
+    fn abstained_grep() -> ToolRow {
+        let why = "`a|b` does not occur in the 1 file(s) searched";
+        let body = format!(
+            "tool: grep\nreason: {why}\nsearched under `/w` matching `*.md`.\n  - `a|b` was retried\nfile *names*, `ask_code` and a\\b\n"
+        );
+        let mut r = ToolRow::new(
+            "grep",
+            "c",
+            Outcome::Abstained(why.into()),
+            payload_lines(&body),
+        );
+        r.target = "/w \"a|b\" *.md".into();
+        r.fold = Fold::Open;
+        r
+    }
+
+    #[test]
+    fn a_tool_bodys_code_spans_read_as_the_replys_do_and_its_bullets_keep_their_text() {
+        let out = abstained_grep().lines(120);
+        let screen = plain(&out);
+        assert_eq!(screen[1], "  a|b does not occur in the 1 file(s) searched");
+        assert_eq!(role_of(&out[1], "a|b"), Some(Role::Code));
+        assert_eq!(screen[3], "  searched under /w matching *.md.");
+        assert_eq!(role_of(&out[3], "*.md"), Some(Role::Code));
+        assert_eq!(screen[4], "    - a|b was retried");
+        // Only code: an asterisk and a backslash in a tool's prose are literal.
+        assert_eq!(screen[5], "  file *names*, ask_code and a\\b");
+        // A command's output and a file's text are not prose.
+        let mut ran = ToolRow::new("bash", "c", Outcome::Ok, payload_lines("x\n`y`\n"));
+        ran.fold = Fold::Open;
+        assert_eq!(plain(&ran.lines(80))[2], "  `y`");
+    }
+
+    #[test]
+    fn only_the_outcome_word_wears_the_outcome() {
+        let mut r = ToolRow::new(
+            "bash",
+            "c",
+            Outcome::Denied("the call was denied (d1)".into()),
+            payload_lines("tool: bash\nmore\n"),
+        );
+        r.indent = 2;
+        let out = r.lines(120);
+        assert_eq!(role_of(&out[0], "REFUSED"), Some(Role::Attention));
+        // The arrow keeps the colour and drops the underline; the separator stays structural.
+        assert_eq!(role_of(&out[0], "▸"), Some(Role::Pending));
+        assert_eq!(role_of(&out[0], " · "), Some(Role::Faint));
+        let reason = &out[1];
+        assert_eq!(role_of(reason, "the call"), Some(Role::Plain));
+        assert!(
+            reason.spans.iter().all(|s| !s.content.starts_with(' ')
+                || reason.style.patch(&s.style).top() == Role::Plain),
+            "the indent is unstyled: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn a_reason_the_row_already_prints_is_not_printed_again() {
+        let r = abstained_grep();
+        let screen = plain(&r.lines(120)).join("\n");
+        assert_eq!(screen.matches("does not occur").count(), 1, "{screen}");
+        assert!(screen.contains("· 4 lines"), "{screen}");
+        // A payload line that says more than the reason stays.
+        let r = ToolRow::new(
+            "bash",
+            "c",
+            Outcome::Failed("exit 1".into()),
+            payload_lines("reason: exit 1 after 3 retries\n"),
+        );
+        assert!(plain(&r.lines(120)).join("\n").contains("after 3 retries"));
     }
 }

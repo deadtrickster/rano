@@ -701,8 +701,20 @@ fn connect(ed: &mut Editor, link: &mut Option<Link>, folder: &Path) -> bool {
             }
             *link = Some(open);
         }
-        // Nothing at all could open a panel here: the line goes where the reader is already
-        // looking, on the status row, and the panel stays shut.
+        // A folder with no daemon of its own is a normal thing to be standing in: the operator's
+        // daemon usually belongs to the project ABOVE the file's folder. Walk up until one answers,
+        // and only the root's refusal is the offline state — that is the case where Enter starts
+        // one for this folder instead of borrowing one.
+        Err(rano::letibot::NoDaemon::NotRunning { .. }) => {
+            if let Some(parent) = folder.parent() {
+                ed.panel.said = format!("no daemon here; asking {}", parent.display());
+                return connect(ed, link, parent);
+            }
+            ed.panel.no_daemon(&rano::letibot::NoDaemon::NotRunning {
+                folder: folder.to_path_buf(),
+                said: "no daemon for this folder or any above it".to_string(),
+            });
+        }
         Err(why @ rano::letibot::NoDaemon::NotInstalled) => ed.panel_refuse(&why.to_string()),
         Err(why) => ed.panel.no_daemon(&why),
     }

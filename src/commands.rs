@@ -115,20 +115,6 @@ pub fn commands() -> &'static [Command] {
                 "Save the buffer, asking for the file name.",
                 |e| e.start_write(),
             ),
-            cmd(
-                "sidebar",
-                "Chat Sidebar",
-                View,
-                "The chat beside the text: on or off. M-J enters it, Esc returns to the text.",
-                |e| e.toggle_sidebar(),
-            ),
-            cmd(
-                "sidebar-enter",
-                "Enter the Sidebar",
-                View,
-                "The keyboard into the chat sidebar, or back out of it with Esc.",
-                |e| e.enter_sidebar(),
-            ),
             // The panel's own keys. Not global commands: without the panel in front of them they
             // have nothing to act on, and the palette should not offer them.
             cmd(
@@ -194,13 +180,6 @@ pub fn commands() -> &'static [Command] {
                 "The panel: follow the focused file into its own folder, and that folder's \
                  conversation.",
                 |e| e.panel_follow(),
-            ),
-            cmd(
-                "ask-position",
-                "Ask",
-                Mark,
-                "Ask about the place: the question, the selection and the file, sent together.",
-                |e| e.start_ask(),
             ),
             cmd(
                 "diff-copy",
@@ -1009,9 +988,6 @@ impl Keymaps {
             .bind("M-l", "buffer-list")
             .bind("M-w", "close-buffer")
             .bind("M-s", "send-position")
-            .bind("M-q", "ask-position")
-            .bind("M-c", "sidebar")
-            .bind("M-j", "sidebar-enter")
             .bind("M-v", "install-update")
             // Todo lists are a prefix: the first real submode.
             .bind("M-t t", "todo-tick")
@@ -1106,9 +1082,6 @@ impl Keymaps {
         let mut review = Keymap::new("review");
         review
             .bind("M-s", "send-position")
-            .bind("M-q", "ask-position")
-            .bind("M-c", "sidebar")
-            .bind("M-j", "sidebar-enter")
             // A hunk decided where it is read: the letters the conflicts map uses.
             .bind("a", "mark-accept")
             .bind("r", "mark-reject")

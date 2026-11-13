@@ -51,7 +51,6 @@ pub mod review;
 pub mod rows;
 // What the editor sends a host (file, cursor, selection).
 pub mod send;
-pub mod sidebar;
 pub mod syntax;
 // The terminal: raw mode, the row-diffing painter, input decoding, feature detection, kitty
 // graphics and OSC 8 links.

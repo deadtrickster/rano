@@ -46,8 +46,11 @@ impl Editor {
             self.deliver_ask(event);
             return;
         }
-        self.enter_sidebar();
-        self.flash("Type the question in the chat");
+        // No ask client: the panel is the chat, and a chat with no panel has no one to reach.
+        self.flash(
+            "No panel is open and nothing answers asks - open a letibot pane (M-P), or set \
+             send_command so M-Q has somewhere to send",
+        );
     }
 
     /// `M-k c`: clear every mark in this buffer. Marks are package R3's

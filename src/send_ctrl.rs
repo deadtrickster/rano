@@ -111,28 +111,6 @@ impl Editor {
         }
     }
 
-    /// **M-A: ask about the place.** The same event `M-S` sends - file, cursor, selection - plus
-    /// the question, typed at a prompt, because "discuss this snippet with an agent" is one
-    /// gesture, not copy, switch, paste, re-select. A host that only notes the place still gets
-    /// the place; the ask is the extra field it may answer.
-    pub(crate) fn send_ask(&mut self, question: String) {
-        let question = question.trim().to_string();
-        if question.is_empty() {
-            self.flash("Ask what?");
-            return;
-        }
-        let mut event = self.send_event();
-        event.ask = Some(question);
-        let Some(send) = self.on_send.as_mut() else {
-            self.flash("Nowhere to ask: set send_command in the config");
-            return;
-        };
-        match send(&event) {
-            Ok(msg) => self.flash(&msg),
-            Err(e) => self.flash(&format!("Ask failed: {e}")),
-        }
-    }
-
     /// M-S: hand the reader's place to the host.
     pub(crate) fn send_position(&mut self) {
         let event = self.send_event();

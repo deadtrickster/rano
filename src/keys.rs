@@ -110,15 +110,6 @@ impl Editor {
         if self.on_key_to_plugin(&key) {
             return KeyOutcome::Handled;
         }
-        // **The sidebar's keyboard**, when it holds it (M-J in, Esc out): the compose line and
-        // the exchange's scrolling, ahead of the maps the way a prompt's keys are.
-        if self.sidebar.focus
-            && self.diff_view.is_none()
-            && self.prompt.is_none()
-            && self.sidebar_key(&key)
-        {
-            return KeyOutcome::Handled;
-        }
         // **The panel's keyboard**, when it holds it (`alt-i` in, Esc out): its map, then the
         // composer's line, ahead of the maps the way a prompt's keys are.
         if self.panel.focus

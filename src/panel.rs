@@ -704,6 +704,9 @@ impl Panel {
         if sendable {
             self.state = PanelState::Thinking;
             self.acts.push(Act::Prompt { text, context });
+        } else if matches!(self.state, PanelState::Offline { .. }) {
+            // Nowhere to send it: said on the panel's own line rather than held in silence.
+            self.said = "no daemon to send that to: nothing was sent".to_string();
         } else {
             // The state stays what the connection is doing — a panel still attaching must keep
             // connecting, or the `Hello` that would send this has nowhere to land.
@@ -1528,6 +1531,15 @@ mod tests {
         assert!(
             panel.take_acts().is_empty(),
             "a launcher cannot be asked to start"
+        );
+        // Words typed into a panel with nowhere to send them are said to be unsent, not swallowed.
+        panel.input = "are you there?".to_string();
+        panel.send();
+        assert!(panel.take_acts().is_empty(), "nothing went out");
+        assert!(
+            panel.said.contains("nothing was sent"),
+            "the panel says so: {}",
+            panel.said
         );
     }
 

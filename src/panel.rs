@@ -234,6 +234,9 @@ pub struct Panel {
     /// attach the daemon requires as its first frame lands on its current session and answers a
     /// Hello, which is not a choice: without this the panel would never move off it.
     picked: bool,
+    /// What is typed while the pick is up: a title, an id prefix, or a row number. The list
+    /// narrows to it, the way letibot's session picker does — a digit is not a different gesture.
+    pick_query: String,
     /// What the state says in full: the no-daemon line, a refusal, what just happened.
     pub said: String,
     pub rows: Vec<Row>,
@@ -285,6 +288,7 @@ impl Default for Panel {
             title: String::new(),
             state: PanelState::Closed,
             picked: false,
+            pick_query: String::new(),
             said: String::new(),
             rows: Vec::new(),
             input: String::new(),
@@ -526,17 +530,45 @@ impl Panel {
             _ => {
                 self.state = PanelState::Picking;
                 self.pick = 0;
+                self.pick_query.clear();
                 self.follow = true;
             }
         }
         self.touch();
     }
 
-    /// The pick took the highlighted row.
+    /// The sessions a query narrows to: an id prefix or a title substring, case-insensitive, in the
+    /// list's own order. A number is the row's number in the FULL list, so what is typed and what is
+    /// on screen agree — a picker that numbers two different lists is the two-enumerations defect.
+    fn picked_sessions(&self) -> Vec<(usize, &Session)> {
+        let q = self.pick_query.to_lowercase();
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                if q.is_empty() {
+                    return true;
+                }
+                if q.chars().all(|c| c.is_ascii_digit()) {
+                    return q.parse::<usize>().ok() == Some(i + 1);
+                }
+                s.id.starts_with(&q) || s.title.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// The pick took the highlighted row, or the only match when a query narrowed to one.
     fn pick_now(&mut self) {
-        let Some(session) = self.sessions.get(self.pick).map(|s| s.id.clone()) else {
-            self.said = "no session to pick".to_string();
-            self.state = PanelState::Idle;
+        let list = self.picked_sessions();
+        let id = if list.len() == 1 {
+            Some(list[0].1.id.clone())
+        } else {
+            list.iter()
+                .find(|(i, _)| *i == self.pick)
+                .map(|(_, s)| s.id.clone())
+        };
+        let Some(session) = id else {
+            self.said = "no session matches that — esc closes the list".to_string();
             self.touch();
             return;
         };
@@ -954,7 +986,13 @@ impl Panel {
             "the folder's sessions",
             Role::Faint,
         )]));
-        for (i, s) in self.sessions.iter().enumerate() {
+        if !self.pick_query.is_empty() {
+            out.push(Line::new(vec![
+                Span::role("› ", Role::UserAccent),
+                Span::raw(self.pick_query.clone()),
+            ]));
+        }
+        for (i, s) in self.picked_sessions() {
             let title = if s.title.is_empty() {
                 "untitled"
             } else {
@@ -1286,18 +1324,24 @@ impl crate::editor::Editor {
     pub fn panel_key(&mut self, key: &crate::term::KeyEvent) -> bool {
         use crate::term::KeyCode;
         let plain = !key.mods.ctrl() && !key.mods.alt();
-        // The pick's letters, which a composer cannot have: nothing is typed while it is up.
+        // While the pick is up, typing NARROWS it — an id prefix, a title, or a row number, the
+        // way letibot's session picker works. A composer cannot have those keys: nothing is typed
+        // into it while a pick is up, and a new session is `M-n`, the map's binding.
         if self.panel.state == PanelState::Picking && plain {
             match key.code {
-                KeyCode::Char('n') => {
-                    self.panel_new();
+                KeyCode::Char(c) => {
+                    self.panel.pick_query.push(c);
+                    self.panel.pick = self
+                        .panel
+                        .picked_sessions()
+                        .first()
+                        .map(|(i, _)| *i)
+                        .unwrap_or(0);
                     return true;
                 }
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    let at = c.to_digit(10).unwrap_or(0) as usize;
-                    if at > 0 && at <= self.panel.sessions.len() {
-                        self.panel.pick = at - 1;
-                    }
+                KeyCode::Backspace => {
+                    self.panel.pick_query.pop();
+                    self.panel.pick = 0;
                     return true;
                 }
                 _ => {}
@@ -1411,6 +1455,40 @@ mod tests {
         let mut panel = Panel::default();
         panel.open(PathBuf::from("/w"));
         panel
+    }
+
+    /// Typing narrows the pick — an id prefix, a title substring, or a row number — and a unique
+    /// match is the answer without moving a cursor. That is letibot's session picker, in the panel.
+    #[test]
+    fn typing_narrows_the_pick_and_a_unique_match_is_the_answer() {
+        let mut panel = Panel {
+            sessions: vec![
+                Session {
+                    id: "s-1".into(),
+                    title: "the script".into(),
+                    created_ms: 0,
+                    live: true,
+                },
+                Session {
+                    id: "s-2".into(),
+                    title: "the other".into(),
+                    created_ms: 0,
+                    live: true,
+                },
+            ],
+            state: PanelState::Picking,
+            ..Panel::default()
+        };
+        for query in ["s-2", "other", "2"] {
+            panel.pick_query = query.to_string();
+            assert_eq!(panel.picked_sessions().len(), 1, "{query} narrows to one");
+            panel.pick_now();
+            assert_eq!(
+                panel.take_acts(),
+                vec![Act::Attach("s-2".to_string())],
+                "{query} picked it"
+            );
+        }
     }
 
     /// A folder with no session of its own asks the one ABOVE it: the operator's session usually

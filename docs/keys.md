@@ -146,6 +146,43 @@ A host that answers asks (letibot's editor pane) sends them; standalone rano han
 `ask.<id>.<field>` lines in the config (see [configuration](configuration.md)): the keys,
 labels, prompts and answer modes are the reader's.
 
+## The panel
+
+`M-i` shows a conversation beside the text and `M-i` again hides it: the buffers stay open and
+nothing is asked. The panel talks to the letibot daemon for the folder the focused file is in —
+one session, its rows, and a composer at the foot. Its top edge names the session and what it is
+doing (`idle`, `thinking`, `waiting on you`), or says why there is no daemon.
+
+| Key | What it does |
+|---|---|
+| `M-i` | Show or hide the panel |
+| `C-]` | The keyboard to the other surface, opening the panel when it is shut |
+| `M-m` | The focused surface takes the whole width, and gives it back |
+| `RET` | Send what the composer says; in the session pick, attach the session under the cursor |
+| `M-n` | A new session in this folder, and into it |
+| `Esc` | Back to the text. The conversation stays open, and keeps streaming |
+| `C-c` | Stop the running turn |
+| arrows, `C-p` / `C-n`, `PgUp` / `PgDn` | Move in the session pick, or scroll the conversation |
+| `M-f` | Follow the focused file into another folder: that folder's daemon, that conversation |
+
+The composer is one line: any character is typed into it, `Home` / `End` / `Left` / `Right` move
+in it, and `RET` sends. In the session pick `n` makes a new session and a digit picks the row
+with that number.
+
+The panel takes the second column while the terminal has room for both: two fifths of it, capped
+at eighty columns, and never less than sixty for the text. Below that the focused surface takes
+the whole frame and `C-]` swaps which one shows. The border between them resizes on a drag.
+
+Opening the panel attaches the session this folder used last, without asking; a folder with
+several sessions and none remembered shows them newest first, and one session is taken. The last
+session per folder is remembered in `panel-sessions`, beside `config.toml`.
+
+With no `letibot` on `PATH` the panel says so and stays shut. A folder with no daemon leaves it
+naming the folder, and `RET` asks the launcher for one — rano never starts a daemon itself, since
+the model, the mode and the placement are the launcher's to choose. A card the session is waiting
+on is named in the rows and answered in letibot: the panel says it can decide nothing, so nothing
+is routed to it that would time out.
+
 ## In a view
 
 Previews, diffs, pictures, reviews and the conflict view replace the text's keys. `F8`,

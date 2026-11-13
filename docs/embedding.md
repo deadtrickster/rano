@@ -137,6 +137,41 @@ and makes a `suggest` or an `edit` stale — drawn as a hint, saying so on the s
 refused by `a`: the anchor, not a guess about line shifts, is what decides. `marks()` and
 `mark_stale(id)` answer the same two questions from outside, for a host that draws its own.
 
+## The panel beside the text
+
+`Editor::panel` is the conversation a host puts beside the text: the rows, the composer, the
+session it is attached to and the folder it follows. rano never opens a socket for it. A host
+opens one, performs the `rano::panel::Act`s the editor hands out and gives the frames back:
+
+```rust
+use rano::panel::Act;
+
+for act in ed.panel.take_acts() {
+    match act {
+        Act::Connect(folder) => { /* rano::letibot::socket(&folder), connect, list_sessions */ }
+        Act::Attach(session) => { /* attach or switch, as an editor head */ }
+        Act::New => { /* new_session */ }
+        Act::Prompt(text) => { /* prompt */ }
+        Act::Interrupt => { /* interrupt */ }
+        Act::Start(folder) => { /* the launcher's --ensure */ }
+    }
+}
+while let Some(frame) = client.try_frame() {
+    ed.panel.apply(&frame); // rows, state, and whether the screen changed
+}
+ed.panel.build(pane.width as usize); // the rows at the width they are drawn at
+```
+
+`rano::agent::panel::View` draws it: the session and its state on the top edge, the conversation
+windowed with a seam counting what is out of view, the composer and, while it holds the keyboard,
+the key row. `View::draw` answers the caret and the scroll it used, which the host stores back.
+
+Three keys are the host's, because rano binds none of them: `alt-i` shows or hides the panel,
+`alt-m` zooms the focused surface, and `ctrl-]` crosses the keyboard between the text and the
+panel. They arrive as `KeyOutcome::Unhandled`; `Editor::panel_toggle`, `panel_zoom` and
+`panel_cross` are what a host calls for them, and `panel_key` is where the panel's own map and its
+composer take a key while `panel.focus` is set.
+
 ## One process, two themes
 
 `rano::theme::set_active` is the process's theme. A host that draws more than one editor in one

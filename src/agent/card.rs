@@ -10,6 +10,8 @@
 //! Adapted from grok-build (xAI, Apache-2.0): `DisplayMode`, the tense-flipping verb, the head/tail
 //! budgets and the reasoning rail.
 
+use crate::markdown::code_runs;
+use crate::markdown::render::runs_spans;
 use crate::render::text::{truncate, truncate_owned};
 use crate::render::{Line, Span, Style};
 use crate::style::Role;
@@ -18,6 +20,7 @@ use crate::width::text as wt;
 use super::decision::{SettledDecision, decision_detail};
 use super::outcome::Outcome;
 use super::text::{bytes_human, clean, clean_line, duration, header_names_the_file, one, wrap};
+use super::tool_row::restates_reason;
 use super::{Fold, lines_widget};
 
 /// How much of a block is shown.
@@ -227,6 +230,19 @@ fn push(l: &mut Line, s: impl Into<String>, r: Role) {
     l.spans.push(Span::role(s, r));
 }
 
+/// Faint text joined onto a faint run before it, so an `ok` tail stays one run.
+fn faint(tail: &mut Vec<Span>, t: &str) {
+    match tail.last_mut() {
+        Some(last) if last.style == Style::of(Role::Faint) => last.content.push_str(t),
+        _ => tail.push(Span::role(t, Role::Faint)),
+    }
+}
+
+/// A note or a reason with its `code` spans drawn the way the settled row draws them.
+fn prose(text: &str, role: Role) -> Vec<Span> {
+    runs_spans(&code_runs(text), role)
+}
+
 impl Card {
     pub fn new(tool: &str, call_id: &str) -> Card {
         Card {
@@ -262,7 +278,11 @@ impl Card {
         let (mark, mark_role) = match &self.phase {
             Phase::Proposed { .. } => ('○', Role::Faint),
             Phase::Running { .. } => ('◐', Role::Pending),
-            Phase::Finished { outcome, .. } | Phase::Replayed { outcome } => ('●', outcome.role()),
+            // The mark takes the outcome's colour without Attention's underline, as the row's does.
+            Phase::Finished { outcome, .. } | Phase::Replayed { outcome } => match outcome.role() {
+                Role::Attention => ('●', Role::Pending),
+                r => ('●', r),
+            },
         };
         // The head is built first and the subject filled in last: the tail does not shrink, since
         // half of `· 12.4s` is not a duration, and the clock is what says the call is alive.
@@ -271,27 +291,52 @@ impl Card {
         push(&mut s, " ", Role::Plain);
         push(&mut s, self.verb.label(running), Role::Strong);
 
-        // The right-hand side: state, timing, disclosure.
-        let mut tail: Vec<String> = Vec::new();
-        let ended = |tail: &mut Vec<String>, outcome: &Outcome| {
-            if !matches!(outcome, Outcome::Ok) {
-                tail.push(outcome.word().to_string());
-                if let Some(r) = outcome.reason() {
-                    tail.push(clean_line(r));
+        // The right-hand side: state, timing, disclosure. Only the outcome word wears the outcome;
+        // separators are faint and notes and reasons are prose.
+        let mut tail: Vec<Span> = Vec::new();
+        let ended = |tail: &mut Vec<Span>, outcome: &Outcome| {
+            if matches!(outcome, Outcome::Ok) {
+                return;
+            }
+            let role = outcome.role();
+            faint(tail, " · ");
+            if role == Role::Faint {
+                faint(tail, outcome.word());
+            } else {
+                tail.push(Span::role(outcome.word(), role));
+            }
+            if let Some(r) = outcome.reason() {
+                let r = clean_line(r);
+                if !r.trim().is_empty() && !r.trim().eq_ignore_ascii_case(outcome.word()) {
+                    faint(tail, " · ");
+                    // A faint outcome (backgrounded) keeps its reason faint, as the row does.
+                    let body = if role == Role::Faint {
+                        role
+                    } else {
+                        Role::Plain
+                    };
+                    tail.extend(prose(&r, body));
                 }
             }
         };
+        let note = |tail: &mut Vec<Span>, n: &str| {
+            faint(tail, " · ");
+            tail.extend(prose(&clean_line(n), Role::Plain));
+        };
         match &self.phase {
-            Phase::Proposed { note } => match note {
+            Phase::Proposed { note: n } => match n {
                 // The note beats the state: "proposed" says what it is, the note says why nothing
                 // is happening yet, which is the question the reader has.
-                Some(n) => tail.push(clean_line(n)),
-                None => tail.push("proposed".into()),
+                Some(n) => note(&mut tail, n),
+                None => faint(&mut tail, " · proposed"),
             },
-            Phase::Running { elapsed_ms, note } => {
-                tail.push(duration(*elapsed_ms));
-                if let Some(n) = note {
-                    tail.push(clean_line(n));
+            Phase::Running {
+                elapsed_ms,
+                note: n,
+            } => {
+                faint(&mut tail, &format!(" · {}", duration(*elapsed_ms)));
+                if let Some(n) = n {
+                    note(&mut tail, n);
                 }
             }
             Phase::Finished {
@@ -299,7 +344,7 @@ impl Card {
                 elapsed_ms,
             } => {
                 if let Some(ms) = elapsed_ms {
-                    tail.push(duration(*ms));
+                    faint(&mut tail, &format!(" · {}", duration(*ms)));
                 }
                 ended(&mut tail, outcome);
             }
@@ -308,23 +353,15 @@ impl Card {
         if let Some((inline, full)) = self.bytes
             && inline != full
         {
-            tail.push(format!("{inline} B of {full} B"));
+            faint(&mut tail, &format!(" · {inline} B of {full} B"));
         }
         if let Some(h) = &self.spill {
-            tail.push(format!("spill {h}"));
+            faint(&mut tail, &format!(" · spill {h}"));
         }
         if tail.is_empty() {
             return truncate_owned(s, cfg.width);
         }
-        let role = match &self.phase {
-            Phase::Finished { outcome, .. } | Phase::Replayed { outcome }
-                if !matches!(outcome, Outcome::Ok) =>
-            {
-                outcome.role()
-            }
-            _ => Role::Faint,
-        };
-        let joined = format!(" · {}", tail.join(" · "));
+        let tail_width: usize = tail.iter().map(|sp| wt::width(&sp.content)).sum();
         // The call id sits beside the subject, and is measured before it for the same reason the
         // tail is.
         let id_str = if cfg.show_id {
@@ -341,7 +378,7 @@ impl Card {
             let target = clean_line(&self.target);
             let spare = cfg
                 .width
-                .saturating_sub(s.width() + wt::width(&joined) + wt::width(&id_str) + 1);
+                .saturating_sub(s.width() + tail_width + wt::width(&id_str) + 1);
             let room = spare.max(MIN_SUBJECT);
             // A path is cut from the left and anything else from the right — the transcript row's
             // `shorten_subject` does the same, so one call does not read two ways. A glob or a quoted
@@ -359,7 +396,7 @@ impl Card {
         if !id_str.is_empty() {
             push(&mut s, id_str, Role::Faint);
         }
-        push(&mut s, joined, role);
+        s.spans.extend(tail);
         // One last guard for the case the floor above creates, taking the END so the clock survives.
         truncate_owned(s, cfg.width)
     }
@@ -367,15 +404,25 @@ impl Card {
     /// The whole card.
     pub fn render(&self, cfg: &CardConfig) -> Vec<Line> {
         let mut out = vec![self.header(cfg)];
-        if cfg.mode == DisplayMode::Collapsed || self.body.is_empty() {
-            if cfg.mode == DisplayMode::Collapsed && !self.body.is_empty() {
-                out.push(one(format!("  … {} lines", self.body.len()), Role::Faint));
+        // The header prints the reason; a body line that only restates it is dropped.
+        let own: Vec<Line> = match &self.phase {
+            Phase::Finished { outcome, .. } | Phase::Replayed { outcome } => self
+                .body
+                .iter()
+                .filter(|l| !restates_reason(&clean_line(&l.plain()), outcome))
+                .cloned()
+                .collect(),
+            _ => self.body.clone(),
+        };
+        if cfg.mode == DisplayMode::Collapsed || own.is_empty() {
+            if cfg.mode == DisplayMode::Collapsed && !own.is_empty() {
+                out.push(one(format!("  … {} lines", own.len()), Role::Faint));
             }
             return out;
         }
         let body = match cfg.mode {
-            DisplayMode::Expanded => head_tail(&self.body, cfg.budget.expanded_max, 0),
-            _ => head_tail(&self.body, cfg.budget.first_lines, cfg.budget.last_lines),
+            DisplayMode::Expanded => head_tail(&own, cfg.budget.expanded_max, 0),
+            _ => head_tail(&own, cfg.budget.first_lines, cfg.budget.last_lines),
         };
         for l in body {
             out.push(truncate_owned(indent(l, 2), cfg.width));
@@ -778,6 +825,72 @@ mod tests {
         // Not success, and not a person's to answer either: information for the model.
         assert_eq!(role_of(&l, "ABSTAINED"), Some(Role::Info));
         assert_eq!(role_of(&l, "●"), Some(Role::Info));
+    }
+
+    #[test]
+    fn a_settled_cards_outcome_is_on_its_word_only() {
+        use crate::style::Palette;
+        let c = Card::new("grep", "c1")
+            .target("a.md")
+            .phase(Phase::Finished {
+                outcome: Outcome::Abstained("`a|b` does not occur".into()),
+                elapsed_ms: Some(40),
+            });
+        assert_eq!(
+            c.header(&cfg()).to_ansi(Palette::Colour),
+            "\x1b[36m●\x1b[0m \x1b[1mSearched\x1b[0m a.md\x1b[2m · 40ms · \x1b[0m\x1b[36mABSTAINED\x1b[0m\x1b[2m · \x1b[0m\x1b[36ma|b\x1b[0m does not occur"
+        );
+        // An ok card keeps its one faint run.
+        let mut ok = Card::new("read", "c1")
+            .target("a.rs")
+            .phase(Phase::Finished {
+                outcome: Outcome::Ok,
+                elapsed_ms: Some(1_200),
+            });
+        ok.bytes = Some((8, 9));
+        assert_eq!(
+            ok.header(&cfg()).to_ansi(Palette::Colour),
+            "\x1b[32m●\x1b[0m \x1b[1mRead\x1b[0m a.rs\x1b[2m · 1.2s · 8 B of 9 B\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn a_refused_card_underlines_only_its_word() {
+        let c = Card::new("bash", "c1")
+            .target("rm -rf /")
+            .body(vec![
+                Line::raw("reason: the call was denied (d1)"),
+                Line::raw("more"),
+            ])
+            .phase(Phase::Finished {
+                outcome: Outcome::Denied("the call was denied (d1)".into()),
+                elapsed_ms: Some(3),
+            });
+        let out = c.render(&cfg());
+        let l = &out[0];
+        let underlined: Vec<&str> = l
+            .spans
+            .iter()
+            .filter(|s| l.style.patch(&s.style).top() == Role::Attention)
+            .map(|s| s.content.as_str())
+            .collect();
+        assert_eq!(underlined, vec!["REFUSED"]);
+        assert_eq!(role_of(l, "●"), Some(Role::Pending));
+        assert_eq!(role_of(l, "the call"), Some(Role::Plain));
+        // The header says the reason; the body does not say it again.
+        assert_eq!(plain(&out[1..]), vec!["  more"]);
+    }
+
+    #[test]
+    fn a_note_draws_its_code_spans() {
+        let c = Card::new("bash", "c1").phase(Phase::Running {
+            elapsed_ms: 9_000,
+            note: Some("compiling `rano`".into()),
+        });
+        let l = c.header(&cfg());
+        assert_eq!(l.plain(), "◐ Running · 9.0s · compiling rano");
+        assert_eq!(role_of(&l, "rano"), Some(Role::Code));
+        assert_eq!(role_of(&l, "compiling"), Some(Role::Plain));
     }
 
     #[test]

@@ -43,6 +43,7 @@ const BACK_OUT: &[&str] = &[
     "list-close",
     "page-close",
     "palette-cancel",
+    "panel-leave",
 ];
 
 /// Every key both programs promise.
@@ -170,6 +171,7 @@ mod tests {
             &k.buffers,
             &k.page,
             &k.palette,
+            &k.panel,
         ] {
             f(&m.name, m);
         }

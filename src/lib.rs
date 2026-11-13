@@ -30,6 +30,9 @@ pub mod keymap;
 pub mod letibot;
 // A model's markdown reply, rendered while it streams.
 pub mod markdown;
+// The panel beside the text: one conversation, the session it is attached to, and the acts a host
+// turns into frames. Drawing is `agent::panel`.
+pub mod panel;
 // Unified diffs read back in: a patch parsed into files and hunks (the editor's M-P view of a
 // .diff/.patch buffer).
 pub mod patch;

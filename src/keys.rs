@@ -119,6 +119,15 @@ impl Editor {
         {
             return KeyOutcome::Handled;
         }
+        // **The panel's keyboard**, when it holds it (`alt-i` in, Esc out): its map, then the
+        // composer's line, ahead of the maps the way a prompt's keys are.
+        if self.panel.focus
+            && self.diff_view.is_none()
+            && self.prompt.is_none()
+            && self.panel_key(&key)
+        {
+            return KeyOutcome::Handled;
+        }
         // Live completion popup: navigation/accept/cancel first; anything else
         // closes it and falls through (typing and backspace re-request instead).
         if self

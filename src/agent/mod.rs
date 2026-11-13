@@ -39,6 +39,7 @@ pub mod monitors;
 pub mod notes;
 pub mod outcome;
 pub mod pane;
+pub mod panel;
 pub mod picker;
 pub mod queue;
 pub mod quit;

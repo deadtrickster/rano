@@ -36,6 +36,9 @@ impl Editor {
         dirty |= self.refresh_prompt_hints();
         dirty |= self.refresh_diff_view();
         dirty |= self.refresh_info_view();
+        // The panel follows the focused buffer into its own folder: one `git` call per buffer
+        // change, never per frame.
+        dirty |= self.panel_watch_folder();
         // The status row comes and goes with a prompt or a message, and the scroll below measures
         // against the text height: a frame that changed it and not this would be a row out. Only
         // `WhenBusy` can change it, so the standalone binary keeps the height it computed.

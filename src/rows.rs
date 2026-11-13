@@ -1044,8 +1044,8 @@ impl Rows {
             return out;
         }
         out.extend(self.chunks[c0][i0..].iter().cloned());
-        for c in (c0 + 1)..c1 {
-            out.extend(self.chunks[c].iter().cloned());
+        for chunk in &self.chunks[c0 + 1..c1] {
+            out.extend(chunk.iter().cloned());
         }
         out.extend(self.chunks[c1][..=i1].iter().cloned());
         out
@@ -1163,8 +1163,8 @@ impl Rows {
             out.extend(self.chunks[c0].drain(i0..=i1));
         } else {
             out.extend(self.chunks[c0].drain(i0..));
-            for c in (c0 + 1)..c1 {
-                out.extend(std::mem::take(&mut self.chunks[c]));
+            for chunk in &mut self.chunks[c0 + 1..c1] {
+                out.extend(std::mem::take(chunk));
             }
             out.extend(self.chunks[c1].drain(..=i1));
         }

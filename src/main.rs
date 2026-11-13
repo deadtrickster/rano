@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rano::buffer::{Buffer, Pos};
+use rano::editor::KeyOutcome;
 use rano::editor::{Area, Editor};
 use rano::expand_tilde;
-use rano::render::{self, Palette, Rect};
+use rano::panel::Act;
+use rano::render::{self, Line, Palette, Rect, Style};
 use rano::send_ctrl::split_position;
-use rano::term::{self, Event, Terminal};
+use rano::style::Role;
+use rano::term::{self, Event, KeyCode, MouseButton, MouseKind, Terminal};
 use rano::{config, export, send_ctrl, syntax, ui};
 
 /// The command line, parsed by hand: files, a few flags, no subcommands.
@@ -312,6 +315,11 @@ fn run(
     }
     ed.bs_mut().goto = pos;
     ed.load_builtins();
+    // Where the last session per folder is remembered, beside the config: a folder reopened
+    // attaches the conversation it had.
+    ed.panel.state_file = config::config_path()
+        .parent()
+        .map(|d| d.join("panel-sessions"));
     // The viewport before the open: a plugin asked for 0 columns answers "not mine".
     let (tw, th) = terminal.size();
     ed.set_area(Area::new(
@@ -341,6 +349,11 @@ fn run(
     }
     ed.add_deferred_buffers_at(&rest);
     let mut frame = render::Buffer::empty(Rect::default());
+    // The panel's connection, its columns, and whether its border is being dragged: the wire, the
+    // width and the pointer are the host's, and the conversation is the editor's.
+    let mut link: Option<Link> = None;
+    let mut panel_width: Option<u16> = None;
+    let mut dragging = false;
     // Dirty-draw: any handled key, paste or resize dirties; `tick` reports the
     // editor's own state changes.
     let mut dirty = true;
@@ -350,11 +363,15 @@ fn run(
             w.min(u16::MAX as usize) as u16,
             h.min(u16::MAX as usize) as u16,
         );
-        dirty |= ed.set_area(Area::new(0, 0, w, h));
         if frame.area() != Rect::new(0, 0, w, h) {
             frame.resize(Rect::new(0, 0, w, h));
             dirty = true;
         }
+        // What the panel and the wire said to each other since the last pass, before the layout:
+        // a frame may have changed the session, and an act may have opened or closed a socket.
+        dirty |= pump(&mut ed, &mut link);
+        let lay = layout(w, h, &ed, panel_width);
+        dirty |= ed.set_area(lay.editor.unwrap_or(Rect::new(0, 0, w, h)).into());
         // The pollers, the overlays' refreshes, the scroll and the highlight:
         // everything between two events, the same call a host makes.
         dirty |= ed.tick(Instant::now());
@@ -370,14 +387,22 @@ fn run(
                 terminal.write_raw(&bytes);
             }
             // Only the rows that changed reach the glass; the cursor is hidden while
-            // they are written and shown where the editor says.
-            let cursor = ui::draw(&mut frame, &ed);
+            // they are written and shown where the focused surface says.
+            let cursor = draw_frame(&mut frame, &mut ed, &lay);
             terminal.draw_buffer(
                 &frame,
                 palette,
                 cursor.map(|(x, y)| (y as usize, x as usize)),
             );
             dirty = false;
+            // The read mark goes out after the rows are on the glass, never on receipt: a crash
+            // costs a duplicate rather than a silence.
+            if let Some(open) = link.as_mut()
+                && open.ack_due
+            {
+                open.ack_due = false;
+                let _ = open.client.ack(ed.panel.rows.len() as u64, 0);
+            }
         }
         if ed.wants_quit() {
             break;
@@ -390,14 +415,20 @@ fn run(
         for ev in terminal.events() {
             match ev {
                 Event::Key(k) => {
-                    ed.handle_key(k);
+                    // A key the editor has no use for is the host's: the three the design puts
+                    // above both programs, and nothing else.
+                    if ed.handle_key(k) == KeyOutcome::Unhandled {
+                        host_key(&mut ed, &k);
+                    }
                     dirty = true;
                 }
                 Event::Paste(t) => {
                     ed.paste_text(&t);
                     dirty = true;
                 }
-                Event::Mouse(m) => dirty |= ed.handle_mouse(m),
+                Event::Mouse(m) => {
+                    dirty |= mouse(&mut ed, &lay, &m, w, &mut panel_width, &mut dragging)
+                }
                 Event::Background { light } => {
                     palette = Palette::detected(light);
                     dirty = true;
@@ -415,6 +446,474 @@ fn run(
         println!("{}", u.message());
     }
     Ok(())
+}
+
+/// The narrowest the panel is worth drawing beside the text.
+const PANEL_MIN: u16 = 36;
+/// The columns the text keeps; below the two minimums and a border, one surface takes the frame.
+const EDITOR_MIN: u16 = 60;
+/// The widest the panel opens at: more than half a wide terminal is a second editor, not a sidebar.
+const PANEL_MAX: u16 = 80;
+
+/// The panel's connection to a letibot daemon: the socket and the seat. The conversation is the
+/// editor's, the wire is the host's, and this is where the two meet.
+struct Link {
+    client: rano::letibot::Client,
+    /// Whether this connection has been through its first `Attach`: a move after that is a
+    /// `Switch`.
+    attached: bool,
+    /// A frame arrived and has not been drawn yet, so the read mark is still owed.
+    ack_due: bool,
+}
+
+impl Link {
+    /// Ask the launcher where the folder's daemon is, and connect to it. A folder with no daemon is
+    /// an answer rather than a socket nothing is listening on.
+    fn open(folder: &Path) -> Result<Link, rano::letibot::NoDaemon> {
+        let socket = rano::letibot::socket(folder)?;
+        match rano::letibot::Client::connect(&socket) {
+            Ok(client) => Ok(Link {
+                client,
+                attached: false,
+                ack_due: false,
+            }),
+            Err(e) => Err(rano::letibot::NoDaemon::NotRunning {
+                folder: folder.to_path_buf(),
+                said: e.to_string(),
+            }),
+        }
+    }
+
+    /// A frame arrived and has not been drawn yet: the read mark is still owed.
+    fn sent(&mut self) {
+        self.ack_due = true;
+    }
+}
+
+/// The seat the panel attaches as. `can_decide: false`: the panel draws no card, so claiming it
+/// could answer one would have the daemon waiting on a head that never will.
+fn seat() -> rano::letibot::Seat {
+    rano::letibot::Seat {
+        can_decide: false,
+        ..Default::default()
+    }
+}
+
+/// What the panel and the wire say to each other, once per pass: frames in, acts out. True when
+/// the screen changed.
+fn pump(ed: &mut Editor, link: &mut Option<Link>) -> bool {
+    let mut dirty = false;
+    if let Some(open) = link.as_mut() {
+        while let Some(frame) = open.client.try_frame() {
+            if matches!(frame, rano::letibot::Frame::Hello(_)) {
+                open.attached = true;
+            }
+            open.sent();
+            dirty |= ed.panel.apply(&frame);
+        }
+    }
+    for act in ed.panel.take_acts() {
+        dirty = true;
+        match act {
+            Act::Connect(folder) => dirty |= connect(ed, link, &folder),
+            Act::Start(folder) => match rano::letibot::start(&folder) {
+                Ok(_) => dirty |= connect(ed, link, &folder),
+                Err(why) => ed.panel.no_daemon(&why),
+            },
+            Act::Attach(session) => {
+                let Some(open) = link.as_mut() else {
+                    ed.panel.no_daemon(&rano::letibot::NoDaemon::NotRunning {
+                        folder: ed.panel.folder.clone(),
+                        said: String::new(),
+                    });
+                    continue;
+                };
+                let outcome = if open.attached {
+                    open.client.switch(&session, 0)
+                } else {
+                    open.client.attach(&session, 0, &seat())
+                };
+                open.sent();
+                if let Err(e) = outcome {
+                    ed.panel.said = format!("cannot attach to {session}: {e}");
+                }
+            }
+            Act::New => {
+                send_frame(ed, link, |open, folder| {
+                    open.client.new_session("", &folder)
+                });
+            }
+            Act::Prompt(text) => {
+                send_frame(ed, link, |open, _| open.client.prompt(&text));
+            }
+            Act::Interrupt => {
+                send_frame(ed, link, |open, _| open.client.interrupt("esc esc"));
+            }
+        }
+    }
+    dirty
+}
+
+/// A frame a command sends, with the two failures every one of them has: no daemon to send it to,
+/// and a socket that has gone away.
+fn send_frame(
+    ed: &mut Editor,
+    link: &mut Option<Link>,
+    send: impl FnOnce(&mut Link, String) -> std::io::Result<String>,
+) {
+    let folder = ed.panel.folder.display().to_string();
+    let Some(open) = link.as_mut() else {
+        ed.panel.no_daemon(&rano::letibot::NoDaemon::NotRunning {
+            folder: ed.panel.folder.clone(),
+            said: String::new(),
+        });
+        return;
+    };
+    if let Err(e) = send(open, folder) {
+        ed.panel.said = format!("cannot reach the daemon: {e}");
+    }
+}
+
+/// Open a connection for `folder` and ask it for its sessions.
+fn connect(ed: &mut Editor, link: &mut Option<Link>, folder: &Path) -> bool {
+    if let Some(old) = link.take() {
+        drop(old);
+    }
+    match Link::open(folder) {
+        Ok(mut open) => {
+            if let Err(e) = open.client.list_sessions() {
+                ed.panel.said = format!("cannot ask for the sessions: {e}");
+            }
+            *link = Some(open);
+        }
+        // Nothing at all could open a panel here: the line goes where the reader is already
+        // looking, on the status row, and the panel stays shut.
+        Err(why @ rano::letibot::NoDaemon::NotInstalled) => ed.panel_refuse(&why.to_string()),
+        Err(why) => ed.panel.no_daemon(&why),
+    }
+    true
+}
+
+/// The panes of one frame. A surface that is not drawn has no rectangle: below the width limit, and
+/// while zoomed, exactly one of them has the frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Layout {
+    editor: Option<Rect>,
+    border: Option<Rect>,
+    panel: Option<Rect>,
+}
+
+/// How a `w`×`h` frame splits between the text and the panel. `want` is the width the operator
+/// dragged the border to, clamped every frame so a resize cannot leave a surface twice as small as
+/// its minimum.
+fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
+    let whole = Rect::new(0, 0, w, h);
+    if !ed.panel.open || w == 0 || h == 0 {
+        return Layout {
+            editor: Some(whole),
+            ..Layout::default()
+        };
+    }
+    if ed.panel.zoom || w < EDITOR_MIN + 1 + PANEL_MIN {
+        // One surface takes the frame: two columns that fit neither is the squeeze the design
+        // refuses.
+        return if ed.panel.focus {
+            Layout {
+                panel: Some(whole),
+                ..Layout::default()
+            }
+        } else {
+            Layout {
+                editor: Some(whole),
+                ..Layout::default()
+            }
+        };
+    }
+    let default = (u32::from(w) * 2 / 5).min(u32::from(PANEL_MAX)) as u16;
+    let pw = want.unwrap_or(default).clamp(PANEL_MIN, w - EDITOR_MIN - 1);
+    let ew = w - pw - 1;
+    Layout {
+        editor: Some(Rect::new(0, 0, ew, h)),
+        border: Some(Rect::new(ew, 0, 1, h)),
+        panel: Some(Rect::new(ew + 1, 0, pw, h)),
+    }
+}
+
+/// Draw the frame the layout asked for, and say where the caret is.
+fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option<(u16, u16)> {
+    let mut cursor = None;
+    if let Some(area) = lay.editor {
+        cursor = ui::draw_in(buf, area, ed);
+    }
+    if let Some(area) = lay.border {
+        // The rule between the two, the same glyph the editor's own sidebar draws.
+        let rule = Line::styled("\u{2502}", Style::of(Role::Faint));
+        for y in area.y..area.y + area.height {
+            buf.set_line(area.x, y, &rule, 1);
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        let hints = if ed.panel.focus {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let drawn = panel_view(ed, &hints).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    cursor
+}
+
+/// The panel as its widget sees it: the facts it draws, and nothing it would have to know.
+fn panel_view<'a>(ed: &'a Editor, hints: &'a [(String, String)]) -> rano::agent::panel::View<'a> {
+    let panel = &ed.panel;
+    rano::agent::panel::View {
+        title: panel.title.clone(),
+        state: panel.state.words(),
+        state_role: panel.state.role(),
+        folder: panel.folder.display().to_string(),
+        moved: panel.moved.as_ref().map(|f| f.display().to_string()),
+        body: panel.lines(),
+        scroll: panel.scroll,
+        follow: panel.follow,
+        input: &panel.input,
+        cursor: panel.cursor,
+        focus: panel.focus,
+        hints,
+    }
+}
+
+/// The three keys the design puts above both programs, pressed where rano binds none of them: the
+/// crossing, the side surface and the zoom. A key the editor did not want and this does not know is
+/// dropped, as it always was.
+fn host_key(ed: &mut Editor, key: &rano::term::KeyEvent) {
+    let alt = key.mods.alt();
+    let ctrl = key.mods.ctrl();
+    match key.code {
+        KeyCode::Char(']') if ctrl && !alt => ed.panel_cross(),
+        KeyCode::Char('i') if alt && !ctrl => ed.panel_toggle(),
+        KeyCode::Char('m') if alt && !ctrl => ed.panel_zoom(),
+        _ => {}
+    }
+}
+
+/// A mouse event in the frame: a click in the panel takes the keyboard there, a held border resizes
+/// it, and anything else is the editor's.
+fn mouse(
+    ed: &mut Editor,
+    lay: &Layout,
+    m: &rano::term::MouseEvent,
+    w: u16,
+    width: &mut Option<u16>,
+    dragging: &mut bool,
+) -> bool {
+    let inside = |r: Option<Rect>| r.is_some_and(|r| r.contains(m.x, m.y));
+    // A held border is the width, whatever the pointer is over now.
+    if *dragging {
+        match m.kind {
+            MouseKind::Drag(MouseButton::Left) => {
+                *width = Some(w.saturating_sub(m.x + 1));
+                return true;
+            }
+            MouseKind::Release(_) => {
+                *dragging = false;
+                return true;
+            }
+            _ => {}
+        }
+    }
+    if inside(lay.border) {
+        if matches!(m.kind, MouseKind::Press(MouseButton::Left)) {
+            *dragging = true;
+            return true;
+        }
+        return false;
+    }
+    if inside(lay.panel) {
+        // A prompt keeps the keyboard wherever the pointer goes: it is a question being answered,
+        // and taking the caret out from under it would answer it by accident.
+        let taking = ed.prompt.is_none();
+        match m.kind {
+            MouseKind::Press(MouseButton::Left) => {
+                if !taking {
+                    return false;
+                }
+                ed.panel.focus = true;
+                ed.panel.cursor = ed.panel.input.chars().count();
+                return true;
+            }
+            MouseKind::WheelUp => {
+                ed.panel_page_up();
+                return true;
+            }
+            MouseKind::WheelDown => {
+                ed.panel_page_down();
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    ed.panel.focus = false;
+    ed.handle_mouse(*m)
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+    use rano::buffer::Buffer;
+    use rano::config::Config;
+
+    fn editor() -> Editor {
+        Editor::new(Buffer::new(), Config::default())
+    }
+
+    /// A closed panel is not a pane: the text keeps the whole frame, as it always did.
+    #[test]
+    fn a_closed_panel_leaves_the_text_the_whole_frame() {
+        let ed = editor();
+        let lay = layout(120, 30, &ed, None);
+        assert_eq!(lay.editor, Some(Rect::new(0, 0, 120, 30)));
+        assert_eq!(lay.panel, None);
+        assert_eq!(lay.border, None);
+    }
+
+    /// Open on a wide terminal: text, the rule, the panel; two fifths to the panel, and neither
+    /// surface below its minimum whatever the operator dragged it to.
+    #[test]
+    fn a_wide_frame_is_two_columns_and_a_rule() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        let lay = layout(120, 30, &ed, None);
+        let panel = lay.panel.expect("a panel column");
+        let text = lay.editor.expect("an editor column");
+        assert_eq!((panel.x, panel.width), (72, 48));
+        assert_eq!(panel.width, 120 * 2 / 5);
+        assert_eq!(lay.border, Some(Rect::new(71, 0, 1, 30)));
+        assert_eq!(
+            text.width + 1 + panel.width,
+            120,
+            "the frame is filled once"
+        );
+
+        // Dragged as narrow and as wide as it goes: the text keeps EDITOR_MIN and the panel keeps
+        // PANEL_MIN, whatever the drag said.
+        let narrow = layout(120, 30, &ed, Some(1)).panel.expect("a panel");
+        assert_eq!(narrow.width, PANEL_MIN);
+        assert_eq!(
+            layout(120, 30, &ed, Some(1)).editor.unwrap().width,
+            120 - PANEL_MIN - 1
+        );
+        let wide = layout(120, 30, &ed, Some(500)).panel.expect("a panel");
+        assert_eq!(wide.width, 120 - EDITOR_MIN - 1);
+
+        // A very wide terminal caps the panel where the design says, not at half.
+        let capped = layout(400, 30, &ed, None).panel.expect("a panel");
+        assert_eq!(capped.width, PANEL_MAX);
+    }
+
+    /// Below the two minimums and the rule, one surface takes the frame and `ctrl-]` swaps which:
+    /// two columns that fit neither is the squeeze the design refuses.
+    #[test]
+    fn a_narrow_frame_zooms_the_focused_surface() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.focus = true;
+        let lay = layout(90, 30, &ed, None);
+        assert_eq!(lay.panel, Some(Rect::new(0, 0, 90, 30)));
+        assert_eq!(lay.editor, None, "the text is not drawn beside it");
+        // The keyboard to the text: now it is the panel that is off the screen, still open.
+        ed.panel.focus = false;
+        let lay = layout(90, 30, &ed, None);
+        assert_eq!(lay.editor, Some(Rect::new(0, 0, 90, 30)));
+        assert_eq!(lay.panel, None);
+        // At exactly the two minimums and the rule it splits again.
+        ed.panel.focus = true;
+        let lay = layout(EDITOR_MIN + 1 + PANEL_MIN, 30, &ed, None);
+        assert!(lay.editor.is_some() && lay.panel.is_some());
+    }
+
+    /// `alt-m` zooms the focused surface on a terminal wide enough to split, and zooms it back.
+    #[test]
+    fn zoom_takes_the_frame_and_gives_it_back() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.focus = true;
+        ed.panel_zoom();
+        let lay = layout(120, 30, &ed, None);
+        assert_eq!(lay.panel, Some(Rect::new(0, 0, 120, 30)));
+        assert_eq!(lay.editor, None);
+        ed.panel_cross();
+        let lay = layout(120, 30, &ed, None);
+        assert_eq!(lay.editor, Some(Rect::new(0, 0, 120, 30)));
+        assert_eq!(lay.panel, None);
+        ed.panel_zoom();
+        let lay = layout(120, 30, &ed, None);
+        assert!(lay.editor.is_some() && lay.panel.is_some(), "split again");
+    }
+
+    /// The three host keys: the crossing, the side surface and the zoom. Every other key the editor
+    /// did not want changes nothing.
+    #[test]
+    fn the_host_keys_are_the_three_the_design_shares() {
+        let mut ed = editor();
+        let key =
+            |code: KeyCode, mods: rano::term::event::Mods| rano::term::KeyEvent { code, mods };
+        let alt_i = key(KeyCode::Char('i'), rano::term::event::Mods::ALT);
+        host_key(&mut ed, &alt_i);
+        assert!(ed.panel.open && ed.panel.focus, "alt-i opens it, focused");
+        let cross = key(KeyCode::Char(']'), rano::term::event::Mods::CTRL);
+        host_key(&mut ed, &cross);
+        assert!(!ed.panel.focus, "ctrl-] crosses to the text");
+        host_key(&mut ed, &cross);
+        assert!(ed.panel.focus, "and back");
+        let alt_m = key(KeyCode::Char('m'), rano::term::event::Mods::ALT);
+        host_key(&mut ed, &alt_m);
+        assert!(ed.panel.zoom, "alt-m zooms");
+        host_key(&mut ed, &alt_i);
+        assert!(!ed.panel.open, "alt-i hides it again");
+        // A key nobody claimed: nothing happens, which is what the binary did before.
+        host_key(
+            &mut ed,
+            &key(KeyCode::Char('z'), rano::term::event::Mods::ALT),
+        );
+        assert!(!ed.panel.open && !ed.panel.zoom);
+    }
+
+    /// A click in the panel takes the keyboard there, and a click in the text gives it back: the
+    /// mouse and the keys must agree about which surface a person is working in.
+    #[test]
+    fn a_click_in_the_panel_takes_the_keyboard_and_a_click_in_the_text_gives_it_back() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.focus = false;
+        let lay = layout(120, 30, &ed, None);
+        let press = |x: u16| rano::term::MouseEvent {
+            kind: MouseKind::Press(MouseButton::Left),
+            x,
+            y: 4,
+            mods: rano::term::event::Mods::NONE,
+        };
+        let mut width = None;
+        let mut dragging = false;
+        assert!(mouse(
+            &mut ed,
+            &lay,
+            &press(100),
+            120,
+            &mut width,
+            &mut dragging
+        ));
+        assert!(
+            ed.panel.focus,
+            "a click in the conversation is the conversation"
+        );
+        mouse(&mut ed, &lay, &press(10), 120, &mut width, &mut dragging);
+        assert!(!ed.panel.focus, "and a click in the text is the text");
+    }
 }
 
 #[cfg(test)]

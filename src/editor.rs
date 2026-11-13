@@ -212,6 +212,9 @@ pub struct Editor {
     /// asks - typed here or sent by `M-Q` - and the replies the host pushes with
     /// [`Self::push_chat`]; the compose line at its foot sends the same event `M-Q` sends.
     pub sidebar: crate::sidebar::Sidebar,
+    /// **The panel: one conversation with a letibot session** (`alt-i`, the `panel` keymap mode).
+    /// Its state is here and its socket is the host's; see [`crate::panel`].
+    pub panel: crate::panel::Panel,
     pub plugin: Option<crate::plugin::Plugin>,
     pub builtins: Vec<crate::plugin::Plugin>,
     pub(crate) plugin_note: Option<String>,
@@ -341,6 +344,7 @@ impl Editor {
             diff_split: false,
             images: false,
             sidebar: crate::sidebar::Sidebar::default(),
+            panel: crate::panel::Panel::default(),
             proto: Proto::None,
             picture_view: None,
             pictures: Pictures::new(Proto::None),
@@ -2320,6 +2324,14 @@ impl Editor {
     /// Bracketed paste. \r is stripped, newlines split into rows; the whole
     /// paste (including selection replacement) is one undo step.
     pub fn paste_text(&mut self, s: &str) {
+        // A paste goes where the caret is, and while the panel holds the keyboard that is its
+        // composer: one line, so the newlines become spaces.
+        if self.panel.focus && self.prompt.is_none() {
+            for c in s.chars() {
+                self.panel.insert(c);
+            }
+            return;
+        }
         if self.refuse_read_only("paste") {
             return;
         }

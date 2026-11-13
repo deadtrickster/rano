@@ -31,6 +31,7 @@ pub enum Group {
     List,
     Page,
     Palette,
+    Panel,
 }
 
 impl Group {
@@ -52,13 +53,19 @@ impl Group {
             Group::List => "Lists",
             Group::Page => "Help pages",
             Group::Palette => "M-x",
+            Group::Panel => "Panel",
         }
     }
 
     pub fn global(self) -> bool {
         !matches!(
             self,
-            Group::Diff | Group::Conflict | Group::List | Group::Page | Group::Palette
+            Group::Diff
+                | Group::Conflict
+                | Group::List
+                | Group::Page
+                | Group::Palette
+                | Group::Panel
         )
     }
 }
@@ -121,6 +128,72 @@ pub fn commands() -> &'static [Command] {
                 View,
                 "The keyboard into the chat sidebar, or back out of it with Esc.",
                 |e| e.enter_sidebar(),
+            ),
+            // The panel's own keys. Not global commands: without the panel in front of them they
+            // have nothing to act on, and the palette should not offer them.
+            cmd(
+                "panel-send",
+                "Send",
+                Panel,
+                "The panel: send the composer's line, or attach the session under the cursor.",
+                |e| e.panel_send(),
+            ),
+            cmd(
+                "panel-new",
+                "New Session",
+                Panel,
+                "The panel: a new session in this folder, and into it.",
+                |e| e.panel_new(),
+            ),
+            cmd(
+                "panel-leave",
+                "Back to the Text",
+                Panel,
+                "The panel: give the keyboard back to the text. The conversation stays open.",
+                |e| e.panel_leave(),
+            ),
+            cmd(
+                "panel-interrupt",
+                "Interrupt",
+                Panel,
+                "The panel: stop the running turn.",
+                |e| e.panel_interrupt(),
+            ),
+            cmd(
+                "panel-up",
+                "Up",
+                Panel,
+                "The panel: the session above, or the conversation a row up.",
+                |e| e.panel_up(),
+            ),
+            cmd(
+                "panel-down",
+                "Down",
+                Panel,
+                "The panel: the session below, or the conversation a row down.",
+                |e| e.panel_down(),
+            ),
+            cmd(
+                "panel-page-up",
+                "Page Up",
+                Panel,
+                "The panel: a screenful of the conversation up.",
+                |e| e.panel_page_up(),
+            ),
+            cmd(
+                "panel-page-down",
+                "Page Down",
+                Panel,
+                "The panel: a screenful of the conversation down.",
+                |e| e.panel_page_down(),
+            ),
+            cmd(
+                "panel-follow",
+                "Follow the Folder",
+                Panel,
+                "The panel: follow the focused file into its own folder, and that folder's \
+                 conversation.",
+                |e| e.panel_follow(),
             ),
             cmd(
                 "ask-position",
@@ -863,6 +936,8 @@ pub struct Keymaps {
     pub buffers: Keymap,
     pub page: Keymap,
     pub palette: Keymap,
+    /// The panel holds the keyboard: the conversation, its composer and its session pick.
+    pub panel: Keymap,
 }
 
 /// Prefix maps whose card shows at once: a help key is pressed to be shown something.
@@ -1089,6 +1164,20 @@ impl Keymaps {
             .bind("C-g", "palette-cancel")
             .bind("M-x", "palette-cancel");
 
+        let mut panel = Keymap::new("panel");
+        panel
+            .bind("RET", "panel-send")
+            .bind("M-n", "panel-new")
+            .bind("<up>", "panel-up")
+            .bind("C-p", "panel-up")
+            .bind("<down>", "panel-down")
+            .bind("C-n", "panel-down")
+            .bind("<pgup>", "panel-page-up")
+            .bind("<pgdn>", "panel-page-down")
+            .bind("ESC", "panel-leave")
+            .bind("C-c", "panel-interrupt")
+            .bind("M-f", "panel-follow");
+
         let mut k = Keymaps {
             global: g,
             diff,
@@ -1104,6 +1193,7 @@ impl Keymaps {
             buffers,
             page,
             palette,
+            panel,
         };
         // The compiled-in presets, so `Keymaps::standard()` alone has a working M-k;
         // `Editor::new` binds the host's config over them.
@@ -1230,6 +1320,11 @@ impl Editor {
         // work while it is open.
         if self.bs().dir.is_some() {
             return vec![&k.dir, &k.global];
+        }
+        // The panel holds the keyboard: its own map over the global one, which is what makes the
+        // bar and the help pages name the panel's keys the way they name every mode's.
+        if self.panel.focus {
+            return vec![&k.panel, &k.global];
         }
         vec![&k.global]
     }
@@ -1442,6 +1537,7 @@ mod tests {
             &k.buffers,
             &k.page,
             &k.palette,
+            &k.panel,
         ]
     }
 

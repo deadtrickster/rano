@@ -1016,6 +1016,23 @@ pub fn ask(folder: &Path) -> Result<Where, NoDaemon> {
 /// [`ask`] against a named binary: the seam a test drives with a script, rather than putting a fake
 /// `letibot` on `PATH` in a process whose environment other tests share.
 pub fn ask_with(folder: &Path, launcher: &Path) -> Result<Where, NoDaemon> {
+    where_with(folder, launcher, &[])
+}
+
+/// Start a daemon for a folder the launcher says has none: `letibot --where --ensure --json`. The
+/// launcher owns the model, the mode and the placement, which is exactly why rano asks it rather
+/// than starting `harnessd` itself.
+pub fn start(folder: &Path) -> Result<Where, NoDaemon> {
+    start_with(folder, Path::new(LAUNCHER))
+}
+
+/// [`start`] against a named binary, for the same reason [`ask_with`] exists.
+pub fn start_with(folder: &Path, launcher: &Path) -> Result<Where, NoDaemon> {
+    where_with(folder, launcher, &["--ensure"])
+}
+
+/// The launcher's `--where [--ensure] --json`, in the folder.
+fn where_with(folder: &Path, launcher: &Path, extra: &[&str]) -> Result<Where, NoDaemon> {
     // A folder that moved makes `spawn` fail with the same ENOENT as a binary that is not there,
     // so it is answered here rather than read as "no letibot on PATH".
     if !folder.is_dir() {
@@ -1023,8 +1040,11 @@ pub fn ask_with(folder: &Path, launcher: &Path) -> Result<Where, NoDaemon> {
             said: format!("no such folder: {}", folder.display()),
         });
     }
+    let mut args = vec!["--where"];
+    args.extend_from_slice(extra);
+    args.push("--json");
     let out = match std::process::Command::new(launcher)
-        .args(["--where", "--json"])
+        .args(&args)
         .current_dir(folder)
         .output()
     {
@@ -1047,8 +1067,9 @@ pub fn ask_with(folder: &Path, launcher: &Path) -> Result<Where, NoDaemon> {
         return Err(NoDaemon::NoVerb {
             said: if said.is_empty() {
                 format!(
-                    "{} --where --json exited {}",
+                    "{} {} exited {}",
                     launcher.display(),
+                    args.join(" "),
                     out.status
                 )
             } else {

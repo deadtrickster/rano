@@ -31,11 +31,18 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!(
-            "rano-panel-{tag}-{}-{:?}",
-            std::process::id(),
-            Instant::now()
-        ));
+        // This folder holds a unix socket, and a socket's path has to fit in `SUN_LEN` (108 bytes) —
+        // the kernel refuses the rest with "path must be shorter than SUN_LEN", which is what the
+        // gate's landing tree did to this test. So the name is short and filesystem-safe, and when
+        // `TMPDIR` is already long enough to matter the folder goes to `/tmp`, which is the one case
+        // where the environment's temp folder cannot be honoured.
+        let base = std::env::temp_dir();
+        let base = if base.as_os_str().len() > 40 {
+            PathBuf::from("/tmp")
+        } else {
+            base
+        };
+        let dir = base.join(format!("rp-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temporary folder");
         TempDir(dir)
     }

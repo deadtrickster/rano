@@ -1106,7 +1106,14 @@ impl Where {
         Ok(Where {
             workspace: text(&v, "workspace"),
             socket: PathBuf::from(socket),
-            up: v.get("up").and_then(Value::as_bool).unwrap_or(false),
+            // The launcher's word for "it is up" is `live`; `up` is what an older answer said.
+            // Reading only `up` made every live daemon read as absent, which is the whole of
+            // "no letibot daemon for this folder" while one was running.
+            up: v
+                .get("up")
+                .or_else(|| v.get("live"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             protocol: number(&v, "protocol").map(|n| n as u32),
         })
     }
@@ -1552,6 +1559,15 @@ mod tests {
         assert_eq!(where_.protocol, None);
         assert!(!where_.up);
         assert_eq!(where_.workspace, "");
+
+        // The launcher's own word, as it actually answers today: `live`, not `up`. A parser that
+        // only knows `up` reads every live daemon as absent, which is the failure this test pins.
+        let live = Where::parse(
+            r#"{"socket":"/run/letibot/abc.sock","live":true,"project":"x","folder":"/w"}"#,
+        )
+        .unwrap();
+        assert!(live.up, "the launcher's `live` means up");
+        assert!(live.protocol.is_none());
 
         assert!(Where::parse(r#"{"up":true}"#).is_err());
         assert!(Where::parse("not a where").is_err());

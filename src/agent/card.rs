@@ -775,8 +775,9 @@ mod tests {
         assert!(h.contains("ABSTAINED"), "{h}");
         assert!(h.contains("outside the workspace"), "{h}");
         assert!(!h.contains("ok"), "{h}");
-        assert_eq!(role_of(&l, "ABSTAINED"), Some(Role::Attention));
-        assert_eq!(role_of(&l, "●"), Some(Role::Attention));
+        // Not success, and not a person's to answer either: information for the model.
+        assert_eq!(role_of(&l, "ABSTAINED"), Some(Role::Info));
+        assert_eq!(role_of(&l, "●"), Some(Role::Info));
     }
 
     #[test]

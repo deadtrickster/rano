@@ -38,7 +38,9 @@ impl Outcome {
     pub fn role(&self) -> Role {
         match self {
             Outcome::Ok => Role::Success,
-            Outcome::Abstained(_) => Role::Attention,
+            // A tool that had no answer (a search that matched nothing) is information for the
+            // model: Attention is kept for what needs a person.
+            Outcome::Abstained(_) => Role::Info,
             Outcome::Denied(_) => Role::Attention,
             Outcome::Failed(_) => Role::Failure,
             Outcome::Interrupted => Role::Failure,
@@ -136,13 +138,12 @@ mod tests {
 
     #[test]
     fn a_settled_rows_register_comes_from_the_outcome_not_from_a_not_ok_test() {
-        // The two the operator named that are still *something to look at*: neither is a failure.
-        for waiting in [
-            Outcome::Denied("the call was denied (d1)".into()),
-            Outcome::Abstained("nothing to do".into()),
-        ] {
-            assert_eq!(waiting.row_role(), Role::Attention, "{waiting:?}");
-        }
+        // A refusal is something to look at; neither it nor an abstention is a failure.
+        let denied = Outcome::Denied("the call was denied (d1)".into());
+        assert_eq!(denied.row_role(), Role::Attention, "{denied:?}");
+        // An abstention needs no person: a search that matched nothing is the model's to read.
+        let abstained = Outcome::Abstained("nothing to do".into());
+        assert_eq!(abstained.row_role(), Role::Info, "{abstained:?}");
         // A backgrounded call is neither loud nor lit: finished work whose product is a job.
         assert_eq!(
             Outcome::Backgrounded("as `j1` after 0.0s — read it".into()).row_role(),

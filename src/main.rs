@@ -688,6 +688,14 @@ fn connect(ed: &mut Editor, link: &mut Option<Link>, folder: &Path) -> bool {
     }
     match Link::open(folder) {
         Ok(mut open) => {
+            // The daemon's first frame has to be ATTACH: a bare attach lands on its current session
+            // (or on a control seat that carries the list, when it holds none), and only then is
+            // asking for the folder's sessions legal. Listing first is refused with "the first
+            // frame must be ATTACH" and the connection dropped — which is what a real daemon did
+            // to this path while the scripted one in the tests accepted it.
+            if let Err(e) = open.client.attach("", 0, &seat()) {
+                ed.panel.said = format!("cannot attach to the daemon: {e}");
+            }
             if let Err(e) = open.client.list_sessions() {
                 ed.panel.said = format!("cannot ask for the sessions: {e}");
             }

@@ -230,6 +230,10 @@ pub struct Panel {
     pub session: String,
     pub title: String,
     pub state: PanelState,
+    /// Whether a session was CHOSEN — by the pick, by the remembered one, or by the rule. The bare
+    /// attach the daemon requires as its first frame lands on its current session and answers a
+    /// Hello, which is not a choice: without this the panel would never move off it.
+    picked: bool,
     /// What the state says in full: the no-daemon line, a refusal, what just happened.
     pub said: String,
     pub rows: Vec<Row>,
@@ -280,6 +284,7 @@ impl Default for Panel {
             session: String::new(),
             title: String::new(),
             state: PanelState::Closed,
+            picked: false,
             said: String::new(),
             rows: Vec::new(),
             input: String::new(),
@@ -446,7 +451,9 @@ impl Panel {
                 self.sessions.clone_from(sessions);
                 if let Some(id) = created {
                     self.attach(id);
-                } else if matches!(self.state, PanelState::Connecting | PanelState::Picking) {
+                } else if !self.picked
+                    || matches!(self.state, PanelState::Connecting | PanelState::Picking)
+                {
                     self.choose();
                 }
             }
@@ -477,6 +484,7 @@ impl Panel {
             return;
         }
         self.session = session.to_string();
+        self.picked = true;
         self.state = PanelState::Connecting;
         self.acts.push(Act::Attach(session.to_string()));
         self.touch();

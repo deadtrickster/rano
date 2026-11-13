@@ -213,10 +213,17 @@ impl View<'_> {
         } else {
             Role::Faint
         };
+        // An empty composer has to say it is one: the placeholder is the answer to "where do I
+        // type", and the caret is already in it. Once there is text the placeholder is gone.
+        let (shown, text_role) = if chars.is_empty() {
+            ("type a prompt…".to_string(), Role::Faint)
+        } else {
+            (shown, Role::Plain)
+        };
         (
             Line::new(vec![
                 Span::role(lead, lead_role),
-                Span::styled(shown, Style::of(Role::Plain)),
+                Span::styled(shown, Style::of(text_role)),
             ]),
             lead.chars().count() + at - start,
         )
@@ -307,6 +314,20 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         v.draw(Rect::new(0, 0, w, h), &mut buf);
         buf.to_plain_lines()
+    }
+
+    /// An empty composer says where the typing goes: the placeholder is faint, and the caret is
+    /// already in it — the reader should not have to know a key to know where the words land.
+    #[test]
+    fn an_empty_composer_says_where_to_type() {
+        let view = blank_panel(&[]);
+        let w = 40;
+        let h = 8;
+        let rows = rows(&view, w, h);
+        assert!(rows[7].contains("type a prompt"), "{rows:?}");
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        let drawn = view.draw(Rect::new(0, 0, w, h), &mut buf);
+        assert_eq!(drawn.cursor, Some((2, 7)), "the caret is in the composer");
     }
 
     /// The top edge names the session, its state and the folder, and the foot is the composer.

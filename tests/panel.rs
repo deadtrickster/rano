@@ -95,17 +95,32 @@ fn scripted_daemon(
         };
         let mut out = stream.try_clone().expect("a writer");
         let mut lines = BufReader::new(stream).lines();
+        // The real daemon's rule, enforced by the test too: the FIRST frame is ATTACH, and anything
+        // else ends the connection. Without this the scripted daemon accepts a handshake no daemon
+        // accepts, which is how a connect path that could not connect passed its own test.
+        let mut first = true;
         while let Some(Ok(line)) = lines.next() {
             let Ok(frame) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             heard.lock().expect("the transcript").push(frame.clone());
+            if first && frame["frame"].as_str() != Some("attach") {
+                writeln!(
+                    out,
+                    r#"{{"frame":"bye","reason":"the first frame must be ATTACH"}}"#
+                )
+                .expect("the refusal");
+                return;
+            }
+            first = false;
             let answer: Vec<String> = match frame["frame"].as_str().unwrap_or_default() {
                 "list_sessions" => vec![format!(
                     r#"{{"frame":"sessions","current":"s-1","sessions":[
                         {{"session_id":"s-1","title":"{TITLE}","created_ms":0,"live":true}}]}}"#
                 )],
-                "attach" => vec![format!(
+                // Moving to a session is the same handshake as attaching to it: a Hello carries
+                // the snapshot either way, which is what the daemon answers a `switch` with.
+                "attach" | "switch" => vec![format!(
                     r#"{{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h-1",
                         "dropped":0,"resumed_from":null,
                         "snapshot":{{"session_id":"s-1","seq":0,"dropped":0,"items_dropped":0,
@@ -319,15 +334,27 @@ fn the_panel_opens_streams_crosses_and_zooms() {
         .lock()
         .expect("the transcript")
         .iter()
+        // The bare attach is the daemon's required first frame: it carries the panel's identity.
         .find(|f| f["frame"] == "attach")
         .cloned()
         .expect("an attach");
     assert_eq!(attach["kind"], "editor");
-    assert_eq!(attach["session_id"], "s-1");
     assert_eq!(
         attach["caps"]["can_decide"].as_bool(),
         Some(false),
         "a panel that draws no card must not say it can answer one"
+    );
+    // And the connection ends up on the session: a bare attach lands on the daemon's current one,
+    // and moving to the picked session is a `switch` after it, not a second attach.
+    assert!(
+        heard
+            .lock()
+            .expect("the transcript")
+            .iter()
+            .any(|f| (f["frame"] == "switch" || f["frame"] == "attach")
+                && f["session_id"] == "s-1"),
+        "the panel ends up on the session: {:?}",
+        heard.lock().expect("the transcript").iter().collect::<Vec<_>>()
     );
 
     // ---- typing in the composer sends, and the reply streams into the rows ----

@@ -90,6 +90,11 @@ buffer). `M-k k` is the same event with an empty `prompt`, where the host's comp
 question. A host without `on_ask` still hears an ask through `on_send`, with its prompt as
 `SendEvent::ask`.
 
+With a panel open, the ask goes out over its socket: `Editor::panel_ask` hands it to the panel,
+which sends the preset's words as a `Prompt` with the place beside them — `EditorContext { refs:
+[{file, range, cursor, text, unsaved, lang}], ask: {preset, answer} }`, the wire shape
+`rano::letibot` writes. A panel that is shut opens for it, and the keyboard stays in the text.
+
 `Editor::bind_ask()` rebuilds the `M-k` keys from `config.ask`, so a host that replaces the
 presets at runtime calls it after the change.
 
@@ -151,20 +156,37 @@ for act in ed.panel.take_acts() {
         Act::Connect(folder) => { /* rano::letibot::socket(&folder), connect, list_sessions */ }
         Act::Attach(session) => { /* attach or switch, as an editor head */ }
         Act::New => { /* new_session */ }
-        Act::Prompt(text) => { /* prompt */ }
+        Act::Prompt { text, context } => { /* prompt_with_context(&text, &[], context.as_ref()) */ }
         Act::Interrupt => { /* interrupt */ }
         Act::Start(folder) => { /* the launcher's --ensure */ }
     }
 }
 while let Some(frame) = client.try_frame() {
-    ed.panel.apply(&frame); // rows, state, and whether the screen changed
+    ed.panel.apply(&frame); // rows, state, marks, and whether the screen changed
 }
+for set in ed.panel.take_marks() {
+    // A reply's citations and a call's edits, as rano::marks; kept and retried while the file is
+    // not open, which `Editor::holds_file` answers.
+    ed.set_marks(&set.path, &set.source, set.marks);
+}
+ed.panel.remember_outcomes(&ed.take_mark_outcomes()); // named by the range, sent on the next prompt
 ed.panel.build(pane.width as usize); // the rows at the width they are drawn at
 ```
 
+`Act::Prompt`'s `context` is what the operator pointed at: a chip from `M-s`
+(`Editor::panel_attach`, or `Panel::attach_place`) or from `M-k k`, the editor's own open files —
+the host adds those, since only it knows them — and the mark outcomes. A daemon that speaks a
+protocol before this one is sent no context at all, which is what `None` says.
+
+A citation that comes back is a mark, not a row: `cite` and `note` are highlights, `suggest` is a
+hunk to take, and both are replaced by a newer reply's on the same file while a hunk stays until
+it is decided. A tool call's edits arrive the same way, as `edit` marks whose `before` a revert
+puts back.
+
 `rano::agent::panel::View` draws it: the session and its state on the top edge, the conversation
-windowed with a seam counting what is out of view, the composer and, while it holds the keyboard,
-the key row. `View::draw` answers the caret and the scroll it used, which the host stores back.
+windowed with a seam counting what is out of view, the chips the next prompt carries on a row of
+their own, the composer and, while it holds the keyboard, the key row. `View::draw` answers the
+caret and the scroll it used, which the host stores back.
 
 Three keys are the host's, because rano binds none of them: `alt-i` shows or hides the panel,
 `alt-m` zooms the focused surface, and `ctrl-]` crosses the keyboard between the text and the

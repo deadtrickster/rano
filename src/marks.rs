@@ -272,6 +272,12 @@ impl Editor {
         }
     }
 
+    /// Whether a buffer with this file is open, which is what decides whether a host's marks can
+    /// land now or have to be kept for the pass that opens it.
+    pub fn holds_file(&self, path: &Path) -> bool {
+        self.find_buffer(path).is_some()
+    }
+
     /// Drop the marks `source` set, in every buffer, or with `None` every mark there is.
     /// A closed buffer has already dropped its own.
     pub fn clear_marks(&mut self, source: Option<&str>) {

@@ -10,11 +10,19 @@
 //! map is in effect, so the key bar and the help pages name its keys the way they name every other
 //! mode's.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::letibot::{DeltaTarget, Event, Frame, NoDaemon, Session};
+use crate::ask::AskEvent;
+use crate::letibot::{
+    AnswerMode, Citation, CitationKind, ContextAsk, ContextPos, ContextRange, ContextRef,
+    DeltaTarget, EditorContext, Event, Frame, MarkOutcome, NoDaemon, Session, ToolEdit,
+};
 use crate::markdown::{IncrementalMarkdown, MarkdownView, RenderOptions};
+use crate::marks::{Mark, Outcome, Severity};
 use crate::render::{Line, Span};
+use crate::review::Change;
+use crate::send::{Point, Selection, SendEvent};
 use crate::style::Role;
 
 /// What the panel is doing, in the words its top edge shows.
@@ -71,10 +79,103 @@ pub enum Act {
     Attach(String),
     /// Make a session in the folder; the answer's `created` names it.
     New,
-    /// The person's words.
-    Prompt(String),
+    /// The person's words, and what they pointed at beside them. `context` is `None` when there is
+    /// nothing to carry, which is what a daemon written before 71 is sent.
+    Prompt {
+        text: String,
+        context: Option<EditorContext>,
+    },
     /// Stop the running turn.
     Interrupt,
+}
+
+/// What a place is called on the wire and in the composer: who captured it.
+const ORIGIN: &str = "rano";
+
+/// One place waiting to ride the next prompt: the panel's chip. The file is absolute and the
+/// positions are the editor's own, so nothing here has to know where the session's workspace is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chip {
+    pub file: PathBuf,
+    pub cursor: Point,
+    pub selection: Option<Selection>,
+    /// The buffer differs from the file on disk, so the text sent is the one the daemon cannot read.
+    pub unsaved: bool,
+    pub lang: String,
+}
+
+impl Chip {
+    /// The chip a place makes, or `None` for an unnamed buffer: a mark needs a file to land on.
+    pub fn of(send: &SendEvent, lang: &str) -> Option<Chip> {
+        Some(Chip {
+            file: send.path.clone()?,
+            cursor: send.cursor,
+            selection: send.selection.clone(),
+            unsaved: send.modified,
+            lang: lang.to_string(),
+        })
+    }
+
+    /// `article.md:41-47 · unsaved`: what the composer's chip row and the user's row say.
+    pub fn label(&self, folder: &Path) -> String {
+        let shown = self
+            .file
+            .strip_prefix(folder)
+            .unwrap_or(&self.file)
+            .display()
+            .to_string();
+        let range = match &self.selection {
+            Some(s) if s.start.line != s.end.line => format!(":{}-{}", s.start.line, s.end.line),
+            Some(s) => format!(":{}", s.start.line),
+            None => format!(":{}", self.cursor.line),
+        };
+        let unsaved = if self.unsaved { " · unsaved" } else { "" };
+        format!("{shown}{range}{unsaved}")
+    }
+
+    /// The `ContextRef` the daemon renders: the path as an absolute one, the range in characters.
+    pub fn reference(&self) -> ContextRef {
+        let point = |p: Point| ContextPos {
+            line: p.line as u32,
+            column: p.column as u32,
+        };
+        ContextRef {
+            file: self.file.display().to_string(),
+            range: self.selection.as_ref().map(|s| ContextRange {
+                start: point(s.start),
+                end: point(s.end),
+            }),
+            cursor: Some(point(self.cursor)),
+            text: self
+                .selection
+                .as_ref()
+                .map(|s| s.text.clone())
+                .unwrap_or_default(),
+            unsaved: self.unsaved,
+            lang: self.lang.clone(),
+            title: String::new(),
+        }
+    }
+}
+
+/// Marks one source set on one file, handed to the host to land on a buffer: the editor holds the
+/// text a mark is anchored in, and the panel holds only what the daemon said about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Markset {
+    pub path: PathBuf,
+    /// `reply:<item_id>` or `call:<call_id>`: who set it, so a host replaces only its own.
+    pub source: String,
+    /// Sources that name the same lines from an older reply, to clear first: highlights do not pile
+    /// up, while hunks stay until they are decided.
+    pub replaces: Vec<String>,
+    pub marks: Vec<Mark>,
+}
+
+/// A prompt asked for before there was anything to ask: held until the `Hello` lands.
+#[derive(Debug)]
+struct Pending {
+    text: String,
+    context: Option<EditorContext>,
 }
 
 /// A reply as it is being written: the text, and the Markdown the panel renders it with while the
@@ -145,6 +246,18 @@ pub struct Panel {
     /// Where the last session per folder is remembered, when the host wants that at all. Unset in
     /// tests, and in a host that keeps its own record.
     pub state_file: Option<PathBuf>,
+    /// What the next prompt carries beside its words: `alt-s` and `alt-k` put places here.
+    pub chips: Vec<Chip>,
+    /// The file each reply's highlights last marked, so a newer reply replaces an older one.
+    cited_by: HashMap<PathBuf, String>,
+    /// The label each mark was set under, which is how an outcome is said back to the model.
+    labels: HashMap<String, String>,
+    /// What the operator decided about earlier marks, sent on the next prompt and then forgotten.
+    pub outcomes: Vec<MarkOutcome>,
+    /// Marks the host has not landed yet: a file that is not open is kept until it is.
+    pending_marks: Vec<Markset>,
+    /// Prompts asked for before the panel could send them.
+    waiting: Vec<Pending>,
     /// The file the folder was last worked out for, so the git call happens once per buffer.
     seen_name: Option<PathBuf>,
     acts: Vec<Act>,
@@ -176,6 +289,12 @@ impl Default for Panel {
             sessions: Vec::new(),
             pick: 0,
             state_file: None,
+            chips: Vec::new(),
+            cited_by: HashMap::new(),
+            labels: HashMap::new(),
+            outcomes: Vec::new(),
+            pending_marks: Vec::new(),
+            waiting: Vec::new(),
             seen_name: None,
             acts: Vec::new(),
             running: Vec::new(),
@@ -276,6 +395,10 @@ impl Panel {
             startable: matches!(why, NoDaemon::NotRunning { .. }),
         };
         self.said = why.to_string();
+        if !self.waiting.is_empty() {
+            self.waiting.clear();
+            self.said.push_str("; nothing was sent");
+        }
         self.touch();
     }
 
@@ -315,6 +438,7 @@ impl Panel {
                 self.said.clear();
                 self.follow = true;
                 self.remember();
+                self.flush();
             }
             Frame::Sessions {
                 created, sessions, ..
@@ -438,6 +562,7 @@ impl Panel {
                 call_id,
                 outcome,
                 why,
+                edits,
                 ..
             } => {
                 let said = if why.is_empty() {
@@ -454,6 +579,7 @@ impl Panel {
                     }
                     None => self.rows.push(Row::Note(said)),
                 }
+                self.edits(call_id, edits);
             }
             Event::TurnFinished { ends_turn, .. } => {
                 // A round that is not the end of the prompt leaves the panel thinking, which is
@@ -485,8 +611,10 @@ impl Panel {
                 )));
                 self.state = PanelState::Waiting;
             }
-            // A citation becomes a mark on the text, which is a later package's work.
-            Event::Citations { .. } | Event::Unknown { .. } => {}
+            // A citation is a mark on the text, which is where the operator is working: the panel's
+            // conversation is the summary, the gutter is the answer.
+            Event::Citations { item_id, citations } => self.citations(item_id, citations),
+            Event::Unknown { .. } => {}
         }
         self.touch();
     }
@@ -510,15 +638,238 @@ impl Panel {
                 if text.is_empty() {
                     return;
                 }
-                self.rows.push(Row::User(text.clone()));
                 self.input.clear();
                 self.cursor = 0;
-                self.scroll = 0;
-                self.follow = true;
-                self.state = PanelState::Thinking;
-                self.acts.push(Act::Prompt(text));
-                self.touch();
+                let context = self.context();
+                self.submit(text, context);
             }
+        }
+    }
+
+    /// `alt-s`: the place as a chip on the next prompt. Nothing is sent: the words are still the
+    /// operator's to write.
+    pub fn attach_place(&mut self, send: &SendEvent, lang: &str) -> bool {
+        let Some(chip) = Chip::of(send, lang) else {
+            self.said = "an unnamed buffer has no place to attach".to_string();
+            self.touch();
+            return false;
+        };
+        self.said = format!("attached {}", chip.label(&self.folder));
+        self.chips.push(chip);
+        self.touch();
+        true
+    }
+
+    /// A quick ask: the preset's words with the place beside them, sent at once, or — for `alt-k k`,
+    /// which has no prompt — the place as a chip and the composer waiting for the words.
+    pub fn ask(&mut self, ask: &AskEvent, lang: &str) -> bool {
+        let chip = Chip::of(&ask.send, lang);
+        if ask.prompt.is_empty() {
+            if let Some(chip) = chip {
+                self.chips.push(chip);
+            }
+            self.focus = true;
+            self.said = "type the question".to_string();
+            self.touch();
+            return true;
+        }
+        let mut context = EditorContext {
+            origin: ORIGIN.to_string(),
+            ..EditorContext::default()
+        };
+        context.refs = chip.iter().map(Chip::reference).collect();
+        context.ask = Some(ContextAsk {
+            preset: ask.preset.clone(),
+            answer: AnswerMode::of(ask.answer),
+        });
+        self.submit(ask.prompt.clone(), context);
+        true
+    }
+
+    /// Send a prompt now, or hold it until there is something to send it to. A chip and a preset are
+    /// what the operator asked for; losing them because the panel was still attaching would be the
+    /// panel's fault, not theirs.
+    fn submit(&mut self, text: String, mut context: EditorContext) {
+        // Read before the state moves: what is being asked is whether there is anything to ask YET.
+        let sendable = self.attached()
+            && matches!(
+                self.state,
+                PanelState::Idle | PanelState::Thinking | PanelState::Waiting
+            );
+        self.rows.push(Row::User(text.clone()));
+        self.scroll = 0;
+        self.follow = true;
+        context.outcomes.append(&mut self.outcomes);
+        let context = (!context.is_empty()).then_some(context);
+        if sendable {
+            self.state = PanelState::Thinking;
+            self.acts.push(Act::Prompt { text, context });
+        } else {
+            // The state stays what the connection is doing — a panel still attaching must keep
+            // connecting, or the `Hello` that would send this has nowhere to land.
+            self.waiting.push(Pending { text, context });
+        }
+        self.touch();
+    }
+
+    /// The `Hello` landed: the prompts asked for while the panel was connecting go out now.
+    fn flush(&mut self) {
+        for pending in std::mem::take(&mut self.waiting) {
+            self.acts.push(Act::Prompt {
+                text: pending.text,
+                context: pending.context,
+            });
+        }
+    }
+
+    /// What the next prompt carries: the chips as references, and the decisions taken since the last
+    /// one. The host adds the editor's other open files at submit time, which is the one fact only
+    /// it has.
+    fn context(&mut self) -> EditorContext {
+        let chips = std::mem::take(&mut self.chips);
+        EditorContext {
+            origin: ORIGIN.to_string(),
+            refs: chips.iter().map(Chip::reference).collect(),
+            outcomes: std::mem::take(&mut self.outcomes),
+            ..EditorContext::default()
+        }
+    }
+
+    /// What the operator decided about earlier marks, in the editor's own ids: named back to the
+    /// range the model wrote, and sent on the next prompt.
+    pub fn remember_outcomes(&mut self, taken: &[(String, Outcome)]) {
+        for (id, outcome) in taken {
+            let label = self.labels.get(id).cloned().unwrap_or_else(|| id.clone());
+            let outcome = match outcome {
+                Outcome::Accepted => "accepted",
+                Outcome::Rejected => "rejected",
+                Outcome::Reverted => "reverted",
+            };
+            self.outcomes.push(MarkOutcome {
+                label,
+                outcome: outcome.to_string(),
+            });
+        }
+    }
+
+    /// The marks a reply or a call set, for the host to land on the buffers it has open.
+    pub fn take_marks(&mut self) -> Vec<Markset> {
+        std::mem::take(&mut self.pending_marks)
+    }
+
+    /// Marks the host could not land, because the file is not open: kept for the pass that opens it.
+    pub fn keep_marks(&mut self, kept: Vec<Markset>) {
+        let mut kept = kept;
+        kept.append(&mut self.pending_marks);
+        self.pending_marks = kept;
+    }
+
+    /// A reply's citations, as marks: a bare range is a highlight, a `note` a remark with its
+    /// severity from the body's first word, a `suggest` a hunk waiting to be taken.
+    fn citations(&mut self, item_id: &str, citations: &[Citation]) {
+        let highlight = format!("reply:{item_id}");
+        let hunk = format!("reply:{item_id}:hunk");
+        let mut sets: Vec<(PathBuf, String, Vec<Mark>)> = Vec::new();
+        for (i, c) in citations.iter().enumerate() {
+            let path = self.resolve(&c.path);
+            let id = format!("{item_id}:{}", i + 1);
+            let label = format!(
+                "{}:{}-{}",
+                shown(&path, &self.folder),
+                c.start.max(1),
+                c.end.max(c.start)
+            );
+            self.labels.insert(id.clone(), label);
+            let (source, mark) = match c.kind {
+                CitationKind::Cite => {
+                    (&highlight, Mark::cite(&id, c.start, c.end, c.lines.clone()))
+                }
+                CitationKind::Note => {
+                    let (severity, text) = note_body(&c.body);
+                    (
+                        &highlight,
+                        Mark::note(&id, c.start, c.end, c.lines.clone(), severity, &text),
+                    )
+                }
+                CitationKind::Suggest => (
+                    &hunk,
+                    Mark::suggest(&id, c.start, c.end, c.lines.clone(), &c.body),
+                ),
+            };
+            match sets.iter_mut().find(|(p, s, _)| *p == path && s == source) {
+                Some((_, _, marks)) => marks.push(mark),
+                None => sets.push((path, source.clone(), vec![mark])),
+            }
+        }
+        for (path, source, marks) in sets {
+            // A highlight is the newest reply's: an older reply's on the same file goes. Hunks are
+            // work and stay until they are decided, which is why they are their own source.
+            let replaces: Vec<String> = if source == highlight {
+                self.cited_by
+                    .insert(path.clone(), source.clone())
+                    .filter(|old| *old != source)
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.pending_marks.push(Markset {
+                path,
+                source,
+                replaces,
+                marks,
+            });
+        }
+    }
+
+    /// A tool call's edits, as `edit` marks: the change is on disk, and `before` is what a revert puts
+    /// back in the buffer.
+    fn edits(&mut self, call_id: &str, edits: &[ToolEdit]) {
+        if edits.is_empty() {
+            return;
+        }
+        let source = format!("call:{call_id}");
+        let mut sets: Vec<(PathBuf, Vec<Mark>)> = Vec::new();
+        for (i, e) in edits.iter().enumerate() {
+            let path = self.resolve(&e.path);
+            let mark = Mark::edit(
+                &format!("{call_id}:{}", i + 1),
+                Change {
+                    before: e.before.clone(),
+                    after: e.after.clone(),
+                    before_start: e.before_start,
+                    after_start: e.after_start,
+                },
+            );
+            let label = format!(
+                "{}:{}-{}",
+                shown(&path, &self.folder),
+                mark.line,
+                mark.end_line.max(mark.line)
+            );
+            self.labels.insert(mark.id.clone(), label);
+            match sets.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, marks)) => marks.push(mark),
+                None => sets.push((path, vec![mark])),
+            }
+        }
+        for (path, marks) in sets {
+            self.pending_marks.push(Markset {
+                path,
+                source: source.clone(),
+                replaces: Vec::new(),
+                marks,
+            });
+        }
+    }
+
+    /// A path as the daemon named it: absolute, or relative to the workspace the conversation is in.
+    fn resolve(&self, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            self.folder.join(path)
         }
     }
 
@@ -646,6 +997,30 @@ fn note_line(note: &str) -> Line {
     ])
 }
 
+/// A path as a person reads it: relative to the conversation's folder when it is inside it.
+fn shown(path: &Path, folder: &Path) -> String {
+    path.strip_prefix(folder)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// A note's severity and its words: the model writes `ok:`, `warn:` or `wrong:` first, and the rest
+/// is the sentence a person reads on the status row.
+fn note_body(body: &str) -> (Severity, String) {
+    let body = body.trim();
+    for (prefix, severity) in [
+        ("ok:", Severity::Ok),
+        ("warn:", Severity::Warn),
+        ("wrong:", Severity::Error),
+    ] {
+        if let Some(rest) = body.strip_prefix(prefix) {
+            return (severity, rest.trim().to_string());
+        }
+    }
+    (Severity::Info, body.to_string())
+}
+
 /// `3m`, `2h`, `4d`: how long ago a session was made, in a column's worth of characters.
 fn aged(created_ms: u64) -> String {
     if created_ms == 0 {
@@ -769,6 +1144,38 @@ impl crate::editor::Editor {
         let name = self.bs().buf.name.clone();
         let cwd = std::env::current_dir().unwrap_or_default();
         folder_for(name.as_deref(), &cwd)
+    }
+
+    /// The language of the focused buffer, as a fenced block names it: what the daemon labels the
+    /// context with, and what a citation comes back as.
+    pub(crate) fn panel_lang(&self) -> String {
+        crate::syntax::language_of(&self.bs().buf)
+            .map(|l| l.name().to_string())
+            .unwrap_or_default()
+    }
+
+    /// A quick ask reached the host while the panel may be shut: show it, attach the place, and send.
+    /// The keyboard stays in the text, which is where the operator is working.
+    pub fn panel_ask(&mut self, ask: &crate::ask::AskEvent) -> bool {
+        if !self.panel.open {
+            let folder = self.panel_folder();
+            self.panel.open(folder);
+            // The answer lands in the panel; the words do not move the caret there.
+            self.panel.focus = false;
+        }
+        let lang = self.panel_lang();
+        self.panel.ask(ask, &lang)
+    }
+
+    /// `alt-s` with no `send_command`: the place becomes a chip on the next prompt rather than a
+    /// paste into it, so the words stay the operator's to write.
+    pub fn panel_attach(&mut self, send: &crate::send::SendEvent) -> bool {
+        if !self.panel.open {
+            let folder = self.panel_folder();
+            self.panel.open(folder);
+        }
+        let lang = self.panel_lang();
+        self.panel.attach_place(send, &lang)
     }
 
     /// Watch the focused buffer for a move to another folder. Called from `tick`, and cheap: the
@@ -1000,7 +1407,13 @@ mod tests {
         panel.take_acts();
         panel.input = "why?".to_string();
         panel.send();
-        assert_eq!(panel.take_acts(), vec![Act::Prompt("why?".to_string())]);
+        assert_eq!(
+            panel.take_acts(),
+            vec![Act::Prompt {
+                text: "why?".to_string(),
+                context: None,
+            }]
+        );
         assert!(matches!(panel.rows.as_slice(), [Row::User(t)] if t == "why?"));
         assert_eq!(panel.state, PanelState::Thinking);
         assert!(panel.input.is_empty() && panel.cursor == 0);
@@ -1064,6 +1477,7 @@ mod tests {
                 call_id: "c-1".to_string(),
                 outcome: "failed".to_string(),
                 why: "no such file".to_string(),
+                edits: Vec::new(),
             },
         });
         let notes: Vec<&str> = panel
@@ -1241,7 +1655,13 @@ mod tests {
             ed.handle_key(held(&KeyCode::Char(c)));
         }
         assert_eq!(ed.handle_key(held(&KeyCode::Enter)), KeyOutcome::Handled);
-        assert_eq!(ed.panel.take_acts(), vec![Act::Prompt("ping".to_string())]);
+        assert_eq!(
+            ed.panel.take_acts(),
+            vec![Act::Prompt {
+                text: "ping".to_string(),
+                context: None,
+            }]
+        );
         assert!(matches!(ed.panel.rows.as_slice(), [Row::User(t)] if t == "ping"));
         assert!(ed.panel.input.is_empty());
     }
@@ -1350,5 +1770,307 @@ mod tests {
             !text.iter().any(|l| l.contains("**")),
             "markdown is rendered: {text:?}"
         );
+    }
+
+    /// A place as the editor hands it over: a file, a cursor and the marked lines' text.
+    fn place() -> SendEvent {
+        SendEvent {
+            path: Some(PathBuf::from("/w/notes.txt")),
+            cursor: Point { line: 3, column: 1 },
+            selection: Some(Selection {
+                start: Point { line: 3, column: 1 },
+                end: Point { line: 4, column: 9 },
+                text: "one\ntwo".to_string(),
+            }),
+            modified: true,
+            ask: None,
+        }
+    }
+
+    /// `M-k f`: the preset's words, with the selection beside them and the answer mode the daemon
+    /// needs to know which fence to ask for.
+    #[test]
+    fn an_ask_sends_the_preset_with_the_selection_beside_it() {
+        let mut panel = opened();
+        panel.apply(&hello("s-1", "the one"));
+        panel.take_acts();
+        let ask = AskEvent {
+            send: place(),
+            preset: "fact-check".to_string(),
+            answer: crate::ask::Answer::Notes,
+            prompt: "Check each claim.".to_string(),
+        };
+        assert!(panel.ask(&ask, "markdown"));
+        let acts = panel.take_acts();
+        let [Act::Prompt { text, context }] = acts.as_slice() else {
+            panic!("one prompt: {acts:?}");
+        };
+        assert_eq!(text, "Check each claim.");
+        let context = context.as_ref().expect("a context");
+        assert_eq!(context.origin, "rano");
+        assert_eq!(
+            context.ask,
+            Some(ContextAsk {
+                preset: "fact-check".to_string(),
+                answer: AnswerMode::Notes,
+            })
+        );
+        assert_eq!(context.refs.len(), 1);
+        assert_eq!(context.refs[0].file, "/w/notes.txt");
+        assert_eq!(context.refs[0].text, "one\ntwo");
+        assert!(context.refs[0].unsaved, "the buffer differs from disk");
+        assert_eq!(context.refs[0].lang, "markdown");
+        let range = context.refs[0].range.expect("the lines the ask is about");
+        assert_eq!((range.start.line, range.end.line), (3, 4));
+        assert_eq!(panel.state, PanelState::Thinking);
+        // The operator's own row is the preset's words, so the conversation reads as the question.
+        assert!(matches!(panel.rows.as_slice(), [Row::User(t)] if t == "Check each claim."));
+    }
+
+    /// An ask pressed before the panel was attached waits for the `Hello` instead of being dropped:
+    /// the answer is the point of asking, and the connection is not the operator's to wait for.
+    #[test]
+    fn an_ask_before_the_attach_goes_out_when_the_hello_lands() {
+        let mut panel = opened();
+        panel.take_acts();
+        let ask = AskEvent {
+            send: place(),
+            preset: "explain".to_string(),
+            answer: crate::ask::Answer::Chat,
+            prompt: "Explain it.".to_string(),
+        };
+        panel.ask(&ask, "markdown");
+        assert!(
+            panel.take_acts().is_empty(),
+            "nothing to send it to yet, so nothing is sent"
+        );
+        // The ask must not move the state off Connecting: the session list and the hello are what the
+        // held prompt is waiting for, and a panel that said `thinking` would never see them.
+        assert_eq!(panel.state, PanelState::Connecting);
+        panel.apply(&sessions(&["s-1"]));
+        assert_eq!(panel.take_acts(), vec![Act::Attach("s-1".to_string())]);
+        panel.apply(&hello("s-1", "the one"));
+        let acts = panel.take_acts();
+        let [Act::Prompt { text, .. }] = acts.as_slice() else {
+            panic!("the held prompt goes out: {acts:?}");
+        };
+        assert_eq!(text, "Explain it.");
+    }
+
+    /// `M-s` with no `send_command`: the place is a chip on the next prompt, and the prompt after it
+    /// has none — a place is attached once.
+    #[test]
+    fn a_chip_rides_one_prompt_and_is_then_gone() {
+        let mut panel = opened();
+        panel.apply(&hello("s-1", "the one"));
+        panel.take_acts();
+        assert!(panel.attach_place(&place(), "markdown"));
+        assert_eq!(panel.chips.len(), 1);
+        assert!(panel.said.contains("notes.txt:3-4"), "{}", panel.said);
+
+        panel.input = "what about this?".to_string();
+        panel.send();
+        let acts = panel.take_acts();
+        let [Act::Prompt { text, context }] = acts.as_slice() else {
+            panic!("one prompt: {acts:?}");
+        };
+        assert_eq!(text, "what about this?");
+        let context = context.as_ref().expect("the chip rode along");
+        assert_eq!(context.refs.len(), 1);
+        assert!(context.ask.is_none(), "a chip is not an ask");
+        assert!(panel.chips.is_empty(), "the chip was spent");
+
+        panel.input = "and this?".to_string();
+        panel.send();
+        let acts = panel.take_acts();
+        let [Act::Prompt { context, .. }] = acts.as_slice() else {
+            panic!("one prompt: {acts:?}");
+        };
+        assert!(context.is_none(), "nothing left to carry");
+    }
+
+    /// `M-k k`: the place is a chip and the composer waits for the words, because there is no prompt
+    /// to send.
+    #[test]
+    fn the_free_ask_attaches_the_place_and_takes_the_keyboard() {
+        let mut panel = opened();
+        panel.focus = false;
+        let ask = AskEvent {
+            send: place(),
+            preset: "ask".to_string(),
+            answer: crate::ask::Answer::Chat,
+            prompt: String::new(),
+        };
+        assert!(panel.ask(&ask, "markdown"));
+        assert!(
+            panel
+                .take_acts()
+                .iter()
+                .all(|a| !matches!(a, Act::Prompt { .. }))
+        );
+        assert_eq!(panel.chips.len(), 1);
+        assert!(panel.focus, "the composer has the keyboard");
+        assert_eq!(panel.said, "type the question");
+    }
+
+    fn citation(kind: CitationKind, start: usize, end: usize, body: &str) -> Event {
+        Event::Citations {
+            item_id: "it-1".to_string(),
+            citations: vec![Citation {
+                label: "notes.txt:3-4".to_string(),
+                path: "notes.txt".to_string(),
+                start,
+                end,
+                lines: vec!["one".to_string(), "two".to_string()],
+                error: None,
+                kind,
+                body: body.to_string(),
+            }],
+        }
+    }
+
+    /// A `note` citation is a mark on those lines, with the severity the body's first word names and
+    /// the sentence the status row shows at it.
+    #[test]
+    fn a_note_citation_becomes_a_mark_with_its_severity() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: citation(CitationKind::Note, 3, 4, "warn: no source for this"),
+        });
+        let sets = panel.take_marks();
+        assert_eq!(sets.len(), 1);
+        let set = &sets[0];
+        assert_eq!(set.path, PathBuf::from("/w/notes.txt"));
+        assert_eq!(set.source, "reply:it-1");
+        assert_eq!(set.marks.len(), 1);
+        let mark = &set.marks[0];
+        assert_eq!(mark.kind, crate::marks::MarkKind::Note);
+        assert_eq!(mark.severity, Severity::Warn);
+        assert_eq!((mark.line, mark.end_line), (3, 4));
+        assert_eq!(
+            mark.text, "no source for this",
+            "the prefix is the severity"
+        );
+        assert_eq!(mark.anchor, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    /// A `suggest` is a hunk, not a remark: it is decided in the editor, and its decision comes back
+    /// to the model named by the range it wrote rather than by a mark id.
+    #[test]
+    fn a_suggestion_is_a_hunk_and_its_decision_is_named_by_the_range() {
+        let mut panel = opened();
+        panel.apply(&hello("s-1", "the one"));
+        panel.take_acts();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: citation(CitationKind::Suggest, 3, 4, "the replacement"),
+        });
+        let sets = panel.take_marks();
+        let mark = &sets[0].marks[0];
+        assert_eq!(mark.kind, crate::marks::MarkKind::Suggest);
+        assert_eq!(mark.after().as_deref(), Some("the replacement"));
+
+        panel.remember_outcomes(&[(mark.id.clone(), Outcome::Accepted)]);
+        panel.input = "and now?".to_string();
+        panel.send();
+        let acts = panel.take_acts();
+        let [Act::Prompt { context, .. }] = acts.as_slice() else {
+            panic!("one prompt: {acts:?}");
+        };
+        let context = context.as_ref().expect("the outcome rides along");
+        assert_eq!(
+            context.outcomes,
+            vec![MarkOutcome {
+                label: "notes.txt:3-4".to_string(),
+                outcome: "accepted".to_string(),
+            }]
+        );
+        assert!(panel.outcomes.is_empty(), "said once, not twice");
+    }
+
+    /// A newer reply's highlights replace an older reply's on the same file; its hunks are work and
+    /// stay, which is why they are a source of their own.
+    #[test]
+    fn a_newer_reply_replaces_the_highlights_and_keeps_the_hunks() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: citation(CitationKind::Note, 3, 4, "ok: fine"),
+        });
+        assert!(panel.take_marks()[0].replaces.is_empty(), "the first one");
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::Citations {
+                item_id: "it-2".to_string(),
+                citations: vec![
+                    Citation {
+                        label: "notes.txt:3-4".to_string(),
+                        path: "notes.txt".to_string(),
+                        start: 3,
+                        end: 4,
+                        lines: vec![],
+                        error: None,
+                        kind: CitationKind::Suggest,
+                        body: "better".to_string(),
+                    },
+                    Citation {
+                        label: "notes.txt:3-4".to_string(),
+                        path: "notes.txt".to_string(),
+                        start: 3,
+                        end: 4,
+                        lines: vec![],
+                        error: None,
+                        kind: CitationKind::Cite,
+                        body: String::new(),
+                    },
+                ],
+            },
+        });
+        let sets = panel.take_marks();
+        let hunk = sets
+            .iter()
+            .find(|s| s.source == "reply:it-2:hunk")
+            .expect("the suggestion is its own set");
+        assert!(hunk.replaces.is_empty(), "a hunk replaces nothing");
+        let highlight = sets
+            .iter()
+            .find(|s| s.source == "reply:it-2")
+            .expect("the citation is a set of its own");
+        assert_eq!(
+            highlight.replaces,
+            vec!["reply:it-1".to_string()],
+            "the older reply's highlights go"
+        );
+    }
+
+    /// An edit a call made is a hunk already on disk: `before` is what a revert puts back.
+    #[test]
+    fn a_call_s_edits_are_marks_named_by_the_call() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::ToolFinished {
+                turn_id: "t".to_string(),
+                call_id: "c-9".to_string(),
+                outcome: "ok".to_string(),
+                why: String::new(),
+                edits: vec![ToolEdit {
+                    path: "notes.txt".to_string(),
+                    before_start: 3,
+                    after_start: 3,
+                    before: "one".to_string(),
+                    after: "a line".to_string(),
+                }],
+            },
+        });
+        let sets = panel.take_marks();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].source, "call:c-9");
+        assert_eq!(sets[0].path, PathBuf::from("/w/notes.txt"));
+        let mark = &sets[0].marks[0];
+        assert_eq!(mark.kind, crate::marks::MarkKind::Edit);
+        assert_eq!(mark.before().as_deref(), Some("one"));
+        assert_eq!((mark.line, mark.end_line), (3, 3));
     }
 }

@@ -39,6 +39,8 @@ pub struct View<'a> {
     /// The composer's line, and its cursor in chars.
     pub input: &'a str,
     pub cursor: usize,
+    /// What the next prompt carries beside its words, one line each: `article.md:41-47 · unsaved`.
+    pub chips: &'a [String],
     /// The panel holds the keyboard: the composer is live and the key row is drawn.
     pub focus: bool,
     /// The key row, as the bar's own `(key, title)` pairs.
@@ -69,10 +71,14 @@ impl View<'_> {
             buf.set_line(area.x, area.y, &self.top_edge(w), w);
             return Drawn::default();
         }
-        let hint_row = self.focus && !self.hints.is_empty() && h >= 5;
-        let room = h - 1 - 1 - usize::from(hint_row);
-        let composer_row = room + 1;
-        let hint_row = composer_row + 1;
+        // The chips take a row of their own above the composer, and only while there are some; the
+        // key row takes the foot, and only while the panel has the keyboard.
+        let chips = !self.chips.is_empty() && h >= 5;
+        let hints = self.focus && !self.hints.is_empty() && h >= 5 + usize::from(chips);
+        let composer_row = h - 1 - usize::from(hints);
+        let chip_row = composer_row - usize::from(chips);
+        let room = composer_row - 1 - usize::from(chips);
+        let hint_row = h - 1;
 
         // ---- the top edge: the session, its state, and the folder it follows ----
         buf.set_line(area.x, area.y, &self.top_edge(w), w);
@@ -128,11 +134,28 @@ impl View<'_> {
             .focus
             .then(|| (area.x + at as u16, area.y + composer_row as u16));
 
+        // ---- the chips: what the next prompt carries beside its words ----
+        if chips {
+            buf.set_line(area.x, area.y + chip_row as u16, &self.chip_line(w), w);
+        }
+
         // ---- the keys, from the map the panel mode is bound in ----
-        if hint_row < h {
+        if hints {
             buf.set_line(area.x, area.y + hint_row as u16, &self.hint_line(w), w);
         }
         Drawn { cursor, scroll }
+    }
+
+    /// The chips on one row, `·` between them, cut at the right edge.
+    fn chip_line(&self, w: usize) -> Line {
+        let text = self.chips.join("  ·  ");
+        let text = crate::width::text::truncate(&text, w);
+        let used = Span::width(&Span::role(&text, Role::Attention));
+        let mut spans = vec![Span::role(text, Role::Attention)];
+        if used < w {
+            spans.push(Span::raw(" ".repeat(w - used)));
+        }
+        Line::new(spans)
     }
 
     /// `▌ title · state` on the left, the folder on the right; a folder that moved is said instead
@@ -273,6 +296,7 @@ mod tests {
             follow: true,
             input: "",
             cursor: 0,
+            chips: &[],
             focus: true,
             hints,
         }
@@ -370,6 +394,43 @@ mod tests {
         assert!(
             drawn[7].contains("a draft"),
             "the composer's foot: {drawn:?}"
+        );
+    }
+
+    /// The chips a prompt will carry sit on a row of their own above the composer, and the
+    /// conversation loses exactly that row while they are there.
+    #[test]
+    fn the_chips_take_a_row_above_the_composer() {
+        let mut view = blank_panel(&[]);
+        view.input = "the words";
+        view.cursor = 9;
+        let plain = rows(&view, 40, 8);
+        assert!(
+            plain[7].contains("the words"),
+            "no chips, the composer takes the foot: {plain:?}"
+        );
+
+        let chips = vec!["notes.txt:3-4 · unsaved".to_string()];
+        view.chips = &chips;
+        let drawn = rows(&view, 40, 8);
+        assert!(
+            drawn[6].contains("notes.txt:3-4"),
+            "the chip row: {drawn:?}"
+        );
+        assert!(
+            drawn[7].contains("the words"),
+            "the composer is still the foot: {drawn:?}"
+        );
+
+        let two = vec![
+            "notes.txt:3-4".to_string(),
+            "draft.md:41-47 · unsaved".to_string(),
+        ];
+        view.chips = &two;
+        let drawn = rows(&view, 60, 8);
+        assert!(
+            drawn[6].contains("notes.txt:3-4") && drawn[6].contains("draft.md:41-47"),
+            "both chips on one row: {drawn:?}"
         );
     }
 

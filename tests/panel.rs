@@ -61,9 +61,33 @@ impl Drop for TempDir {
 /// The frames the panel has sent, in order, for the assertions about what it actually said.
 type Heard = Arc<Mutex<Vec<Value>>>;
 
+/// Wait until a frame with this tag has been heard: the panel's pass is a poll interval long, so a
+/// question about what it sent is a question to wait on, not to ask once.
+fn heard_frame(heard: &Heard, tag: &str) -> Option<Value> {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        let found = heard
+            .lock()
+            .expect("the transcript")
+            .iter()
+            .find(|f| f["frame"] == tag)
+            .cloned();
+        if found.is_some() {
+            return found;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
 /// A daemon on a socket, scripted: a list with one session, a `Hello` for the attach, and a turn of
-/// three deltas for the first prompt.
-fn scripted_daemon(socket: &Path, heard: Heard) -> std::thread::JoinHandle<()> {
+/// three deltas for the first prompt. `note` is a `note` fence the reply points at a file's first
+/// line with, which is what a quick ask's answer comes back as.
+fn scripted_daemon(
+    socket: &Path,
+    heard: Heard,
+    note: Option<(&'static str, &'static str)>,
+) -> std::thread::JoinHandle<()> {
     let listener = UnixListener::bind(socket).expect("a socket to listen on");
     std::thread::spawn(move || {
         let Ok((stream, _)) = listener.accept() else {
@@ -90,18 +114,7 @@ fn scripted_daemon(socket: &Path, heard: Heard) -> std::thread::JoinHandle<()> {
                         "sessions":[{{"session_id":"s-1","title":"{TITLE}","created_ms":0,
                                       "live":true}}]}}"#
                 )],
-                "prompt" => vec![
-                    r#"{"frame":"accepted","client_request_id":"r","seq":1,"note":"queued"}"#
-                        .to_string(),
-                    r#"{"frame":"event","seq":2,"event":"turn_started","turn_id":"t","model":"m"}"#
-                        .to_string(),
-                    r#"{"frame":"event","seq":3,"event":"delta","turn_id":"t","target":"text","text":"streamed "}"#
-                        .to_string(),
-                    r#"{"frame":"event","seq":4,"event":"delta","turn_id":"t","target":"text","text":"reply."}"#
-                        .to_string(),
-                    r#"{"frame":"event","seq":5,"event":"turn_finished","turn_id":"t","ends_turn":true}"#
-                        .to_string(),
-                ],
+                "prompt" => turn(note),
                 _ => Vec::new(),
             };
             for line in answer {
@@ -116,6 +129,46 @@ fn scripted_daemon(socket: &Path, heard: Heard) -> std::thread::JoinHandle<()> {
     })
 }
 
+/// The frames one prompt is answered with: the reply, its end, and — when the ask was for notes —
+/// the `Citations` entry a `note` fence comes back as.
+fn turn(note: Option<(&str, &str)>) -> Vec<String> {
+    let mut out = vec![
+        r#"{"frame":"accepted","client_request_id":"r","seq":1,"note":"queued"}"#.to_string(),
+        r#"{"frame":"event","seq":2,"event":"turn_started","turn_id":"t","model":"m"}"#
+            .to_string(),
+        r#"{"frame":"event","seq":3,"event":"delta","turn_id":"t","target":"text","text":"streamed "}"#
+            .to_string(),
+        r#"{"frame":"event","seq":4,"event":"delta","turn_id":"t","target":"text","text":"reply."}"#
+            .to_string(),
+    ];
+    if let Some((path, body)) = note {
+        out.push(
+            serde_json::json!({
+                "frame": "event",
+                "seq": 5,
+                "event": "citations",
+                "item_id": "it-1",
+                "citations": [{
+                    "label": format!("{path}:1-1"),
+                    "path": path,
+                    "start": 1,
+                    "end": 1,
+                    "lines": [LINE],
+                    "error": null,
+                    "kind": "note",
+                    "body": body,
+                }],
+            })
+            .to_string(),
+        );
+    }
+    out.push(
+        r#"{"frame":"event","seq":6,"event":"turn_finished","turn_id":"t","ends_turn":true}"#
+            .to_string(),
+    );
+    out
+}
+
 /// The binary on a pty of its own, and what it has drawn so far.
 struct Ran {
     master: File,
@@ -126,10 +179,10 @@ struct Ran {
 
 impl Ran {
     /// Start `rano <file>` in `cwd`, at `cols`×`rows`, on a pty.
-    fn new(cwd: &Path, socket: &Path, config: &Path, cols: u16, rows: u16) -> Ran {
+    fn new(cwd: &Path, socket: &Path, config: &Path, file: &str, cols: u16, rows: u16) -> Ran {
         let (master, slave) = openpty(cols, rows);
         let child = Command::new(env!("CARGO_BIN_EXE_rano"))
-            .arg("notes.txt")
+            .arg(file)
             .current_dir(cwd)
             .env("LETIBOT_SOCKET", socket)
             .env("XDG_CONFIG_HOME", config)
@@ -247,9 +300,9 @@ fn the_panel_opens_streams_crosses_and_zooms() {
     let config = TempDir::new("config");
     let socket = dir.path().join("daemon.sock");
     let heard: Heard = Arc::new(Mutex::new(Vec::new()));
-    let daemon = scripted_daemon(&socket, Arc::clone(&heard));
+    let daemon = scripted_daemon(&socket, Arc::clone(&heard), None);
 
-    let mut ran = Ran::new(dir.path(), &socket, config.path(), 120, 30);
+    let mut ran = Ran::new(dir.path(), &socket, config.path(), "notes.txt", 120, 30);
     // The editor is up and its file is on the glass before any key is sent, so the pty is in raw
     // mode and a key is a key rather than a line.
     assert!(ran.wait_for(0, "liquor"), "the editor drew its file");
@@ -363,6 +416,83 @@ fn the_panel_opens_streams_crosses_and_zooms() {
     assert!(
         !ran.since(from).contains("liquor"),
         "and the editor is not drawn beside it: {:?}",
+        ran.since(from)
+    );
+
+    drop(ran);
+    let _ = daemon.join();
+}
+
+/// The package's "done when": `alt-k f` on a selection sends a prompt whose `context` holds it, and
+/// the `note` citation that comes back is a mark on those lines.
+#[test]
+fn a_quick_ask_carries_the_selection_and_its_note_lands_on_the_lines() {
+    let dir = TempDir::new("ask");
+    std::fs::write(dir.path().join("notes.md"), format!("{LINE}\n")).expect("a file to read");
+    let config = TempDir::new("ask-config");
+    let socket = dir.path().join("daemon.sock");
+    let heard: Heard = Arc::new(Mutex::new(Vec::new()));
+    let daemon = scripted_daemon(
+        &socket,
+        Arc::clone(&heard),
+        Some(("notes.md", "warn: the jugs are the wrong count")),
+    );
+
+    let mut ran = Ran::new(dir.path(), &socket, config.path(), "notes.md", 130, 30);
+    assert!(ran.wait_for(0, "liquor"), "the editor drew its file");
+
+    // ---- a selection, then alt-k f: the panel opens by itself, because the answer belongs there ----
+    let from = ran.mark();
+    ran.send(b"\x01"); // ctrl-a: set-mark where the caret is
+    ran.send(b"\x1b[C\x1b[C\x1b[C\x1b[C"); // four to the right: "pack"
+    ran.send(b"\x1bk");
+    ran.send(b"f");
+    assert!(
+        ran.wait_for(from, TITLE),
+        "the panel opened, attached and named its session: {:?}",
+        ran.since(from)
+    );
+
+    // ---- what went out is the preset, with the selection as its context ----
+    let prompt = heard_frame(&heard, "prompt").expect("the ask went out as a prompt");
+    assert!(
+        prompt["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("factual claim"),
+        "the preset's own words: {prompt:?}"
+    );
+    let context = &prompt["context"];
+    assert_eq!(context["origin"], "rano");
+    assert_eq!(context["ask"]["preset"], "fact-check");
+    assert_eq!(context["ask"]["answer"], "notes");
+    let reference = &context["refs"][0];
+    assert_eq!(
+        reference["text"], "pack",
+        "the selection as the editor has it"
+    );
+    assert_eq!(reference["range"]["start"]["line"], 1);
+    assert_eq!(reference["range"]["end"]["column"], 5);
+    assert!(
+        reference["file"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("notes.md"),
+        "the file it is about: {reference:?}"
+    );
+    assert_eq!(reference["unsaved"], false);
+    assert_eq!(reference["lang"], "markdown");
+
+    // ---- and the note that came back is a mark on those lines, which is the status row's words ----
+    let from = ran.mark();
+    assert!(
+        ran.wait_for(from, "jugs are the wrong count"),
+        "the note is on the glass at the lines it is about: {:?}",
+        ran.since(from)
+    );
+    assert!(
+        ran.since(from).contains("note:"),
+        "the mark says what it is: {:?}",
         ran.since(from)
     );
 

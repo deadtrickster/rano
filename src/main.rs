@@ -293,8 +293,25 @@ fn run(
     // One request at startup, off the main thread, here rather than in
     // `Editor::new` so no test makes a network call by constructing an editor.
     ed.start_update_check();
+    // The callbacks cannot reach the panel or the socket, so what a key hands them leaves through the
+    // outbox and the pass after this one picks it up.
+    let outbox: Outbox = std::rc::Rc::default();
     if let Some(cmd) = ed.config.send_command.clone() {
         ed.on_send = Some(send_ctrl::command_sender(cmd));
+    } else {
+        // No `send_command`: `M-s` attaches the place to the next prompt instead of shelling out.
+        let outbox = std::rc::Rc::clone(&outbox);
+        ed.on_send = Some(Box::new(move |send: &rano::send::SendEvent| {
+            outbox.borrow_mut().push(Outgoing::Place(send.clone()));
+            Ok("attached to the next prompt".to_string())
+        }));
+    }
+    {
+        let outbox = std::rc::Rc::clone(&outbox);
+        ed.on_ask = Some(Box::new(move |ask: &rano::ask::AskEvent| {
+            outbox.borrow_mut().push(Outgoing::Ask(ask.clone()));
+            Ok(format!("asking: {}", ask.preset))
+        }));
     }
     // `RANO_PLUGIN` beats the config file and `RANO_CAPABILITIES` the grant, so a
     // plugin can be tried without editing the config.
@@ -369,7 +386,7 @@ fn run(
         }
         // What the panel and the wire said to each other since the last pass, before the layout:
         // a frame may have changed the session, and an act may have opened or closed a socket.
-        dirty |= pump(&mut ed, &mut link);
+        dirty |= pump(&mut ed, &mut link, &outbox);
         let lay = layout(w, h, &ed, panel_width);
         dirty |= ed.set_area(lay.editor.unwrap_or(Rect::new(0, 0, w, h)).into());
         // The pollers, the overlays' refreshes, the scroll and the highlight:
@@ -501,8 +518,41 @@ fn seat() -> rano::letibot::Seat {
 
 /// What the panel and the wire say to each other, once per pass: frames in, acts out. True when
 /// the screen changed.
-fn pump(ed: &mut Editor, link: &mut Option<Link>) -> bool {
+fn pump(ed: &mut Editor, link: &mut Option<Link>, outbox: &Outbox) -> bool {
     let mut dirty = false;
+    // What a key handed `on_ask` or `on_send`: the panel asks, and a place becomes a chip.
+    for out in std::mem::take(&mut *outbox.borrow_mut()) {
+        dirty = true;
+        match out {
+            Outgoing::Ask(ask) => {
+                ed.panel_ask(&ask);
+            }
+            Outgoing::Place(send) => {
+                ed.panel_attach(&send);
+            }
+        }
+    }
+    // What the operator decided about earlier marks rides the next prompt, named as the model wrote
+    // the range rather than by an id it has never seen.
+    let taken = ed.take_mark_outcomes();
+    if !taken.is_empty() {
+        ed.panel.remember_outcomes(&taken);
+    }
+    // A reply's citations and a call's edits, on the buffers this host has open. A file that is not
+    // open is kept, not dropped: it lands on the pass that opens it.
+    let mut unlanded = Vec::new();
+    for set in ed.panel.take_marks() {
+        dirty = true;
+        for source in &set.replaces {
+            ed.clear_marks(Some(source));
+        }
+        if ed.holds_file(&set.path) {
+            ed.set_marks(&set.path, &set.source, set.marks);
+        } else {
+            unlanded.push(set);
+        }
+    }
+    ed.panel.keep_marks(unlanded);
     if let Some(open) = link.as_mut() {
         while let Some(frame) = open.client.try_frame() {
             if matches!(frame, rano::letibot::Frame::Hello(_)) {
@@ -543,8 +593,12 @@ fn pump(ed: &mut Editor, link: &mut Option<Link>) -> bool {
                     open.client.new_session("", &folder)
                 });
             }
-            Act::Prompt(text) => {
-                send_frame(ed, link, |open, _| open.client.prompt(&text));
+            Act::Prompt { text, context } => {
+                let context = with_open_buffers(ed, context);
+                send_frame(ed, link, |open, _| {
+                    open.client
+                        .prompt_with_context(&text, &[], context.as_ref())
+                });
             }
             Act::Interrupt => {
                 send_frame(ed, link, |open, _| open.client.interrupt("esc esc"));
@@ -552,6 +606,59 @@ fn pump(ed: &mut Editor, link: &mut Option<Link>) -> bool {
         }
     }
     dirty
+}
+
+/// The context a prompt carries, with the editor's other open files added: the one fact only the
+/// host has, and the reason the panel asks for it at send time rather than at ask time.
+fn with_open_buffers(
+    ed: &Editor,
+    context: Option<rano::letibot::EditorContext>,
+) -> Option<rano::letibot::EditorContext> {
+    let open = open_buffers(ed);
+    match context {
+        Some(mut context) => {
+            context.open = open;
+            Some(context)
+        }
+        // Nothing pointed at, nothing decided: the open files alone are worth one line, and it is
+        // still a context the daemon renders.
+        None if !open.is_empty() => Some(rano::letibot::EditorContext {
+            origin: "rano".to_string(),
+            open,
+            ..rano::letibot::EditorContext::default()
+        }),
+        None => None,
+    }
+}
+
+/// Every file the editor holds open, names only: a view (the manual, a listing) is not a file the
+/// daemon can read, so it is not one the model is told about.
+fn open_buffers(ed: &Editor) -> Vec<rano::letibot::OpenBuffer> {
+    ed.buffers
+        .iter()
+        .enumerate()
+        .filter(|(_, bs)| !bs.synthetic)
+        .filter_map(|(i, bs)| {
+            let name = bs.buf.name.as_ref()?;
+            Some(rano::letibot::OpenBuffer {
+                file: name.display().to_string(),
+                unsaved: bs.buf.modified,
+                visible: i == ed.cur,
+            })
+        })
+        .collect()
+}
+
+/// What the editor hands a host callback that this loop has not acted on yet: a callback holds no
+/// socket and no panel, so it leaves the fact here.
+type Outbox = std::rc::Rc<std::cell::RefCell<Vec<Outgoing>>>;
+
+#[derive(Debug)]
+enum Outgoing {
+    /// `M-k <key>`: a quick ask, which the panel sends with the place beside it.
+    Ask(rano::ask::AskEvent),
+    /// `M-s`: a place to attach to the next prompt.
+    Place(rano::send::SendEvent),
 }
 
 /// A frame a command sends, with the two failures every one of them has: no daemon to send it to,
@@ -659,7 +766,13 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         } else {
             Vec::new()
         };
-        let drawn = panel_view(ed, &hints).draw(area, buf);
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
         ed.panel.scroll = drawn.scroll;
         if drawn.cursor.is_some() {
             cursor = drawn.cursor;
@@ -669,7 +782,11 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
 }
 
 /// The panel as its widget sees it: the facts it draws, and nothing it would have to know.
-fn panel_view<'a>(ed: &'a Editor, hints: &'a [(String, String)]) -> rano::agent::panel::View<'a> {
+fn panel_view<'a>(
+    ed: &'a Editor,
+    hints: &'a [(String, String)],
+    chips: &'a [String],
+) -> rano::agent::panel::View<'a> {
     let panel = &ed.panel;
     rano::agent::panel::View {
         title: panel.title.clone(),
@@ -682,6 +799,7 @@ fn panel_view<'a>(ed: &'a Editor, hints: &'a [(String, String)]) -> rano::agent:
         follow: panel.follow,
         input: &panel.input,
         cursor: panel.cursor,
+        chips,
         focus: panel.focus,
         hints,
     }

@@ -505,8 +505,19 @@ impl Panel {
         }
         match self.sessions.len() {
             0 => {
-                self.state = PanelState::Idle;
-                self.said = "no sessions in this folder: enter makes one".to_string();
+                // Look UP before saying there is nothing: the operator's session usually belongs to
+                // the project above the file's folder, and that is the one to offer. Each parent is
+                // asked in turn until one has sessions, and the top says so instead of leaving a
+                // blank panel with no way in.
+                if let Some(parent) = self.folder.parent().map(Path::to_path_buf) {
+                    self.state = PanelState::Connecting;
+                    self.said = format!("no session here; asking {}", parent.display());
+                    self.acts.push(Act::Connect(parent));
+                } else {
+                    self.state = PanelState::Idle;
+                    self.said =
+                        "no session anywhere above this folder: enter starts one".to_string();
+                }
             }
             1 => {
                 let id = self.sessions[0].id.clone();
@@ -641,6 +652,16 @@ impl Panel {
         match self.state {
             PanelState::Picking => self.pick_now(),
             PanelState::Offline { startable: true } => self.start(),
+            // Nothing to attach to and nothing typed: Enter starts the session this panel is for,
+            // instead of sending an empty prompt into a panel with no session.
+            _ if self.sessions.is_empty()
+                && !self.attached()
+                && self.input.trim().is_empty()
+                // Not offline: a session can only be made where a daemon answers.
+                && !matches!(self.state, PanelState::Offline { .. }) =>
+            {
+                self.new_session();
+            }
             _ => {
                 let text = self.input.trim().to_string();
                 if text.is_empty() {
@@ -1390,6 +1411,39 @@ mod tests {
         let mut panel = Panel::default();
         panel.open(PathBuf::from("/w"));
         panel
+    }
+
+    /// A folder with no session of its own asks the one ABOVE it: the operator's session usually
+    /// belongs to the project, not to the subdirectory the file happens to sit in.
+    #[test]
+    fn a_folder_with_no_session_asks_the_one_above_it() {
+        let mut panel = Panel {
+            folder: PathBuf::from("/home/dead/Projects/rano/rano"),
+            state: PanelState::Connecting,
+            ..Panel::default()
+        };
+        panel.apply(&Frame::Sessions {
+            current: String::new(),
+            created: None,
+            sessions: Vec::new(),
+        });
+        assert_eq!(
+            panel.take_acts(),
+            vec![Act::Connect(PathBuf::from("/home/dead/Projects/rano"))]
+        );
+    }
+
+    /// And with nothing anywhere above it, Enter is how a session comes to exist — not a prompt
+    /// typed into a panel that has none.
+    #[test]
+    fn a_folder_with_no_session_anywhere_starts_one_on_enter() {
+        let mut panel = Panel {
+            folder: PathBuf::from("/"),
+            state: PanelState::Idle,
+            ..Panel::default()
+        };
+        panel.send();
+        assert_eq!(panel.take_acts(), vec![Act::New]);
     }
 
     /// The panel asks the host for a connection and nothing else: it holds no socket, so every

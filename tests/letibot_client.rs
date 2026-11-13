@@ -9,7 +9,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use rano::letibot::{Client, DecisionRequest, Event, Frame, Reply, Seat};
+use rano::letibot::{
+    AnswerMode, CitationKind, Client, ContextAsk, ContextPos, ContextRange, ContextRef,
+    DecisionRequest, EditorContext, Event, Frame, MarkOutcome, OpenBuffer, PROTOCOL_VERSION, Reply,
+    Seat,
+};
 use serde_json::Value;
 
 /// Long enough that a failure to answer is the client's, short enough that a hang is not a wait.
@@ -79,7 +83,7 @@ fn attaching_announces_an_editor_head_and_reads_the_hello() {
     assert_eq!(attach["kind"], "editor");
     assert_eq!(attach["session_id"], "s-1");
     assert_eq!(attach["since_seq"], 0);
-    assert_eq!(attach["protocol_version"], 70);
+    assert_eq!(attach["protocol_version"], PROTOCOL_VERSION);
     assert_eq!(attach["caps"]["can_decide"].as_bool(), Some(true));
     assert_eq!(attach["caps"]["features"][0], "editor_v1");
 
@@ -91,6 +95,142 @@ fn attaching_announces_an_editor_head_and_reads_the_hello() {
     assert_eq!(hello.session_id, "s-1");
     assert_eq!(hello.protocol_version, 70);
     assert_eq!(hello.sessions[0].title, "the one");
+}
+
+/// The two things this client was moved to protocol 72 to speak: what a prompt carries beside its
+/// words (71), and the kind of thing a citation is (72).
+#[test]
+fn a_prompt_carries_the_context_and_a_citation_carries_its_kind() {
+    let (mut client, mut peer) = Peer::pair();
+    client.attach("s-1", 0, &Seat::default()).unwrap();
+    let _ = peer.hear();
+    peer.hello();
+    assert!(client.frame(PATIENCE).is_some());
+
+    let context = EditorContext {
+        origin: "rano".to_string(),
+        refs: vec![ContextRef {
+            file: "/w/article.md".to_string(),
+            range: Some(ContextRange {
+                start: ContextPos {
+                    line: 41,
+                    column: 1,
+                },
+                end: ContextPos {
+                    line: 47,
+                    column: 9,
+                },
+            }),
+            cursor: Some(ContextPos {
+                line: 41,
+                column: 1,
+            }),
+            text: "the first transatlantic cable".to_string(),
+            unsaved: true,
+            lang: "markdown".to_string(),
+            title: String::new(),
+        }],
+        open: vec![OpenBuffer {
+            file: "/w/notes.md".to_string(),
+            unsaved: false,
+            visible: true,
+        }],
+        ask: Some(ContextAsk {
+            preset: "fact-check".to_string(),
+            answer: AnswerMode::Notes,
+        }),
+        outcomes: vec![MarkOutcome {
+            label: "article.md:41-47".to_string(),
+            outcome: "accepted".to_string(),
+        }],
+    };
+    client
+        .prompt_with_context("check this", &[], Some(&context))
+        .expect("a prompt is written");
+    let prompt = peer.hear();
+    let sent = &prompt["context"];
+    assert_eq!(sent["origin"], "rano");
+    assert_eq!(sent["refs"][0]["file"], "/w/article.md");
+    assert_eq!(sent["refs"][0]["range"]["start"]["line"], 41);
+    assert_eq!(sent["refs"][0]["range"]["end"]["column"], 9);
+    assert_eq!(sent["refs"][0]["text"], "the first transatlantic cable");
+    assert_eq!(sent["refs"][0]["unsaved"], true);
+    assert_eq!(sent["refs"][0]["lang"], "markdown");
+    assert_eq!(sent["open"][0]["file"], "/w/notes.md");
+    assert_eq!(sent["ask"]["preset"], "fact-check");
+    assert_eq!(sent["ask"]["answer"], "notes");
+    assert_eq!(sent["outcomes"][0]["label"], "article.md:41-47");
+    assert_eq!(sent["outcomes"][0]["outcome"], "accepted");
+
+    peer.say(
+        r#"{"frame":"event","seq":1,"event":"citations","item_id":"it-1",
+            "citations":[{"label":"article.md:41-47","path":"article.md","start":41,
+            "end":47,"lines":["a","b"],"error":null,"kind":"note",
+            "body":"warn: no source for this"}]}"#,
+    );
+    let Some(Frame::Event {
+        event: Event::Citations { item_id, citations },
+        ..
+    }) = client.frame(PATIENCE)
+    else {
+        panic!("a citations event");
+    };
+    assert_eq!(item_id, "it-1");
+    assert_eq!(citations[0].kind, CitationKind::Note);
+    assert_eq!(citations[0].body, "warn: no source for this");
+    assert_eq!(citations[0].lines, vec!["a".to_string(), "b".to_string()]);
+
+    // A daemon that never heard of the field still reads as a citation of the bare kind.
+    peer.say(
+        r#"{"frame":"event","seq":2,"event":"citations","item_id":"it-2",
+            "citations":[{"label":"a.md:1-1","path":"a.md","start":1,"end":1,
+            "lines":[]}]}"#,
+    );
+    let Some(Frame::Event {
+        event: Event::Citations { citations, .. },
+        ..
+    }) = client.frame(PATIENCE)
+    else {
+        panic!("a citations event");
+    };
+    assert_eq!(citations[0].kind, CitationKind::Cite, "70 and 71 mean cite");
+    assert!(citations[0].body.is_empty());
+
+    // And a finished call's edits, both sides of each, which are the editor's `edit` marks.
+    peer.say(
+        r#"{"frame":"event","seq":3,"event":"tool_finished","turn_id":"t-1",
+            "call_id":"c-1","outcome":{"outcome":"ok"},"edits":[{"path":"article.md",
+            "created":false,"before_start":41,"after_start":41,"before_lines":50,
+            "after_lines":50,"truncated":false,"before":"old line","after":"new line"}]}"#,
+    );
+    let Some(Frame::Event {
+        event: Event::ToolFinished { edits, .. },
+        ..
+    }) = client.frame(PATIENCE)
+    else {
+        panic!("a tool_finished event");
+    };
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].path, "article.md");
+    assert_eq!((edits[0].before_start, edits[0].after_start), (41, 41));
+    assert_eq!(edits[0].before, "old line");
+    assert_eq!(edits[0].after, "new line");
+
+    // One object rather than a list is what a row written before the list carries.
+    peer.say(
+        r#"{"frame":"event","seq":4,"event":"tool_finished","turn_id":"t-1",
+            "call_id":"c-2","outcome":"ok","edits":{"path":"b.md","before":"x",
+            "after":"y","before_start":1,"after_start":1}}"#,
+    );
+    let Some(Frame::Event {
+        event: Event::ToolFinished { edits, .. },
+        ..
+    }) = client.frame(PATIENCE)
+    else {
+        panic!("a tool_finished event");
+    };
+    assert_eq!(edits.len(), 1, "one object read as a one-item list");
+    assert_eq!(edits[0].path, "b.md");
 }
 
 /// A prompt goes out with the seq this head has consumed, and the reply is folded out of the
@@ -112,6 +252,10 @@ fn a_prompt_folds_its_reply_out_of_the_deltas() {
     assert_eq!(prompt["text"], "why is it slow?");
     assert_eq!(prompt["expected_seq"], 0, "nothing has been seen yet");
     assert_eq!(prompt["attachments"], serde_json::json!([]));
+    assert!(
+        prompt.get("context").is_none(),
+        "words with nothing pointed at send no context"
+    );
 
     peer.say(
         r#"{"frame":"accepted","client_request_id":"rano-1","seq":1,

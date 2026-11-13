@@ -20,7 +20,10 @@ use serde_json::Value;
 
 /// The protocol this build was written against. rano sends it and reads the daemon's from `Hello`:
 /// the daemon logs a difference and serves anyway, so this is a fact to state, not a gate to pass.
-pub const PROTOCOL_VERSION: u32 = 70;
+///
+/// 71 added `Prompt.context`, 72 `Citation.kind` and `body`; both are defaulted on the wire, and
+/// this build reads and writes both, so it speaks the newer one.
+pub const PROTOCOL_VERSION: u32 = 72;
 
 /// The head kind a panel attaches as.
 pub const KIND_EDITOR: &str = "editor";
@@ -129,6 +132,9 @@ enum Out<'a> {
         expected_seq: u64,
         text: &'a str,
         attachments: &'a [Attachment],
+        /// Absent rather than empty, so a daemon written before 71 reads exactly what it always did.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<&'a EditorContext>,
     },
     Interrupt {
         client_request_id: &'a str,
@@ -212,7 +218,17 @@ pub enum DeltaTarget {
     Other(String),
 }
 
-/// One cited range: the empty fence a reply labelled `path:start-end`, and the lines behind it.
+/// What a line-addressed fence is for, which is its label's first word: a bare range shows the
+/// lines, `note` says something about them, `suggest` offers a replacement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CitationKind {
+    #[default]
+    Cite,
+    Note,
+    Suggest,
+}
+
+/// One cited range: the fence a reply labelled `path:start-end`, and the lines behind it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Citation {
     /// The fence's label as the model wrote it, which is how a head matches fence to citation.
@@ -223,6 +239,125 @@ pub struct Citation {
     pub lines: Vec<String>,
     /// Why the lines are not here, or not all here. `None` when every cited line was read.
     pub error: Option<String>,
+    pub kind: CitationKind,
+    /// A `note`'s sentence or a `suggest`'s replacement: empty for a bare citation.
+    pub body: String,
+}
+
+/// Both sides of one file a tool call changed, as the daemon bounded it to the differing region.
+/// These are `edit` marks: the change is already on disk, and `before` is what a revert puts back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolEdit {
+    /// Relative to the session's workspace, or absolute.
+    pub path: String,
+    /// 1-based line of the old file that `before` starts at.
+    pub before_start: usize,
+    /// 1-based line of the new file that `after` starts at.
+    pub after_start: usize,
+    pub before: String,
+    pub after: String,
+}
+
+/// What the operator pointed at, carried beside the words rather than pasted into them. The daemon
+/// renders it, so a head and the daemon's own spelling of the block can never disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EditorContext {
+    /// `rano`, `browser` or `acp`: who captured it, said on the block's first line.
+    pub origin: String,
+    pub refs: Vec<ContextRef>,
+    /// The other files open in the editor, names only.
+    pub open: Vec<OpenBuffer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask: Option<ContextAsk>,
+    /// What became of the marks an earlier reply suggested.
+    pub outcomes: Vec<MarkOutcome>,
+}
+
+impl EditorContext {
+    /// Nothing to say beside the words: a prompt with no chips, no open files and no outcomes is
+    /// sent without a context at all, which is what a daemon written before 71 understands.
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+            && self.open.is_empty()
+            && self.ask.is_none()
+            && self.outcomes.is_empty()
+    }
+}
+
+/// One place: a file with a range, a whole file, or a page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ContextRef {
+    /// An absolute path, or the URL a browser captured.
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<ContextRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<ContextPos>,
+    /// The selection as the editor has it, empty for a bare place.
+    pub text: String,
+    /// The buffer differs from the file on disk, so the text sent is the one the daemon cannot read.
+    pub unsaved: bool,
+    pub lang: String,
+    /// A browser page's title, empty for a file.
+    pub title: String,
+}
+
+/// A span of a [`ContextRef`]: lines and columns 1-based, columns counted in characters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ContextRange {
+    pub start: ContextPos,
+    pub end: ContextPos,
+}
+
+/// A place in a buffer, spelled as rano's `SendEvent` spells it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ContextPos {
+    pub line: u32,
+    pub column: u32,
+}
+
+/// One of the editor's other buffers: a name and two facts, never its text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OpenBuffer {
+    pub file: String,
+    pub unsaved: bool,
+    pub visible: bool,
+}
+
+/// A quick ask: the preset the operator pressed and the shape of answer wanted back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ContextAsk {
+    pub preset: String,
+    pub answer: AnswerMode,
+}
+
+/// What a quick ask wants: an answer in the conversation, a note to keep, or a suggested edit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerMode {
+    #[default]
+    Chat,
+    Notes,
+    Suggest,
+}
+
+impl AnswerMode {
+    /// The wire's word for rano's own answer mode.
+    pub fn of(answer: crate::ask::Answer) -> AnswerMode {
+        match answer {
+            crate::ask::Answer::Chat => AnswerMode::Chat,
+            crate::ask::Answer::Notes => AnswerMode::Notes,
+            crate::ask::Answer::Suggest => AnswerMode::Suggest,
+        }
+    }
+}
+
+/// What the operator did with a mark a reply suggested: `accepted`, `rejected` or `reverted`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MarkOutcome {
+    /// The range the mark named, as the model knows it: `article.md:41-47`.
+    pub label: String,
+    pub outcome: String,
 }
 
 /// One rung of a permission's ladder.
@@ -275,12 +410,14 @@ pub enum Event {
         access: String,
     },
     /// A tool call ending. `outcome` is the word (`ok`, `failed`, `denied`, `timeout`, …) and `why`
-    /// its reason when it has one: both are what a one-line tool row says.
+    /// its reason when it has one: both are what a one-line tool row says. `edits` is every file a
+    /// file-editing call changed, both sides of each, and becomes `edit` marks on those lines.
     ToolFinished {
         turn_id: String,
         call_id: String,
         outcome: String,
         why: String,
+        edits: Vec<ToolEdit>,
     },
     /// One round's ending. `ends_turn` says whether the whole prompt is over, because only the
     /// daemon knows what follows a round.
@@ -474,21 +611,25 @@ impl Client {
     /// A user message, queueing it behind a running turn the way the daemon does rather than
     /// refusing it. Answers the request id its `Accepted` or `Rejected` is keyed by.
     pub fn prompt(&mut self, text: &str) -> std::io::Result<String> {
-        self.prompt_with(text, &[])
+        self.prompt_with_context(text, &[], None)
     }
 
-    /// [`Client::prompt`] with files beside it.
-    pub fn prompt_with(
+    /// [`Client::prompt`] with files and the editor's context beside it. `context` is `None` for a
+    /// prompt that only has words, which is what a daemon older than 71 is sent.
+    pub fn prompt_with_context(
         &mut self,
         text: &str,
         attachments: &[Attachment],
+        context: Option<&EditorContext>,
     ) -> std::io::Result<String> {
         let id = self.next_id();
+        let context = context.filter(|c| !c.is_empty());
         self.write(&Out::Prompt {
             client_request_id: &id,
             expected_seq: self.seq(),
             text,
             attachments,
+            context,
         })?;
         Ok(id)
     }
@@ -801,6 +942,13 @@ fn event(v: &Value) -> Event {
                 } else {
                     why
                 },
+                // One object rather than a list is what a row written before the list existed
+                // carries, and a `null` is a call that changed nothing.
+                edits: match at(v, "edits") {
+                    Value::Array(items) => items.iter().map(tool_edit).collect(),
+                    Value::Object(_) => vec![tool_edit(at(v, "edits"))],
+                    _ => Vec::new(),
+                },
             }
         }
         // A daemon older than the field published only endings, so an absent `ends_turn` is one:
@@ -826,12 +974,15 @@ fn event(v: &Value) -> Event {
                     path: text(c, "path"),
                     start: uint(c, "start") as usize,
                     end: uint(c, "end") as usize,
-                    lines: array(c, "lines")
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect(),
+                    lines: strings(c, "lines"),
                     error: non_empty(c, "error"),
+                    // A daemon older than 72 sends neither, and a bare range is what it meant.
+                    kind: match text(c, "kind").as_str() {
+                        "note" => CitationKind::Note,
+                        "suggest" => CitationKind::Suggest,
+                        _ => CitationKind::Cite,
+                    },
+                    body: text(c, "body"),
                 })
                 .collect(),
         },
@@ -894,6 +1045,26 @@ fn array(v: &Value, key: &str) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// A list of strings, with the entries that are not one left out.
+fn strings(v: &Value, key: &str) -> Vec<String> {
+    array(v, key)
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// One element of a `tool_finished`'s `edits`.
+fn tool_edit(v: &Value) -> ToolEdit {
+    ToolEdit {
+        path: text(v, "path"),
+        before_start: uint(v, "before_start") as usize,
+        after_start: uint(v, "after_start") as usize,
+        before: text(v, "before"),
+        after: text(v, "after"),
+    }
 }
 
 fn sessions(v: &Value) -> Vec<Session> {
@@ -1107,7 +1278,7 @@ mod tests {
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
         assert_eq!(v["frame"], "attach");
-        assert_eq!(v["protocol_version"], 70);
+        assert_eq!(v["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(v["session_id"], "s-1");
         assert_eq!(v["since_seq"], 0);
         assert_eq!(v["kind"], "editor");
@@ -1124,6 +1295,7 @@ mod tests {
             expected_seq: 7,
             text: "why is it slow?",
             attachments: &[],
+            context: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&prompt).unwrap()).unwrap();
         assert_eq!(v["frame"], "prompt");
@@ -1131,6 +1303,10 @@ mod tests {
         assert_eq!(v["expected_seq"], 7);
         assert_eq!(v["text"], "why is it slow?");
         assert_eq!(v["attachments"], serde_json::json!([]));
+        assert!(
+            v.get("context").is_none(),
+            "a prompt that points at nothing says nothing about it"
+        );
 
         let stop = Out::Interrupt {
             client_request_id: "rano-2",
@@ -1416,7 +1592,7 @@ mod tests {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\necho '{{\"workspace\":\"{}\",\"socket\":\"{}/s.sock\",\"up\":true,\"protocol\":70}}'\n",
+                "#!/bin/sh\necho '{{\"workspace\":\"{}\",\"socket\":\"{}/s.sock\",\"up\":true,\"protocol\":72}}'\n",
                 dir.display(),
                 dir.display()
             ),

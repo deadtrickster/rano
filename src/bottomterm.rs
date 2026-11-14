@@ -263,7 +263,12 @@ impl Vt {
                 '\x1b' => self.escape(&mut it),
                 '\r' => self.x = 0,
                 '\n' => self.linefeed(),
-                '\x08' => self.x = self.x.saturating_sub(1),
+                // Backspace erases as well as moves: the cell under the new cursor position is
+                // blanked, or a delete happens only in the shell and never on the glass.
+                '\x08' => {
+                    self.x = self.x.saturating_sub(1);
+                    self.cells[self.y * self.cols + self.x] = ' ';
+                }
                 '\t' => {
                     self.x = ((self.x / 8) + 1) * 8;
                     if self.x >= self.cols {
@@ -361,10 +366,30 @@ impl Vt {
     fn lines(&self) -> Vec<Line> {
         (0..self.rows)
             .map(|y| {
-                let text: String = (0..self.cols)
-                    .map(|x| self.cells[y * self.cols + x])
-                    .collect();
-                Line::new(vec![Span::raw(text.trim_end().to_string())])
+                let mut spans: Vec<Span> = Vec::new();
+                let mut text = String::new();
+                for x in 0..self.cols {
+                    let cell = self.cells[y * self.cols + x];
+                    if x == self.x && y == self.y {
+                        if !text.is_empty() {
+                            spans.push(Span::raw(std::mem::take(&mut text)));
+                        }
+                        // The caret: a visible cell where the next character lands.
+                        spans.push(Span::styled(
+                            cell.to_string(),
+                            crate::render::Style::new().reverse(),
+                        ));
+                    } else {
+                        text.push(cell);
+                    }
+                }
+                if !text.is_empty() {
+                    spans.push(Span::raw(text));
+                }
+                if spans.is_empty() {
+                    spans.push(Span::raw(" ".to_string()));
+                }
+                Line::new(spans)
             })
             .collect()
     }
@@ -390,6 +415,24 @@ mod tests {
             t.lines().iter().any(|l| l.plain().contains("hi")),
             "{:?}",
             t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Backspace erases as well as moves, and the caret is drawn where the next character lands.
+    #[test]
+    fn backspace_erases_and_the_caret_is_drawn() {
+        let mut p = Vt::new(10, 2);
+        p.process(b"ab");
+        p.process(b"\x08");
+        let row: String = (0..10).map(|x| p.cells[x]).collect();
+        assert_eq!(row, "a         ", "the b is erased, not merely moved over");
+        let lines = p.lines();
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.attrs.contains(crate::style::Attrs::REVERSE)),
+            "a caret cell"
         );
     }
 

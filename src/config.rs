@@ -24,6 +24,9 @@ pub struct Config {
     /// How keys are written: `key_notation = emacs` (the default), `nano` (`^X`, `M-U`), or
     /// `words` (`ctrl-x`, `alt-u`) — the spelling the two programs share.
     pub notation: crate::keymap::Notation,
+    /// How many lines a bottom-terminal tab keeps for PgUp/PgDn: `terminal_scrollback = N`.
+    /// 200 is the default, and a big scrollback is a choice you pay for in memory.
+    pub terminal_scrollback: usize,
     /// `theme = NAME`: the theme in `themes/NAME.toml` beside this file.
     pub theme: Option<String>,
     /// The WASM plugin: a `.wasm` whose `on_open`/`on_save` hooks run at the two
@@ -112,6 +115,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tab_width: 4,
+            terminal_scrollback: 200,
             auto_indent: true,
             indent: Indent::Spaces,
             indent_size: 4,

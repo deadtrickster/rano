@@ -203,9 +203,10 @@ impl Editor {
     fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
         let ctrl = key.mods.ctrl();
         let alt = key.mods.alt();
-        // `ctrl-\`` is NUL in ASCII, so it cannot be a chord: the toggle is `M-y`, which is free
-        // in the map and in the tests that ask what an unbound key does.
-        if alt && matches!(key.code, crate::term::KeyCode::Char('y')) {
+        // `ctrl-\`` is NUL in ASCII, so it cannot be a chord. The toggle is `M-0`: free in the map,
+        // and not a key any test uses as an unbound example — binding M-y broke the describe-key
+        // test's unbound case, which is exactly the trap to avoid here.
+        if alt && matches!(key.code, crate::term::KeyCode::Char('0')) {
             let cwd = std::env::current_dir().unwrap_or_default();
             let _ = self.bottom.toggle(&cwd, self.text_w as u16, 12);
             return true;

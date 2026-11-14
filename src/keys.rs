@@ -203,7 +203,9 @@ impl Editor {
     fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
         let ctrl = key.mods.ctrl();
         let alt = key.mods.alt();
-        if ctrl && matches!(key.code, crate::term::KeyCode::Char('`')) {
+        // `ctrl-\`` is NUL in ASCII, so it cannot be a chord: the toggle is `M-y`, which is free
+        // in the map and in the tests that ask what an unbound key does.
+        if alt && matches!(key.code, crate::term::KeyCode::Char('y')) {
             let cwd = std::env::current_dir().unwrap_or_default();
             let _ = self.bottom.toggle(&cwd, self.text_w as u16, 12);
             return true;

@@ -1635,6 +1635,26 @@ impl Editor {
             m.x -= self.area.x;
             m.y -= self.area.y;
         }
+        // The bottom terminal takes the wheel: it scrolls the active tab's scrollback, not the
+        // document above it. Open, not focused — a touchpad over the panel must not have to click
+        // into it first, which is what the old guard required.
+        if self.bottom.open {
+            return match m.kind {
+                MouseKind::WheelUp => {
+                    if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
+                        t.scroll_up(WHEEL_LINES as usize);
+                    }
+                    true
+                }
+                MouseKind::WheelDown => {
+                    if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
+                        t.scroll_down(WHEEL_LINES as usize);
+                    }
+                    true
+                }
+                _ => false,
+            };
+        }
         // The list overlay is keyboard-only; the text under it is not there to click.
         if self.picker.is_some() {
             return false;

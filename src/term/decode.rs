@@ -744,7 +744,11 @@ mod tests {
     #[test]
     fn alt_zero_is_a_key_with_alt() {
         let (k, _) = decode_prefix(b"\x1b0", true);
-        assert_eq!(k, vec![key(crate::term::KeyCode::Char('0'), Mods::ALT)], "{k:?}");
+        assert_eq!(
+            k,
+            vec![key(crate::term::KeyCode::Char('0'), Mods::ALT)],
+            "{k:?}"
+        );
     }
 
     #[test]

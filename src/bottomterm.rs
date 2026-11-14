@@ -36,6 +36,9 @@ impl Tab {
                     libc::dup2(slave, 1);
                     libc::dup2(slave, 2);
                     libc::close(slave);
+                    // The pty is the child's controlling terminal: without it the shell says it
+                    // has no tty and turns job control off, which is a warning on every open.
+                    libc::ioctl(0, libc::TIOCSCTTY as _, 0);
                     let shell = shell();
                     let cwd = std::ffi::CString::new(cwd.as_os_str().as_encoded_bytes())
                         .expect("no NUL in a path");
@@ -173,6 +176,16 @@ impl BottomTerm {
             )]));
             return out;
         }
+        let mut strip = String::from("tabs ");
+        for (i, _) in self.tabs.iter().enumerate() {
+            let mark = if i == self.active { ">" } else { " " };
+            strip.push_str(&format!("{mark}{} ", i + 1));
+        }
+        strip.push_str("(M-n new, M-[ M-] switch, M-w close)");
+        out.push(Line::new(vec![Span::role(
+            crate::width::text::truncate(&strip, w),
+            Role::Faint,
+        )]));
         out.extend(
             self.tabs[self.active]
                 .lines()

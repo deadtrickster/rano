@@ -742,6 +742,12 @@ mod tests {
     /// The kitty keyboard means the keys the legacy spelling already meant, plus Shift+Enter
     /// and a bare Esc.
     #[test]
+    fn alt_zero_is_a_key_with_alt() {
+        let (k, _) = decode_prefix(b"\x1b0", true);
+        assert_eq!(k, vec![key(crate::term::KeyCode::Char('0'), Mods::ALT)], "{k:?}");
+    }
+
+    #[test]
     fn kitty_keys_decode_to_their_legacy_meaning() {
         let one = |b: &[u8]| {
             let (k, used) = decode_prefix(b, false);

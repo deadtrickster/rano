@@ -749,6 +749,7 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     if !ed.panel.open || w == 0 || h == 0 {
         return Layout {
             editor: Some(whole),
+            bottom,
             ..Layout::default()
         };
     }

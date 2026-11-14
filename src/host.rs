@@ -196,6 +196,15 @@ mod tests {
     }
 
     #[test]
+    fn m_zero_opens_the_bottom_terminal() {
+        let mut ed = ed("abc");
+        let out = ed.handle_key(key(crate::term::KeyCode::Char('0'), Mods::ALT));
+        assert_eq!(out, crate::editor::KeyOutcome::Handled);
+        assert!(ed.bottom.open, "M-0 opens it");
+        assert_eq!(ed.bottom.tabs.len(), 1, "one shell");
+    }
+
+    #[test]
     fn an_idle_editor_waits_the_idle_wait() {
         assert_eq!(ed("x").next_wakeup(), IDLE_WAIT);
     }

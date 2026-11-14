@@ -793,11 +793,20 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         }
     }
     if let Some(area) = lay.bottom {
-        ed.bottom.feed();
         let cwd = std::env::current_dir().unwrap_or_default();
         let lines = ed.bottom.lines(area.width as usize, &cwd);
-        for (i, l) in lines.iter().take(area.height as usize).enumerate() {
-            buf.set_line(area.x, area.y + i as u16, l, area.width as usize);
+        // A rule above the strip: the terminal is a pane, not more of the file's text.
+        let rule = Line::styled(
+            "─".repeat(area.width as usize),
+            crate::render::Style::of(Role::Faint),
+        );
+        buf.set_line(area.x, area.y, &rule, area.width as usize);
+        for (i, l) in lines
+            .iter()
+            .take((area.height as usize).saturating_sub(1))
+            .enumerate()
+        {
+            buf.set_line(area.x, area.y + 1 + i as u16, l, area.width as usize);
         }
     }
     if let Some(area) = lay.panel {

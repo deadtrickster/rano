@@ -31,6 +31,9 @@ impl Editor {
         self.completion_retry_poll();
         dirty |= self.exec_poll();
         dirty |= self.update_poll();
+        // The bottom terminal's ptys: drained on every tick, so `ls` answers even when the operator
+        // is not pressing keys. Feeding only on a draw is what made it look hung.
+        dirty |= self.bottom.feed();
         // A file from the command line whose buffer just became current.
         dirty |= self.start_pending_load();
         dirty |= self.refresh_prompt_hints();

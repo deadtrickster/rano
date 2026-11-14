@@ -68,15 +68,18 @@ impl Tab {
     }
 
     /// Whatever the shell wrote since the last pass, into the emulator.
-    pub fn feed(&mut self) {
+    pub fn feed(&mut self) -> bool {
         let mut buf = [0u8; 4096];
+        let mut dirty = false;
         loop {
             let n = unsafe { libc::read(self.master, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n <= 0 {
                 break;
             }
+            dirty = true;
             self.parser.process(&buf[..n as usize]);
         }
+        dirty
     }
 
     /// A key, as the shell's bytes.
@@ -159,11 +162,15 @@ impl BottomTerm {
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 
-    /// Feed every tab: a quiet shell is a cheap frame.
-    pub fn feed(&mut self) {
+    /// Feed every tab: a quiet shell is a cheap frame. `true` when anything arrived, which is
+    /// what makes the next draw redraw — a terminal whose output only arrives on a keypress is a
+    /// terminal that looks hung on `ls`.
+    pub fn feed(&mut self) -> bool {
+        let mut dirty = false;
         for t in &mut self.tabs {
-            t.feed();
+            dirty |= t.feed();
         }
+        dirty
     }
 
     /// The active tab's screen, or the empty state with the tab strip.

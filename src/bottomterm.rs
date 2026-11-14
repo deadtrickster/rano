@@ -87,6 +87,16 @@ impl Tab {
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
     }
 
+    /// Scroll back by `n` lines, capped at what the scrollback holds.
+    pub fn scroll_up(&mut self, n: usize) {
+        self.parser.scroll = (self.parser.scroll + n).min(self.parser.history.len());
+    }
+
+    /// Scroll forward by `n` lines, back to the live screen at zero.
+    pub fn scroll_down(&mut self, n: usize) {
+        self.parser.scroll = self.parser.scroll.saturating_sub(n);
+    }
+
     /// The screen, in the panel's rows.
     pub fn lines(&self) -> Vec<Line> {
         self.parser.lines()
@@ -247,8 +257,18 @@ struct Vt {
     cols: usize,
     rows: usize,
     cells: Vec<char>,
+    /// The foreground SGR chose for each cell, and whether it is bold.
+    fg: Vec<Option<[u8; 3]>>,
+    bold: Vec<bool>,
+    /// The lines that scrolled off the top, for PgUp/PgDn: a scrollback, not a blank pane.
+    history: Vec<String>,
+    /// How far back the view is scrolled: 0 is the live screen.
+    scroll: usize,
     x: usize,
     y: usize,
+    /// The style SGR is currently setting, applied to every character that follows.
+    cur_fg: Option<[u8; 3]>,
+    cur_bold: bool,
 }
 
 impl Vt {
@@ -257,8 +277,14 @@ impl Vt {
             cols,
             rows,
             cells: vec![' '; cols * rows],
+            fg: vec![None; cols * rows],
+            bold: vec![false; cols * rows],
+            history: Vec::new(),
+            scroll: 0,
             x: 0,
             y: 0,
+            cur_fg: None,
+            cur_bold: false,
         }
     }
 
@@ -295,6 +321,8 @@ impl Vt {
         let i = self.y * self.cols + self.x;
         if i < self.cells.len() {
             self.cells[i] = c;
+            self.fg[i] = self.cur_fg;
+            self.bold[i] = self.cur_bold;
         }
         self.x += 1;
     }
@@ -302,8 +330,18 @@ impl Vt {
     fn linefeed(&mut self) {
         self.x = 0;
         if self.y + 1 >= self.rows {
+            // The top row is scrollback now, not lost: that is what PgUp reads.
+            let top: String = (0..self.cols).map(|x| self.cells[x]).collect();
+            self.history.push(top.trim_end().to_string());
+            if self.history.len() > 200 {
+                self.history.remove(0);
+            }
             self.cells.drain(..self.cols);
             self.cells.resize(self.rows * self.cols, ' ');
+            self.fg.drain(..self.cols);
+            self.fg.resize(self.rows * self.cols, None);
+            self.bold.drain(..self.cols);
+            self.bold.resize(self.rows * self.cols, false);
         } else {
             self.y += 1;
         }
@@ -324,6 +362,9 @@ impl Vt {
     }
 
     fn csi(&mut self, params: &str, last: char) {
+        // CSI's own bracket is not a parameter: `\x1b[31m` is 31, not "[31" — a parse that
+        // includes it silently reads 0 and resets the colour instead of setting it.
+        let params = params.trim_start_matches('[');
         let n = |d: usize| {
             params
                 .split(';')
@@ -366,40 +407,113 @@ impl Vt {
                     }
                 }
             }
+            'm' => self.sgr(params),
             _ => {}
         }
     }
 
+    /// SGR: the codes a shell actually emits — reset, bold, the sixteen foreground colours.
+    /// Anything else is left alone, which is the honest subset for `ls --color` and git.
+    fn sgr(&mut self, params: &str) {
+        for part in params.split(';') {
+            let n: usize = part.parse().unwrap_or(0);
+            match n {
+                0 => {
+                    self.cur_fg = None;
+                    self.cur_bold = false;
+                }
+                1 => self.cur_bold = true,
+                30..=37 => self.cur_fg = Some(rgb(n - 30)),
+                90..=97 => self.cur_fg = Some(rgb(n - 90 + 8)),
+                39 => self.cur_fg = None,
+                _ => {}
+            }
+        }
+    }
+
     fn lines(&self) -> Vec<Line> {
-        (0..self.rows)
-            .map(|y| {
-                let mut spans: Vec<Span> = Vec::new();
-                let mut text = String::new();
-                for x in 0..self.cols {
-                    let cell = self.cells[y * self.cols + x];
-                    if x == self.x && y == self.y {
-                        if !text.is_empty() {
-                            spans.push(Span::raw(std::mem::take(&mut text)));
-                        }
-                        // The caret: a visible cell where the next character lands.
-                        spans.push(Span::styled(
-                            cell.to_string(),
-                            crate::render::Style::new().reverse(),
-                        ));
-                    } else {
-                        text.push(cell);
-                    }
-                }
+        if self.scroll > 0 {
+            return self.history_lines();
+        }
+        (0..self.rows).map(|y| self.row_line(y)).collect()
+    }
+
+    /// One row of the live screen, styled per cell.
+    fn row_line(&self, y: usize) -> Line {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut text = String::new();
+        let mut style = crate::render::Style::new();
+        for x in 0..self.cols {
+            let i = y * self.cols + x;
+            let cell = self.cells[i];
+            let mut st = crate::render::Style::new();
+            if let Some(rgb) = self.fg[i] {
+                st.raw.fg_rgb = Some(rgb);
+            }
+            if self.bold[i] {
+                st.attrs = crate::style::Attrs::BOLD;
+            }
+            if x == self.x && y == self.y {
                 if !text.is_empty() {
-                    spans.push(Span::raw(text));
+                    spans.push(Span::styled(std::mem::take(&mut text), style.clone()));
                 }
-                if spans.is_empty() {
-                    spans.push(Span::raw(" ".to_string()));
+                spans.push(Span::styled(
+                    cell.to_string(),
+                    crate::render::Style::new().reverse(),
+                ));
+                style = st;
+            } else {
+                if st != style {
+                    if !text.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut text), style.clone()));
+                    }
+                    style = st;
                 }
-                Line::new(spans)
-            })
+                text.push(cell);
+            }
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, style));
+        }
+        if spans.is_empty() {
+            spans.push(Span::raw(" ".to_string()));
+        }
+        Line::new(spans)
+    }
+
+    /// The scrollback window: history rows, ending `scroll` lines back from the newest.
+    fn history_lines(&self) -> Vec<Line> {
+        let end = self.history.len().saturating_sub(self.scroll);
+        let start = end.saturating_sub(self.rows);
+        self.history[start..end]
+            .iter()
+            .map(|t| Line::raw(t.clone()))
             .collect()
     }
+}
+
+/// The sixteen colours SGR names, as RGB: exact colours, since a palette's nearest is not the
+/// same colour the shell chose.
+fn rgb(n: usize) -> [u8; 3] {
+    const C: &[[u8; 3]] = &[
+        [0, 0, 0],
+        [205, 49, 49],
+        [49, 205, 49],
+        [205, 205, 49],
+        [49, 49, 205],
+        [205, 49, 205],
+        [49, 205, 205],
+        [229, 229, 229],
+        [127, 127, 127],
+        [255, 85, 85],
+        [85, 255, 85],
+        [255, 255, 85],
+        [85, 85, 255],
+        [255, 85, 255],
+        [85, 255, 255],
+        [255, 255, 255],
+    ];
+    C[n.min(15)]
 }
 
 #[cfg(test)]
@@ -423,6 +537,26 @@ mod tests {
             "{:?}",
             t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
         );
+    }
+
+    /// SGR sets a foreground per cell, and reset clears it.
+    #[test]
+    fn sgr_colours_are_kept_per_cell() {
+        let mut p = Vt::new(10, 2);
+        p.process(b"\x1b[31mR\x1b[0mX");
+        println!("fg={:?} cur={:?}", p.fg[0], p.cur_fg);
+        assert_eq!(p.fg[0], Some(rgb(1)), "red at cell 0");
+        assert_eq!(p.fg[1], None, "reset after it");
+    }
+
+    /// What scrolled off the top is in the scrollback, and PgUp reads it.
+    #[test]
+    fn a_scrolled_back_line_is_in_history() {
+        let mut p = Vt::new(10, 2);
+        p.process(b"one\ntwo\nthree\n");
+        assert_eq!(p.history.len(), 2, "both scrolled-off lines are scrollback");
+        p.scroll = 1;
+        assert!(p.lines().iter().any(|l| l.plain().contains("one")));
     }
 
     /// Backspace erases as well as moves, and the caret is drawn where the next character lands.

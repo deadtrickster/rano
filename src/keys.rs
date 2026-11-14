@@ -236,6 +236,18 @@ impl Editor {
                 self.bottom.next();
                 true
             }
+            (false, false, crate::term::KeyCode::PageUp) => {
+                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    tab.scroll_up(1);
+                }
+                true
+            }
+            (false, false, crate::term::KeyCode::PageDown) => {
+                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    tab.scroll_down(1);
+                }
+                true
+            }
             _ => {
                 let Some(bytes) = key_bytes(key) else {
                     return false;

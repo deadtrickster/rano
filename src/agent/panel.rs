@@ -241,10 +241,12 @@ impl View<'_> {
             if used + need > w {
                 break;
             }
-            if used > 0 {
+            if gap == 1 {
                 spans.push(Span::raw(" "));
             }
-            used += key.chars().count();
+            // The gap is part of what was used: counting the key without it pushed every entry
+            // one column right and the row past the pane's width, where it was cut.
+            used += gap + key.chars().count();
             spans.push(Span::styled(
                 key.to_string(),
                 Style::of(Role::Strong).reverse(),
@@ -389,6 +391,38 @@ mod tests {
         view.focus = false;
         let mut buf = Buffer::empty(rect);
         assert_eq!(view.draw(rect, &mut buf).cursor, None);
+    }
+
+    /// At every width the bar is whole entries with a gap between them, and never past the pane:
+    /// the row was one column per entry too long, and the last entry was cut at the edge.
+    #[test]
+    fn the_panel_bar_fits_its_width_with_whole_entries() {
+        let hints: Vec<(String, String)> = (0..40)
+            .map(|i| (format!("C-<k{i}>"), format!("Prev Word {i}")))
+            .collect();
+        let view = blank_panel(&hints);
+        for w in [24usize, 80, 239, 240, 400] {
+            let line = view.hint_line(w).plain();
+            assert!(
+                line.chars().count() <= w,
+                "width {w}: {} columns: {line:?}",
+                line.chars().count()
+            );
+            // Every pair on the row is a WHOLE entry: the row's words are the entries' words.
+            for (key, title) in view.hints.iter() {
+                let whole = format!("{key} {title}");
+                if let Some(at) = line.find(&whole) {
+                    assert!(at + whole.len() <= line.len(), "{whole:?} is cut");
+                }
+            }
+            // And a cut entry would show as a key's own prefix: none does.
+            assert!(
+                !line.contains("Prev Word")
+                    || line.contains(" Prev Word")
+                    || line.starts_with("Prev"),
+                "a title is whole or absent: {line:?}"
+            );
+        }
     }
 
     /// The panel's bar keeps whole entries: at a width where the next hint does not fit, the bar

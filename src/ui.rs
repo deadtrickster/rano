@@ -323,6 +323,11 @@ pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<Strin
             break;
         }
         rows.push(std::mem::take(&mut cur));
+        // A name that does not fit a row of its own is not started at all: a bar that shows
+        // `M-` of a hint is a bar saying a different hint.
+        if format!(" {n}").chars().count() > width {
+            break;
+        }
         cur = format!(" {n}");
         shown += 1;
     }
@@ -1786,6 +1791,13 @@ mod tests {
             rows[0].contains("(+1)"),
             "and it says what it left out: {rows:?}"
         );
+        // A name that does not fit a row of its own is not started at all.
+        let long = vec!["C-a A".to_string(), "a-very-long-hint-name".to_string()];
+        let rows = hint_rows(&long, 10, 2);
+        for r in &rows {
+            assert!(r.chars().count() <= 10, "{r:?} is past the width");
+            assert!(!r.contains("a-very"), "not started at all: {r:?}");
+        }
         // With a second row allowed the next name goes there whole, never cut.
         let rows = hint_rows(&names, 10, 2);
         assert_eq!(rows.len(), 2, "{rows:?}");

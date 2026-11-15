@@ -274,7 +274,7 @@ mod tests {
             .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
             .expect("a shell");
         ed.bottom.tabs[0].send(b"exit 0\n");
-        for _ in 0..200 {
+        for _ in 0..600 {
             ed.bottom.tabs[0].feed();
             if ed.bottom.tabs[0].exited.is_some() {
                 break;

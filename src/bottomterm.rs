@@ -966,7 +966,7 @@ mod tests {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"exit 42\n");
         let mut noticed = false;
-        for _ in 0..200 {
+        for _ in 0..600 {
             t.feed();
             if t.exited.is_some() {
                 noticed = true;

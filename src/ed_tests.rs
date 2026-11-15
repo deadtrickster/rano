@@ -1007,6 +1007,34 @@ fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture(
     }
 }
 
+/// `c` (mark-clear) drops every mark in EVERY open buffer, not only the one on screen: the
+/// docs say "every open file" and the palette's paragraph is the authority. This pins the
+/// code to that statement — the one gap a docs-vs-manual rebuild cannot close.
+#[test]
+fn clearing_marks_reaches_every_open_buffer() {
+    let d = temp_dir("clear_marks_scope");
+    let one = d.0.join("one.txt");
+    let two = d.0.join("two.txt");
+    fs::write(&one, "alpha\nbeta\n").unwrap();
+    fs::write(&two, "gamma\ndelta\n").unwrap();
+    let mut ed = test_ed("");
+    ed.config.multibuffer = true;
+    assert!(ed.open_at(&one, 1, None).is_ok());
+    assert!(ed.open_at(&two, 1, None).is_ok());
+    for bs in &mut ed.buffers {
+        bs.marks.push(crate::marks::Mark::cite(
+            "reply-1",
+            1,
+            1,
+            vec!["x".to_string()],
+        ));
+    }
+    ed.run_command("mark-clear");
+    for (i, bs) in ed.buffers.iter().enumerate() {
+        assert!(bs.marks.is_empty(), "buffer {i} kept a mark");
+    }
+}
+
 /// A picture file opens as the picture, not as the text of its bytes. The buffer
 /// underneath is the file as it is, so Esc lands in that text.
 #[test]

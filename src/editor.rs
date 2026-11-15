@@ -215,6 +215,10 @@ pub struct Editor {
     pub images: bool,
     /// tmux's `allow-passthrough` is off: why a picture cannot be drawn here, said by name.
     pub tmux_passthrough_off: bool,
+    /// The host draws the status row and the key bar itself, full width: the editor's own
+    /// `draw_in` then leaves those rows alone. Set when the frame is shared with another
+    /// surface, so the bar belongs to the frame and not to the text column.
+    pub foot_drawn_by_host: bool,
     pub(crate) proto: Proto,
     pub(crate) picture_view: Option<PictureView>,
     /// The pictures the terminal holds, separate from `images_held` so the two cannot
@@ -357,6 +361,7 @@ impl Editor {
             diff_split: false,
             images: false,
             tmux_passthrough_off: false,
+            foot_drawn_by_host: false,
             panel: crate::panel::Panel::default(),
             focus: Focus::Text,
             bottom: crate::bottomterm::BottomTerm::default(),

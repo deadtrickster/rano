@@ -368,10 +368,17 @@ pub fn draw(buf: &mut Buffer, ed: &Editor) -> Option<(u16, u16)> {
 /// laid out from `area`'s origin and clipped to it, and every cell is painted so
 /// one buffer can be reused across frames. Returns the cursor cell as `(col, row)`.
 pub fn draw_in(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
-    draw_in_alone(buf, area, ed)
+    draw_in_alone(buf, area, ed, false)
 }
 
-fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
+/// The frame's foot — the status row and the key bar — drawn full width by the host when the
+/// frame is shared with another surface. The same rows `draw_in` paints inside a pane it owns
+/// whole; here the pane is only the foot, and nothing else is drawn.
+pub fn draw_foot(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)> {
+    draw_in_alone(buf, area, ed, true)
+}
+
+fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> Option<(u16, u16)> {
     // Pane-relative rectangles: the layout below was written for a frame at
     // (0, 0), and the intersection keeps "outside the area is untouched" true.
     let at = |x: u16, y: u16, w: u16, h: u16| {
@@ -388,11 +395,12 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
     // The editor's own count, not `chrome.rows()`: a `WhenBusy` row that has nothing to say is
     // the text's, and the click mapping measures against the same number.
     let chrome_rows = ed.chrome_rows();
-    if (area.height as usize) < chrome_rows + 1 {
+    if !foot_only && (area.height as usize) < chrome_rows + 1 {
         Paragraph::new("Terminal too small").render(whole, buf);
         return None;
     }
-    let text_h = area.height as usize - chrome_rows;
+    // A foot-sized pane has no text rows; the overlays below clamp it anyway.
+    let text_h = (area.height as usize).saturating_sub(chrome_rows);
     let t0 = chrome.top();
     let head = || {
         if chrome.bare() {
@@ -462,221 +470,229 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
         }
     }
 
-    // ---- title bar (row 0, reversed) ----
-    let name = ed.title_text();
-    let flags = match (bs.read_only, bs.mark.is_some()) {
-        (true, true) => "VIEW M",
-        (true, false) => "VIEW",
-        (false, true) => "M",
-        (false, false) => "",
-    };
-    if chrome.title {
-        put(
-            buf,
-            at(0, 0, width, 1),
-            &Line::styled(title_line(width, &name, bs.buf.modified, flags), rev()),
-        );
-    }
-
-    // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
-    if g > 0 {
-        let mut nums: Vec<Line> = Vec::with_capacity(text_h);
-        for (i, (r, seg)) in vis.iter().enumerate() {
-            let s = if *r < bs.buf.row_count() && *seg == 0 {
-                match bs.line_number(*r) {
-                    Some(n) => format!("{:>w$} ", n, w = g - 1),
-                    None => " ".repeat(g),
-                }
-            } else {
-                " ".repeat(g)
-            };
-            let role = match diag_sev[i] {
-                Some(sev) => crate::editor::diag_role(sev),
-                None => Role::Faint,
-            };
-            nums.push(Line::styled(s, role));
+    if !foot_only {
+        // ---- title bar (row 0, reversed) ----
+        let name = ed.title_text();
+        let flags = match (bs.read_only, bs.mark.is_some()) {
+            (true, true) => "VIEW M",
+            (true, false) => "VIEW",
+            (false, true) => "M",
+            (false, false) => "",
+        };
+        if chrome.title {
+            put(
+                buf,
+                at(0, 0, width, 1),
+                &Line::styled(title_line(width, &name, bs.buf.modified, flags), rev()),
+            );
         }
-        for (i, l) in nums.iter().enumerate() {
-            put(buf, at(0, t0 + i as u16, g as u16, 1), l);
-        }
-    }
 
-    // ---- text area (rows 1..text_h) ----
-    // A wrap segment is the display range the wrap table records; scrolling is
-    // the same window at `scroll_x`.
-    let mut lines: Vec<Line> = Vec::with_capacity(text_h);
-    for (i, (r, seg)) in vis.iter().enumerate() {
-        let (a, b) = diag_range[i];
-        match bs.buf.row_opt(*r) {
-            Some(chars) => {
-                let line = match ed.row_is_simple(*r) {
-                    Some(true) => {
-                        let (lo, hi) = if ed.wrap {
-                            ed.seg_chars(*r, *seg)
-                        } else {
-                            (bs.scroll_x, bs.scroll_x.saturating_add(view_w))
-                        };
-                        line_to_spans(*r, simple_window(chars, lo, hi), ed, &diags[a..b])
+        // ---- gutter (rows 1..text_h, dim, right-aligned numbers) ----
+        if g > 0 {
+            let mut nums: Vec<Line> = Vec::with_capacity(text_h);
+            for (i, (r, seg)) in vis.iter().enumerate() {
+                let s = if *r < bs.buf.row_count() && *seg == 0 {
+                    match bs.line_number(*r) {
+                        Some(n) => format!("{:>w$} ", n, w = g - 1),
+                        None => " ".repeat(g),
                     }
-                    _ if ed.wrap => {
-                        let (lo, hi) = ed.seg_chars(*r, *seg);
-                        let (d0, _) = ed.seg_disp(*r, *seg);
-                        line_to_spans(
-                            *r,
-                            seg_window(chars, lo, hi, d0, ed.tab_width).into_iter(),
-                            ed,
-                            &diags[a..b],
-                        )
-                    }
-                    _ => {
-                        let d1 = bs.scroll_x.saturating_add(view_w);
-                        line_to_spans(
-                            *r,
-                            text_window(chars, bs.scroll_x, d1, ed.tab_width).into_iter(),
-                            ed,
-                            &diags[a..b],
-                        )
-                    }
+                } else {
+                    " ".repeat(g)
                 };
-                lines.push(line);
+                let role = match diag_sev[i] {
+                    Some(sev) => crate::editor::diag_role(sev),
+                    None => Role::Faint,
+                };
+                nums.push(Line::styled(s, role));
             }
-            None => lines.push(Line::default()),
+            for (i, l) in nums.iter().enumerate() {
+                put(buf, at(0, t0 + i as u16, g as u16, 1), l);
+            }
         }
-    }
-    for (i, l) in lines.iter().enumerate() {
-        put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
-    }
-    scrollbar(
-        area,
-        buf,
-        t0,
-        text_h,
-        ed.scroll_pos(),
-        ed.scroll_total(text_h),
-    );
 
-    // ---- completion popup (LSP) ----
-    // A small block below the word being completed, or above it near the bottom.
-    if let Some(p) = &ed.completion
-        && !p.items.is_empty()
-    {
-        let vis = p.items.len().min(8);
-        let label_w = p
-            .items
-            .iter()
-            .map(|it| it.label.chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(40);
-        // Clamped inside the pane: a minimum above the pane's own width panics.
-        let max = (width as usize).min(60);
-        let w = (label_w + 6).clamp(10.min(max), max);
-        let drow = if ed.wrap {
-            ed.visual_pos(Pos {
-                row: p.row,
-                col: p.col,
-            }) as i64
-                - bs.scroll as i64
-        } else {
-            p.row as i64 - bs.scroll as i64
-        };
-        let vis_i = vis as i64;
-        // The word sits on pane row drow+1; just below it, or above when that
-        // would clip.
-        let word_pane = drow + i64::from(t0);
-        let y0 = if word_pane + vis_i < i64::from(t0) + text_h as i64 {
-            word_pane + 1
-        } else {
-            word_pane - vis_i
-        };
-        if y0 >= i64::from(t0) && y0 + vis_i - 1 < i64::from(t0) + text_h as i64 {
-            let line = bs.buf.row_opt(p.row).map(Vec::as_slice).unwrap_or(&[]);
-            let disp = display_col(line, p.col, ed.tab_width);
-            let x = if ed.wrap {
-                // Offset within the word's own visual row, not modulo the viewport.
-                (g + ed.disp_in_seg(p.row, p.col)) as u16
+        // ---- text area (rows 1..text_h) ----
+        // A wrap segment is the display range the wrap table records; scrolling is
+        // the same window at `scroll_x`.
+        let mut lines: Vec<Line> = Vec::with_capacity(text_h);
+        for (i, (r, seg)) in vis.iter().enumerate() {
+            let (a, b) = diag_range[i];
+            match bs.buf.row_opt(*r) {
+                Some(chars) => {
+                    let line = match ed.row_is_simple(*r) {
+                        Some(true) => {
+                            let (lo, hi) = if ed.wrap {
+                                ed.seg_chars(*r, *seg)
+                            } else {
+                                (bs.scroll_x, bs.scroll_x.saturating_add(view_w))
+                            };
+                            line_to_spans(*r, simple_window(chars, lo, hi), ed, &diags[a..b])
+                        }
+                        _ if ed.wrap => {
+                            let (lo, hi) = ed.seg_chars(*r, *seg);
+                            let (d0, _) = ed.seg_disp(*r, *seg);
+                            line_to_spans(
+                                *r,
+                                seg_window(chars, lo, hi, d0, ed.tab_width).into_iter(),
+                                ed,
+                                &diags[a..b],
+                            )
+                        }
+                        _ => {
+                            let d1 = bs.scroll_x.saturating_add(view_w);
+                            line_to_spans(
+                                *r,
+                                text_window(chars, bs.scroll_x, d1, ed.tab_width).into_iter(),
+                                ed,
+                                &diags[a..b],
+                            )
+                        }
+                    };
+                    lines.push(line);
+                }
+                None => lines.push(Line::default()),
+            }
+        }
+        for (i, l) in lines.iter().enumerate() {
+            put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
+        }
+        scrollbar(
+            area,
+            buf,
+            t0,
+            text_h,
+            ed.scroll_pos(),
+            ed.scroll_total(text_h),
+        );
+
+        // ---- completion popup (LSP) ----
+        // A small block below the word being completed, or above it near the bottom.
+        if let Some(p) = &ed.completion
+            && !p.items.is_empty()
+        {
+            let vis = p.items.len().min(8);
+            let label_w = p
+                .items
+                .iter()
+                .map(|it| it.label.chars().count())
+                .max()
+                .unwrap_or(0)
+                .min(40);
+            // Clamped inside the pane: a minimum above the pane's own width panics.
+            let max = (width as usize).min(60);
+            let w = (label_w + 6).clamp(10.min(max), max);
+            let drow = if ed.wrap {
+                ed.visual_pos(Pos {
+                    row: p.row,
+                    col: p.col,
+                }) as i64
+                    - bs.scroll as i64
             } else {
-                (g + disp.saturating_sub(bs.scroll_x)) as u16
+                p.row as i64 - bs.scroll as i64
             };
-            let x = x.min(width.saturating_sub(w as u16));
-            let start = if p.items.len() > vis {
-                (p.sel + 1).saturating_sub(vis).min(p.items.len() - vis)
+            let vis_i = vis as i64;
+            // The word sits on pane row drow+1; just below it, or above when that
+            // would clip.
+            let word_pane = drow + i64::from(t0);
+            let y0 = if word_pane + vis_i < i64::from(t0) + text_h as i64 {
+                word_pane + 1
             } else {
-                0
+                word_pane - vis_i
             };
-            for i in 0..vis {
-                let it = &p.items[start + i];
-                let label: String = it.label.chars().take(label_w).collect();
-                let pad = w
-                    .saturating_sub(2)
-                    .saturating_sub(label.chars().count())
-                    .saturating_sub(kind_tag(it.kind).len());
-                let style = if i + start == p.sel {
+            if y0 >= i64::from(t0) && y0 + vis_i - 1 < i64::from(t0) + text_h as i64 {
+                let line = bs.buf.row_opt(p.row).map(Vec::as_slice).unwrap_or(&[]);
+                let disp = display_col(line, p.col, ed.tab_width);
+                let x = if ed.wrap {
+                    // Offset within the word's own visual row, not modulo the viewport.
+                    (g + ed.disp_in_seg(p.row, p.col)) as u16
+                } else {
+                    (g + disp.saturating_sub(bs.scroll_x)) as u16
+                };
+                let x = x.min(width.saturating_sub(w as u16));
+                let start = if p.items.len() > vis {
+                    (p.sel + 1).saturating_sub(vis).min(p.items.len() - vis)
+                } else {
+                    0
+                };
+                for i in 0..vis {
+                    let it = &p.items[start + i];
+                    let label: String = it.label.chars().take(label_w).collect();
+                    let pad = w
+                        .saturating_sub(2)
+                        .saturating_sub(label.chars().count())
+                        .saturating_sub(kind_tag(it.kind).len());
+                    let style = if i + start == p.sel {
+                        sel()
+                    } else {
+                        Style::new()
+                    };
+                    let text = format!(" {label}{}{}", " ".repeat(pad), kind_tag(it.kind));
+                    put(
+                        buf,
+                        at(x, y0 as u16 + i as u16, w as u16, 1),
+                        &Line::styled(text, style),
+                    );
+                }
+            }
+        }
+
+        // ---- list overlay (M-L buffers, M-? usages) ----
+        // A reversed header naming the list, then one row per item, scrolled to stay
+        // in view.
+        if let Some(p) = &ed.picker {
+            let area_text = at(0, t0, width, text_h as u16);
+            buf.fill(area_text, &Style::new());
+            let header = format!(" {}   Enter: go  Esc: close", p.title);
+            band(buf, at(0, t0, width, 1), Line::from(header), head());
+            let rows = crate::picker::list_rows(text_h);
+            let start = (p.sel + 1).saturating_sub(rows);
+            for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
+                let style = if start + k == p.sel {
                     sel()
                 } else {
                     Style::new()
                 };
-                let text = format!(" {label}{}{}", " ".repeat(pad), kind_tag(it.kind));
-                put(
+                band(
                     buf,
-                    at(x, y0 as u16 + i as u16, w as u16, 1),
-                    &Line::styled(text, style),
+                    at(0, t0 + 1 + k as u16, width, 1),
+                    Line::from(format!(" {}", it.label)),
+                    style,
                 );
             }
         }
-    }
 
-    // ---- list overlay (M-L buffers, M-? usages) ----
-    // A reversed header naming the list, then one row per item, scrolled to stay
-    // in view.
-    if let Some(p) = &ed.picker {
-        let area_text = at(0, t0, width, text_h as u16);
-        buf.fill(area_text, &Style::new());
-        let header = format!(" {}   Enter: go  Esc: close", p.title);
-        band(buf, at(0, t0, width, 1), Line::from(header), head());
-        let rows = crate::picker::list_rows(text_h);
-        let start = (p.sel + 1).saturating_sub(rows);
-        for (k, it) in p.items.iter().skip(start).take(rows).enumerate() {
-            let style = if start + k == p.sel {
-                sel()
-            } else {
-                Style::new()
-            };
-            band(
-                buf,
-                at(0, t0 + 1 + k as u16, width, 1),
-                Line::from(format!(" {}", it.label)),
-                style,
-            );
-        }
-    }
-
-    // ---- external-change diff (over the text, like the list) ----
-    if let Some(v) = &ed.diff_view {
-        let area_text = at(0, t0, width, text_h as u16);
-        buf.fill(area_text, &Style::new());
-        band(buf, at(0, t0, width, 1), Line::from(v.header()), head());
-        let rows = crate::diffview::body_rows(text_h);
-        for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            // **The selection is drawn where it was made**: over the rendered line, in the theme's
-            // selection look, on top of the syntax styles the renderer gave it.
-            let line = v.top + k;
-            match v.selection_on(line) {
-                Some((from, to)) => put(
-                    buf,
-                    at(0, t0 + 1 + k as u16, width, 1),
-                    &crate::diffview::highlight_selection(l, from, to),
-                ),
-                None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
+        // ---- external-change diff (over the text, like the list) ----
+        if let Some(v) = &ed.diff_view {
+            let area_text = at(0, t0, width, text_h as u16);
+            buf.fill(area_text, &Style::new());
+            band(buf, at(0, t0, width, 1), Line::from(v.header()), head());
+            let rows = crate::diffview::body_rows(text_h);
+            for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
+                // **The selection is drawn where it was made**: over the rendered line, in the theme's
+                // selection look, on top of the syntax styles the renderer gave it.
+                let line = v.top + k;
+                match v.selection_on(line) {
+                    Some((from, to)) => put(
+                        buf,
+                        at(0, t0 + 1 + k as u16, width, 1),
+                        &crate::diffview::highlight_selection(l, from, to),
+                    ),
+                    None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
+                }
             }
+            scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
         }
-        scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
-    }
+    } // !foot_only: the pane's own rows
 
     // ---- status line (row height-3) ----
     // nano's statusline: the prompt bar is a full reverse strip with the label and
     // answer at column 0; a message sits centered, only its bracketed text reversed.
     let status_row = area.height - 1 - if chrome.keys { 2 } else { 0 };
+    // The host's own foot bar is full width and drawn after the surfaces: these rows are not
+    // this pane's to paint when it does. (The foot's own call is foot_only, which is the host
+    // drawing them.)
+    if ed.foot_drawn_by_host && !foot_only {
+        return cursor;
+    }
     // `WhenBusy` with nothing to say draws no row here at all: the text has those rows, and the
     // host's own status line has the place.
     if ed.status_shown() {
@@ -799,126 +815,128 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
         }
     }
 
-    // ---- cursor ----
-    if let Some(p) = &ed.palette {
-        let col = 4 + p.query.chars().count();
-        cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
-    } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
-        if let Some(p) = &ed.prompt {
-            let (_, col) = prompt_text(p, width as usize);
+    if !foot_only {
+        // ---- cursor ----
+        if let Some(p) = &ed.palette {
+            let col = 4 + p.query.chars().count();
             cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
-        } else {
-            let cy = if ed.wrap {
-                ed.visual_pos(bs.cursor) as i64 - bs.scroll as i64
+        } else if ed.info.is_none() && ed.picker.is_none() && ed.diff_view.is_none() {
+            if let Some(p) = &ed.prompt {
+                let (_, col) = prompt_text(p, width as usize);
+                cursor_at((col as u16).min(width.saturating_sub(1)), status_row);
             } else {
-                bs.cursor.row as i64 - bs.scroll as i64
-            };
-            if cy >= 0 && (cy as u16) < text_h as u16 {
-                // char col → display col → minus scroll_x → plus gutter
-                let line = bs
-                    .buf
-                    .row_opt(bs.cursor.row)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let disp = match ed.row_is_simple(bs.cursor.row) {
-                    Some(true) => bs.cursor.col.min(line.len()),
-                    _ => display_col(line, bs.cursor.col, ed.tab_width),
-                };
-                let cx = if ed.wrap {
-                    (g + ed.disp_in_seg(bs.cursor.row, bs.cursor.col)) as u16
+                let cy = if ed.wrap {
+                    ed.visual_pos(bs.cursor) as i64 - bs.scroll as i64
                 } else {
-                    (g + disp.saturating_sub(bs.scroll_x)) as u16
+                    bs.cursor.row as i64 - bs.scroll as i64
                 };
-                cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + t0);
+                if cy >= 0 && (cy as u16) < text_h as u16 {
+                    // char col → display col → minus scroll_x → plus gutter
+                    let line = bs
+                        .buf
+                        .row_opt(bs.cursor.row)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let disp = match ed.row_is_simple(bs.cursor.row) {
+                        Some(true) => bs.cursor.col.min(line.len()),
+                        _ => display_col(line, bs.cursor.col, ed.tab_width),
+                    };
+                    let cx = if ed.wrap {
+                        (g + ed.disp_in_seg(bs.cursor.row, bs.cursor.col)) as u16
+                    } else {
+                        (g + disp.saturating_sub(bs.scroll_x)) as u16
+                    };
+                    cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + t0);
+                }
             }
         }
-    }
 
-    // ---- help pages (over the text, like the list) ----
-    if let Some(v) = &ed.info {
-        let area_text = at(0, t0, width, text_h as u16);
-        buf.fill(area_text, &Style::new());
-        let header = titled_hints(
-            &v.title,
-            &["q: close", "\u{2191}\u{2193} PgUp PgDn: scroll"],
-            width as usize,
-        );
-        band(buf, at(0, t0, width, 1), Line::from(header), head());
-        let rows = crate::diffview::body_rows(text_h);
-        for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
-            put(buf, at(0, t0 + 1 + k as u16, width, 1), l);
+        // ---- help pages (over the text, like the list) ----
+        if let Some(v) = &ed.info {
+            let area_text = at(0, t0, width, text_h as u16);
+            buf.fill(area_text, &Style::new());
+            let header = titled_hints(
+                &v.title,
+                &["q: close", "\u{2191}\u{2193} PgUp PgDn: scroll"],
+                width as usize,
+            );
+            band(buf, at(0, t0, width, 1), Line::from(header), head());
+            let rows = crate::diffview::body_rows(text_h);
+            for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
+                put(buf, at(0, t0 + 1 + k as u16, width, 1), l);
+            }
         }
-    }
 
-    // ---- M-x: the query on the status row, candidates above it ----
-    if let Some(p) = &ed.palette {
-        put(
-            buf,
-            at(0, status_row, width, 1),
-            &Line::styled(
-                format!(
-                    "M-x {:<w$}",
-                    p.query,
-                    w = (width as usize).saturating_sub(4)
-                ),
-                rev(),
-            ),
-        );
-        let rows = text_h.min(14).min(p.items.len().max(1));
-        let top = status_row.saturating_sub(rows as u16);
-        buf.fill(at(0, top, width, rows as u16), &Style::new());
-        if p.items.is_empty() {
+        // ---- M-x: the query on the status row, candidates above it ----
+        if let Some(p) = &ed.palette {
             put(
                 buf,
-                at(0, top, width, 1),
-                &Line::styled("  no command matches", Role::Faint),
+                at(0, status_row, width, 1),
+                &Line::styled(
+                    format!(
+                        "M-x {:<w$}",
+                        p.query,
+                        w = (width as usize).saturating_sub(4)
+                    ),
+                    rev(),
+                ),
             );
+            let rows = text_h.min(14).min(p.items.len().max(1));
+            let top = status_row.saturating_sub(rows as u16);
+            buf.fill(at(0, top, width, rows as u16), &Style::new());
+            if p.items.is_empty() {
+                put(
+                    buf,
+                    at(0, top, width, 1),
+                    &Line::styled("  no command matches", Role::Faint),
+                );
+            }
+            let start = (p.sel + 1).saturating_sub(rows);
+            let tw = p
+                .items
+                .iter()
+                .filter_map(|n| crate::commands::command(n))
+                .map(|c| c.title.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (k, name) in p.items.iter().skip(start).take(rows).enumerate() {
+                let Some(c) = crate::commands::command(name) else {
+                    continue;
+                };
+                let keys = ed.keys_for(name);
+                let line = Line::new(vec![
+                    Span::raw(format!(" {:<tw$}  ", c.title)),
+                    Span::role(format!("{keys:<14} "), Role::Key),
+                    Span::role(c.doc.to_string(), Role::Faint),
+                ]);
+                let style = if start + k == p.sel {
+                    sel()
+                } else {
+                    Style::new()
+                };
+                band(buf, at(0, top + k as u16, width, 1), line, style);
+            }
         }
-        let start = (p.sel + 1).saturating_sub(rows);
-        let tw = p
-            .items
-            .iter()
-            .filter_map(|n| crate::commands::command(n))
-            .map(|c| c.title.chars().count())
-            .max()
-            .unwrap_or(0);
-        for (k, name) in p.items.iter().skip(start).take(rows).enumerate() {
-            let Some(c) = crate::commands::command(name) else {
-                continue;
-            };
-            let keys = ed.keys_for(name);
-            let line = Line::new(vec![
-                Span::raw(format!(" {:<tw$}  ", c.title)),
-                Span::role(format!("{keys:<14} "), Role::Key),
-                Span::role(c.doc.to_string(), Role::Faint),
-            ]);
-            let style = if start + k == p.sel {
-                sel()
-            } else {
-                Style::new()
-            };
-            band(buf, at(0, top + k as u16, width, 1), line, style);
-        }
-    }
 
-    // ---- which-key: a pending prefix's card, above the status row ----
-    if let Some((m, keys)) = ed.pending_card() {
-        let nano = ed.config.notation;
-        let entries = crate::commands::entries_of(m, ed);
-        let rows = crate::help::card_rows(&entries, width as usize, &Style::of(Role::Key));
-        let n = rows.len().min(text_h.saturating_sub(1));
-        let top = status_row.saturating_sub(n as u16 + 1);
-        buf.fill(at(0, top, width, n as u16 + 1), &Style::new());
-        let title = format!(
-            " {} {}-   ESC: cancel",
-            m.name,
-            crate::help::notation(nano, &keys)
-        );
-        band(buf, at(0, top, width, 1), Line::from(title), head());
-        for (k, l) in rows.into_iter().take(n).enumerate() {
-            put(buf, at(0, top + 1 + k as u16, width, 1), &l);
+        // ---- which-key: a pending prefix's card, above the status row ----
+        if let Some((m, keys)) = ed.pending_card() {
+            let nano = ed.config.notation;
+            let entries = crate::commands::entries_of(m, ed);
+            let rows = crate::help::card_rows(&entries, width as usize, &Style::of(Role::Key));
+            let n = rows.len().min(text_h.saturating_sub(1));
+            let top = status_row.saturating_sub(n as u16 + 1);
+            buf.fill(at(0, top, width, n as u16 + 1), &Style::new());
+            let title = format!(
+                " {} {}-   ESC: cancel",
+                m.name,
+                crate::help::notation(nano, &keys)
+            );
+            band(buf, at(0, top, width, 1), Line::from(title), head());
+            for (k, l) in rows.into_iter().take(n).enumerate() {
+                put(buf, at(0, top + 1 + k as u16, width, 1), &l);
+            }
         }
-    }
+    } // !foot_only: the overlays and the cursor
     cursor
 }
 

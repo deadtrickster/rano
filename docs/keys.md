@@ -65,6 +65,9 @@ prints them nano's way (^X, M-X). The keys do not change.
 | `M-b` | Jump to the previous match |
 | `C-\` / `<f4>` | Replace. `y` / `n` / `a` / `q` per match, `a` replaces from the cursor on |
 
+In the search prompt `M-c` toggles case sensitivity and `M-r` toggles regex, each saying so on
+the status row. Those two are the prompt's own; elsewhere `M-c` copies the file and `M-r` sorts.
+
 ## Moving
 
 | Key | What it does |
@@ -192,13 +195,14 @@ is routed to it that would time out.
 
 ## The bottom terminal
 
-`M-0` shows a shell strip under the text and hides it again; while the strip has the keyboard
-the same key hands it back rather than hiding. The tabs live on the strip's rule, the active
-one marked, and a drag on the rule resizes the strip.
+`M-0` shows a shell strip under the text and gives it the keyboard. It never hides the strip:
+focused, the key hands the keyboard back to the text; open and unfocused, it focuses the strip
+again. The shell keeps running either way. The tabs live on the strip's rule, the active one
+marked, and a drag on the rule resizes the strip.
 
 | Key | What it does |
 |---|---|
-| `M-0` | Show or hide the terminal; focused, the keyboard back to the text |
+| `M-0` | Show the terminal and give it the keyboard; focused, hand it back to the text. Never hides the strip |
 | `M-n` | A new tab |
 | `M-w` | Close the current tab |
 | `M-[` / `M-]` | Previous / next tab |
@@ -206,8 +210,8 @@ one marked, and a drag on the rule resizes the strip.
 | `<pgup>` / `<pgdn>` | Scroll the strip's history; the wheel scrolls too |
 
 A key the strip does not bind goes to the shell, apart from the host's own (`C-]`, `M-i`,
-`M-m`), which work over every surface. `ESC` is the strip's own too: it hands the keyboard
-back to the text rather than to the program in the shell.
+`M-m`), which work over every surface. `ESC` goes to the program in the shell — vi, less and
+fzf need it; `M-0` or `C-]` is the way back to the text.
 
 ## In a view
 

@@ -167,6 +167,16 @@ pub fn commands() -> &'static [Command] {
                 |e| e.panel_page_up(),
             ),
             cmd(
+                "panel-fold-tools",
+                "Fold Tools",
+                Panel,
+                "The panel: collapse a run of tool calls to one line, or open every call.",
+                |e| {
+                    e.panel.tools_open = !e.panel.tools_open;
+                    e.panel.rebuilt();
+                },
+            ),
+            cmd(
                 "panel-page-down",
                 "Page Down",
                 Panel,
@@ -1279,7 +1289,8 @@ impl Keymaps {
             .bind("<pgdn>", "panel-page-down")
             .bind("ESC", "panel-leave")
             .bind("C-c", "panel-interrupt")
-            .bind("M-f", "panel-follow");
+            .bind("M-f", "panel-follow")
+            .bind("M-t", "panel-fold-tools");
 
         let mut terminal = Keymap::new("terminal");
         terminal

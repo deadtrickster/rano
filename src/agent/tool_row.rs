@@ -13,8 +13,8 @@ use super::decision::{SettledDecision, decision_lines};
 use super::diffbody;
 use super::outcome::Outcome;
 use super::text::{
-    clean, clean_line, duration, first_sentence, is_envelope, one, shorten_subject, step_in,
-    strip_gutter, visible_width,
+    bytes_word, clean, clean_line, duration, first_sentence, is_envelope, one, shorten_subject,
+    step_in, strip_gutter, visible_width,
 };
 use super::{Fold, lines_widget};
 
@@ -51,6 +51,9 @@ pub struct ToolRow {
     pub window: Option<usize>,
     /// Rows the window may take on this screen, so an open window fits.
     pub window_rows: usize,
+    /// The result's inline and full sizes in bytes, when the host knows them and does not
+    /// hold the payload: the header names the size instead of a count it would have to invent.
+    pub bytes: Option<(u64, u64)>,
     /// The body budget an unfolded row may draw.
     pub body_lines: usize,
     /// Whether this is the newest long result — the one `ctrl-v` reaches.
@@ -111,6 +114,7 @@ impl ToolRow {
             decision: None,
             picture: Vec::new(),
             link_root: None,
+            bytes: None,
             fold: Fold::Folded,
             window: None,
             window_rows: 40,
@@ -269,14 +273,25 @@ impl ToolRow {
             };
         }
 
-        head.spans.push(Span::role(
-            format!(
-                " · {} line{}",
-                lines.len(),
-                if lines.len() == 1 { "" } else { "s" }
-            ),
-            size_role,
-        ));
+        // The size of what the result was: the host's line count when it holds the payload,
+        // the wire's byte count when it does not, and nothing at all when neither — a row
+        // that says `0 lines` about a screenful of output is worse than a silent row.
+        if !lines.is_empty() {
+            head.spans.push(Span::role(
+                format!(
+                    " · {} line{}",
+                    lines.len(),
+                    if lines.len() == 1 { "" } else { "s" }
+                ),
+                size_role,
+            ));
+        } else if let Some((inline, full)) = self.bytes {
+            let mut said = format!(" · {}", bytes_word(full));
+            if full > inline {
+                said.push_str(" · spilled");
+            }
+            head.spans.push(Span::role(said, size_role));
+        }
         if !hidden_note.is_empty() {
             head.spans
                 .push(Span::role(hidden_note.clone(), Role::Faint));

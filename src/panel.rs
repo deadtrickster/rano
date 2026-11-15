@@ -209,8 +209,11 @@ pub enum Row {
     /// What the session said, streaming while the turn runs. Boxed: a reply carries the Markdown
     /// parser's window, and every other row would pay for it.
     Reply(Box<Reply>),
-    /// Anything that is not prose: a tool call, a turn's end, a refusal — one line.
+    /// Anything that is not prose: a turn's end, a refusal — one line.
     Note(String),
+    /// A tool call: verb and target, its outcome and duration, its payload folded with a
+    /// line count, the failure's reason wrapped rather than cut.
+    Tool(Box<crate::agent::tool_row::ToolRow>),
 }
 
 /// The panel, and the conversation it is showing.
@@ -266,8 +269,11 @@ pub struct Panel {
     /// The file the folder was last worked out for, so the git call happens once per buffer.
     seen_name: Option<PathBuf>,
     acts: Vec<Act>,
-    /// Tool calls still running: `(call_id, row, name)`.
-    running: Vec<(String, usize, String)>,
+    /// Tool calls still running: `(call_id, row, name, started, call markup)`.
+    running: Vec<(String, usize, String, std::time::Instant, String)>,
+    /// The model's raw call markup for the call about to start: the wire sends a tool's
+    /// arguments as that stream and nowhere else.
+    call_markup: String,
     /// The conversation at the last built width, oldest first.
     built: Vec<Line>,
     built_for: Option<(usize, u64)>,
@@ -304,6 +310,7 @@ impl Default for Panel {
             seen_name: None,
             acts: Vec::new(),
             running: Vec::new(),
+            call_markup: String::new(),
             built: Vec::new(),
             built_for: None,
             version: 0,
@@ -462,6 +469,10 @@ impl Panel {
                 self.said = format!("the daemon refused that: {reason}");
             }
             Frame::Bye { reason } => {
+                // A call in flight when the daemon left will never settle: its note says so,
+                // and the half-streamed markup is not the next call's.
+                self.call_markup.clear();
+                self.settle_running("abandoned");
                 self.state = PanelState::Offline { startable: false };
                 self.said = if reason.is_empty() {
                     "the daemon left".to_string()
@@ -469,7 +480,10 @@ impl Panel {
                     format!("the daemon left: {reason}")
                 };
             }
-            Frame::Resync { .. } => self.said = "the stream restarted".to_string(),
+            Frame::Resync { .. } => {
+                self.call_markup.clear();
+                self.said = "the stream restarted".to_string();
+            }
             Frame::Event { event, .. } => self.event(event),
             // Answered before the match, and here only because the compiler asks for every arm.
             Frame::RowsFetched { .. } | Frame::Unknown { .. } => return false,
@@ -597,11 +611,30 @@ impl Panel {
                 // new conversation, is what pins it again.
                 self.state = PanelState::Thinking;
             }
-            // Thinking and the model's raw call markup are not prose: the panel folds both.
-            Event::Delta { .. } => {}
+            // Thinking is not prose and the panel folds it; the raw call markup is kept —
+            // it is the only copy of a tool call's arguments this side of the wire, and a
+            // settled row reads its TARGET from it. It is never filed as the payload, which
+            // is the tool's output and not on this wire at all.
+            Event::Delta { target, text, .. } => {
+                if *target == DeltaTarget::ToolCall {
+                    self.call_markup.push_str(text);
+                }
+            }
             Event::ToolStarted { call_id, name, .. } => {
-                self.running
-                    .push((call_id.clone(), self.rows.len(), name.clone()));
+                // A call that has not settled is a NOTE, not a ToolRow: the row is "one SETTLED
+                // tool call" and its Outcome has no running variant, so drawing one here would
+                // claim `ok` for as long as the command runs. The streamed arguments are kept
+                // for the target a settled row will carry.
+                // One call's markup out of the stream; anything after it is the next call's.
+                let (markup, rest) = split_call_markup(std::mem::take(&mut self.call_markup));
+                self.call_markup = rest;
+                self.running.push((
+                    call_id.clone(),
+                    self.rows.len(),
+                    name.clone(),
+                    std::time::Instant::now(),
+                    markup,
+                ));
                 self.rows.push(Row::Note(format!("{name} …")));
             }
             Event::ToolFinished {
@@ -609,21 +642,47 @@ impl Panel {
                 outcome,
                 why,
                 edits,
+                bytes,
                 ..
             } => {
-                let said = if why.is_empty() {
-                    outcome.clone()
-                } else {
-                    format!("{outcome}: {why}")
-                };
-                match self.running.iter().position(|(id, _, _)| id == call_id) {
+                let settled = settled_outcome(outcome, why);
+                match self.running.iter().position(|(id, ..)| id == call_id) {
                     Some(at) => {
-                        let (_, row, name) = self.running.remove(at);
-                        if let Some(Row::Note(note)) = self.rows.get_mut(row) {
-                            *note = format!("{name} · {said}");
+                        let (_, row, name, started, markup) = self.running.remove(at);
+                        // The wire carries no tool OUTPUT (ToolFinished is outcome, why and
+                        // edits): the payload stays empty rather than filing the arguments
+                        // under a field the widget documents as the result, where `· N lines`
+                        // would count arguments while reading as the output.
+                        let mut t = crate::agent::tool_row::ToolRow::new(
+                            &name,
+                            call_id,
+                            settled,
+                            Vec::new(),
+                        );
+                        t.target = call_target(&markup);
+                        t.bytes = *bytes;
+                        // A failure's reason is the reason you read the row: the failed call
+                        // draws it whole, wrapped, because this surface has no unfold key.
+                        t.fold = if matches!(
+                            t.outcome,
+                            crate::agent::outcome::Outcome::Failed(_)
+                                | crate::agent::outcome::Outcome::Denied(_)
+                        ) {
+                            crate::agent::Fold::Open
+                        } else {
+                            crate::agent::Fold::Folded
+                        };
+                        t.elapsed_ms =
+                            Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                        if let Some(slot) = self.rows.get_mut(row) {
+                            *slot = Row::Tool(Box::new(t));
                         }
                     }
-                    None => self.rows.push(Row::Note(said)),
+                    None => self.rows.push(Row::Note(if why.is_empty() {
+                        outcome.clone()
+                    } else {
+                        format!("{outcome}: {why}")
+                    })),
                 }
                 self.edits(call_id, edits);
             }
@@ -637,6 +696,10 @@ impl Panel {
                 };
             }
             Event::TurnInterrupted { reason, .. } => {
+                // A call in flight when the turn ended never gets its finish: its note says so
+                // rather than standing as a call that will never settle.
+                self.call_markup.clear();
+                self.settle_running("interrupted");
                 self.rows.push(Row::Note(if reason.is_empty() {
                     "interrupted".to_string()
                 } else {
@@ -645,6 +708,8 @@ impl Panel {
                 self.state = PanelState::Idle;
             }
             Event::TurnFailed { error, .. } => {
+                self.call_markup.clear();
+                self.settle_running("not run");
                 self.rows.push(Row::Note(format!("failed: {error}")));
                 self.state = PanelState::Idle;
             }
@@ -921,6 +986,18 @@ impl Panel {
         }
     }
 
+    /// Every call still running gets its word in place of the pending note: a turn that ends
+    /// mid-call must not leave a row that reads like a call about to answer.
+    fn settle_running(&mut self, word: &str) {
+        // The entries stay: a `tool_finished` that arrives after the turn ended still owns its
+        // row and replaces the note, rather than pushing a second row for one call.
+        for (_, row, name, _, _) in &self.running {
+            if let Some(Row::Note(note)) = self.rows.get_mut(*row) {
+                *note = format!("{name} · {word}");
+            }
+        }
+    }
+
     /// A path as the daemon named it: absolute, or relative to the workspace the conversation is in.
     fn resolve(&self, path: &str) -> PathBuf {
         let path = PathBuf::from(path);
@@ -943,7 +1020,9 @@ impl Panel {
         if self.state == PanelState::Picking {
             self.build_pick(&mut out, w);
         } else {
-            for row in &mut self.rows {
+            let mut it = self.rows.iter_mut().peekable();
+            while let Some(row) = it.next() {
+                let next_row = it.peek().is_some_and(|r| matches!(r, Row::Tool(_)));
                 match row {
                     Row::User(text) => {
                         let text = crate::agent::text::clean(text).into_owned();
@@ -960,6 +1039,15 @@ impl Panel {
                         out.extend(reply.view.lines(&reply.md, w, &opts));
                     }
                     Row::Note(note) => out.push(note_line(note)),
+                    Row::Tool(t) => {
+                        out.extend(t.lines(w));
+                        // Replies breathe; a run of tool calls is one block of work and reads
+                        // as such — no blank row between neighbours.
+                        if !next_row {
+                            out.push(Line::default());
+                        }
+                        continue;
+                    }
                 }
                 out.push(Line::default());
             }
@@ -1050,6 +1138,65 @@ impl Panel {
             self.input.remove(byte);
         }
         self.touch();
+    }
+}
+
+/// The call's target: the first named string among its arguments — a command, a path, a
+/// pattern — read from the raw call markup. Empty when the markup names none, which draws as
+/// nothing rather than as a guess.
+/// One call's markup out of the stream: serde reads the first JSON value and the rest is the
+/// next call's. A message that streams two calls before either starts must not charge the
+/// second's arguments to the first (nor concatenate them into unparseable junk).
+fn split_call_markup(stream: String) -> (String, String) {
+    use serde_json::Deserializer;
+    let mut de = Deserializer::from_str(&stream).into_iter::<serde_json::Value>();
+    match de.next() {
+        Some(Ok(_)) => {
+            let end = de.byte_offset();
+            (stream[..end].to_string(), stream[end..].to_string())
+        }
+        _ => (stream, String::new()),
+    }
+}
+
+fn call_target(markup: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(markup.trim()) else {
+        return String::new();
+    };
+    for key in [
+        "command",
+        "cmd",
+        "path",
+        "file_path",
+        "file",
+        "pattern",
+        "query",
+        "url",
+    ] {
+        if let Some(v) = v.get(key).and_then(|v| v.as_str()) {
+            return v.to_string();
+        }
+    }
+    String::new()
+}
+
+/// The wire's outcome word and reason as the typed outcome: one mapping, so the row's colour
+/// and its word cannot disagree with the card the live call was drawn as.
+fn settled_outcome(word: &str, why: &str) -> crate::agent::outcome::Outcome {
+    use crate::agent::outcome::Outcome as Tool;
+    match word {
+        "ok" => Tool::Ok,
+        "abstained" => Tool::Abstained(why.to_string()),
+        "denied" | "refused" => Tool::Denied(why.to_string()),
+        "timeout" | "timed out" => Tool::Timeout,
+        "interrupted" => Tool::Interrupted,
+        "backgrounded" => Tool::Backgrounded(why.to_string()),
+        "not run" | "not_run" => Tool::NotRun(why.to_string()),
+        other => Tool::Failed(if why.is_empty() {
+            other.to_string()
+        } else {
+            why.to_string()
+        }),
     }
 }
 
@@ -1614,11 +1761,263 @@ mod tests {
         assert_eq!(panel.state, PanelState::Idle);
     }
 
-    /// A tool call is one line that ends with its outcome, so a run of calls is a list a reader can
-    /// scan rather than a paragraph each.
+    /// The header names the size the wire reports — never a count of zero about output the
+    /// panel simply does not hold — and a long failure's reason is drawn whole, wrapped,
+    /// because this surface has no unfold key to offer.
     #[test]
-    fn a_tool_call_ends_on_the_line_it_started_on() {
+    fn a_settled_row_names_the_size_and_wraps_a_long_reason() {
         let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::ToolStarted {
+                turn_id: "t".to_string(),
+                call_id: "c-1".to_string(),
+                name: "bash".to_string(),
+                access: "exec".to_string(),
+            },
+        });
+        let long = "cannot resolve dependency `serde_derive` for the crate at /w: the lock                     file disagrees with the manifest, and the registry cache holds a version                     that no longer matches";
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::ToolFinished {
+                turn_id: "t".to_string(),
+                call_id: "c-1".to_string(),
+                outcome: "failed".to_string(),
+                why: long.to_string(),
+                edits: Vec::new(),
+                bytes: Some((300, 4096)),
+            },
+        });
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("0 lines"), "no invented line count: {text}");
+        assert!(
+            text.contains("4.0 KiB") && text.contains("spilled"),
+            "the wire's size, said: {text}"
+        );
+        assert!(
+            text.contains("no longer matches"),
+            "the reason's tail is drawn, wrapped not cut: {text}"
+        );
+        assert!(
+            !text.contains("/t unfolds"),
+            "and no chord this surface lacks: {text}"
+        );
+    }
+
+    /// Markup that streams for two calls is split per call, and markup left by a turn that
+    /// ended never becomes the next call's target.
+    #[test]
+    fn markup_is_one_calls_own_and_never_leaks() {
+        let mut panel = opened();
+        // One message streams both calls' arguments before either starts.
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::Delta {
+                turn_id: "t".to_string(),
+                target: DeltaTarget::ToolCall,
+                text: "{\"command\": \"echo one\"}{\"command\": \"echo two\"}".to_string(),
+            },
+        });
+        for (seq, id) in [(2, "c-1"), (3, "c-2")] {
+            panel.apply(&Frame::Event {
+                seq,
+                event: Event::ToolStarted {
+                    turn_id: "t".to_string(),
+                    call_id: id.to_string(),
+                    name: "bash".to_string(),
+                    access: "exec".to_string(),
+                },
+            });
+            panel.apply(&Frame::Event {
+                seq: seq + 10,
+                event: Event::ToolFinished {
+                    turn_id: "t".to_string(),
+                    call_id: id.to_string(),
+                    outcome: "ok".to_string(),
+                    why: String::new(),
+                    edits: Vec::new(),
+                    bytes: Some((0, 0)),
+                },
+            });
+        }
+        let targets: Vec<&str> = panel
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Tool(t) => Some(t.target.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["echo one", "echo two"],
+            "each row names its own command"
+        );
+        // A turn ends with markup half-streamed: it is not the next turn's target.
+        panel.apply(&Frame::Event {
+            seq: 30,
+            event: Event::Delta {
+                turn_id: "t".to_string(),
+                target: DeltaTarget::ToolCall,
+                text: "{\"command\": \"never ran\"}".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 31,
+            event: Event::TurnFailed {
+                turn_id: "t".to_string(),
+                error: "gone".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 32,
+            event: Event::ToolStarted {
+                turn_id: "u".to_string(),
+                call_id: "c-3".to_string(),
+                name: "bash".to_string(),
+                access: "exec".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 33,
+            event: Event::ToolFinished {
+                turn_id: "u".to_string(),
+                call_id: "c-3".to_string(),
+                outcome: "ok".to_string(),
+                why: String::new(),
+                edits: Vec::new(),
+                bytes: Some((0, 0)),
+            },
+        });
+        let last = panel
+            .rows
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Row::Tool(t) => Some(t.target.clone()),
+                _ => None,
+            })
+            .expect("the last call's row");
+        assert!(
+            !last.contains("never ran"),
+            "the dead turn's markup is not charged to this call: {last:?}"
+        );
+    }
+
+    /// A `tool_finished` that arrives after the turn ended owns its row: the settled note is
+    /// replaced, not doubled.
+    #[test]
+    fn a_late_finish_replaces_its_note() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::ToolStarted {
+                turn_id: "t".to_string(),
+                call_id: "c-1".to_string(),
+                name: "bash".to_string(),
+                access: "exec".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::TurnInterrupted {
+                turn_id: "t".to_string(),
+                reason: String::new(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 3,
+            event: Event::ToolFinished {
+                turn_id: "t".to_string(),
+                call_id: "c-1".to_string(),
+                outcome: "interrupted".to_string(),
+                why: String::new(),
+                edits: Vec::new(),
+                bytes: Some((0, 0)),
+            },
+        });
+        let tool_rows = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Tool(_)))
+            .count();
+        let notes = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Note(_)))
+            .count();
+        assert_eq!(tool_rows, 1, "one row for the call");
+        assert_eq!(
+            notes, 1,
+            "the turn's own note, and no second row for the call"
+        );
+    }
+
+    /// A call that has not settled is a note, never a row claiming an outcome: the wire's
+    /// ToolStarted has no outcome to draw, and a turn ending mid-call settles the note.
+    #[test]
+    fn a_running_call_is_a_note_until_it_settles() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::ToolStarted {
+                turn_id: "t".to_string(),
+                call_id: "c-1".to_string(),
+                name: "bash".to_string(),
+                access: "exec".to_string(),
+            },
+        });
+        assert!(
+            !panel.rows.iter().any(|r| matches!(r, Row::Tool(_))),
+            "no settled row while the call runs"
+        );
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("bash …"), "the pending note: {text}");
+        assert!(!text.contains("· ok"), "and no outcome claimed: {text}");
+        // The turn ends before the call: the note says so, and nothing reads as pending.
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::TurnFailed {
+                turn_id: "t".to_string(),
+                error: "gone".to_string(),
+            },
+        });
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("bash · not run"), "{text}");
+    }
+
+    /// A tool call is a ToolRow: verb and target from the streamed call, its outcome and
+    /// duration when it settles, its payload folded with a line count, and a failure's reason
+    /// wrapped rather than cut off.
+    #[test]
+    fn a_tool_call_is_a_tool_row() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::Delta {
+                turn_id: "t".to_string(),
+                target: DeltaTarget::ToolCall,
+                text: "{\"command\": \"cat /nope\"}".to_string(),
+            },
+        });
         panel.apply(&Frame::Event {
             seq: 2,
             event: Event::ToolStarted {
@@ -1634,19 +2033,111 @@ mod tests {
                 turn_id: "t".to_string(),
                 call_id: "c-1".to_string(),
                 outcome: "failed".to_string(),
-                why: "no such file".to_string(),
+                why: "cat: /nope: no such file or directory".to_string(),
                 edits: Vec::new(),
+                bytes: None,
             },
         });
-        let notes: Vec<&str> = panel
+        // Settled rows only carry an outcome word: nothing claims `ok` while the call runs.
+        assert!(
+            !panel
+                .rows
+                .iter()
+                .any(|r| matches!(r, Row::Tool(_))
+                    && panel.running.iter().any(|(id, ..)| id == "c-1")),
+            "a running call is not a settled row"
+        );
+        let tool = panel
             .rows
             .iter()
-            .filter_map(|r| match r {
-                Row::Note(n) => Some(n.as_str()),
+            .find_map(|r| match r {
+                Row::Tool(t) => Some(t.as_ref()),
                 _ => None,
             })
-            .collect();
-        assert_eq!(notes, vec!["bash · failed: no such file"]);
+            .expect("a tool row");
+        assert_eq!(tool.name, "bash");
+        assert_eq!(tool.target, "cat /nope", "the command is the target");
+        assert_eq!(
+            tool.outcome.reason(),
+            Some("cat: /nope: no such file or directory"),
+            "the failure's reason is kept whole"
+        );
+        assert!(tool.elapsed_ms.is_some(), "a duration was taken");
+        assert!(
+            tool.payload.is_empty(),
+            "the wire carries no output: the arguments are not the payload, so `· N lines` \
+             cannot count them as the result: {:?}",
+            tool.payload
+        );
+        // Rendered: the verb and target on the row, the reason wrapped, nothing cut.
+        panel.build(60);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Ran"), "the row carries the verb: {text}");
+        assert!(
+            text.contains("cat /nope"),
+            "the target is on the row: {text}"
+        );
+        assert!(
+            text.contains("no such file or directory"),
+            "the reason is drawn: {text}"
+        );
+    }
+
+    /// Consecutive tool rows touch: a run of calls is one block of work, no blank row between
+    /// neighbours, and a reply after them still breathes.
+    #[test]
+    fn tool_rows_have_no_blank_between_them() {
+        let mut panel = opened();
+        for i in 1..=3 {
+            let id = format!("c-{i}");
+            panel.apply(&Frame::Event {
+                seq: i,
+                event: Event::ToolStarted {
+                    turn_id: "t".to_string(),
+                    call_id: id.clone(),
+                    name: "read".to_string(),
+                    access: "read".to_string(),
+                },
+            });
+            panel.apply(&Frame::Event {
+                seq: i + 10,
+                event: Event::ToolFinished {
+                    turn_id: "t".to_string(),
+                    call_id: id,
+                    outcome: "ok".to_string(),
+                    why: String::new(),
+                    edits: Vec::new(),
+                    bytes: None,
+                },
+            });
+        }
+        panel.build(60);
+        let lines = panel.lines();
+        // Every rendered row between the first tool's row and the last non-blank row is a
+        // tool row: no empty line splits them.
+        let plains: Vec<String> = lines.iter().map(|l| l.plain()).collect();
+        let first = plains
+            .iter()
+            .position(|l| l.contains("Read"))
+            .expect("a tool row");
+        let last = plains
+            .iter()
+            .rposition(|l| l.contains("Read"))
+            .expect("a tool row");
+        let run = &plains[first..=last];
+        assert_eq!(
+            run.len(),
+            3,
+            "three calls, three rows, nothing between: {plains:?}"
+        );
+        for l in run {
+            assert!(!l.trim().is_empty(), "a tool row, not a gap: {plains:?}");
+        }
     }
 
     /// The three no-daemon states say three different things, and only one of them can be started
@@ -2275,6 +2766,7 @@ mod tests {
                 call_id: "c-9".to_string(),
                 outcome: "ok".to_string(),
                 why: String::new(),
+                bytes: None,
                 edits: vec![ToolEdit {
                     path: "notes.txt".to_string(),
                     before_start: 3,

@@ -224,6 +224,9 @@ pub struct Editor {
     /// when the frame has a border, so `draw_in` leaves its own scrollbar out and the host
     /// draws the thumb into the rule.
     pub scrollbar_in_border: bool,
+    /// The rule's thumb is held: a press on it grabbed the view, and drags in the rule follow
+    /// the pointer until the release — the host's mouse routing owns the gesture.
+    pub scroll_grab: bool,
     pub(crate) proto: Proto,
     pub(crate) picture_view: Option<PictureView>,
     /// The pictures the terminal holds, separate from `images_held` so the two cannot
@@ -368,6 +371,7 @@ impl Editor {
             tmux_passthrough_off: false,
             foot_drawn_by_host: false,
             scrollbar_in_border: false,
+            scroll_grab: false,
             panel: crate::panel::Panel::default(),
             focus: Focus::Text,
             bottom: crate::bottomterm::BottomTerm::default(),
@@ -437,6 +441,15 @@ impl Editor {
 
     pub fn bs_mut(&mut self) -> &mut BufferState {
         &mut self.buffers[self.cur]
+    }
+
+    /// The host's answer to a press on the split rule's thumb: the view jumps to this top
+    /// row, marked for re-highlight as the wheel's path does.
+    pub fn scroll_to(&mut self, top: usize) {
+        if self.bs_mut().scroll != top {
+            self.bs_mut().scroll = top;
+            self.highlight_dirty = true;
+        }
     }
 
     fn clamp_cursor(&mut self) {
@@ -1687,12 +1700,12 @@ impl Editor {
             self.focus = Focus::Terminal;
         }
         // The last column is the scrollbar: a press or drag there is the view's place in the
-        // history, exactly as the text pane's scrollbar is.
+        // history, exactly as the text pane's scrollbar is. The thumb is the one sum every
+        // bar shares, so the click lands where the drawing is.
         if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
             let content_h = (strip_h as usize).saturating_sub(2);
             let total = tab.history_len() + tab.screen_rows();
-            if content_h > 1 && total > content_h {
-                let thumb = ((content_h * content_h) / total).clamp(1, content_h);
+            if let Some((_, thumb)) = crate::ui::thumb_span(content_h, 0, total) {
                 let travel = content_h - thumb;
                 let first = strip_y as usize + 2;
                 let travel_max = total - content_h;
@@ -1922,9 +1935,13 @@ impl Editor {
     /// **A press or drag on the scrollbar column jumps there**: the thumb's whole travel mapped
     /// onto the content's. The same gesture the wheel answers, pointed instead of counted - "no
     /// idea at which place in the file i am" is a question of getting somewhere as much as of
-    /// knowing where you are.
+    /// knowing where you are. With the panel open the bar is the split rule, one column right
+    /// of the text: the host routes its presses, and the text's own last column is text.
     fn scrollbar_jump(&mut self, pane_row: u16, pane_col: u16) -> bool {
-        if pane_col + 1 != self.text_w as u16 || self.diff_view.is_some() {
+        if pane_col + 1 != self.text_w as u16
+            || self.diff_view.is_some()
+            || self.scrollbar_in_border
+        {
             return false;
         }
         let top = self.chrome.top();

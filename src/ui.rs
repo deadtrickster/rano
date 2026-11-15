@@ -694,7 +694,11 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                     None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
                 }
             }
-            scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
+            // With the panel open the split rule is the bar — the preview's place in its
+            // lines carried there, not drawn beside the rule as a second bar.
+            if !ed.scrollbar_in_border {
+                scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
+            }
         }
     } // !foot_only: the pane's own rows
 

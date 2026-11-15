@@ -35,7 +35,7 @@ does not know the terminal exists.
 | `--export text`, `markdown`, `html` | README usage | works, driven | |
 | `--export ansi` | README usage | broken, driven | `fn main() {` comes out as `fnmain(){`, indentation and inner spaces are dropped. Stripping SGR from the output does not give the source back |
 | Syntax errors as diagnostics | README | not confirmed | ` zzz` appended to a Rust line showed nothing in a plain capture after 3 s. rust-analyzer is installed. May be colour only |
-| Editor scrollbar | none | works, undocumented | a `│` track with a `█` thumb in the text column |
+| Editor scrollbar | none | works, undocumented | a `│` track with the thumb the accent on the same `│` in the text column — the split rule's own column while the panel is open |
 | Panel `M-i`, zoom, no-daemon state | keys | works, driven | split at 110 columns, whole frame at 80. Offline text names `/` instead of the folder |
 | Panel key bar | keys | defect, driven | `<pgup> Page UESC Back to tM-f Follow th`, the same defect the rano session recorded in room row 1329 |
 | Bottom terminal `M-0` | nowhere | partial, driven | see below |

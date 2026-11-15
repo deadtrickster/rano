@@ -294,6 +294,55 @@ mod tests {
         assert!(ed.bottom.tabs.is_empty(), "Enter closed the dead tab");
     }
 
+    /// A click in the strip focuses it, and the next key is the shell's: the buffer is untouched
+    /// and the pty echoes it.
+    #[test]
+    fn a_click_in_the_strip_sends_the_next_key_to_the_shell() {
+        use crate::term::{MouseButton, MouseEvent, MouseKind};
+        let mut ed = ed("abc");
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = crate::editor::Focus::Text;
+        ed.bottom
+            .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let press = MouseEvent {
+            kind: MouseKind::Press(MouseButton::Left),
+            x: 5,
+            y: 20,
+            mods: crate::term::event::Mods::NONE,
+        };
+        assert!(ed.bottom_mouse(press, 18, 12));
+        assert_eq!(
+            ed.focus,
+            crate::editor::Focus::Terminal,
+            "the click focused it"
+        );
+        let before = text(&ed);
+        super::key(&mut ed, key(KeyCode::Char('y'), Mods::NONE));
+        assert_eq!(text(&ed), before, "the buffer is unmodified");
+        let tab = &mut ed.bottom.tabs[0];
+        let mut seen = false;
+        for _ in 0..600 {
+            tab.feed();
+            if tab.lines().iter().any(|l| l.plain().contains('y')) {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            seen,
+            "the shell echoed the key: exited={:?} lines={:?}",
+            ed.bottom.tabs[0].exited,
+            ed.bottom.tabs[0]
+                .lines()
+                .iter()
+                .map(|l| l.plain())
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// On the alternate screen the page keys are the program's: `less` pages its own document
     /// with PgDn, rather than rano scrolling a scrollback that is not on the glass.
     #[test]

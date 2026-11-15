@@ -1490,20 +1490,29 @@ impl Editor {
     }
 
     /// Run a command by name, and remember it for `M-x`'s ordering.
-    /// The strip's open/shut and the keyboard that follows it: the map's `toggle-terminal`.
+    /// The strip's keyboard, and its open/shut: an open strip is FOCUSED by `M-0`, and only a
+    /// focused one is hidden by it — one command, so there is no state from which the strip
+    /// cannot be reached.
     pub(crate) fn terminal_toggle(&mut self) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let _ = self.bottom.toggle(
-            &cwd,
-            self.text_w as u16,
-            12,
-            self.config.terminal_scrollback,
-        );
-        self.focus = if self.bottom.open {
-            crate::editor::Focus::Terminal
-        } else {
-            crate::editor::Focus::Text
-        };
+        match (self.bottom.open, self.focus) {
+            // Focused: the keyboard goes back to the text and the shell keeps running.
+            (true, crate::editor::Focus::Terminal) => {
+                self.focus = crate::editor::Focus::Text;
+            }
+            // Open and not focused (a click in the text, Esc): the keyboard comes back to it.
+            (true, _) => self.focus = crate::editor::Focus::Terminal,
+            // Shut: open a shell, and the keyboard goes with it.
+            (false, _) => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let _ = self.bottom.toggle(
+                    &cwd,
+                    self.text_w as u16,
+                    12,
+                    self.config.terminal_scrollback,
+                );
+                self.focus = crate::editor::Focus::Terminal;
+            }
+        }
     }
 
     pub(crate) fn terminal_focus_text(&mut self) {

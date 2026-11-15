@@ -1183,15 +1183,25 @@ impl crate::editor::Editor {
 
     /// `ctrl-]`: the keyboard to the other surface, opening the panel when it is shut.
     pub fn panel_cross(&mut self) {
-        if !self.panel.open {
+        // The surfaces that are open, in the order the cycle visits them. With nothing else open
+        // the panel is what there is to cross to, so it opens.
+        let mut order = vec![crate::editor::Focus::Text];
+        if self.panel.open {
+            order.push(crate::editor::Focus::Panel);
+        }
+        if self.bottom.open {
+            order.push(crate::editor::Focus::Terminal);
+        }
+        if order.len() == 1 {
             self.panel_open();
             return;
         }
-        self.focus = if self.focus == crate::editor::Focus::Panel {
-            crate::editor::Focus::Text
-        } else {
-            crate::editor::Focus::Panel
-        };
+        if !order.contains(&self.focus) {
+            self.focus = order[1];
+            return;
+        }
+        let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        self.focus = order[(i + 1) % order.len()];
     }
 
     /// `alt-m`: the focused surface takes the whole width, or gives it back.

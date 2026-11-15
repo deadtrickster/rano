@@ -242,6 +242,16 @@ impl Tab {
     }
 
     /// How far back the view is scrolled, in lines: the wheel's effect, readable by the host.
+    /// Where the program's cursor is, in screen cells: `None` when the program hid it, or when
+    /// the view is scrolled back, where the cursor is not on the glass.
+    pub fn cursor_pos(&self) -> Option<(u16, u16)> {
+        let screen = self.parser.screen();
+        if screen.hide_cursor() || screen.scrollback() > 0 {
+            return None;
+        }
+        Some(screen.cursor_position())
+    }
+
     /// Is the program on the alternate screen? Then it owns the page keys: `less` scrolls its own
     /// document, and the scrollback rano keeps is not on the glass.
     pub fn on_program_screen(&self) -> bool {
@@ -287,11 +297,19 @@ impl Tab {
 
     /// The screen, in the panel's rows.
     pub fn lines(&self) -> Vec<Line> {
+        self.lines_for(false)
+    }
+
+    /// The screen, with the painted caret only where the strip does NOT have the keyboard: a
+    /// focused strip's caret is the real one, which the frame places.
+    pub fn lines_for(&self, focused: bool) -> Vec<Line> {
         let screen = self.parser.screen();
         // `size()` answers (rows, cols), as `Parser::new` takes them.
         let (rows, cols) = screen.size();
         let (rows, cols) = (rows.get() as usize, cols.get() as usize);
-        (0..rows).map(|y| row_line(screen, y, cols)).collect()
+        (0..rows)
+            .map(|y| row_line(screen, y, cols, focused))
+            .collect()
     }
 }
 
@@ -421,6 +439,12 @@ impl BottomTerm {
 
     /// The active tab's screen, or the empty state with the tab strip.
     pub fn lines(&self, w: usize, cwd: &Path) -> Vec<Line> {
+        self.lines_for(w, cwd, false)
+    }
+
+    /// The strip's rows, with the active tab's caret painted dim unless the strip has the
+    /// keyboard (then the frame places the real one).
+    pub fn lines_for(&self, w: usize, cwd: &Path, focused: bool) -> Vec<Line> {
         let mut out = Vec::new();
         if self.tabs.is_empty() {
             out.push(Line::new(vec![Span::role(
@@ -449,7 +473,7 @@ impl BottomTerm {
         )]));
         out.extend(
             self.tabs[self.active]
-                .lines()
+                .lines_for(focused)
                 .into_iter()
                 .map(|l| crate::render::text::truncate(&l, w)),
         );
@@ -549,11 +573,12 @@ fn nz(v: u16) -> std::num::NonZeroU16 {
 
 /// One screen row as a [`Line`], styles and all: the cells are grouped into runs of one style,
 /// and the row is the parser's full width (a short row painted over a longer one must clear it).
-fn row_line(screen: &vt100::Screen, y: usize, cols: usize) -> Line {
+fn row_line(screen: &vt100::Screen, y: usize, cols: usize, focused: bool) -> Line {
     let mut spans: Vec<Span> = Vec::new();
     let mut text = String::new();
     let mut style = crate::render::Style::new();
     let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+    let painted = !focused;
     for x in 0..cols {
         let Some(cell) = screen.cell(y as u16, x as u16) else {
             break;
@@ -577,8 +602,13 @@ fn row_line(screen: &vt100::Screen, y: usize, cols: usize) -> Line {
         if cell.underline() {
             st = st.underline();
         }
-        if cell.inverse() || cursor == Some((y as u16, x as u16)) {
+        if cell.inverse() {
             st = st.reverse();
+        }
+        if painted && cursor == Some((y as u16, x as u16)) {
+            // An unfocused strip's caret is painted and dim: the glass says who has the keyboard,
+            // and the real cursor is in the focused pane.
+            st = st.reverse().dim();
         }
         if st != style {
             if !text.is_empty() {
@@ -1109,6 +1139,34 @@ mod tests {
                 .any(|l| l.starts_with("$") || l.starts_with("#")),
             "a prompt waits: {shown:?}"
         );
+    }
+
+    /// The painted caret is for an UNFOCUSED strip only: a focused one's caret is the real
+    /// cursor, which the frame places, and drawing both would be two.
+    #[test]
+    fn the_painted_caret_is_for_an_unfocused_strip_only() {
+        let (mut t, slave) = pipe_tab();
+        write_all(slave, b"ab");
+        assert!(feed_until(&mut t, |t| t.lines()[0]
+            .plain()
+            .starts_with("ab")));
+        let painted = |lines: Vec<Line>| {
+            lines[0].spans.iter().any(|s| {
+                s.style.attrs.contains(crate::style::Attrs::REVERSE)
+                    && s.style.attrs.contains(crate::style::Attrs::DIM)
+            })
+        };
+        assert!(
+            painted(t.lines_for(false)),
+            "painted and dim without the keyboard"
+        );
+        assert!(
+            !painted(t.lines_for(true)),
+            "no painted caret with it: the real cursor is there"
+        );
+        unsafe {
+            libc::close(slave);
+        }
     }
 
     /// An OSC title is not text: the parser keeps it as the window title, and the screen shows

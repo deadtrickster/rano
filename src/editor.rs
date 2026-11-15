@@ -1655,6 +1655,14 @@ impl Editor {
     /// active tab's scrollback, and dragging the rule above it resizes the strip. Nothing here
     /// reaches the document.
     pub fn bottom_mouse(&mut self, m: MouseEvent, strip_y: u16, strip_h: u16) -> bool {
+        // A click anywhere in the strip takes the keyboard there: the pane the pointer is in is
+        // the pane being typed into.
+        if matches!(
+            m.kind,
+            MouseKind::Press(MouseButton::Left) | MouseKind::Drag(MouseButton::Left)
+        ) {
+            self.focus = Focus::Terminal;
+        }
         // The last column is the scrollbar: a press or drag there is the view's place in the
         // history, exactly as the text pane's scrollbar is.
         if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
@@ -1711,6 +1719,8 @@ impl Editor {
                 self.bottom.dragging = false;
                 true
             }
+            // The click is the strip's: it took the keyboard, and it is not the text's to keep.
+            MouseKind::Press(MouseButton::Left) | MouseKind::Drag(MouseButton::Left) => true,
             _ => false,
         }
     }

@@ -821,7 +821,9 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     if let Some(area) = lay.bottom {
         let cwd = std::env::current_dir().unwrap_or_default();
         let content_w = (area.width as usize).saturating_sub(1);
-        let lines = ed.bottom.lines(content_w, &cwd);
+        let lines = ed
+            .bottom
+            .lines_for(content_w, &cwd, ed.focus == Focus::Terminal);
         // A rule above the strip: the terminal is a pane, not more of the file's text.
         let rule = Line::styled(
             "─".repeat(area.width as usize),
@@ -837,6 +839,16 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         }
         // The scrollbar, the same drawing the text pane's is: a track with a thumb, always
         // drawn, over the rows the terminal actually has.
+        // The one real cursor: in the strip when the strip has the keyboard, where the shell's
+        // own caret is — and only when it is on the glass and the program did not hide it.
+        // A prompt is drawn over every surface and owns the cursor while it is open.
+        if ed.focus == Focus::Terminal
+            && ed.prompt.is_none()
+            && let Some(tab) = ed.bottom.tabs.get(ed.bottom.active)
+            && let Some((cx, cy)) = tab.cursor_pos()
+        {
+            cursor = Some((area.x + cx, area.y + 2 + cy));
+        }
         if let Some(tab) = ed.bottom.tabs.get(ed.bottom.active) {
             let h = (area.height as usize).saturating_sub(2);
             let history = tab.history_len();
@@ -1221,6 +1233,146 @@ mod panel_tests {
         // A key nobody claimed: nothing happens, which is what the binary did before.
         let _ = ed.handle_key(key(KeyCode::Char('z'), rano::term::event::Mods::ALT));
         assert!(!ed.panel.open && !ed.panel.zoom);
+    }
+
+    /// One real cursor, and it is in the focused pane: the frame's caret lies inside that
+    /// surface's rectangle, and nowhere else.
+    #[test]
+    fn the_real_cursor_is_in_the_focused_surface() {
+        use std::path::Path;
+        let mut ed = editor();
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        // Text.
+        let lay = layout(120, 40, &ed, None);
+        let cur = draw_frame(&mut buf, &mut ed, &lay).expect("the text has a caret");
+        assert!(lay.editor.expect("an editor").contains(cur.0, cur.1));
+        // The panel's composer.
+        ed.panel.open = true;
+        ed.focus = Focus::Panel;
+        ed.panel.input = "abc".to_string();
+        ed.panel.cursor = 3;
+        let lay = layout(120, 40, &ed, None);
+        let cur = draw_frame(&mut buf, &mut ed, &lay).expect("the composer has a caret");
+        assert!(
+            lay.panel.expect("a panel").contains(cur.0, cur.1),
+            "the caret is in the composer: {cur:?}"
+        );
+        // The terminal.
+        ed.panel.open = false;
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        let cur = draw_frame(&mut buf, &mut ed, &lay).expect("the shell has a caret");
+        assert!(
+            strip.contains(cur.0, cur.1),
+            "the shell's caret is in the strip: {cur:?}"
+        );
+        // An open prompt, over it all: C-f is the search.
+        let _ = ed.handle_key(rano::term::KeyEvent::new(
+            KeyCode::Char('f'),
+            rano::term::event::Mods::CTRL,
+        ));
+        for c in "needle".chars() {
+            let _ = ed.handle_key(rano::term::KeyEvent::new(
+                KeyCode::Char(c),
+                rano::term::event::Mods::NONE,
+            ));
+        }
+        let lay = layout(120, 40, &ed, None);
+        let cur = draw_frame(&mut buf, &mut ed, &lay).expect("the prompt has a caret");
+        assert!(
+            lay.editor.expect("an editor").contains(cur.0, cur.1),
+            "the prompt's caret is in the frame: {cur:?}"
+        );
+        assert!(!strip.contains(cur.0, cur.1), "and not in the strip");
+    }
+
+    /// A click in the strip takes the keyboard there; a click in the text gives it back.
+    #[test]
+    fn a_click_in_the_strip_focuses_the_terminal() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Text;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        let click = rano::term::MouseEvent {
+            kind: MouseKind::Press(MouseButton::Left),
+            x: 5,
+            y: strip.y + 3,
+            mods: rano::term::event::Mods::NONE,
+        };
+        let mut width = None;
+        let mut dragging = false;
+        assert!(mouse(&mut ed, &lay, &click, 120, &mut width, &mut dragging));
+        assert_eq!(
+            ed.focus,
+            Focus::Terminal,
+            "the click took the keyboard there"
+        );
+    }
+
+    /// M-0 and C-] each reach the open strip from the text, and its bar says so.
+    #[test]
+    fn m_zero_and_cross_focus_the_open_strip() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Text;
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char('0'), rano::term::event::Mods::ALT),
+        );
+        assert_eq!(ed.focus, Focus::Terminal, "M-0 focuses an open strip");
+        assert!(
+            ed.key_hints().iter().any(|(_, t)| t == "New Tab"),
+            "the bar is the terminal's"
+        );
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char(']'), rano::term::event::Mods::CTRL),
+        );
+        assert_eq!(ed.focus, Focus::Text, "C-] crosses back to the text");
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char(']'), rano::term::event::Mods::CTRL),
+        );
+        assert_eq!(ed.focus, Focus::Terminal, "and to the strip again");
+        // With the panel open too the cycle is text -> panel -> terminal -> text.
+        ed.panel.open = true;
+        ed.focus = Focus::Text;
+        let cross = || rano::term::KeyEvent::new(KeyCode::Char(']'), rano::term::event::Mods::CTRL);
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Panel);
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Terminal);
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Text);
+        // M-0 while focused gives the keyboard back; a second one focuses it again, never hides.
+        ed.bottom.open = true;
+        ed.focus = Focus::Terminal;
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char('0'), rano::term::event::Mods::ALT),
+        );
+        assert_eq!(ed.focus, Focus::Text);
+        assert!(ed.bottom.open, "the strip stays open");
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char('0'), rano::term::event::Mods::ALT),
+        );
+        assert_eq!(ed.focus, Focus::Terminal, "and it comes back");
     }
 
     /// The strip's last column is a scrollbar — a track with a thumb, always drawn. `↑N more` is

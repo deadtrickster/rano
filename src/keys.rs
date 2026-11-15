@@ -218,9 +218,20 @@ impl Editor {
             }
             return true;
         }
+        let k = crate::keymap::Key::from_event(key);
+        // The host's keys work over every surface, the strip included: `C-]` must be able to
+        // cross AWAY from the terminal, which is a key the shell never sees.
+        let host: Vec<&crate::keymap::Keymap> = self.host_keymaps.iter().rev().collect();
+        if !host.is_empty()
+            && let crate::keymap::Lookup::Command(name) =
+                crate::keymap::lookup(&host, std::slice::from_ref(&k))
+        {
+            let name = name.to_string();
+            self.run_command(&name);
+            return true;
+        }
         // The terminal's own chords are its MAP's, so help, M-x and the bars can see them; a key
         // the map does not know is the shell's, never the editor's.
-        let k = crate::keymap::Key::from_event(key);
         let found = crate::keymap::lookup(&[&self.keymaps.terminal], std::slice::from_ref(&k));
         if let crate::keymap::Lookup::Command(name) = found {
             let name = name.to_string();

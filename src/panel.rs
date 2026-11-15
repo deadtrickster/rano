@@ -269,6 +269,13 @@ pub struct Panel {
     /// The file the folder was last worked out for, so the git call happens once per buffer.
     seen_name: Option<PathBuf>,
     acts: Vec<Act>,
+    /// When the running turn started: the status line's clock, and what makes a spinner move
+    /// without a token arriving.
+    turn_started: Option<std::time::Instant>,
+    /// The second the status line last said, so the host redraws once a second and not more.
+    shown_second: u64,
+    /// The card the head is waiting on, as one phrase: the status line names it.
+    pending_ask: Option<String>,
     /// The conversation's tool fold (`M-t` in the panel): with false, a run of settled calls
     /// collapses to one line and only the newest and the failed stay open.
     pub tools_open: bool,
@@ -312,6 +319,9 @@ impl Default for Panel {
             waiting: Vec::new(),
             seen_name: None,
             acts: Vec::new(),
+            turn_started: None,
+            shown_second: 0,
+            pending_ask: None,
             tools_open: false,
             running: Vec::new(),
             call_markup: String::new(),
@@ -598,7 +608,12 @@ impl Panel {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::TurnStarted { .. } => self.state = PanelState::Thinking,
+            Event::TurnStarted { .. } => {
+                // The clock the status line reads, and no ask is pending in a fresh turn.
+                self.turn_started = Some(std::time::Instant::now());
+                self.pending_ask = None;
+                self.state = PanelState::Thinking;
+            }
             Event::Delta {
                 target: DeltaTarget::Text,
                 text,
@@ -694,6 +709,7 @@ impl Panel {
                 // A round that is not the end of the prompt leaves the panel thinking, which is
                 // what only the daemon can tell.
                 self.state = if *ends_turn {
+                    self.turn_started = None;
                     PanelState::Idle
                 } else {
                     PanelState::Thinking
@@ -703,6 +719,8 @@ impl Panel {
                 // A call in flight when the turn ended never gets its finish: its note says so
                 // rather than standing as a call that will never settle.
                 self.call_markup.clear();
+                self.turn_started = None;
+                self.pending_ask = None;
                 self.settle_running("interrupted");
                 self.rows.push(Row::Note(if reason.is_empty() {
                     "interrupted".to_string()
@@ -713,11 +731,14 @@ impl Panel {
             }
             Event::TurnFailed { error, .. } => {
                 self.call_markup.clear();
+                self.turn_started = None;
+                self.pending_ask = None;
                 self.settle_running("not run");
                 self.rows.push(Row::Note(format!("failed: {error}")));
                 self.state = PanelState::Idle;
             }
             Event::DecisionRequested(card) => {
+                self.pending_ask = Some(format!("{} · {}", card.kind, card.summary));
                 // This head says `can_decide: false`, so the daemon put the card in front of one
                 // that can answer it; saying where is the panel's whole job here.
                 self.rows.push(Row::Note(format!(
@@ -1013,6 +1034,57 @@ impl Panel {
     }
 
     /// The conversation at `width`, oldest first: what the widget windows and draws.
+    /// The turn's one status line: `Responding` with its spinner and clock while the turn
+    /// runs, or the ask being waited on, named. `None` when nothing is happening.
+    pub fn turn_line(&self, w: usize) -> Option<Line> {
+        if let Some(ask) = &self.pending_ask {
+            return Some(Line::new(vec![Span::styled(
+                format!("waiting · {ask}"),
+                crate::render::Style::of(Role::Pending),
+            )]));
+        }
+        if self.state != PanelState::Thinking {
+            return None;
+        }
+        let elapsed = self.turn_started.map(|t| t.elapsed().as_millis() as u64);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let slow = elapsed.is_some_and(|ms| ms > crate::agent::turn_status::SLOW_AFTER_MS);
+        let line = crate::agent::turn_status::TurnStatus {
+            busy: true,
+            prefill: None,
+            elapsed_ms: elapsed,
+            now_ms: now,
+            slow,
+        }
+        .line(w);
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// True once per whole second while a turn runs: the host redraws on it, so the spinner
+    /// moves and the clock counts without a token arriving.
+    /// The card being waited on, if any: the host keeps a faster clock while one is shown.
+    pub fn pending_ask(&self) -> Option<&str> {
+        self.pending_ask.as_deref()
+    }
+
+    pub fn tick_turn(&mut self) -> bool {
+        if self.state != PanelState::Thinking {
+            return false;
+        }
+        let secs = self
+            .turn_started
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        if secs != self.shown_second {
+            self.shown_second = secs;
+            return true;
+        }
+        false
+    }
+
     pub fn build(&mut self, width: usize) {
         let key = (width, self.version);
         if self.built_for == Some(key) {
@@ -2046,6 +2118,118 @@ mod tests {
             notes, 1,
             "the turn's own note, and no second row for the call"
         );
+    }
+
+    /// The turn's state is one line, above the composer: Responding with its clock while the
+    /// turn runs, the ask named while one waits, gone when nothing is happening.
+    #[test]
+    fn the_turns_state_is_one_line_above_the_composer() {
+        let mut panel = opened();
+        assert!(panel.turn_line(60).is_none(), "idle says nothing");
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        let line = panel.turn_line(60).expect("a turn is running");
+        assert!(line.plain().contains("Responding"), "{:?}", line.plain());
+        assert!(
+            line.plain().contains("0ms") || line.plain().contains("0.0s"),
+            "the clock is on it: {:?}",
+            line.plain()
+        );
+        // The row sits above the composer, one row apart, inside the panel.
+        let view = crate::agent::panel::View {
+            title: "s".to_string(),
+            state: "thinking",
+            state_role: Role::Faint,
+            folder: "/w".to_string(),
+            moved: None,
+            body: &[],
+            scroll: 0,
+            follow: true,
+            turn: Some(line.clone()),
+            input: "typed words",
+            cursor: 11,
+            chips: &[],
+            focus: false,
+            hints: &[],
+        };
+        let area = crate::render::Rect::new(0, 0, 60, 12);
+        let mut buf = crate::render::Buffer::empty(area);
+        view.draw(area, &mut buf);
+        let rows = buf.emit(crate::render::Palette::None);
+        let at = |needle: &str| rows.iter().position(|r| r.contains(needle));
+        let turn_row =
+            at("Responding").unwrap_or_else(|| panic!("the turn row is drawn: {rows:?}"));
+        let composer = at("typed words").expect("the composer is drawn");
+        assert_eq!(
+            composer,
+            turn_row + 1,
+            "the status line is directly above the composer: {rows:?}"
+        );
+        // A card waiting is named on the same line.
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::DecisionRequested(DecisionRequest {
+                req_id: "r-1".to_string(),
+                kind: "permission".to_string(),
+                summary: "bash would run rm -rf build".to_string(),
+                ..DecisionRequest::default()
+            }),
+        });
+        let line = panel.turn_line(60).expect("the ask is shown");
+        assert!(
+            line.plain().contains("waiting") && line.plain().contains("rm -rf build"),
+            "{:?}",
+            line.plain()
+        );
+        // The turn's end takes it away.
+        panel.apply(&Frame::Event {
+            seq: 3,
+            event: Event::TurnFinished {
+                turn_id: "t".to_string(),
+                ends_turn: true,
+            },
+        });
+        // The ask belongs to the session, not the turn: it stays named after the turn ends,
+        // because it is still waiting on a person.
+        assert!(
+            panel
+                .turn_line(60)
+                .is_some_and(|l| l.plain().contains("waiting")),
+            "the ask outlives the turn"
+        );
+        // A turn that ends with nothing pending says nothing at all.
+        let mut idle = opened();
+        idle.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        idle.apply(&Frame::Event {
+            seq: 2,
+            event: Event::TurnFinished {
+                turn_id: "t".to_string(),
+                ends_turn: true,
+            },
+        });
+        assert!(idle.turn_line(60).is_none(), "an idle panel says nothing");
+        // And the host's clock: one tick per whole second while the turn runs.
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        let _ = panel.tick_turn();
+        assert!(!panel.tick_turn(), "the second has not changed");
     }
 
     /// A call that has not settled is a note, never a row claiming an outcome: the wire's

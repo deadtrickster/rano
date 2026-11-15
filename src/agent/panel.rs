@@ -41,6 +41,9 @@ pub struct View<'a> {
     pub cursor: usize,
     /// What the next prompt carries beside its words, one line each: `article.md:41-47 · unsaved`.
     pub chips: &'a [String],
+    /// The turn's own status: `Responding` with its spinner and clock, or the ask being waited
+    /// on — one row ABOVE the composer, where what is happening sits next to what you type.
+    pub turn: Option<Line>,
     /// The panel holds the keyboard: the composer is live and the key row is drawn.
     pub focus: bool,
     /// The key row, as the bar's own `(key, title)` pairs.
@@ -75,10 +78,13 @@ impl View<'_> {
         // key row takes the foot, and only while the panel has the keyboard.
         let chips = !self.chips.is_empty() && h >= 5;
         let hints = self.focus && !self.hints.is_empty() && h >= 5 + usize::from(chips);
+        let turn = self.turn.is_some() && h >= 6 + usize::from(chips);
         let composer_row = h - 1 - usize::from(hints);
         let chip_row = composer_row - usize::from(chips);
-        let room = composer_row - 1 - usize::from(chips);
+        let turn_row = chip_row - usize::from(turn);
+        let room = composer_row - 1 - usize::from(chips) - usize::from(turn);
         let hint_row = h - 1;
+        let _ = turn_row;
 
         // ---- the top edge: the session, its state, and the folder it follows ----
         buf.set_line(area.x, area.y, &self.top_edge(w), w);
@@ -125,6 +131,12 @@ impl View<'_> {
         while row < composer_row {
             buf.set_line(area.x, area.y + row as u16, &Line::raw(" ".repeat(w)), w);
             row += 1;
+        }
+
+        // ---- the turn's state: one row above the composer, where what is happening sits
+        // next to what you type. Drawn after the body's padding, which fills to the composer.
+        if turn && let Some(turn_line) = &self.turn {
+            buf.set_line(area.x, area.y + turn_row as u16, turn_line, w);
         }
 
         // ---- the composer, and the caret in it ----
@@ -313,6 +325,7 @@ mod tests {
             body: &[],
             scroll: 0,
             follow: true,
+            turn: None,
             input: "",
             cursor: 0,
             chips: &[],

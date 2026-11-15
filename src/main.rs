@@ -893,7 +893,7 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             .iter()
             .map(|c| c.label(&ed.panel.folder))
             .collect();
-        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        let drawn = panel_view(ed, &hints, &chips, area.width as usize).draw(area, buf);
         ed.panel.scroll = drawn.scroll;
         if drawn.cursor.is_some() {
             cursor = drawn.cursor;
@@ -970,9 +970,11 @@ fn panel_view<'a>(
     ed: &'a Editor,
     hints: &'a [(String, String)],
     chips: &'a [String],
+    width: usize,
 ) -> rano::agent::panel::View<'a> {
     let panel = &ed.panel;
     rano::agent::panel::View {
+        turn: ed.panel.turn_line(width),
         title: panel.title.clone(),
         state: panel.state.words(),
         state_role: panel.state.role(),

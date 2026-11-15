@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use rano::buffer::{Buffer, Pos};
 use rano::editor::KeyOutcome;
-use rano::editor::{Area, Editor};
+use rano::editor::{Area, Editor, Focus};
 use rano::expand_tilde;
 use rano::panel::Act;
 use rano::render::{self, Line, Palette, Rect, Style};
@@ -433,9 +433,10 @@ fn run(
         for ev in terminal.events() {
             match ev {
                 Event::Key(k) => {
-                    // A key the editor has no use for is the host's: the three the design puts
-                    // above both programs, and nothing else.
-                    if ed.handle_key(k) == KeyOutcome::Unhandled {
+                    // The terminal's keys are the host's, ahead of the editor's maps: a focused
+                    // terminal's typing must never edit the file behind it. A key neither has a
+                    // use for is the host's three the design shares.
+                    if rano::host::key(&mut ed, k) == KeyOutcome::Unhandled {
                         host_key(&mut ed, &k);
                     }
                     dirty = true;
@@ -757,14 +758,18 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     if ed.panel.zoom || w < EDITOR_MIN + 1 + PANEL_MIN {
         // One surface takes the frame: two columns that fit neither is the squeeze the design
         // refuses.
-        return if ed.panel.focus {
+        return if ed.focus == Focus::Panel {
+            // A narrow or zoomed frame still draws the strip: its rows are reserved, so the
+            // terminal is drawn on them rather than leaving a blank band.
             Layout {
                 panel: Some(whole),
+                bottom,
                 ..Layout::default()
             }
         } else {
             Layout {
                 editor: Some(whole),
+                bottom,
                 ..Layout::default()
             }
         };
@@ -824,7 +829,7 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     }
     if let Some(area) = lay.panel {
         ed.panel.build(area.width as usize);
-        let hints = if ed.panel.focus {
+        let hints = if ed.focus == Focus::Panel {
             ed.key_hints()
         } else {
             Vec::new()
@@ -863,7 +868,7 @@ fn panel_view<'a>(
         input: &panel.input,
         cursor: panel.cursor,
         chips,
-        focus: panel.focus,
+        focus: ed.focus == Focus::Panel,
         hints,
     }
 }
@@ -923,7 +928,7 @@ fn mouse(
                 if !taking {
                     return false;
                 }
-                ed.panel.focus = true;
+                ed.focus = Focus::Panel;
                 ed.panel.cursor = ed.panel.input.chars().count();
                 return true;
             }
@@ -945,7 +950,7 @@ fn mouse(
     {
         return ed.bottom_mouse(*m, strip.y, strip.height);
     }
-    ed.panel.focus = false;
+    ed.focus = Focus::Text;
     ed.handle_mouse(*m)
 }
 
@@ -1129,17 +1134,17 @@ mod panel_tests {
     fn a_narrow_frame_zooms_the_focused_surface() {
         let mut ed = editor();
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = Focus::Panel;
         let lay = layout(90, 30, &ed, None);
         assert_eq!(lay.panel, Some(Rect::new(0, 0, 90, 30)));
         assert_eq!(lay.editor, None, "the text is not drawn beside it");
         // The keyboard to the text: now it is the panel that is off the screen, still open.
-        ed.panel.focus = false;
+        ed.focus = Focus::Text;
         let lay = layout(90, 30, &ed, None);
         assert_eq!(lay.editor, Some(Rect::new(0, 0, 90, 30)));
         assert_eq!(lay.panel, None);
         // At exactly the two minimums and the rule it splits again.
-        ed.panel.focus = true;
+        ed.focus = Focus::Panel;
         let lay = layout(EDITOR_MIN + 1 + PANEL_MIN, 30, &ed, None);
         assert!(lay.editor.is_some() && lay.panel.is_some());
     }
@@ -1149,7 +1154,7 @@ mod panel_tests {
     fn zoom_takes_the_frame_and_gives_it_back() {
         let mut ed = editor();
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = Focus::Panel;
         ed.panel_zoom();
         let lay = layout(120, 30, &ed, None);
         assert_eq!(lay.panel, Some(Rect::new(0, 0, 120, 30)));
@@ -1172,12 +1177,15 @@ mod panel_tests {
             |code: KeyCode, mods: rano::term::event::Mods| rano::term::KeyEvent { code, mods };
         let alt_i = key(KeyCode::Char('i'), rano::term::event::Mods::ALT);
         host_key(&mut ed, &alt_i);
-        assert!(ed.panel.open && ed.panel.focus, "alt-i opens it, focused");
+        assert!(
+            ed.panel.open && ed.focus == Focus::Panel,
+            "alt-i opens it, focused"
+        );
         let cross = key(KeyCode::Char(']'), rano::term::event::Mods::CTRL);
         host_key(&mut ed, &cross);
-        assert!(!ed.panel.focus, "ctrl-] crosses to the text");
+        assert!(ed.focus == Focus::Text, "ctrl-] crosses to the text");
         host_key(&mut ed, &cross);
-        assert!(ed.panel.focus, "and back");
+        assert!(ed.focus == Focus::Panel, "and back");
         let alt_m = key(KeyCode::Char('m'), rano::term::event::Mods::ALT);
         host_key(&mut ed, &alt_m);
         assert!(ed.panel.zoom, "alt-m zooms");
@@ -1191,13 +1199,66 @@ mod panel_tests {
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
+    /// With the terminal focused, a click in the panel still moves the keyboard: one focus, and
+    /// the pointer decides which surface it is.
+    #[test]
+    fn a_click_in_the_panel_moves_the_keyboard_off_the_terminal() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.bottom.open = true;
+        ed.focus = Focus::Terminal;
+        let lay = layout(120, 30, &ed, None);
+        let panel = lay.panel.expect("a panel column");
+        let click = rano::term::MouseEvent {
+            kind: MouseKind::Press(MouseButton::Left),
+            x: panel.x + 2,
+            y: 4,
+            mods: rano::term::event::Mods::NONE,
+        };
+        let mut width = None;
+        let mut dragging = false;
+        assert!(mouse(&mut ed, &lay, &click, 120, &mut width, &mut dragging));
+        assert_eq!(ed.focus, Focus::Panel, "the panel has the keyboard now");
+    }
+
+    /// M-i on a frame too narrow for two columns, with the terminal open: the panel takes the
+    /// width above the strip, and the strip is still drawn on its reserved rows.
+    #[test]
+    fn a_narrow_frame_with_the_terminal_open_still_draws_the_strip() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        let narrow = EDITOR_MIN + PANEL_MIN; // one short of the two-column split
+        host_key(
+            &mut ed,
+            &rano::term::KeyEvent::new(KeyCode::Char('i'), rano::term::event::Mods::ALT),
+        );
+        assert!(ed.panel.open, "M-i opened the panel");
+        let lay = layout(narrow, 30, &ed, None);
+        let strip = lay.bottom.expect("the strip is still drawn");
+        assert_eq!(
+            strip.y + strip.height,
+            30,
+            "on its reserved rows at the foot"
+        );
+        let panel = lay.panel.expect("the panel takes the width above it");
+        assert_eq!(panel.height, strip.y, "and does not overlap the strip");
+        // Zoomed is the same answer: the strip is drawn, not a blank band.
+        ed.panel.zoom = true;
+        let lay = layout(120, 30, &ed, None);
+        assert!(lay.bottom.is_some(), "zoomed still draws the strip");
+        assert_eq!(
+            lay.panel.expect("a zoomed panel").height,
+            lay.bottom.unwrap().y
+        );
+    }
+
     /// A click in the panel takes the keyboard there, and a click in the text gives it back: the
     /// mouse and the keys must agree about which surface a person is working in.
     #[test]
     fn a_click_in_the_panel_takes_the_keyboard_and_a_click_in_the_text_gives_it_back() {
         let mut ed = editor();
         ed.panel.open = true;
-        ed.panel.focus = false;
+        ed.focus = Focus::Text;
         let lay = layout(120, 30, &ed, None);
         let press = |x: u16| rano::term::MouseEvent {
             kind: MouseKind::Press(MouseButton::Left),
@@ -1216,11 +1277,14 @@ mod panel_tests {
             &mut dragging
         ));
         assert!(
-            ed.panel.focus,
+            ed.focus == Focus::Panel,
             "a click in the conversation is the conversation"
         );
         mouse(&mut ed, &lay, &press(10), 120, &mut width, &mut dragging);
-        assert!(!ed.panel.focus, "and a click in the text is the text");
+        assert!(
+            ed.focus == Focus::Text,
+            "and a click in the text is the text"
+        );
     }
 }
 

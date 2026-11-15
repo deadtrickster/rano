@@ -218,8 +218,6 @@ pub enum Row {
 pub struct Panel {
     /// Drawn beside the text.
     pub open: bool,
-    /// Holds the keyboard: the `panel` keymap mode.
-    pub focus: bool,
     /// `alt-m`: the focused surface takes the whole width even on a wide terminal.
     pub zoom: bool,
     /// The folder this conversation belongs to. The host resolves a socket from it.
@@ -280,7 +278,6 @@ impl Default for Panel {
     fn default() -> Self {
         Panel {
             open: false,
-            focus: false,
             zoom: false,
             folder: PathBuf::new(),
             moved: None,
@@ -329,7 +326,6 @@ impl Panel {
     /// has not met is a conversation of its own.
     pub fn open(&mut self, folder: PathBuf) {
         self.open = true;
-        self.focus = true;
         self.seen_name = None;
         if folder != self.folder || self.state == PanelState::Closed {
             self.folder = folder;
@@ -341,7 +337,6 @@ impl Panel {
     /// it again is the split it was, not the zoom one frame was under.
     pub fn close(&mut self) {
         self.open = false;
-        self.focus = false;
         self.zoom = false;
     }
 
@@ -729,7 +724,6 @@ impl Panel {
             if let Some(chip) = chip {
                 self.chips.push(chip);
             }
-            self.focus = true;
             self.said = "type the question".to_string();
             self.touch();
             return true;
@@ -1174,6 +1168,7 @@ impl crate::editor::Editor {
     pub fn panel_toggle(&mut self) {
         if self.panel.open {
             self.panel.close();
+            self.focus = crate::editor::Focus::Text;
         } else {
             self.panel_open();
         }
@@ -1183,6 +1178,7 @@ impl crate::editor::Editor {
     pub fn panel_open(&mut self) {
         let folder = self.panel_folder();
         self.panel.open(folder);
+        self.focus = crate::editor::Focus::Panel;
     }
 
     /// `ctrl-]`: the keyboard to the other surface, opening the panel when it is shut.
@@ -1191,7 +1187,11 @@ impl crate::editor::Editor {
             self.panel_open();
             return;
         }
-        self.panel.focus = !self.panel.focus;
+        self.focus = if self.focus == crate::editor::Focus::Panel {
+            crate::editor::Focus::Text
+        } else {
+            crate::editor::Focus::Panel
+        };
     }
 
     /// `alt-m`: the focused surface takes the whole width, or gives it back.
@@ -1204,6 +1204,7 @@ impl crate::editor::Editor {
     /// line saying why not.
     pub fn panel_refuse(&mut self, said: &str) {
         self.panel.close();
+        self.focus = crate::editor::Focus::Text;
         self.panel.said = said.to_string();
         self.flash(said);
     }
@@ -1229,12 +1230,16 @@ impl crate::editor::Editor {
     pub fn panel_ask(&mut self, ask: &crate::ask::AskEvent) -> bool {
         if !self.panel.open {
             let folder = self.panel_folder();
+            // The answer lands in the panel; the keyboard stays where it is.
             self.panel.open(folder);
-            // The answer lands in the panel; the words do not move the caret there.
-            self.panel.focus = false;
         }
         let lang = self.panel_lang();
-        self.panel.ask(ask, &lang)
+        let sent = self.panel.ask(ask, &lang);
+        if ask.prompt.is_empty() {
+            // A free ask has no question to answer: the composer waits for the operator's words.
+            self.focus = crate::editor::Focus::Panel;
+        }
+        sent
     }
 
     /// `alt-s` with no `send_command`: the place becomes a chip on the next prompt rather than a
@@ -1275,7 +1280,7 @@ impl crate::editor::Editor {
     }
 
     pub fn panel_leave(&mut self) {
-        self.panel.focus = false;
+        self.focus = crate::editor::Focus::Text;
     }
 
     pub fn panel_interrupt(&mut self) {
@@ -1529,7 +1534,7 @@ mod tests {
     #[test]
     fn opening_asks_the_host_to_connect_and_the_session_is_attached_from_the_list() {
         let mut panel = opened();
-        assert!(panel.open && panel.focus);
+        assert!(panel.open);
         assert_eq!(panel.state, PanelState::Connecting);
         assert_eq!(panel.take_acts(), vec![Act::Connect(PathBuf::from("/w"))]);
 
@@ -1771,7 +1776,7 @@ mod tests {
     fn esc_leaves_the_panel_and_the_letters_go_to_the_composer() {
         let mut ed = Editor::new(Buffer::new(), Config::default());
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = crate::editor::Focus::Panel;
         ed.panel.state = PanelState::Idle;
         for c in "hi".chars() {
             assert_eq!(
@@ -1791,7 +1796,10 @@ mod tests {
             KeyOutcome::Handled,
             "the panel's Esc is its own"
         );
-        assert!(!ed.panel.focus, "Esc gives the keyboard back to the text");
+        assert!(
+            ed.focus != crate::editor::Focus::Panel,
+            "Esc gives the keyboard back to the text"
+        );
         assert!(ed.panel.open, "and leaves the panel showing");
     }
 
@@ -1800,7 +1808,7 @@ mod tests {
     fn the_composers_enter_sends_what_was_typed() {
         let mut ed = Editor::new(Buffer::new(), Config::default());
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = crate::editor::Focus::Panel;
         ed.panel.state = PanelState::Idle;
         ed.panel.session = "s-1".to_string();
         for c in "ping".chars() {
@@ -1824,7 +1832,7 @@ mod tests {
     fn a_letter_outside_ascii_is_typed_and_deleted_by_the_character() {
         let mut ed = Editor::new(Buffer::new(), Config::default());
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = crate::editor::Focus::Panel;
         ed.panel.state = PanelState::Idle;
         for c in "aéb".chars() {
             ed.handle_key(held(&KeyCode::Char(c)));
@@ -1846,9 +1854,9 @@ mod tests {
     fn a_refused_panel_is_not_shown_at_all() {
         let mut ed = Editor::new(Buffer::new(), Config::default());
         ed.panel.open = true;
-        ed.panel.focus = true;
+        ed.focus = crate::editor::Focus::Panel;
         ed.panel_refuse("no letibot on PATH");
-        assert!(!ed.panel.open && !ed.panel.focus);
+        assert!(!ed.panel.open && ed.focus != crate::editor::Focus::Panel);
         assert_eq!(ed.status_text().as_deref(), Some("no letibot on PATH"));
     }
 
@@ -2046,7 +2054,6 @@ mod tests {
     #[test]
     fn the_free_ask_attaches_the_place_and_takes_the_keyboard() {
         let mut panel = opened();
-        panel.focus = false;
         let ask = AskEvent {
             send: place(),
             preset: "ask".to_string(),
@@ -2061,7 +2068,7 @@ mod tests {
                 .all(|a| !matches!(a, Act::Prompt { .. }))
         );
         assert_eq!(panel.chips.len(), 1);
-        assert!(panel.focus, "the composer has the keyboard");
+        // The keyboard is the host's one focus now, not a flag on the panel.
         assert_eq!(panel.said, "type the question");
     }
 

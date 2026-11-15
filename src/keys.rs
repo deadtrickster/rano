@@ -110,14 +110,9 @@ impl Editor {
         if self.on_key_to_plugin(&key) {
             return KeyOutcome::Handled;
         }
-        // **The bottom terminal's keyboard** (`` ctrl-` `` toggles it): while it holds focus its
-        // own chords switch tabs and everything else is the shell's.
-        if self.bottom_key(&key) {
-            return KeyOutcome::Handled;
-        }
         // **The panel's keyboard**, when it holds it (`alt-i` in, Esc out): its map, then the
         // composer's line, ahead of the maps the way a prompt's keys are.
-        if self.panel.focus
+        if self.focus == crate::editor::Focus::Panel
             && self.diff_view.is_none()
             && self.prompt.is_none()
             && self.panel_key(&key)
@@ -200,7 +195,10 @@ impl Editor {
     /// The bottom terminal's keys. `false` means the key was not for it, so it falls through to the
     /// editor's own maps. While the terminal is focused, everything but its own chords goes to the
     /// shell — that is what a terminal panel is for.
-    fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
+    /// The bottom terminal's keys, answered by the HOST ahead of the editor's maps: a focused
+    /// terminal's typing is the shell's, and an embedder that never draws the strip never forks
+    /// a shell it cannot show.
+    pub fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
         let ctrl = key.mods.ctrl();
         let alt = key.mods.alt();
         // `ctrl-\`` is NUL in ASCII, so it cannot be a chord. The toggle is `M-0`: free in the map,
@@ -214,9 +212,15 @@ impl Editor {
                 12,
                 self.config.terminal_scrollback,
             );
+            // The keyboard follows the strip: open takes it, shut gives it back to the text.
+            self.focus = if self.bottom.open {
+                crate::editor::Focus::Terminal
+            } else {
+                crate::editor::Focus::Text
+            };
             return true;
         }
-        if !self.bottom.open || !self.bottom.focus {
+        if !self.bottom.open || self.focus != crate::editor::Focus::Terminal {
             return false;
         }
         // A dead shell takes no more keys: its tab says how it exited, Enter or M-w closes it,
@@ -231,6 +235,9 @@ impl Editor {
                 || (alt && matches!(key.code, crate::term::KeyCode::Char('w')))
             {
                 self.bottom.close_active();
+                if !self.bottom.open {
+                    self.focus = crate::editor::Focus::Text;
+                }
             }
             return true;
         }
@@ -245,8 +252,8 @@ impl Editor {
                 true
             }
             // M-0 while focused unfocuses rather than closes: the shell keeps running.
-            (false, true, crate::term::KeyCode::Char('0')) if self.bottom.focus => {
-                self.bottom.focus = false;
+            (false, true, crate::term::KeyCode::Char('0')) => {
+                self.focus = crate::editor::Focus::Text;
                 true
             }
             (false, true, crate::term::KeyCode::Char('n')) => {
@@ -260,6 +267,9 @@ impl Editor {
             }
             (false, true, crate::term::KeyCode::Char('w')) => {
                 self.bottom.close_active();
+                if !self.bottom.open {
+                    self.focus = crate::editor::Focus::Text;
+                }
                 true
             }
             (false, true, crate::term::KeyCode::Char('[')) => {

@@ -309,7 +309,6 @@ impl Drop for Tab {
 /// The bottom terminal: a row of tabs, the active one drawn, and which of them has the keyboard.
 pub struct BottomTerm {
     pub open: bool,
-    pub focus: bool,
     pub tabs: Vec<Tab>,
     pub active: usize,
     /// The strip's height in rows, remembered across toggles: a terminal the operator has resized
@@ -324,7 +323,6 @@ impl BottomTerm {
     pub fn new() -> BottomTerm {
         BottomTerm {
             open: false,
-            focus: false,
             tabs: Vec::new(),
             active: 0,
             height: 12,
@@ -341,7 +339,6 @@ impl BottomTerm {
         scrollback: usize,
     ) -> std::io::Result<()> {
         self.open = !self.open;
-        self.focus = self.open;
         if self.open && self.tabs.is_empty() {
             self.tabs.push(Tab::open(cwd, cols, rows, scrollback)?);
         }
@@ -388,7 +385,6 @@ impl BottomTerm {
         self.tabs.remove(self.active);
         if self.tabs.is_empty() {
             self.open = false;
-            self.focus = false;
         }
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }

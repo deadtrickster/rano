@@ -175,6 +175,16 @@ impl Area {
     }
 }
 
+/// Which surface holds the keyboard: one answer, owned by the host layer, so the text, the panel
+/// and the bottom terminal can never each believe they have it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Text,
+    Panel,
+    Terminal,
+}
+
 pub struct Editor {
     pub buffers: Vec<BufferState>,
     pub cur: usize,
@@ -213,6 +223,8 @@ pub struct Editor {
     pub panel: crate::panel::Panel,
     /// **The bottom terminal**: shells in tabs at the foot of the frame (`` ctrl-` `` toggles).
     /// Each tab is a pty and a `vt100` parser; see [`crate::bottomterm`].
+    /// The surface with the keyboard: text, panel, or terminal.
+    pub focus: Focus,
     pub bottom: crate::bottomterm::BottomTerm,
     pub plugin: Option<crate::plugin::Plugin>,
     pub builtins: Vec<crate::plugin::Plugin>,
@@ -343,6 +355,7 @@ impl Editor {
             diff_split: false,
             images: false,
             panel: crate::panel::Panel::default(),
+            focus: Focus::Text,
             bottom: crate::bottomterm::BottomTerm::default(),
             proto: Proto::None,
             picture_view: None,
@@ -2215,7 +2228,7 @@ impl Editor {
             return;
         }
         // A focused terminal: the paste is the shell's input, not the file's.
-        if self.bottom.open && self.bottom.focus {
+        if self.bottom.open && self.focus == Focus::Terminal {
             if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
                 tab.paste(s);
             }
@@ -2223,7 +2236,7 @@ impl Editor {
         }
         // While the panel holds the keyboard the caret is its composer: one line, so the
         // newlines become spaces.
-        if self.panel.focus {
+        if self.focus == Focus::Panel {
             for c in s.chars() {
                 self.panel.insert(c);
             }

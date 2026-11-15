@@ -1296,7 +1296,7 @@ impl Editor {
         }
         // The panel holds the keyboard: its own map over the global one, which is what makes the
         // bar and the help pages name the panel's keys the way they name every mode's.
-        if self.panel.focus {
+        if self.focus == crate::editor::Focus::Panel {
             return vec![&k.panel, &k.global];
         }
         vec![&k.global]

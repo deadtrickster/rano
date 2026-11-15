@@ -105,6 +105,16 @@ impl Editor {
     }
 }
 
+/// A key as the host answers it: the bottom terminal's keys first, then the editor's maps. The
+/// binary routes through here, so rano and an embedder agree — and an embedder that only ever
+/// calls `Editor::handle_key` never forks a shell it cannot draw.
+pub fn key(ed: &mut Editor, k: crate::term::KeyEvent) -> crate::editor::KeyOutcome {
+    if ed.bottom_key(&k) {
+        return crate::editor::KeyOutcome::Handled;
+    }
+    ed.handle_key(k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +211,7 @@ mod tests {
     #[test]
     fn m_zero_opens_the_bottom_terminal() {
         let mut ed = ed("abc");
-        let out = ed.handle_key(key(crate::term::KeyCode::Char('0'), Mods::ALT));
+        let out = super::key(&mut ed, key(crate::term::KeyCode::Char('0'), Mods::ALT));
         assert_eq!(out, crate::editor::KeyOutcome::Handled);
         assert!(ed.bottom.open, "M-0 opens it");
         assert_eq!(ed.bottom.tabs.len(), 1, "one shell");
@@ -213,7 +223,7 @@ mod tests {
     fn a_focused_terminal_leaks_no_key_to_the_editor() {
         let mut ed = ed("abc");
         ed.bottom.open = true;
-        ed.bottom.focus = true;
+        ed.focus = crate::editor::Focus::Terminal;
         let before = text(&ed);
         for (code, mods) in [
             (KeyCode::Tab, Mods::NONE),
@@ -223,7 +233,7 @@ mod tests {
             (KeyCode::Delete, Mods::NONE),
             (KeyCode::Char('x'), Mods::CTRL),
         ] {
-            ed.handle_key(key(code, mods));
+            super::key(&mut ed, key(code, mods));
         }
         assert_eq!(text(&ed), before, "nothing reached the buffer");
         assert!(!ed.wants_quit(), "C-x did not ask to quit");
@@ -234,7 +244,7 @@ mod tests {
     fn a_paste_at_a_focused_terminal_reaches_the_pty() {
         let mut ed = ed("abc");
         ed.bottom.open = true;
-        ed.bottom.focus = true;
+        ed.focus = crate::editor::Focus::Terminal;
         ed.bottom
             .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
             .expect("a shell");
@@ -259,7 +269,7 @@ mod tests {
     fn a_dead_shell_takes_no_keys_and_enter_closes_it() {
         let mut ed = ed("abc");
         ed.bottom.open = true;
-        ed.bottom.focus = true;
+        ed.focus = crate::editor::Focus::Terminal;
         ed.bottom
             .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
             .expect("a shell");
@@ -273,11 +283,28 @@ mod tests {
         }
         assert_eq!(ed.bottom.tabs[0].exited, Some(0), "the exit was noticed");
         let before = text(&ed);
-        ed.handle_key(key(KeyCode::Char('x'), Mods::NONE));
+        super::key(&mut ed, key(KeyCode::Char('x'), Mods::NONE));
         assert_eq!(text(&ed), before, "nothing reached the buffer");
         assert_eq!(ed.bottom.tabs.len(), 1, "the dead tab is still there");
-        ed.handle_key(key(KeyCode::Enter, Mods::NONE));
+        super::key(&mut ed, key(KeyCode::Enter, Mods::NONE));
         assert!(ed.bottom.tabs.is_empty(), "Enter closed the dead tab");
+    }
+
+    /// An embedder that drives `Editor::handle_key` alone never forks a shell: the terminal's
+    /// chords are the host's, so M-0, M-n and M-w are simply unbound keys there.
+    #[test]
+    fn an_editor_driven_through_handle_key_alone_never_forks() {
+        let mut ed = ed("abc");
+        for (code, mods) in [
+            (KeyCode::Char('0'), Mods::ALT),
+            (KeyCode::Char('n'), Mods::ALT),
+            (KeyCode::Char('w'), Mods::ALT),
+        ] {
+            ed.handle_key(key(code, mods));
+        }
+        assert!(!ed.bottom.open, "no strip was opened");
+        assert!(ed.bottom.tabs.is_empty(), "no shell was forked");
+        assert_eq!(text(&ed).join("\n"), "abc", "and the file is untouched");
     }
 
     #[test]

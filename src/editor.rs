@@ -1655,6 +1655,34 @@ impl Editor {
     /// active tab's scrollback, and dragging the rule above it resizes the strip. Nothing here
     /// reaches the document.
     pub fn bottom_mouse(&mut self, m: MouseEvent, strip_y: u16, strip_h: u16) -> bool {
+        // The last column is the scrollbar: a press or drag there is the view's place in the
+        // history, exactly as the text pane's scrollbar is.
+        if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+            let content_h = (strip_h as usize).saturating_sub(2);
+            let total = tab.history_len() + tab.screen_rows();
+            if content_h > 1 && total > content_h {
+                let thumb = ((content_h * content_h) / total).clamp(1, content_h);
+                let travel = content_h - thumb;
+                let first = strip_y as usize + 2;
+                let travel_max = total - content_h;
+                if matches!(
+                    m.kind,
+                    MouseKind::Press(MouseButton::Left) | MouseKind::Drag(MouseButton::Left)
+                ) && (m.y as usize) >= first
+                    && (m.y as usize) < first + content_h
+                    && m.x == self.area.x + self.area.w.saturating_sub(1)
+                {
+                    let i = (m.y as usize - first).min(travel);
+                    let at = if travel == 0 {
+                        0
+                    } else {
+                        i * travel_max / travel
+                    };
+                    tab.scroll_to_top_index(at);
+                    return true;
+                }
+            }
+        }
         match m.kind {
             MouseKind::WheelUp => {
                 if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {

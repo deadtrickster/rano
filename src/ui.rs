@@ -87,6 +87,29 @@ pub(crate) fn scrollbar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usi
     let travel = h - thumb;
     let max = total - h;
     let at = (pos.min(max) * travel) / max.max(1);
+    bar(pane, buf, y, h, at, thumb);
+}
+
+/// A track and a thumb that are ALWAYS drawn: a pane with nothing to scroll yet says so with a
+/// full-height thumb rather than with no scrollbar at all — the terminal's, where `↑N more` was
+/// the only sign of a scrollback.
+pub fn bar_always(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, total: usize) {
+    if h < 2 {
+        return;
+    }
+    if total <= h {
+        bar(pane, buf, y, h, 0, h);
+        return;
+    }
+    let thumb = ((h * h) / total).clamp(1, h);
+    let travel = h - thumb;
+    let max = total - h;
+    let at = (pos.min(max) * travel) / max.max(1);
+    bar(pane, buf, y, h, at, thumb);
+}
+
+/// The cells of one bar: `thumb` cells from `at`, the rest the faint track.
+fn bar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, at: usize, thumb: usize) {
     for i in 0..h {
         let ch = if i >= at && i < at + thumb {
             '\u{2588}'

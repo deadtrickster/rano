@@ -248,6 +248,24 @@ impl Tab {
         self.parser.screen().alternate_screen()
     }
 
+    /// The rows the shell has scrolled off, and the rows on the glass: the scrollbar's total.
+    pub fn history_len(&self) -> usize {
+        self.parser.screen().scrollback_len()
+    }
+
+    pub fn screen_rows(&self) -> usize {
+        self.parser.screen().size().0.get() as usize
+    }
+
+    /// Scroll so that the history's row `top` is the first visible one: what a click on the
+    /// track names.
+    pub fn scroll_to_top_index(&mut self, top: usize) {
+        let history = self.history_len();
+        self.parser
+            .screen_mut()
+            .set_scrollback(history.saturating_sub(top));
+    }
+
     pub fn scroll_pos(&self) -> usize {
         self.parser.screen().scrollback()
     }

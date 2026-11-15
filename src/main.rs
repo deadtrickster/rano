@@ -796,8 +796,11 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
 fn sync_bottom_size(ed: &mut Editor, lay: &Layout) {
     if let Some(area) = lay.bottom {
         let rows = (area.height as usize).saturating_sub(2).max(1) as u16;
+        // One column narrower: the strip's last column is the scrollbar, and no shell output
+        // may sit under it.
+        let cols = area.width.saturating_sub(1).max(1);
         for tab in &mut ed.bottom.tabs {
-            tab.resize(area.width, rows);
+            tab.resize(cols, rows);
         }
     }
 }
@@ -817,7 +820,8 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     }
     if let Some(area) = lay.bottom {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let lines = ed.bottom.lines(area.width as usize, &cwd);
+        let content_w = (area.width as usize).saturating_sub(1);
+        let lines = ed.bottom.lines(content_w, &cwd);
         // A rule above the strip: the terminal is a pane, not more of the file's text.
         let rule = Line::styled(
             "─".repeat(area.width as usize),
@@ -829,7 +833,18 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             .take((area.height as usize).saturating_sub(1))
             .enumerate()
         {
-            buf.set_line(area.x, area.y + 1 + i as u16, l, area.width as usize);
+            buf.set_line(area.x, area.y + 1 + i as u16, l, content_w);
+        }
+        // The scrollbar, the same drawing the text pane's is: a track with a thumb, always
+        // drawn, over the rows the terminal actually has.
+        if let Some(tab) = ed.bottom.tabs.get(ed.bottom.active) {
+            let h = (area.height as usize).saturating_sub(2);
+            let history = tab.history_len();
+            let total = history + tab.screen_rows();
+            // `pos` counts from the top of the history: offset 0 is its foot, which is the
+            // thumb at the bottom of the track.
+            let pos = history.saturating_sub(tab.scroll_pos());
+            crate::ui::bar_always(area, buf, 2, h, pos, total);
         }
     }
     if let Some(area) = lay.panel {
@@ -1002,7 +1017,8 @@ mod panel_tests {
         let rows = strip.height - 2;
         ed.bottom.tabs[0].send(b"PS1='PROMPT> '\n");
         ed.bottom.tabs[0].send(b"stty size\n");
-        let want = format!("{rows} {}", strip.width);
+        // The pty is one column narrower than the strip: the last column is the scrollbar.
+        let want = format!("{rows} {}", strip.width - 1);
         assert!(
             feed_until(&mut ed, |l| l.trim().ends_with(&want)),
             "stty size is the drawn rectangle: {want}"
@@ -1042,7 +1058,7 @@ mod panel_tests {
         let lay2 = layout(80, 30, &ed, None);
         sync_bottom_size(&mut ed, &lay2);
         let strip2 = lay2.bottom.expect("a strip");
-        let want2 = format!("{} {}", strip2.height - 2, strip2.width);
+        let want2 = format!("{} {}", strip2.height - 2, strip2.width - 1);
         ed.bottom.tabs[0].send(b"stty size\n");
         assert!(
             feed_until(&mut ed, |l| l.trim().ends_with(&want2)),
@@ -1205,6 +1221,69 @@ mod panel_tests {
         // A key nobody claimed: nothing happens, which is what the binary did before.
         let _ = ed.handle_key(key(KeyCode::Char('z'), rano::term::event::Mods::ALT));
         assert!(!ed.panel.open && !ed.panel.zoom);
+    }
+
+    /// The strip's last column is a scrollbar — a track with a thumb, always drawn. `↑N more` is
+    /// a counter; this is where in the history the view actually is.
+    #[test]
+    fn the_strips_last_column_is_a_scrollbar() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        ed.bottom.tabs[0].send(b"seq 1 200\n");
+        assert!(feed_until(&mut ed, |l| l.trim() == "200"), "seq answered");
+        let strip = lay.bottom.expect("a strip");
+        let right = (strip.x + strip.width - 1) as usize;
+        let track = |buf: &rano::render::Buffer| -> Vec<char> {
+            let rows = buf.emit(rano::render::Palette::None);
+            ((strip.y as usize + 2)..(strip.y + strip.height) as usize)
+                .map(|y| rows[y].chars().nth(right).unwrap_or(' '))
+                .collect()
+        };
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let at_bottom = track(&buf);
+        assert_eq!(
+            at_bottom.last(),
+            Some(&'\u{2588}'),
+            "the thumb is at the foot: {at_bottom:?}"
+        );
+        assert!(
+            at_bottom
+                .iter()
+                .all(|c| *c == '\u{2502}' || *c == '\u{2588}'),
+            "track or thumb, never shell text: {at_bottom:?}"
+        );
+        // Three pages back through the host path: the thumb moves up, and the counter agrees.
+        for _ in 0..3 {
+            rano::host::key(
+                &mut ed,
+                rano::term::KeyEvent::new(KeyCode::PageUp, rano::term::event::Mods::NONE),
+            );
+        }
+        draw_frame(&mut buf, &mut ed, &lay);
+        let scrolled = track(&buf);
+        assert_ne!(scrolled, at_bottom, "the thumb moved: {scrolled:?}");
+        assert!(
+            buf.emit(rano::render::Palette::None)
+                .join("")
+                .contains("↑3 more"),
+            "the counter agrees with the thumb"
+        );
+        // A key is an answer to the newest output: back to the bottom, thumb and all.
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(KeyCode::Char('x'), rano::term::event::Mods::NONE),
+        );
+        draw_frame(&mut buf, &mut ed, &lay);
+        assert_eq!(track(&buf), at_bottom, "back at the bottom after a key");
     }
 
     /// The status and the key bar are the frame's last rows: the terminal's strip is above them,

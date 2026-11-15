@@ -26,6 +26,7 @@ impl Editor {
         dirty |= self.line_count_poll();
         dirty |= self.diag_flush(now);
         dirty |= self.tick_status();
+        dirty |= self.panel.tick_turn();
         dirty |= self.lsp_poll();
         dirty |= self.lsp_flush(now);
         self.completion_retry_poll();
@@ -95,6 +96,15 @@ impl Editor {
             LOADING_WAIT
         } else {
             IDLE_WAIT
+        };
+        // A running turn's status line moves on its own clock: once a second is enough for the
+        // spinner and the elapsed count, and a tick that never comes froze both.
+        let wait = if self.panel.state == crate::panel::PanelState::Thinking
+            || self.panel.pending_ask().is_some()
+        {
+            wait.min(Duration::from_millis(250))
+        } else {
+            wait
         };
         match self.card_due() {
             // The +1 ms rounds past the deadline: waking a hair early would

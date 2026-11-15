@@ -22,6 +22,9 @@ pub struct Tab {
     pid: libc::pid_t,
     /// The tab's label: the shell's name, and whether it has exited.
     pub title: String,
+    /// The shell's exit status, once its end of the pty is gone and waitpid has reaped it.
+    /// A dead shell takes no more keys.
+    pub exited: Option<i32>,
 }
 
 impl Tab {
@@ -75,6 +78,7 @@ impl Tab {
                     master,
                     pid: p,
                     title: "sh".to_string(),
+                    exited: None,
                 })
             }
             _ => Err(std::io::Error::last_os_error()),
@@ -98,7 +102,15 @@ impl Tab {
             }
             let want = buf.len().min(budget);
             let n = unsafe { libc::read(self.master, buf.as_mut_ptr() as *mut _, want) };
-            if n <= 0 {
+            if n == 0
+                || (n == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EIO))
+            {
+                // The shell's end is gone: EOF on some platforms, EIO on Linux. Reap it and put
+                // the status in the tab's title rather than leaving a silent dead pane.
+                self.notice_exit();
+                break;
+            }
+            if n < 0 {
                 break;
             }
             dirty = true;
@@ -108,10 +120,35 @@ impl Tab {
         dirty
     }
 
+    /// The shell's exit, if waitpid can collect it now: the title carries the status, and the
+    /// tab stops taking input.
+    fn notice_exit(&mut self) {
+        if self.exited.is_some() {
+            return;
+        }
+        let mut status = 0;
+        let r = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        if r == self.pid {
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                128 + libc::WTERMSIG(status)
+            } else {
+                1
+            };
+            self.exited = Some(code);
+            self.title = format!("sh (exited {code})");
+        }
+    }
+
     /// A key, as the shell's bytes. Every key translates or is swallowed: a chord this cannot
     /// spell must not fall through to the editor, which would cut or indent the file behind the
     /// reader's back.
     pub fn send(&mut self, bytes: &[u8]) {
+        if self.exited.is_some() {
+            // Nothing is written to a dead shell: the keystrokes are not its input any more.
+            return;
+        }
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
     }
 
@@ -722,6 +759,7 @@ mod tests {
                 master,
                 pid,
                 title: "t".to_string(),
+                exited: None,
             },
             slave,
         )
@@ -769,6 +807,7 @@ mod tests {
             master,
             pid,
             title: "t".to_string(),
+            exited: None,
         };
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the child is alive");
@@ -868,6 +907,51 @@ mod tests {
         t.paste("ef");
         let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
         assert_eq!(&buf[..n as usize], b"ef", "and off again");
+        unsafe {
+            libc::close(slave);
+        }
+    }
+
+    /// A shell that exits is noticed: the status is in the tab's title, not a silent dead pane.
+    #[test]
+    fn a_shell_that_exits_is_noticed_and_titled() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"exit 42\n");
+        let mut noticed = false;
+        for _ in 0..200 {
+            t.feed();
+            if t.exited.is_some() {
+                noticed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(noticed, "the exit was noticed");
+        assert_eq!(t.exited, Some(42), "the status is the shell's own");
+        assert!(t.title.contains("42"), "the tab says so: {}", t.title);
+    }
+
+    /// A dead tab is not written to: keys after the exit never reach the pty.
+    #[test]
+    fn a_dead_tab_is_not_written_to() {
+        let (mut t, slave) = pipe_tab();
+        unsafe {
+            let mut tio: libc::termios = std::mem::zeroed();
+            libc::tcgetattr(slave, &mut tio);
+            libc::cfmakeraw(&mut tio);
+            libc::tcsetattr(slave, libc::TCSANOW, &tio);
+        }
+        let mut buf = [0u8; 8];
+        t.send(b"a");
+        let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(n, 1, "a live tab takes the key");
+        t.exited = Some(0);
+        t.send(b"b");
+        unsafe {
+            libc::fcntl(slave, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert!(n <= 0, "a dead tab took no key: {n}");
         unsafe {
             libc::close(slave);
         }

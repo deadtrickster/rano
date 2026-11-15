@@ -219,6 +219,21 @@ impl Editor {
         if !self.bottom.open || !self.bottom.focus {
             return false;
         }
+        // A dead shell takes no more keys: its tab says how it exited, Enter or M-w closes it,
+        // and nothing else is written to it or leaked to the editor.
+        if self
+            .bottom
+            .tabs
+            .get(self.bottom.active)
+            .is_some_and(|t| t.exited.is_some())
+        {
+            if matches!(key.code, crate::term::KeyCode::Enter)
+                || (alt && matches!(key.code, crate::term::KeyCode::Char('w')))
+            {
+                self.bottom.close_active();
+            }
+            return true;
+        }
         let cwd = std::env::current_dir().unwrap_or_default();
         match (ctrl, alt, key.code) {
             (false, false, crate::term::KeyCode::Esc) => {

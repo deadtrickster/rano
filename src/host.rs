@@ -254,6 +254,32 @@ mod tests {
         assert_eq!(text(&ed), before, "the buffer is unmodified");
     }
 
+    /// A dead shell's tab swallows keys, changes nothing in the buffer, and Enter closes it.
+    #[test]
+    fn a_dead_shell_takes_no_keys_and_enter_closes_it() {
+        let mut ed = ed("abc");
+        ed.bottom.open = true;
+        ed.bottom.focus = true;
+        ed.bottom
+            .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        ed.bottom.tabs[0].send(b"exit 0\n");
+        for _ in 0..200 {
+            ed.bottom.tabs[0].feed();
+            if ed.bottom.tabs[0].exited.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ed.bottom.tabs[0].exited, Some(0), "the exit was noticed");
+        let before = text(&ed);
+        ed.handle_key(key(KeyCode::Char('x'), Mods::NONE));
+        assert_eq!(text(&ed), before, "nothing reached the buffer");
+        assert_eq!(ed.bottom.tabs.len(), 1, "the dead tab is still there");
+        ed.handle_key(key(KeyCode::Enter, Mods::NONE));
+        assert!(ed.bottom.tabs.is_empty(), "Enter closed the dead tab");
+    }
+
     #[test]
     fn an_idle_editor_waits_the_idle_wait() {
         assert_eq!(ed("x").next_wakeup(), IDLE_WAIT);

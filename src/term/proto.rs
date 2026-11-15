@@ -48,6 +48,9 @@ pub struct Env {
     pub tmux: bool,
     /// What tmux said about `allow-passthrough`, when it was asked — `None` when nobody asked.
     pub passthrough: Option<bool>,
+    /// `client_termname`: the terminal tmux is really talking to. `TERM_PROGRAM` does not cross
+    /// ssh, so inside tmux this is the only name the client has.
+    pub client_term: String,
 }
 
 impl Env {
@@ -62,22 +65,21 @@ impl Env {
             kitty_window: !var("KITTY_WINDOW_ID").is_empty(),
             tmux: !var("TMUX").is_empty(),
             passthrough: None,
+            client_term: String::new(),
         }
     }
 
-    /// Ask tmux whether it will pass a DCS sequence through, and record the answer. Worth only
-    /// inside tmux: it costs a process and a round trip to a busy server. `on` and `all` both
-    /// forward a wrapped sequence; anything else is a no.
-    pub fn ask_passthrough(&mut self) {
+    /// Ask tmux, once, for both facts the decision needs: the client's real name and whether
+    /// DCS sequences are forwarded. Both commands are bounded — a hung tmux server must not
+    /// stall the UI thread, and an unanswered one is simply no answer.
+    pub fn ask_tmux(&mut self) {
         if !self.tmux {
             return;
         }
-        let said = std::process::Command::new("tmux")
-            .args(["show-options", "-gv", "allow-passthrough"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        self.passthrough = match said.as_deref() {
+        self.client_term =
+            tmux_said(&["display-message", "-p", "#{client_termname}"]).unwrap_or_default();
+        self.passthrough = match tmux_said(&["show-options", "-gv", "allow-passthrough"]).as_deref()
+        {
             Some("on") | Some("all") => Some(true),
             Some(_) => Some(false),
             None => None,
@@ -85,10 +87,42 @@ impl Env {
     }
 }
 
+/// A tmux command's answer, trimmed, or None if it did not answer within the query timeout.
+fn tmux_said(args: &[&str]) -> Option<String> {
+    let mut child = std::process::Command::new("tmux")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let out = child.wait_with_output().ok()?;
+                return Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    }
+}
+
 /// The terminal's family, by the names it goes by: a pure function of two strings so a test can
 /// walk the whole list.
 fn kitty_family(env: &Env) -> bool {
     let prog = env.term_program.to_ascii_lowercase();
+    // Inside tmux the client's own name is the only one there is: `xterm-ghostty`, `xterm-kitty`,
+    // `wezterm` are all the kitty family, whatever `TERM` and `TERM_PROGRAM` say.
+    let client = env.client_term.to_ascii_lowercase();
+    if client.contains("ghostty") || client.contains("kitty") || client.contains("wezterm") {
+        return true;
+    }
     env.kitty_window
         || env.term.contains("kitty")
         || env.term.contains("ghostty")
@@ -147,11 +181,16 @@ impl Proto {
             // Named after all, just not by the first rung — nothing to ask.
             return named;
         }
+        if env.tmux {
+            // The client is unknown and tmux forwards: ask the terminal through the wrapper,
+            // not bare — a bare query is swallowed by the multiplexer, never answered.
+            if env.passthrough == Some(true) {
+                let wrapped = Proto::KittyPassthrough.wrap(KITTY_QUERY);
+                return after_answer(&wrapped, ask_bytes(&wrapped, QUERY_TIMEOUT).answered);
+            }
+            return Proto::None;
+        }
         match ask_kitty(QUERY_TIMEOUT).answered {
-            Some(true) if env.tmux => match env.passthrough {
-                Some(true) => Proto::KittyPassthrough,
-                _ => Proto::None,
-            },
             Some(true) => Proto::Kitty,
             _ => Proto::None,
         }
@@ -194,8 +233,24 @@ pub struct Reply {
 /// question goes to stdout and the answer comes back on stdin, so this only works in raw mode
 /// before a host starts reading — which is why it is the last rung.
 pub fn ask_kitty(timeout: Duration) -> Reply {
+    ask_bytes(KITTY_QUERY, timeout)
+}
+
+/// What a wrapped capability answer means: the client was unknown, tmux forwards, and the
+/// terminal answered — so it is the kitty family behind the multiplexer.
+fn after_answer(seq: &[u8], answered: Option<bool>) -> Proto {
+    debug_assert!(seq.starts_with(b"\x1bPtmux;"), "asked through the wrapper");
+    match answered {
+        Some(true) => Proto::KittyPassthrough,
+        _ => Proto::None,
+    }
+}
+
+/// The capability question as these bytes must be written: bare for a direct terminal, wrapped
+/// for tmux.
+fn ask_bytes(seq: &[u8], timeout: Duration) -> Reply {
     let mut reply = Reply::default();
-    if !write_out(KITTY_QUERY) {
+    if !write_out(seq) {
         return reply;
     }
     let deadline = std::time::Instant::now() + timeout;
@@ -291,6 +346,41 @@ mod tests {
             term_program: prog.into(),
             ..Env::default()
         }
+    }
+
+    fn tmux_env(client: &str, pass: Option<bool>) -> Env {
+        Env {
+            term: "tmux-256color".into(),
+            tmux: true,
+            client_term: client.into(),
+            passthrough: pass,
+            ..Env::default()
+        }
+    }
+
+    /// Inside tmux the client's own name decides, and passthrough is the gate: over ssh there is
+    /// no TERM_PROGRAM, so `client_termname` is the only name the client has.
+    #[test]
+    fn inside_tmux_the_client_name_and_passthrough_decide() {
+        for client in ["xterm-ghostty", "xterm-kitty", "wezterm"] {
+            let e = tmux_env(client, Some(true));
+            assert_eq!(Proto::of(&e, true), Proto::KittyPassthrough, "{client}");
+        }
+        let e = tmux_env("xterm-ghostty", Some(false));
+        assert_eq!(Proto::of(&e, true), Proto::None, "passthrough off is no");
+        let e = tmux_env("xterm", Some(true));
+        assert_eq!(
+            Proto::of(&e, true),
+            Proto::None,
+            "nothing before the answer"
+        );
+        let wrapped = Proto::KittyPassthrough.wrap(KITTY_QUERY);
+        assert!(wrapped.starts_with(b"\x1bPtmux;"), "DCS-wrapped, not bare");
+        assert_eq!(after_answer(&wrapped, Some(true)), Proto::KittyPassthrough);
+        assert_eq!(after_answer(&wrapped, Some(false)), Proto::None);
+        assert_eq!(after_answer(&wrapped, None), Proto::None);
+        // Outside tmux a name is still just a name: unchanged.
+        assert_eq!(Proto::of(&env("xterm-ghostty", ""), true), Proto::Kitty);
     }
 
     /// The names, on every terminal worth knowing, and the ones this file declines to guess about.

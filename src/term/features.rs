@@ -23,6 +23,9 @@ pub struct Features {
     /// How a picture is delivered when [`Features::images`] is on — a field, not a second
     /// detection, so the two cannot disagree.
     pub proto: crate::term::Proto,
+    /// tmux said `allow-passthrough` is off: the reason a picture cannot be drawn, and what M-p
+    /// must tell the operator to change.
+    pub tmux_passthrough_off: bool,
 }
 
 const NAMES: [&str; 7] = [
@@ -45,6 +48,7 @@ impl Features {
         images: true,
         background: true,
         proto: crate::term::Proto::Kitty,
+        tmux_passthrough_off: false,
     };
 
     /// What Ghostty gets: everything but `progress`, which it animates for a whole turn.
@@ -57,20 +61,16 @@ impl Features {
     pub fn detect() -> Features {
         let mut env = crate::term::proto::Env::now();
         let mut f = Features::of_env(&env, &words());
+        if env.tmux {
+            // Both tmux facts, asked once: the client's real name and whether DCS is forwarded.
+            env.ask_tmux();
+        }
         if !f.images {
             // A name promises nothing over ssh; the terminal's own answer does.
             f.proto = crate::term::Proto::detect(&env, true);
-            // tmux is asked only when it can change the answer.
-            if f.proto == crate::term::Proto::Kitty && env.tmux {
-                env.ask_passthrough();
-                f.proto = if env.passthrough == Some(true) {
-                    crate::term::Proto::KittyPassthrough
-                } else {
-                    crate::term::Proto::None
-                };
-            }
             f.images = f.proto.speaks();
         }
+        f.tmux_passthrough_off = env.tmux && env.passthrough == Some(false);
         f
     }
 

@@ -103,8 +103,12 @@ line is reported.
 | `RANO_WRITE_STATS` | A path, or `-` for stderr: write the terminal's write stats on exit |
 | `RANO_INSTALL_DIR`, `RANO_FROM_SOURCE`, `RANO_VERSION` | `install.sh`: where the binary goes, build instead of download, the tag |
 
-`LETIBOT_TERM_FEATURES` is read when `RANO_TERM_FEATURES` is unset. Inside tmux nothing is on
-unless the override says so.
+`LETIBOT_TERM_FEATURES` is read when `RANO_TERM_FEATURES` is unset. Inside tmux a picture is
+drawn when the client tmux reports (`client_termname`) is in the kitty family and
+`allow-passthrough` is on — both asked of tmux once, with a deadline, since `TERM_PROGRAM` does
+not cross ssh. With passthrough on and the client unknown, the capability query is sent
+DCS-wrapped and its answer decides. With `allow-passthrough` off, `M-p` says exactly what to
+change: `tmux: set -g allow-passthrough on`.
 
 ## Pictures
 

@@ -952,6 +952,23 @@ fn a_reference_to_a_missing_file_draws_nothing() {
 }
 
 #[test]
+fn a_picture_in_tmux_with_passthrough_off_says_the_tmux_answer() {
+    let d = temp_dir("png_tmux");
+    let file = d.0.join("sun.png");
+    write_png(&file, 20, 10);
+    let mut ed = test_ed("x");
+    ed.bs_mut().buf.name = Some(file);
+    ed.images = false;
+    ed.tmux_passthrough_off = true;
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let msg = ed.status_text().expect("a reason is said");
+    assert!(
+        msg.contains("tmux: set -g allow-passthrough on"),
+        "the tmux answer, not the generic refusal: {msg}"
+    );
+}
+
+#[test]
 fn a_picture_says_why_when_the_terminal_takes_none_or_the_file_is_not_a_picture() {
     let d = temp_dir("png_why");
     let file = d.0.join("sun.png");

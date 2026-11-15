@@ -477,9 +477,11 @@ impl Editor {
     /// Failures are said rather than drawn: a picture's failure is one the reader cannot see.
     fn open_picture(&mut self, name: String) {
         if !self.images {
-            self.flash(
-                "This terminal does not take inline pictures: RANO_TERM_FEATURES=images forces them",
-            );
+            self.flash(if self.tmux_passthrough_off {
+                "tmux: set -g allow-passthrough on"
+            } else {
+                "This terminal does not take inline pictures: RANO_TERM_FEATURES=images forces them"
+            });
             return;
         }
         let Some(path) = self.bs().buf.name.clone() else {

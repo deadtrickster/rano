@@ -213,6 +213,8 @@ pub struct Editor {
     /// Whether the terminal takes inline pictures: a cell it cannot fill is
     /// drawn as garbage, so off until a host says otherwise.
     pub images: bool,
+    /// tmux's `allow-passthrough` is off: why a picture cannot be drawn here, said by name.
+    pub tmux_passthrough_off: bool,
     pub(crate) proto: Proto,
     pub(crate) picture_view: Option<PictureView>,
     /// The pictures the terminal holds, separate from `images_held` so the two cannot
@@ -354,6 +356,7 @@ impl Editor {
             diff_view: None,
             diff_split: false,
             images: false,
+            tmux_passthrough_off: false,
             panel: crate::panel::Panel::default(),
             focus: Focus::Text,
             bottom: crate::bottomterm::BottomTerm::default(),

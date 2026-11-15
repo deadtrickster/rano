@@ -287,6 +287,7 @@ fn run(
         terminal.features().proto,
         rano::term::Proto::Kitty | rano::term::Proto::KittyPassthrough
     );
+    ed.tmux_passthrough_off = terminal.features().tmux_passthrough_off;
     // `--edit`: the escape from the mode a `.log` name puts it in, set before any
     // load.
     ed.edit_override = edit;

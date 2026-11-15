@@ -1822,11 +1822,15 @@ mod panel_tests {
             let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
             draw_frame(&mut buf, &mut ed, &lay);
             let rows = buf.emit(rano::render::Palette::None);
-            for row in foot_y as usize..h as usize {
+            for (row, r) in rows
+                .iter()
+                .enumerate()
+                .take(h as usize)
+                .skip(foot_y as usize)
+            {
                 assert!(
-                    !rows[row].contains("dead@") && !rows[row].trim_start().starts_with('['),
-                    "A: no shell text on the status row {row} at {w}x{h}: {:?}",
-                    rows[row]
+                    !r.contains("dead@") && !r.trim_start().starts_with('['),
+                    "A: no shell text on the status row {row} at {w}x{h}: {r:?}"
                 );
             }
             // C: the title bar spans the frame after open and close. The reverse-video band
@@ -1843,7 +1847,6 @@ mod panel_tests {
             sync_bottom_size(&mut ed, &lay);
             let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
             draw_frame(&mut buf, &mut ed, &lay);
-            let rows = buf.emit(rano::render::Palette::None);
             let styled = buf.emit(rano::render::Palette::Colour);
             let er = lay.editor.expect("an editor");
             assert!(
@@ -1863,7 +1866,6 @@ mod panel_tests {
             sync_bottom_size(&mut ed, &lay);
             let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
             draw_frame(&mut buf, &mut ed, &lay);
-            let rows = buf.emit(rano::render::Palette::None);
             let styled = buf.emit(rano::render::Palette::Colour);
             assert!(
                 styled[0].contains("  rano") && styled[0].chars().count() >= w as usize,

@@ -1829,6 +1829,101 @@ mod panel_tests {
         }
     }
 
+    /// docs/keys.md and the keymaps agree, in BOTH directions: every chord the doc claims
+    /// parses and is bound somewhere, and every binding of every map is a chord the doc names.
+    /// The config test pins the doc's spellings against the parser; this is the direction that
+    /// would have caught the review's findings — the shared aliases with no row, and the
+    /// terminal's whole missing section.
+    #[test]
+    fn keys_md_and_the_maps_agree() {
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/keys.md"))
+            .expect("keys.md is readable");
+        // Every backticked token. A token is a CHORD CLAIM when it reads like a key: a modifier
+        // form, a `<named>` key, a bare key word. Prose in backticks (`wri out`, `multibuffer`)
+        // is not a claim; a claim that does not parse, or that no map binds, is a doc bug.
+        let tokens: Vec<&str> = doc
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect();
+        let bare = [
+            "RET",
+            "TAB",
+            "ESC",
+            "DEL",
+            "SPC",
+            "Esc",
+            "Home",
+            "End",
+            "Delete",
+            "Insert",
+            "PgUp",
+            "PgDn",
+            "Tab",
+            "Enter",
+            "Backspace",
+            "Space",
+            "arrows",
+        ];
+        let is_claim = |t: &str| {
+            t.starts_with("C-")
+                || t.starts_with("M-")
+                || t.starts_with("S-")
+                || (t.starts_with('<') && t.ends_with('>') && t.len() > 2)
+                || bare.contains(&t)
+                || (t.starts_with('F') && t[1..].chars().all(|c| c.is_ascii_digit()) && t.len() > 1)
+        };
+        let names = [
+            "global", "diff", "save", "patch", "markdown", "picture", "view", "conflict", "review",
+            "dir", "list", "buffers", "page", "palette", "panel", "terminal",
+        ];
+        // The maps as the editor actually has them; the module is private, the field is not.
+        let mut ed = editor();
+        let maps = &mut ed.keymaps;
+        let mut bound = Vec::new();
+        for name in names {
+            // by_name_mut is the one place the names are listed; the maps are only read here.
+            let map = maps.by_name_mut(name).expect("a named map");
+            for (seq, cmd) in map.flatten() {
+                bound.push((name.to_string(), seq, cmd));
+            }
+        }
+        for (seq, cmd) in host_map().flatten() {
+            bound.push(("host".to_string(), seq, cmd));
+        }
+        // Both directions collect every problem: one run names all of them, the way the
+        // config's own key problems are all said rather than the first only.
+        let mut problems = Vec::new();
+        // A: the doc's claims are true.
+        for token in tokens.iter().filter(|t| is_claim(t)) {
+            match rano::keymap::parse_seq(token) {
+                None => problems.push(format!(
+                    "keys.md claims `{token}`, which is not a chord the parser knows"
+                )),
+                Some(seq) => {
+                    // A prefix is nameable too: `M-k` is how the doc introduces its asks.
+                    if !bound.iter().any(|(_, s, _)| s.starts_with(&seq)) {
+                        problems.push(format!(
+                            "keys.md claims `{token}`, which no map binds, not even as a prefix"
+                        ));
+                    }
+                }
+            }
+        }
+        // B: every binding is named in the doc, in the maps' own spelling.
+        for (map, seq, cmd) in &bound {
+            let text = seq.iter().map(|k| k.emacs()).collect::<Vec<_>>().join(" ");
+            if !tokens.contains(&text.as_str()) {
+                problems.push(format!(
+                    "`{text}` is {cmd} in the {map} map, but docs/keys.md never names it"
+                ));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
     /// The strip's last column is a scrollbar — a track with a thumb, always drawn. `↑N more` is
     /// a counter; this is where in the history the view actually is.
     #[test]

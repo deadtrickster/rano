@@ -1,8 +1,9 @@
 # rano
 
 A nano clone for the terminal, in Rust. nano's keys and nano's immediacy, with tree-sitter
-syntax highlighting, a minimal LSP client, and a tail that opens a 2 GiB log without reading
-it. It is also a library, so a host can show the editor as a pane.
+syntax highlighting, a minimal LSP client, a shell strip with tabs under the text, a letibot
+conversation beside it, and a tail that opens a 2 GiB log without reading it. It is also a
+library, so a host can show the editor as a pane.
 
 Why: nano is the editor people reach for when they do not want to learn one. rano keeps that
 and adds what a programmer misses in nano - highlighting, diagnostics, jump to definition, logs
@@ -93,7 +94,7 @@ transform text on open and save ([docs/plugins.md](docs/plugins.md)).
 - It carries no image decoder. Pictures need a terminal that takes inline images, and any
   format but PNG needs a converter on the machine.
 - It ships no language server. With none installed you get tree-sitter feedback only.
-- It has no GUI and no tabs.
+- It has no GUI, and no buffer tabs. The bottom terminal does have tabs.
 
 ## Docs
 

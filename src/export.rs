@@ -237,11 +237,18 @@ fn ansi(lines: &[Vec<char>], tab_width: usize, style_of: &dyn Fn(Pos) -> Option<
         if r > 0 {
             s.push('\n');
         }
+        let runs = runs_at_row(line, r, tab_width, style_of);
+        // Trailing blanks are the screen's, not the file's — but only at the END of the line.
+        // Trimming every colourless run eats the space before a styled word: `fn main() {`
+        // became `fnmain(){`. So the blank runs at the end are dropped, and only the last
+        // remaining colourless run is trimmed.
+        let mut end = runs.len();
+        while end > 0 && runs[end - 1].style.is_none() && runs[end - 1].text.trim().is_empty() {
+            end -= 1;
+        }
         let mut open = false;
-        for run in runs_at_row(line, r, tab_width, style_of) {
-            // Trailing blanks are the screen's, not the file's: a colourless run of spaces costs
-            // a reset per line for nothing.
-            let text = if run.style.is_none() {
+        for (i, run) in runs[..end].iter().enumerate() {
+            let text = if i + 1 == end && run.style.is_none() {
                 run.text.trim_end()
             } else {
                 run.text.as_str()
@@ -446,6 +453,28 @@ mod tests {
         assert_eq!(
             out,
             "let x = 1;\n<<not a tag>>\n        tabbed & <escaped>\n"
+        );
+    }
+
+    /// The export is the source with colours, not a reformatting: strip the SGR and the file's
+    /// own whitespace is still there, indentation and the space before a styled word included.
+    #[test]
+    fn ansi_keeps_the_sources_whitespace() {
+        let lines = vec![cs("fn main() {"), cs("    let x = 1;"), cs("}")];
+        // `main` is the styled word, in the middle of the line.
+        let f = |p: Pos| {
+            if p.row == 0 && (3..7).contains(&p.col) {
+                Some(Style::of(Role::Keyword))
+            } else {
+                None
+            }
+        };
+        let out = render(&lines, 4, "t.rs", Format::Ansi, &f);
+        let re = regex::Regex::new("\x1b\\[[0-9;]*m").expect("an SGR pattern");
+        let plain = re.replace_all(&out, "");
+        assert_eq!(
+            plain, "fn main() {\n    let x = 1;\n}\n",
+            "the source, exactly"
         );
     }
 

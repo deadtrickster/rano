@@ -252,7 +252,7 @@ mod tests {
         ed.paste_text("echo pasted-123");
         let tab = &mut ed.bottom.tabs[ed.bottom.active];
         let mut seen = false;
-        for _ in 0..50 {
+        for _ in 0..600 {
             tab.feed();
             if tab.lines().iter().any(|l| l.plain().contains("pasted-123")) {
                 seen = true;

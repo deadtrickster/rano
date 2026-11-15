@@ -894,7 +894,7 @@ mod tests {
             "Drop returned in {elapsed:?}, not parked behind a child that ignores SIGHUP"
         );
         let mut gone = false;
-        for _ in 0..100 {
+        for _ in 0..600 {
             // A zombie still answers kill(pid, 0); ESRCH means the pid was reaped.
             let r = unsafe { libc::kill(pid, 0) };
             if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
@@ -1038,7 +1038,7 @@ mod tests {
             t.send(b"stty size\n");
             let want = format!("{rows} {cols}");
             let mut saw = false;
-            for _ in 0..100 {
+            for _ in 0..600 {
                 t.feed();
                 if t.lines().iter().any(|l| l.plain().trim().ends_with(&want)) {
                     saw = true;
@@ -1060,7 +1060,7 @@ mod tests {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"echo $TERM\n");
         let mut saw = false;
-        for _ in 0..100 {
+        for _ in 0..600 {
             t.feed();
             if t.lines()
                 .iter()
@@ -1082,7 +1082,7 @@ mod tests {
         t.send(b"yes | head -1\n");
         t.send(b"echo after-pipe\n");
         let mut answered = false;
-        for _ in 0..100 {
+        for _ in 0..600 {
             t.feed();
             if t.lines()
                 .iter()

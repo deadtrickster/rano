@@ -829,7 +829,9 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     }
     if let Some(area) = lay.panel {
         ed.panel.build(area.width as usize);
-        let hints = if ed.focus == Focus::Panel {
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
             ed.key_hints()
         } else {
             Vec::new()
@@ -1197,6 +1199,28 @@ mod panel_tests {
             &key(KeyCode::Char('z'), rano::term::event::Mods::ALT),
         );
         assert!(!ed.panel.open && !ed.panel.zoom);
+    }
+
+    /// With the panel and the terminal both open, the composer and the key hints are drawn once
+    /// each: the frame's bar says the keys, the panel does not repeat them beside the strip.
+    #[test]
+    fn the_composer_and_the_hints_appear_once_with_the_terminal_open() {
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.input = "composer-words".to_string();
+        ed.focus = Focus::Panel;
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        let lay = layout(120, 40, &ed, None);
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rows = buf.emit(rano::render::Palette::None);
+        let count = |needle: &str| rows.iter().flat_map(|r| r.match_indices(needle)).count();
+        assert_eq!(count("composer-words"), 1, "the composer appears once");
+        assert_eq!(count("RET Send"), 1, "the key hints appear once");
+        // The one copy is the frame's bar, which is where a reader looks for keys.
+        let bar = rows[26].clone() + &rows[27];
+        assert!(bar.contains("RET Send"), "the bar has the keys");
     }
 
     /// With the terminal focused, a click in the panel still moves the keyboard: one focus, and

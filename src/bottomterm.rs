@@ -285,10 +285,7 @@ impl BottomTerm {
         // A scroll position that is off the bottom says so: the view is not the newest output, and
         // that must be visible or a reader thinks the shell is quiet.
         if self.tabs[self.active].parser.scroll > 0 {
-            strip.push_str(&format!(
-                " ↑{} more",
-                self.tabs[self.active].parser.scroll
-            ));
+            strip.push_str(&format!(" ↑{} more", self.tabs[self.active].parser.scroll));
         }
         out.push(Line::new(vec![Span::role(
             crate::width::text::truncate(&strip, w),

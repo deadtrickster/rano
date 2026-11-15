@@ -28,60 +28,39 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Open a shell in `cwd`, its pty `cols`×`rows`. The parent's end is non-blocking.
+    /// Open a shell in `cwd`, its pty `cols`×`rows`. The parent's end is non-blocking and
+    /// close-on-exec, and the spawn is a `Command`: the argv, the cwd and the environment are
+    /// built before the fork, not in the child.
     pub fn open(cwd: &Path, cols: u16, rows: u16, scrollback: usize) -> std::io::Result<Tab> {
         let (master, slave) = openpty(cols, rows)?;
-        let pid = unsafe { libc::fork() };
-        match pid {
-            0 => {
-                // The child is the shell, on the slave end, in the folder the editor is in.
+        unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+            // A child of the editor must not inherit the shell's pty, and the shell itself must
+            // not inherit the parent end. Set before the spawn, and checked.
+            if libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master);
+                libc::close(slave);
+                return Err(e);
+            }
+        }
+        // The slave is the Command's Stdio: it is closed when that Command is dropped, on either
+        // path. Closing it here too would be a double close, and a reused fd number is fatal.
+        match spawn_shell(cwd, slave) {
+            Ok(pid) => Ok(Tab {
+                parser: Vt::new(cols as usize, rows as usize, scrollback),
+                master,
+                pid,
+                title: "sh".to_string(),
+                exited: None,
+            }),
+            Err(e) => {
+                // A failed spawn leaves the master to close; the slave went with the Command.
                 unsafe {
                     libc::close(master);
-                    libc::setsid();
-                    libc::dup2(slave, 0);
-                    libc::dup2(slave, 1);
-                    libc::dup2(slave, 2);
-                    libc::close(slave);
-                    // The pty is the child's controlling terminal: without it the shell says it
-                    // has no tty and turns job control off, which is a warning on every open.
-                    libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-                    let shell = shell();
-                    let cwd = std::ffi::CString::new(cwd.as_os_str().as_encoded_bytes())
-                        .expect("no NUL in a path");
-                    libc::chdir(cwd.as_ptr());
-                    libc::execlp(
-                        shell.as_ptr(),
-                        shell.as_ptr(),
-                        std::ptr::null::<libc::c_char>(),
-                    );
-                    libc::_exit(127);
                 }
+                Err(e)
             }
-            p if p > 0 => {
-                unsafe {
-                    libc::close(slave);
-                    libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
-                    // A child of the editor (a compiler, a test runner) must not inherit the
-                    // shell's pty: it would hold the terminal open after the tab closed. The
-                    // fcntl is checked, and a failure still kills and reaps the shell.
-                    if libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
-                        let e = std::io::Error::last_os_error();
-                        libc::close(master);
-                        libc::kill(p, libc::SIGKILL);
-                        let mut status = 0;
-                        libc::waitpid(p, &mut status, 0);
-                        return Err(e);
-                    }
-                }
-                Ok(Tab {
-                    parser: Vt::new(cols as usize, rows as usize, scrollback),
-                    master,
-                    pid: p,
-                    title: "sh".to_string(),
-                    exited: None,
-                })
-            }
-            _ => Err(std::io::Error::last_os_error()),
         }
     }
 
@@ -467,9 +446,39 @@ fn openpty(cols: u16, rows: u16) -> std::io::Result<(RawFd, RawFd)> {
 }
 
 /// The shell to open: `$SHELL` if it names one, `/bin/sh` otherwise.
-fn shell() -> std::ffi::CString {
-    let s = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    std::ffi::CString::new(s).expect("no NUL in a shell's path")
+fn shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// The shell on the slave end of the pty, in the editor's folder. `Command` builds the argv and
+/// the environment before the fork; the child's own work is only async-signal-safe calls.
+fn spawn_shell(cwd: &Path, slave: RawFd) -> std::io::Result<libc::pid_t> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(shell());
+    cmd.current_dir(cwd)
+        // The emulator is a VT100 subset, and that is what the shell is told: a program that
+        // believes TERM=xterm-256color asks for sequences this screen does not implement.
+        .env("TERM", "vt100");
+    unsafe {
+        // Each Stdio owns its own descriptor, so nothing is closed twice.
+        cmd.stdin(Stdio::from_raw_fd(slave))
+            .stdout(Stdio::from_raw_fd(libc::dup(slave)))
+            .stderr(Stdio::from_raw_fd(libc::dup(slave)));
+        cmd.pre_exec(|| {
+            libc::setsid();
+            // The pty is the child's controlling terminal: without it the shell says it has no
+            // tty and turns job control off, a warning on every open.
+            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+            // SIGPIPE back to the default: the editor ignores it, and a pipeline like
+            // `yes | head -1` only ends because the writer dies on it.
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    Ok(child.id() as libc::pid_t)
 }
 
 /// A VT100-subset emulator, in-tree because this box's registry is read-only: printable UTF-8,
@@ -1021,6 +1030,58 @@ mod tests {
                 t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
             );
         }
+    }
+
+    /// The shell is told the terminal is a VT100, which is what the emulator implements.
+    #[test]
+    fn the_shell_is_told_the_terminal_is_a_vt100() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"echo $TERM\n");
+        let mut saw = false;
+        for _ in 0..100 {
+            t.feed();
+            if t.lines()
+                .iter()
+                .any(|l| l.plain().trim().ends_with("vt100"))
+            {
+                saw = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(saw, "echo $TERM answered vt100");
+    }
+
+    /// `yes | head -1` ends because the writer dies on SIGPIPE: no "Broken pipe" message, and
+    /// the shell answers the next command.
+    #[test]
+    fn a_pipeline_ends_on_sigpipe_not_a_broken_pipe_message() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"yes | head -1\n");
+        t.send(b"echo after-pipe\n");
+        let mut answered = false;
+        for _ in 0..100 {
+            t.feed();
+            if t.lines()
+                .iter()
+                .any(|l| l.plain().trim().ends_with("after-pipe") && !l.plain().contains("echo"))
+            {
+                answered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(answered, "the shell answered after the pipeline");
+        let text = t
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("Broken pipe"),
+            "no broken-pipe whine: {text}"
+        );
     }
 
     /// A tab is a real pty with a real shell behind it: it answers `echo`.

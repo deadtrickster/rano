@@ -197,6 +197,11 @@ impl Tab {
         }
     }
 
+    /// How far back the view is scrolled, in lines: the wheel's effect, readable by the host.
+    pub fn scroll_pos(&self) -> usize {
+        self.parser.scroll
+    }
+
     /// Scroll back by `n` lines, capped at what the scrollback holds.
     pub fn scroll_up(&mut self, n: usize) {
         self.parser.scroll = (self.parser.scroll + n).min(self.parser.history.len());
@@ -252,6 +257,9 @@ pub struct BottomTerm {
     /// The strip's height in rows, remembered across toggles: a terminal the operator has resized
     /// stays that size.
     pub height: usize,
+    /// The rule above the strip is being dragged: the drag is the terminal's wherever the
+    /// pointer goes, exactly as a held panel border is the panel's.
+    pub dragging: bool,
 }
 
 impl BottomTerm {
@@ -262,6 +270,7 @@ impl BottomTerm {
             tabs: Vec::new(),
             active: 0,
             height: 12,
+            dragging: false,
         }
     }
 

@@ -925,6 +925,13 @@ fn mouse(
             _ => return false,
         }
     }
+    // The terminal is a pane with a rectangle: the wheel over it scrolls its scrollback, and the
+    // document above is not involved. Everywhere else is the editor's own mouse handling.
+    if let Some(strip) = lay.bottom
+        && (ed.bottom.dragging || inside(lay.bottom))
+    {
+        return ed.bottom_mouse(*m, strip.y, strip.height);
+    }
     ed.panel.focus = false;
     ed.handle_mouse(*m)
 }
@@ -934,9 +941,51 @@ mod panel_tests {
     use super::*;
     use rano::buffer::Buffer;
     use rano::config::Config;
+    use rano::term::{Mods, MouseButton, MouseEvent};
 
     fn editor() -> Editor {
         Editor::new(Buffer::new(), Config::default())
+    }
+
+    /// The strip is a mouse pane with a rectangle: the wheel over it is the terminal's, and
+    /// dragging its rule resizes it.
+    #[test]
+    fn the_strip_is_a_mouse_pane() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        let lay = layout(120, 30, &ed, None);
+        let strip = lay.bottom.expect("a strip");
+        assert_eq!(strip.y + strip.height, 30, "the strip ends at the foot");
+        let mut width = None;
+        let mut dragging = false;
+        let wheel = MouseEvent {
+            kind: MouseKind::WheelUp,
+            x: 10,
+            y: strip.y + 2,
+            mods: Mods::NONE,
+        };
+        assert!(
+            mouse(&mut ed, &lay, &wheel, 120, &mut width, &mut dragging),
+            "the strip took the wheel"
+        );
+        // Taking hold of the rule, then dragging it to row 10, leaves 30 - 10 = 20 rows of
+        // terminal — and the drag is the strip's even far above the strip's own rectangle.
+        let grab = MouseEvent {
+            kind: MouseKind::Press(MouseButton::Left),
+            x: 10,
+            y: strip.y,
+            mods: Mods::NONE,
+        };
+        assert!(mouse(&mut ed, &lay, &grab, 120, &mut width, &mut dragging));
+        let drag = MouseEvent {
+            kind: MouseKind::Drag(MouseButton::Left),
+            x: 10,
+            y: 10,
+            mods: Mods::NONE,
+        };
+        assert!(mouse(&mut ed, &lay, &drag, 120, &mut width, &mut dragging));
+        assert_eq!(ed.bottom.height, 20, "the drag resized the strip");
     }
 
     /// A closed panel is not a pane: the text keeps the whole frame, as it always did.

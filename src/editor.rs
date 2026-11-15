@@ -1626,6 +1626,42 @@ impl Editor {
 
     /// Left click: the cursor, and on the cursor itself the mark (nano's rule).
     /// Drag: extend. Release without a drag: drop the anchor. Wheel: scroll.
+    /// The mouse over the bottom terminal's strip, in frame coordinates: the wheel scrolls the
+    /// active tab's scrollback, and dragging the rule above it resizes the strip. Nothing here
+    /// reaches the document.
+    pub fn bottom_mouse(&mut self, m: MouseEvent, strip_y: u16, strip_h: u16) -> bool {
+        match m.kind {
+            MouseKind::WheelUp => {
+                if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    t.scroll_up(WHEEL_LINES as usize);
+                }
+                true
+            }
+            MouseKind::WheelDown => {
+                if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    t.scroll_down(WHEEL_LINES as usize);
+                }
+                true
+            }
+            // A press on the rule takes hold of it; the drag then resizes the strip wherever
+            // the pointer goes, and the release lets go.
+            MouseKind::Press(MouseButton::Left) if m.y == strip_y => {
+                self.bottom.dragging = true;
+                true
+            }
+            MouseKind::Drag(MouseButton::Left) if self.bottom.dragging => {
+                let foot = strip_y + strip_h;
+                self.bottom.height = (foot.saturating_sub(m.y) as usize).clamp(4, 40);
+                true
+            }
+            MouseKind::Release(_) if self.bottom.dragging => {
+                self.bottom.dragging = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn handle_mouse(&mut self, m: MouseEvent) -> bool {
         let mut m = m;
         if !self.area.is_empty() {
@@ -1634,34 +1670,6 @@ impl Editor {
             }
             m.x -= self.area.x;
             m.y -= self.area.y;
-        }
-        // The bottom terminal takes the wheel: it scrolls the active tab's scrollback, not the
-        // document above it. Open, not focused — a touchpad over the panel must not have to click
-        // into it first, which is what the old guard required.
-        if self.bottom.open {
-            // Dragging the rule resizes the strip, as a window's border does.
-            if m.kind == MouseKind::Drag(MouseButton::Left)
-                && m.y == self.area.h.saturating_sub(self.bottom.height as u16)
-            {
-                let want = (self.area.h as isize - m.y as isize).max(4) as usize;
-                self.bottom.height = want.clamp(4, 40);
-                return true;
-            }
-            return match m.kind {
-                MouseKind::WheelUp => {
-                    if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
-                        t.scroll_up(WHEEL_LINES as usize);
-                    }
-                    true
-                }
-                MouseKind::WheelDown => {
-                    if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
-                        t.scroll_down(WHEEL_LINES as usize);
-                    }
-                    true
-                }
-                _ => false,
-            };
         }
         // The list overlay is keyboard-only; the text under it is not there to click.
         if self.picker.is_some() {

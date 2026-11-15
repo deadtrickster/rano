@@ -2927,6 +2927,62 @@ fn a_filter_without_a_mark_flashes_instead_of_panicking() {
     assert_eq!(lines(&ed), vec!["b", "a"], "nothing was filtered");
 }
 
+/// The mouse is routed by the strip's rectangle: the wheel over the text scrolls the document,
+/// the wheel over the strip scrolls the terminal, and a click and a drag in the text still work.
+#[test]
+fn the_mouse_is_routed_by_the_strips_rectangle() {
+    let text = (1..=200)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut ed = test_ed(&text);
+    ed.bottom.open = true;
+    ed.bottom.height = 12;
+    ed.bottom
+        .new_tab(PathBuf::from("/tmp").as_path(), 40, 6, 200)
+        .expect("a shell");
+    ed.bottom.tabs[0].send(b"seq 1 60\n");
+    let mut ready = false;
+    for _ in 0..100 {
+        ed.bottom.tabs[0].feed();
+        if ed.bottom.tabs[0]
+            .lines()
+            .iter()
+            .any(|l| l.plain().contains("60"))
+        {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready, "the shell answered seq");
+
+    // A click places the caret, and a drag selects, exactly as without a terminal.
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 3, 1)));
+    assert_eq!(
+        ed.bs().cursor,
+        Pos { row: 2, col: 0 },
+        "the click placed it"
+    );
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), 5, 4)));
+    assert!(ed.sel_span().is_some(), "the drag selected");
+
+    // The wheel over the TEXT is the document's, not the terminal's.
+    let doc = ed.bs().scroll;
+    assert!(ed.handle_mouse(me(MouseKind::WheelDown, 5, 5)));
+    assert!(ed.bs().scroll > doc, "the document scrolled");
+    assert_eq!(ed.bottom.tabs[0].scroll_pos(), 0, "the terminal did not");
+
+    // The wheel over the STRIP is the terminal's, not the document's.
+    let doc = ed.bs().scroll;
+    assert!(ed.bottom_mouse(me(MouseKind::WheelUp, 29, 5), 18, 12));
+    assert!(
+        ed.bottom.tabs[0].scroll_pos() > 0,
+        "the terminal scrolled back"
+    );
+    assert_eq!(ed.bs().scroll, doc, "the document did not scroll");
+}
+
 #[test]
 fn paste_text_single_and_multiline() {
     let mut ed = test_ed("");

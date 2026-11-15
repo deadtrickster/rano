@@ -242,6 +242,12 @@ impl Tab {
     }
 
     /// How far back the view is scrolled, in lines: the wheel's effect, readable by the host.
+    /// Is the program on the alternate screen? Then it owns the page keys: `less` scrolls its own
+    /// document, and the scrollback rano keeps is not on the glass.
+    pub fn on_program_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
     pub fn scroll_pos(&self) -> usize {
         self.parser.screen().scrollback()
     }

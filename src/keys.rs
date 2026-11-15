@@ -224,8 +224,18 @@ impl Editor {
         let found = crate::keymap::lookup(&[&self.keymaps.terminal], std::slice::from_ref(&k));
         if let crate::keymap::Lookup::Command(name) = found {
             let name = name.to_string();
-            self.run_command(&name);
-            return true;
+            // On the alternate screen the program owns the page keys: `less` scrolls its own
+            // document with them, and rano's scrollback is not on the glass to scroll.
+            let program_screen = self
+                .bottom
+                .tabs
+                .get(self.bottom.active)
+                .is_some_and(|t| t.on_program_screen());
+            let page_key = matches!(name.as_str(), "terminal-scroll-up" | "terminal-scroll-down");
+            if !(program_screen && page_key) {
+                self.run_command(&name);
+                return true;
+            }
         }
         let bytes = if matches!(key.code, crate::term::KeyCode::Esc) {
             // Esc is a key programs need (vi, less, fzf), and no program binds M-0.

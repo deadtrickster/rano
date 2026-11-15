@@ -294,6 +294,44 @@ mod tests {
         assert!(ed.bottom.tabs.is_empty(), "Enter closed the dead tab");
     }
 
+    /// On the alternate screen the page keys are the program's: `less` pages its own document
+    /// with PgDn, rather than rano scrolling a scrollback that is not on the glass.
+    #[test]
+    fn pgdn_reaches_less_on_the_alternate_screen() {
+        let mut ed = ed("abc");
+        let mut host = crate::keymap::Keymap::new("host");
+        host.bind("M-0", "toggle-terminal");
+        ed.push_keymap(host);
+        super::key(&mut ed, key(KeyCode::Char('0'), Mods::ALT));
+        assert!(ed.bottom.open, "the strip is open");
+        let file = "/tmp/rano-alt-less.txt";
+        ed.bottom.tabs[0].send(format!("seq 1 300 > {file}; less {file}\n").as_bytes());
+        let mut top = String::new();
+        for _ in 0..600 {
+            ed.bottom.tabs[0].feed();
+            top = ed.bottom.tabs[0].lines()[0].plain();
+            if top.trim() == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(top.trim(), "1", "less shows its first line: {top:?}");
+        // PgDn through the host path: the map's scroll-down, but the program has the screen.
+        super::key(&mut ed, key(KeyCode::PageDown, Mods::NONE));
+        let mut moved = false;
+        for _ in 0..600 {
+            ed.bottom.tabs[0].feed();
+            if ed.bottom.tabs[0].lines()[0].plain().trim() != "1" {
+                moved = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(moved, "PgDn paged less, not rano's scrollback");
+        ed.bottom.tabs[0].send(b"q");
+        let _ = std::fs::remove_file(file);
+    }
+
     /// The terminal's chords are its map's, and the map's entries are commands: help, M-x and
     /// the bars read what the terminal answers, and a chord through the host path runs it.
     #[test]

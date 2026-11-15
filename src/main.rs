@@ -1201,6 +1201,49 @@ mod panel_tests {
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
+    /// Scrolled back, a short history row painted over a longer live row leaves no tail: the
+    /// terminal's rows are the pane's width, because `Buffer::set_line` writes only the spans.
+    #[test]
+    fn a_short_history_row_leaves_no_tail_of_the_long_row_it_covers() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        ed.bottom.tabs[0].send(b"seq 1 30\n");
+        ed.bottom.tabs[0].send(b"printf 'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\n'\n");
+        assert!(
+            feed_until(&mut ed, |l| l.contains("ZZZZZZ")),
+            "the long row is on the live screen"
+        );
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        assert!(
+            buf.emit(rano::render::Palette::None)
+                .join("")
+                .contains("ZZZZZZ"),
+            "drawn before scrolling"
+        );
+        // Two rows back: the long row is out of the window, and short history rows take its
+        // place — drawn into the SAME buffer, which is what a redraw is.
+        ed.bottom.tabs[0].scroll_up(2);
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rows = buf.emit(rano::render::Palette::None);
+        let tail = rows
+            .iter()
+            .find(|r| r.contains('Z'))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !tail.contains('Z'),
+            "a tail of the old row survived: {tail:?}"
+        );
+    }
+
     /// With the panel and the terminal both open, the composer and the key hints are drawn once
     /// each: the frame's bar says the keys, the panel does not repeat them beside the strip.
     #[test]

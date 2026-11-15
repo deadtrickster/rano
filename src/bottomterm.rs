@@ -387,7 +387,7 @@ impl BottomTerm {
                 format!("no terminal open — M-n opens one in {}", cwd.display()),
                 Role::Faint,
             )]));
-            return out;
+            return out.into_iter().map(|l| pad_to_width(l, w)).collect();
         }
         let mut strip = String::from("tabs ");
         for (i, _) in self.tabs.iter().enumerate() {
@@ -410,7 +410,10 @@ impl BottomTerm {
                 .into_iter()
                 .map(|l| crate::render::text::truncate(&l, w)),
         );
-        out
+        // Every row is the pane's width: `Buffer::set_line` writes only a line's spans, so a
+        // short row painted over a longer one would leave the old row's tail behind. The parser
+        // is not to blame — scrollback rows are stored trimmed, so padding belongs here.
+        out.into_iter().map(|l| pad_to_width(l, w)).collect()
     }
 }
 
@@ -418,6 +421,17 @@ impl Default for BottomTerm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A row padded with blanks to the pane's width: painting it over a longer row clears the tail.
+fn pad_to_width(l: Line, w: usize) -> Line {
+    let have = l.plain().chars().count();
+    if have >= w {
+        return l;
+    }
+    let mut spans = l.spans;
+    spans.push(Span::raw(" ".repeat(w - have)));
+    Line::new(spans)
 }
 
 /// The pty pair, sized to the panel. `openpty` is libc's, since that is the only C this needs.

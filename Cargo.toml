@@ -13,6 +13,10 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # terminal layer needs. Already in the tree (through tree-sitter's and others'
 # dependencies), so this is a direct edge to a crate already built, not a new one.
 libc = "0.2"
+# The terminal emulator the bottom strip draws: a full VT parser (alternate screen, cursor
+# addressing, 256 colours), which is what `less`, `vi` and `clear` need and the in-tree subset
+# could not do. Its own deps are vte and unicode-width.
+vt100 = "0.18.1"
 tree-sitter = "0.27"
 tree-sitter-language = "0.1"
 tree-sitter-rust = "0.24"

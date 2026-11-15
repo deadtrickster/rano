@@ -223,7 +223,7 @@ pub struct Editor {
     /// **The panel: one conversation with a letibot session** (`alt-i`, the `panel` keymap mode).
     /// Its state is here and its socket is the host's; see [`crate::panel`].
     pub panel: crate::panel::Panel,
-    /// **The bottom terminal**: shells in tabs at the foot of the frame (`` ctrl-` `` toggles).
+    /// **The bottom terminal**: shells in tabs at the foot of the frame (`M-0` toggles).
     /// Each tab is a pty and a `vt100` parser; see [`crate::bottomterm`].
     /// The surface with the keyboard: text, panel, or terminal.
     pub focus: Focus,

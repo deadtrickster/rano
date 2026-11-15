@@ -17,7 +17,7 @@ const FEED_BUDGET: usize = 256 * 1024;
 
 /// One shell: the pty it writes to, its process, and the emulator that makes a screen of it.
 pub struct Tab {
-    parser: Vt,
+    parser: vt100::Parser,
     master: RawFd,
     pid: libc::pid_t,
     /// The tab's label: the shell's name, and whether it has exited.
@@ -48,7 +48,7 @@ impl Tab {
         // path. Closing it here too would be a double close, and a reused fd number is fatal.
         match spawn_shell(cwd, slave) {
             Ok(pid) => Ok(Tab {
-                parser: Vt::new(cols as usize, rows as usize, scrollback),
+                parser: new_parser(cols, rows, scrollback),
                 master,
                 pid,
                 title: "sh".to_string(),
@@ -132,20 +132,20 @@ impl Tab {
         // answer to the newest output, and the scrollback is for reading, not for typing into.
         // A key sent to the shell snaps the view to the bottom: what the operator types is an
         // answer to the newest output, and the scrollback is for reading, not for typing into.
-        self.parser.scroll = 0;
+        self.parser.screen_mut().set_scrollback(0);
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
     }
 
     /// A paste is the shell's input, not the editor's: bracketed when the program asked for
     /// bracketed paste, so readline and editors can tell it apart from typing.
     pub fn paste(&mut self, s: &str) {
-        self.parser.scroll = 0;
+        self.parser.screen_mut().set_scrollback(0);
         let mut out = Vec::new();
-        if self.parser.bracketed {
+        if self.parser.screen().bracketed_paste() {
             out.extend_from_slice(b"\x1b[200~");
         }
         out.extend_from_slice(s.as_bytes());
-        if self.parser.bracketed {
+        if self.parser.screen().bracketed_paste() {
             out.extend_from_slice(b"\x1b[201~");
         }
         self.send(&out);
@@ -212,7 +212,7 @@ impl Tab {
 
     /// An arrow, in the mode the program set: application cursor mode sends SS3, the default CSI.
     fn arrow(&self, which: char) -> Vec<u8> {
-        if self.parser.app_cursor {
+        if self.parser.screen().application_cursor() {
             vec![0x1b, b'O', which as u8]
         } else {
             vec![0x1b, b'[', which as u8]
@@ -225,7 +225,8 @@ impl Tab {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        if self.parser.cols == cols as usize && self.parser.rows == rows as usize {
+        let (have_rows, have_cols) = self.parser.screen().size();
+        if have_cols.get() == cols.max(1) && have_rows.get() == rows.max(1) {
             return;
         }
         let size = libc::winsize {
@@ -237,27 +238,36 @@ impl Tab {
         unsafe {
             libc::ioctl(self.master, libc::TIOCSWINSZ as _, &size as *const _);
         }
-        self.parser.resize(cols as usize, rows as usize);
+        self.parser.set_size(nz(rows), nz(cols));
     }
 
     /// How far back the view is scrolled, in lines: the wheel's effect, readable by the host.
     pub fn scroll_pos(&self) -> usize {
-        self.parser.scroll
+        self.parser.screen().scrollback()
     }
 
     /// Scroll back by `n` lines, capped at what the scrollback holds.
     pub fn scroll_up(&mut self, n: usize) {
-        self.parser.scroll = (self.parser.scroll + n).min(self.parser.history.len());
+        let cur = self.parser.screen().scrollback();
+        // The parser clamps to what it kept, so a wheel at the top simply stops.
+        self.parser.screen_mut().set_scrollback(cur + n);
     }
 
     /// Scroll forward by `n` lines, back to the live screen at zero.
     pub fn scroll_down(&mut self, n: usize) {
-        self.parser.scroll = self.parser.scroll.saturating_sub(n);
+        let cur = self.parser.screen().scrollback();
+        self.parser
+            .screen_mut()
+            .set_scrollback(cur.saturating_sub(n));
     }
 
     /// The screen, in the panel's rows.
     pub fn lines(&self) -> Vec<Line> {
-        self.parser.lines()
+        let screen = self.parser.screen();
+        // `size()` answers (rows, cols), as `Parser::new` takes them.
+        let (rows, cols) = screen.size();
+        let (rows, cols) = (rows.get() as usize, cols.get() as usize);
+        (0..rows).map(|y| row_line(screen, y, cols)).collect()
     }
 }
 
@@ -405,8 +415,9 @@ impl BottomTerm {
         let mut strip = strip.trim_end().to_string();
         // A scroll position that is off the bottom says so: the view is not the newest output, and
         // that must be visible or a reader thinks the shell is quiet.
-        if self.tabs[self.active].parser.scroll > 0 {
-            strip.push_str(&format!(" ↑{} more", self.tabs[self.active].parser.scroll));
+        let scrolled = self.tabs[self.active].parser.screen().scrollback();
+        if scrolled > 0 {
+            strip.push_str(&format!(" ↑{scrolled} more"));
         }
         out.push(Line::new(vec![Span::role(
             crate::width::text::truncate(&strip, w),
@@ -480,9 +491,8 @@ fn spawn_shell(cwd: &Path, slave: RawFd) -> std::io::Result<libc::pid_t> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(shell());
     cmd.current_dir(cwd)
-        // The emulator is a VT100 subset, and that is what the shell is told: a program that
-        // believes TERM=xterm-256color asks for sequences this screen does not implement.
-        .env("TERM", "vt100");
+        // What the parser implements well: 256 colours, the alternate screen, cursor addressing.
+        .env("TERM", "xterm-256color");
     unsafe {
         // Each Stdio owns its own descriptor, so nothing is closed twice.
         cmd.stdin(Stdio::from_raw_fd(slave))
@@ -503,283 +513,89 @@ fn spawn_shell(cwd: &Path, slave: RawFd) -> std::io::Result<libc::pid_t> {
     Ok(child.id() as libc::pid_t)
 }
 
-/// A VT100-subset emulator, in-tree because this box's registry is read-only: printable UTF-8,
-/// CR/LF/BS/TAB, cursor motion, erase in line and in display, and scrolling. A shell and its output
-/// is what it is for; a full-screen program wants more, and that is a later piece, not a silent gap.
-struct Vt {
-    cols: usize,
-    rows: usize,
-    cells: Vec<char>,
-    /// The foreground SGR chose for each cell, and whether it is bold.
-    fg: Vec<Option<[u8; 3]>>,
-    bold: Vec<bool>,
-    /// The lines that scrolled off the top, for PgUp/PgDn: a scrollback, not a blank pane.
-    history: Vec<String>,
-    /// How many scrolled-off lines are kept: `terminal_scrollback` in config.toml.
-    scrollback: usize,
-    /// How far back the view is scrolled: 0 is the live screen.
-    scroll: usize,
-    x: usize,
-    y: usize,
-    /// The style SGR is currently setting, applied to every character that follows.
-    cur_fg: Option<[u8; 3]>,
-    cur_bold: bool,
-    /// DECCKM: application cursor mode, which makes arrows SS3 rather than CSI.
-    pub app_cursor: bool,
-    /// DECSET 2004: the program wants pastes bracketed, so it can tell them from typing.
-    pub bracketed: bool,
+/// The parser a tab is born with: `rows`×`cols`, keeping `scrollback` lines of history.
+fn new_parser(cols: u16, rows: u16, scrollback: usize) -> vt100::Parser {
+    vt100::Parser::new(nz(rows), nz(cols), scrollback)
 }
 
-impl Vt {
-    fn new(cols: usize, rows: usize, scrollback: usize) -> Vt {
-        Vt {
-            cols,
-            rows,
-            cells: vec![' '; cols * rows],
-            fg: vec![None; cols * rows],
-            bold: vec![false; cols * rows],
-            history: Vec::new(),
-            scrollback,
-            scroll: 0,
-            x: 0,
-            y: 0,
-            cur_fg: None,
-            cur_bold: false,
-            app_cursor: false,
-            bracketed: false,
-        }
-    }
+/// A terminal dimension as the parser wants it: never zero.
+fn nz(v: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(v.max(1)).expect("max(1) is not zero")
+}
 
-    fn process(&mut self, bytes: &[u8]) {
-        let text = String::from_utf8_lossy(bytes);
-        let mut it = text.chars().peekable();
-        while let Some(c) = it.next() {
-            match c {
-                '\x1b' => self.escape(&mut it),
-                '\r' => self.x = 0,
-                '\n' => self.linefeed(),
-                // Backspace erases as well as moves: the cell under the new cursor position is
-                // blanked, or a delete happens only in the shell and never on the glass.
-                '\x08' => {
-                    self.x = self.x.saturating_sub(1);
-                    self.cells[self.y * self.cols + self.x] = ' ';
-                }
-                '\t' => {
-                    self.x = ((self.x / 8) + 1) * 8;
-                    if self.x >= self.cols {
-                        self.x = self.cols - 1;
-                    }
-                }
-                c if !c.is_control() => self.put(c),
-                _ => {}
-            }
-        }
-    }
-
-    fn put(&mut self, c: char) {
-        if self.x >= self.cols {
-            self.linefeed();
-        }
-        let i = self.y * self.cols + self.x;
-        if i < self.cells.len() {
-            self.cells[i] = c;
-            self.fg[i] = self.cur_fg;
-            self.bold[i] = self.cur_bold;
-        }
-        self.x += 1;
-    }
-
-    fn linefeed(&mut self) {
-        self.x = 0;
-        if self.y + 1 >= self.rows {
-            // The top row is scrollback now, not lost: that is what PgUp reads.
-            let top: String = (0..self.cols).map(|x| self.cells[x]).collect();
-            self.history.push(top.trim_end().to_string());
-            if self.history.len() > self.scrollback {
-                self.history.remove(0);
-            }
-            self.cells.drain(..self.cols);
-            self.cells.resize(self.rows * self.cols, ' ');
-            self.fg.drain(..self.cols);
-            self.fg.resize(self.rows * self.cols, None);
-            self.bold.drain(..self.cols);
-            self.bold.resize(self.rows * self.cols, false);
-        } else {
-            self.y += 1;
-        }
-    }
-
-    fn escape(&mut self, it: &mut std::iter::Peekable<std::str::Chars>) {
-        let mut params = String::new();
-        for c in it.by_ref() {
-            if c.is_ascii_alphabetic() {
-                self.csi(&params, c);
-                return;
-            }
-            params.push(c);
-            if params.len() > 16 {
-                return;
-            }
-        }
-    }
-
-    fn csi(&mut self, params: &str, last: char) {
-        // CSI's own bracket is not a parameter: `\x1b[31m` is 31, not "[31" — a parse that
-        // includes it silently reads 0 and resets the colour instead of setting it.
-        let params = params.trim_start_matches('[');
-        let n = |d: usize| {
-            params
-                .split(';')
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(d)
+/// One screen row as a [`Line`], styles and all: the cells are grouped into runs of one style,
+/// and the row is the parser's full width (a short row painted over a longer one must clear it).
+fn row_line(screen: &vt100::Screen, y: usize, cols: usize) -> Line {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut text = String::new();
+    let mut style = crate::render::Style::new();
+    let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+    for x in 0..cols {
+        let Some(cell) = screen.cell(y as u16, x as u16) else {
+            break;
         };
-        match last {
-            'A' => self.y = self.y.saturating_sub(n(1)),
-            'B' => self.y = (self.y + n(1)).min(self.rows - 1),
-            'C' => self.x = (self.x + n(1)).min(self.cols - 1),
-            'D' => self.x = self.x.saturating_sub(n(1)),
-            'H' | 'f' => {
-                let mut p = params.split(';');
-                self.y = p
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .min(self.rows - 1);
-                self.x = p
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .min(self.cols - 1);
-            }
-            'J' => {
-                if params.parse::<usize>().unwrap_or(0) == 2 {
-                    self.cells.fill(' ');
-                    self.x = 0;
-                    self.y = 0;
-                }
-            }
-            'K' => {
-                let start = self.y * self.cols + self.x;
-                for i in start..(start + self.cols - self.x) {
-                    if i < self.cells.len() {
-                        self.cells[i] = ' ';
-                    }
-                }
-            }
-            'h' | 'l' => {
-                // DECSET/DECRST: the only private mode the paste path reads is 2004.
-                if params == "?2004" {
-                    self.bracketed = last == 'h';
-                }
-            }
-            'm' => self.sgr(params),
-            _ => {}
+        let mut st = crate::render::Style::new();
+        if let Some(rgb) = colour_rgb(cell.fgcolor()) {
+            st = st.raw(crate::render::Raw {
+                fg_rgb: Some(rgb),
+                ..crate::render::Raw::default()
+            });
         }
+        if cell.bold() {
+            st = st.bold();
+        }
+        if cell.dim() {
+            st = st.dim();
+        }
+        if cell.italic() {
+            st = st.italic();
+        }
+        if cell.underline() {
+            st = st.underline();
+        }
+        if cell.inverse() || cursor == Some((y as u16, x as u16)) {
+            st = st.reverse();
+        }
+        if st != style {
+            if !text.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut text), style.clone()));
+            }
+            style = st;
+        }
+        let contents = cell.contents();
+        text.push_str(if contents.is_empty() { " " } else { contents });
     }
+    if !text.is_empty() {
+        spans.push(Span::styled(text, style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(" ".to_string()));
+    }
+    Line::new(spans)
+}
 
-    /// A new size, keeping what is on the screen: the strip's rectangle changed under the shell.
-    fn resize(&mut self, cols: usize, rows: usize) {
-        let mut cells = vec![' '; cols * rows];
-        let mut fg = vec![None; cols * rows];
-        let mut bold = vec![false; cols * rows];
-        for y in 0..self.rows.min(rows) {
-            for x in 0..self.cols.min(cols) {
-                cells[y * cols + x] = self.cells[y * self.cols + x];
-                fg[y * cols + x] = self.fg[y * self.cols + x];
-                bold[y * cols + x] = self.bold[y * self.cols + x];
-            }
-        }
-        self.cols = cols;
-        self.rows = rows;
-        self.cells = cells;
-        self.fg = fg;
-        self.bold = bold;
-        self.x = self.x.min(cols - 1);
-        self.y = self.y.min(rows - 1);
-        self.scroll = 0;
+/// A vt100 colour as RGB: the sixteen the theme names, then the 6×6×6 cube and the grey ramp, so
+/// a program asking for 256 colours keeps the one it chose.
+fn colour_rgb(c: vt100::Color) -> Option<[u8; 3]> {
+    match c {
+        vt100::Color::Default => None,
+        vt100::Color::Rgb(r, g, b) => Some([r, g, b]),
+        vt100::Color::Idx(i) => Some(index_rgb(i)),
     }
+}
 
-    /// SGR: the codes a shell actually emits — reset, bold, the sixteen foreground colours.
-    /// Anything else is left alone, which is the honest subset for `ls --color` and git.
-    fn sgr(&mut self, params: &str) {
-        for part in params.split(';') {
-            let n: usize = part.parse().unwrap_or(0);
-            match n {
-                0 => {
-                    self.cur_fg = None;
-                    self.cur_bold = false;
-                }
-                1 => self.cur_bold = true,
-                30..=37 => self.cur_fg = Some(rgb(n - 30)),
-                90..=97 => self.cur_fg = Some(rgb(n - 90 + 8)),
-                39 => self.cur_fg = None,
-                _ => {}
-            }
-        }
+fn index_rgb(i: u8) -> [u8; 3] {
+    let n = i as usize;
+    if n < 16 {
+        return rgb(n);
     }
-
-    fn lines(&self) -> Vec<Line> {
-        if self.scroll > 0 {
-            return self.history_lines();
-        }
-        (0..self.rows).map(|y| self.row_line(y)).collect()
+    if n < 232 {
+        let n = n - 16;
+        const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        return [STEPS[n / 36], STEPS[(n / 6) % 6], STEPS[n % 6]];
     }
-
-    /// One row of the live screen, styled per cell.
-    fn row_line(&self, y: usize) -> Line {
-        let mut spans: Vec<Span> = Vec::new();
-        let mut text = String::new();
-        let mut style = crate::render::Style::new();
-        for x in 0..self.cols {
-            let i = y * self.cols + x;
-            let cell = self.cells[i];
-            let mut st = crate::render::Style::new();
-            if let Some(rgb) = self.fg[i] {
-                st.raw.fg_rgb = Some(rgb);
-            }
-            if self.bold[i] {
-                st.attrs = crate::style::Attrs::BOLD;
-            }
-            if x == self.x && y == self.y {
-                if !text.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut text), style.clone()));
-                }
-                spans.push(Span::styled(
-                    cell.to_string(),
-                    crate::render::Style::new().reverse(),
-                ));
-                style = st;
-            } else {
-                if st != style {
-                    if !text.is_empty() {
-                        spans.push(Span::styled(std::mem::take(&mut text), style.clone()));
-                    }
-                    style = st;
-                }
-                text.push(cell);
-            }
-        }
-        if !text.is_empty() {
-            spans.push(Span::styled(text, style));
-        }
-        if spans.is_empty() {
-            spans.push(Span::raw(" ".to_string()));
-        }
-        Line::new(spans)
-    }
-
-    /// The scrollback window: history rows, ending `scroll` lines back from the newest.
-    fn history_lines(&self) -> Vec<Line> {
-        let end = self.history.len().saturating_sub(self.scroll);
-        let start = end.saturating_sub(self.rows);
-        self.history[start..end]
-            .iter()
-            .map(|t| Line::raw(t.clone()))
-            .collect()
-    }
+    let v = 8 + 10 * (i - 232);
+    [v, v, v]
 }
 
 /// The sixteen colours SGR names, as RGB: exact colours, since a palette's nearest is not the
@@ -825,7 +641,7 @@ mod tests {
         std::mem::forget(child);
         (
             Tab {
-                parser: Vt::new(40, 6, 200),
+                parser: new_parser(40, 6, 200),
                 master,
                 pid,
                 title: "t".to_string(),
@@ -833,6 +649,19 @@ mod tests {
             },
             slave,
         )
+    }
+
+    /// Feed until the screen answers `pred`: a pty delivers a write in however many reads it
+    /// likes, so a single feed is not a guarantee.
+    fn feed_until(t: &mut Tab, pred: impl Fn(&Tab) -> bool) -> bool {
+        for _ in 0..200 {
+            t.feed();
+            if pred(t) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
     }
 
     fn write_all(fd: RawFd, bytes: &[u8]) {
@@ -873,7 +702,7 @@ mod tests {
         let pid = child.id() as libc::pid_t;
         std::mem::forget(child);
         let t = Tab {
-            parser: Vt::new(40, 6, 200),
+            parser: new_parser(40, 6, 200),
             master,
             pid,
             title: "t".to_string(),
@@ -941,9 +770,11 @@ mod tests {
         for i in 0..20 {
             t.parser.process(format!("line{i}\r\n").as_bytes());
         }
-        assert_eq!(t.parser.history.len(), 5, "five lines kept");
+        // The parser keeps five and clamps a scroll past them: the oldest are gone.
+        t.scroll_up(100);
+        assert_eq!(t.scroll_pos(), 5, "five lines kept");
         assert!(
-            !t.parser.history.iter().any(|l| l.contains("line0")),
+            !t.lines().iter().any(|l| l.plain().contains("line0")),
             "the oldest lines scrolled out of the kept history"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1054,9 +885,9 @@ mod tests {
         }
     }
 
-    /// The shell is told the terminal is a VT100, which is what the emulator implements.
+    /// The shell is told what the parser implements well.
     #[test]
-    fn the_shell_is_told_the_terminal_is_a_vt100() {
+    fn the_shell_is_told_the_terminal_is_xterm_256color() {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"echo $TERM\n");
         let mut saw = false;
@@ -1064,14 +895,18 @@ mod tests {
             t.feed();
             if t.lines()
                 .iter()
-                .any(|l| l.plain().trim().ends_with("vt100"))
+                .any(|l| l.plain().trim().ends_with("xterm-256color"))
             {
                 saw = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(saw, "echo $TERM answered vt100");
+        assert!(
+            saw,
+            "echo $TERM answered xterm-256color: {:?}",
+            t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
+        );
     }
 
     /// `yes | head -1` ends because the writer dies on SIGPIPE: no "Broken pipe" message, and
@@ -1146,47 +981,206 @@ mod tests {
     /// SGR sets a foreground per cell, and reset clears it.
     #[test]
     fn sgr_colours_are_kept_per_cell() {
-        let mut p = Vt::new(10, 2, 200);
-        p.process(b"\x1b[31mR\x1b[0mX");
-        println!("fg={:?} cur={:?}", p.fg[0], p.cur_fg);
-        assert_eq!(p.fg[0], Some(rgb(1)), "red at cell 0");
-        assert_eq!(p.fg[1], None, "reset after it");
+        let (mut t, slave) = pipe_tab();
+        write_all(slave, b"\x1b[31mR\x1b[0mX");
+        assert!(feed_until(&mut t, |t| t.lines()[0].plain().contains('X')));
+        let line = &t.lines()[0];
+        let first = line.spans.first().expect("a span");
+        assert_eq!(first.content, "R");
+        assert_eq!(first.style.raw.fg_rgb, Some(rgb(1)), "red at cell 0");
+        let rest: String = line.spans[1..].iter().map(|s| s.content.clone()).collect();
+        assert!(rest.starts_with('X'), "{rest:?}");
+        assert_eq!(line.spans[1].style.raw.fg_rgb, None, "reset after it");
+        unsafe {
+            libc::close(slave);
+        }
     }
 
     /// What scrolled off the top is in the scrollback, and PgUp reads it.
     #[test]
     fn a_scrolled_back_line_is_in_history() {
-        let mut p = Vt::new(10, 2, 200);
-        p.process(b"one\ntwo\nthree\n");
-        assert_eq!(p.history.len(), 2, "both scrolled-off lines are scrollback");
-        p.scroll = 1;
-        assert!(p.lines().iter().any(|l| l.plain().contains("one")));
+        let (mut t, slave) = pipe_tab();
+        // A program's line ends: the pty's ONLCR turns `\n` into `\r\n`, so a bare `\n` would
+        // make two newlines. Ten lines in a six-row screen leave four in the scrollback.
+        for i in 1..=10 {
+            write_all(slave, format!("line{i}\r\n").as_bytes());
+        }
+        assert!(feed_until(&mut t, |t| {
+            t.lines().iter().any(|l| l.plain().trim() == "line10")
+        }));
+        t.scroll_up(100);
+        let pos = t.scroll_pos();
+        assert!(pos >= 4, "the lines that scrolled off are kept: {pos}");
+        assert!(
+            t.lines().iter().any(|l| l.plain().trim() == "line1"),
+            "the oldest line is readable: {:?}",
+            t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
+        );
+        unsafe {
+            libc::close(slave);
+        }
     }
 
-    /// Backspace erases as well as moves, and the caret is drawn where the next character lands.
+    /// Backspace is a cursor move, and a shell erases what it leaves with `\b \b`; the caret is
+    /// drawn where the next character lands.
     #[test]
     fn backspace_erases_and_the_caret_is_drawn() {
-        let mut p = Vt::new(10, 2, 200);
-        p.process(b"ab");
-        p.process(b"\x08");
-        let row: String = (0..10).map(|x| p.cells[x]).collect();
-        assert_eq!(row, "a         ", "the b is erased, not merely moved over");
-        let lines = p.lines();
+        let (mut t, slave) = pipe_tab();
+        // What a readline sends for one erased character: back, blank it, back again.
+        write_all(slave, b"ab\x08 \x08");
+        assert!(feed_until(&mut t, |t| {
+            let row = t.lines()[0].plain();
+            row.starts_with('a') && !row.starts_with("ab")
+        }));
+        let row = t.lines()[0].plain();
+        assert!(row.starts_with('a'), "{row:?}");
+        assert!(!row.starts_with("ab"), "the b is erased: {row:?}");
         assert!(
-            lines[0]
+            t.lines()[0]
                 .spans
                 .iter()
                 .any(|s| s.style.attrs.contains(crate::style::Attrs::REVERSE)),
             "a caret cell"
         );
+        unsafe {
+            libc::close(slave);
+        }
+    }
+
+    /// `clear` erases and `seq` writes three lines: what the crate brought is the erase, so the
+    /// screen holds the numbers and a prompt, not the command's echo.
+    #[test]
+    fn clear_and_seq_leave_three_lines_and_a_prompt() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"clear; seq 1 3\n");
+        assert!(feed_until(&mut t, |t| {
+            t.lines().iter().any(|l| l.plain().trim() == "3")
+        }));
+        let shown: Vec<String> = t
+            .lines()
+            .iter()
+            .map(|l| l.plain().trim_end().to_string())
+            .collect();
+        for n in ["1", "2", "3"] {
+            assert_eq!(
+                shown.iter().filter(|l| *l == n).count(),
+                1,
+                "one {n} on the screen: {shown:?}"
+            );
+        }
+        assert!(
+            !shown.iter().any(|l| l.contains("clear")),
+            "the echo is erased: {shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("$") || l.starts_with("#")),
+            "a prompt waits: {shown:?}"
+        );
+    }
+
+    /// An OSC title is not text: the parser keeps it as the window title, and the screen shows
+    /// only what followed it.
+    #[test]
+    fn an_osc_title_is_not_text_on_the_screen() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        // The title is built in the shell, so the command's own echo cannot spell it: what is
+        // left on the screen is only what followed it.
+        t.send(b"T=$(printf 'the-%s' title); printf '\\033]0;%s\\007x\\n' \"$T\"\n");
+        assert!(feed_until(&mut t, |t| {
+            t.lines().iter().any(|l| l.plain().contains('x'))
+        }));
+        let shown: Vec<String> = t.lines().iter().map(|l| l.plain()).collect();
+        assert!(
+            !shown.iter().any(|l| l.contains("the-title")),
+            "the title never reaches the screen: {shown:?}"
+        );
+    }
+
+    /// A 256-colour SGR keeps the colour it named: 196 is the cube's red, not the nearest of
+    /// sixteen, which is what the hand parser could do.
+    #[test]
+    fn a_256_colour_sgr_keeps_its_colour() {
+        let (mut t, slave) = pipe_tab();
+        write_all(slave, b"\x1b[38;5;196mX\x1b[0m");
+        assert!(feed_until(&mut t, |t| {
+            t.lines()[0].plain().contains('X')
+        }));
+        let line = &t.lines()[0];
+        let span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains('X'))
+            .expect("the X's span");
+        assert_eq!(
+            span.style.raw.fg_rgb,
+            Some([255, 0, 0]),
+            "196 is the cube's red"
+        );
+        assert_eq!(
+            span.style.raw.fg_rgb,
+            Some([255, 0, 0]),
+            "colour 196 as RGB"
+        );
+        unsafe {
+            libc::close(slave);
+        }
+    }
+
+    /// `less` draws on the alternate screen: its first line is at column one, and PgDn reaches
+    /// the program rather than rano's scrollback.
+    #[test]
+    fn less_shows_line_one_in_column_one_and_pages_with_pgdn() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"seq 1 300 > /tmp/rano-vt-less.txt; less /tmp/rano-vt-less.txt\n");
+        assert!(feed_until(&mut t, |t| {
+            t.lines().iter().any(|l| l.plain().starts_with('1'))
+        }));
+        let top = t.lines()[0].plain();
+        assert!(top.starts_with('1'), "line 1 at column one: {top:?}");
+        t.send(b"\x1b[6~");
+        assert!(feed_until(&mut t, |t| { t.lines()[0].plain() != top }));
+        t.send(b"q");
+        let _ = std::fs::remove_file("/tmp/rano-vt-less.txt");
+    }
+
+    /// `vi` draws on the alternate screen, and `:q!` gives the shell's own screen back.
+    #[test]
+    fn vi_quits_and_the_shells_screen_comes_back() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        t.send(b"echo before-vi\n");
+        assert!(feed_until(&mut t, |t| {
+            t.lines().iter().any(|l| l.plain().contains("before-vi"))
+        }));
+        t.send(b"vi -u NONE /tmp/rano-vt-vi.txt\n");
+        assert!(
+            feed_until(&mut t, |t| {
+                !t.lines().iter().any(|l| l.plain().contains("before-vi"))
+            }),
+            "vi's alternate screen hides the shell's"
+        );
+        t.send(b":q!\r");
+        assert!(
+            feed_until(&mut t, |t| {
+                t.lines().iter().any(|l| l.plain().contains("before-vi"))
+            }),
+            "the shell's screen comes back"
+        );
+        let _ = std::fs::remove_file("/tmp/rano-vt-vi.txt");
     }
 
     /// The emulator is not a byte pipe: a carriage return moves the cursor, it does not type one.
     #[test]
     fn a_carriage_return_is_not_a_character() {
-        let mut p = Vt::new(10, 3, 200);
-        p.process(b"ab\rX");
-        let text: String = (0..10).map(|x| p.cells[x]).collect();
-        assert_eq!(text.trim_end(), "Xb");
+        let (mut t, slave) = pipe_tab();
+        write_all(slave, b"ab\rX");
+        assert!(feed_until(&mut t, |t| t.lines()[0].plain().contains('X')));
+        let row = t.lines()[0].plain();
+        assert!(row.trim_end().starts_with("Xb"), "{row:?}");
+        assert!(!row.contains('\r'), "{row:?}");
+        unsafe {
+            libc::close(slave);
+        }
     }
 }

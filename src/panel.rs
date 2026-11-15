@@ -1189,6 +1189,7 @@ fn tool_fold(rows: &[Row], open: bool) -> ToolFold {
         }
         let run = &rows[start..i];
         let mut failed = 0usize;
+        let mut words: Vec<String> = Vec::new();
         let mut hidden = 0usize;
         for (k, r) in run.iter().enumerate() {
             let Row::Tool(t) = r else { continue };
@@ -1196,6 +1197,10 @@ fn tool_fold(rows: &[Row], open: bool) -> ToolFold {
                 && !matches!(t.outcome, crate::agent::outcome::Outcome::Abstained(_));
             if failed_here {
                 failed += 1;
+                let w = t.outcome.word().to_lowercase();
+                if !words.iter().any(|have| have == &w) {
+                    words.push(w.clone());
+                }
             }
             // The newest call is the run's last row whatever its outcome; a failure keeps
             // its own line wherever it sits.
@@ -1211,10 +1216,13 @@ fn tool_fold(rows: &[Row], open: bool) -> ToolFold {
             } else {
                 "tool calls"
             };
-            let summary = if failed > 0 {
-                format!("{} {calls} · {failed} failed", run.len())
-            } else {
-                format!("{} {calls}", run.len())
+            // The summary names the dominant non-success kind — a refusal is `refused`, not a
+            // `failed` the row underneath contradicts; several kinds say `not ok` and leave
+            // the word to the rows, which are one line away.
+            let summary = match words.len() {
+                0 => format!("{} {calls}", run.len()),
+                1 => format!("{} {calls} · {failed} {}", run.len(), words[0]),
+                _ => format!("{} {calls} · {failed} not ok", run.len()),
             };
             fold.summary_at[i - 1] = Some(summary);
         }
@@ -2213,7 +2221,7 @@ mod tests {
             .join("\n");
         assert!(
             text.contains("8 tool calls · 1 failed"),
-            "one line names the run: {text}"
+            "one line names the run and its kind: {text}"
         );
         // The newest and the failed stay open: three rows of calls and the summary — not
         // eight calls and a summary.
@@ -2240,6 +2248,90 @@ mod tests {
         assert!(
             !text.contains("tool calls ·"),
             "and no summary line while open: {text}"
+        );
+    }
+
+    /// The summary names the kind it counted: a run of refusals says `refused`, not `failed`,
+    /// and a run of mixed kinds says `not ok` rather than choosing one word and lying.
+    #[test]
+    fn the_fold_summary_names_the_kind_it_counted() {
+        let mut panel = opened();
+        let mut seq = 1;
+        for (i, word) in ["ok", "denied", "ok", "timeout"].iter().enumerate() {
+            let id = format!("c-{i}");
+            panel.apply(&Frame::Event {
+                seq,
+                event: Event::ToolStarted {
+                    turn_id: "t".to_string(),
+                    call_id: id.clone(),
+                    name: "bash".to_string(),
+                    access: "exec".to_string(),
+                },
+            });
+            seq += 1;
+            panel.apply(&Frame::Event {
+                seq,
+                event: Event::ToolFinished {
+                    turn_id: "t".to_string(),
+                    call_id: id,
+                    outcome: word.to_string(),
+                    why: String::new(),
+                    edits: Vec::new(),
+                    bytes: Some((0, 0)),
+                },
+            });
+            seq += 1;
+        }
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("4 tool calls · 2 not ok"),
+            "two kinds say `not ok`: {text}"
+        );
+        assert!(
+            !text.contains("2 failed"),
+            "a refusal is not a failure: {text}"
+        );
+        // One kind says its own word.
+        let mut panel = opened();
+        for (i, word) in ["ok", "denied", "denied", "ok"].iter().enumerate() {
+            let id = format!("d-{i}");
+            panel.apply(&Frame::Event {
+                seq: i as u64 + 1,
+                event: Event::ToolStarted {
+                    turn_id: "t".to_string(),
+                    call_id: id.clone(),
+                    name: "bash".to_string(),
+                    access: "exec".to_string(),
+                },
+            });
+            panel.apply(&Frame::Event {
+                seq: i as u64 + 11,
+                event: Event::ToolFinished {
+                    turn_id: "t".to_string(),
+                    call_id: id,
+                    outcome: word.to_string(),
+                    why: String::new(),
+                    edits: Vec::new(),
+                    bytes: Some((0, 0)),
+                },
+            });
+        }
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("4 tool calls · 2 refused"),
+            "a refusal says refused: {text}"
         );
     }
 

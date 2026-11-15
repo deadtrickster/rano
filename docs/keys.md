@@ -164,6 +164,7 @@ doing (`idle`, `thinking`, `waiting on you`), or says why there is no daemon.
 | `C-c` | Stop the running turn |
 | arrows, `C-p` / `C-n`, `PgUp` / `PgDn` | Move in the session pick, or scroll the conversation |
 | `M-f` | Follow the focused file into another folder: that folder's daemon, that conversation |
+| `M-t` | Fold a run of tool calls to one line, or open every call |
 
 The composer is one line: any character is typed into it, `Home` / `End` / `Left` / `Right` move
 in it, and `RET` sends. In the session pick `n` makes a new session and a digit picks the row

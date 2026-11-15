@@ -708,8 +708,10 @@ mod tests {
     /// Feed until the screen answers `pred`: a pty delivers a write in however many reads it
     /// likes, so a single feed is not a guarantee.
     fn feed_until(t: &mut Tab, pred: impl Fn(&Tab) -> bool) -> bool {
-        // A loaded gate is slower than two seconds, and the pty's answer is what is waited for.
-        for _ in 0..600 {
+        // A loaded machine is slower than any small bound: the merge gate's suite has needed
+        // more than six seconds for a shell to print its prompt. Thirty, returning the moment
+        // the answer arrives.
+        for _ in 0..3000 {
             t.feed();
             if pred(t) {
                 return true;

@@ -97,15 +97,9 @@ impl Editor {
         } else {
             IDLE_WAIT
         };
-        // A running turn's status line moves on its own clock: once a second is enough for the
-        // spinner and the elapsed count, and a tick that never comes froze both.
-        let wait = if self.panel.state == crate::panel::PanelState::Thinking
-            || self.panel.pending_ask().is_some()
-        {
-            wait.min(Duration::from_millis(250))
-        } else {
-            wait
-        };
+        // No special case for a running turn's status line: the ordinary idle wait already
+        // ticks several times a second, and `Panel::tick_turn` marks the frame dirty once per
+        // whole second. A clamp here could only shorten a wait that is already shorter.
         match self.card_due() {
             // The +1 ms rounds past the deadline: waking a hair early would
             // find the card not due and sleep the whole wait again.

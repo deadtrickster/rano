@@ -441,6 +441,12 @@ pub enum Event {
         citations: Vec<Citation>,
     },
     DecisionRequested(DecisionRequest),
+    /// A card was answered — by whichever head could decide, so every other head stops naming
+    /// it. The daemon emits it as `decision_answered` with the request's id; without it a shown
+    /// ask could only ever be cleared by the next turn.
+    DecisionAnswered {
+        req_id: String,
+    },
     /// An event whose tag this build does not know. Delivered, because a panel may want to say so,
     /// and never fatal.
     Unknown {
@@ -1019,6 +1025,9 @@ fn event(v: &Value) -> Event {
             because: text(v, "because"),
             deadline: number(v, "deadline"),
         }),
+        "decision_answered" => Event::DecisionAnswered {
+            req_id: text(v, "req_id"),
+        },
         _ => Event::Unknown { tag },
     }
 }
@@ -1468,6 +1477,16 @@ mod tests {
         assert_eq!(card.target, "rm -rf x");
         assert_eq!(card.options[0].option_id, "allow_once");
         assert_eq!(card.deadline, None);
+        // The answer is an event too, so a head that only watches can stop naming the card.
+        let frame = parse(
+            r#"{"frame":"event","seq":6,"event":"decision_answered","req_id":"r-1",
+                "outcome":{"outcome":"selected","option_id":"allow_once"},
+                "by":{"kind":"human"},"basis":"","late":false}"#,
+        );
+        let Event::DecisionAnswered { req_id } = event_of(&frame) else {
+            panic!("a decision_answered is one");
+        };
+        assert_eq!(req_id, "r-1");
     }
 
     #[test]

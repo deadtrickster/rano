@@ -654,7 +654,8 @@ mod tests {
     /// Feed until the screen answers `pred`: a pty delivers a write in however many reads it
     /// likes, so a single feed is not a guarantee.
     fn feed_until(t: &mut Tab, pred: impl Fn(&Tab) -> bool) -> bool {
-        for _ in 0..200 {
+        // A loaded gate is slower than two seconds, and the pty's answer is what is waited for.
+        for _ in 0..600 {
             t.feed();
             if pred(t) {
                 return true;
@@ -1053,8 +1054,14 @@ mod tests {
     fn clear_and_seq_leave_three_lines_and_a_prompt() {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"clear; seq 1 3\n");
+        // The numbers and the prompt that follows them: `seq` finishing is not the prompt
+        // arriving, and a gate under load can put seconds between the two.
         assert!(feed_until(&mut t, |t| {
             t.lines().iter().any(|l| l.plain().trim() == "3")
+                && t.lines().iter().any(|l| {
+                    let s = l.plain();
+                    s.starts_with('$') || s.starts_with('#')
+                })
         }));
         let shown: Vec<String> = t
             .lines()

@@ -1570,10 +1570,9 @@ impl Editor {
     /// The rows the status and the key bar take at the frame's foot. The terminal's strip goes
     /// above them: they belong to the frame, not to the editor's text rows.
     pub fn status_rows(&self) -> usize {
-        if !self.status_shown() {
-            return 0;
-        }
-        1 + if self.chrome.keys { 2 } else { 0 }
+        // The key bar is drawn whatever the status row says; only the status row itself comes
+        // and goes. The strip sits above ALL of it.
+        usize::from(self.status_shown()) + if self.chrome.keys { 2 } else { 0 }
     }
 
     pub fn status_shown(&self) -> bool {

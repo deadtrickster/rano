@@ -1590,6 +1590,20 @@ impl Editor {
         {
             return entries_of(m, self);
         }
+        if self.focus == crate::editor::Focus::Terminal && self.bottom.open {
+            // The terminal answers its own chords and everything else is the shell's: the bar
+            // says what the focused surface answers, not what the layers underneath it would.
+            let term = &self.keymaps.terminal;
+            let mut out = Vec::new();
+            for (k, e) in term.entries() {
+                if let Entry::Command(c) = e
+                    && let Some(cmd) = command(c)
+                {
+                    out.push((note(std::slice::from_ref(k)), cmd.title.to_string()));
+                }
+            }
+            return out;
+        }
         if self
             .editor_keymaps()
             .first()

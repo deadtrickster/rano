@@ -758,7 +758,7 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     let bottom = (strip > 0).then(|| Rect::new(0, strip_y, w, strip));
     let host_foot = ed.panel.open && status > 0;
     let foot = host_foot.then(|| Rect::new(0, h - status, w, status));
-    let above_h = if host_foot { strip_y } else { h };
+    let above_h = if foot.is_some() { strip_y } else { h };
     let whole = Rect::new(0, 0, w, above_h);
     if !ed.panel.open || w == 0 || h == 0 {
         return Layout {
@@ -1778,6 +1778,118 @@ mod panel_tests {
             assert!(
                 bar.contains("RET Send"),
                 "the frame's bar is full width at {w}x{h}"
+            );
+        }
+    }
+
+    /// The foot's rows are nobody else's: the strip ends above the status row, the status row
+    /// holds no shell text, text and panel end on the same row, and the title bar spans the
+    /// frame at every open/close transition.
+    #[test]
+    fn the_foots_rows_are_nobody_elses() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        for (w, h) in [(239u16, 68u16), (100, 30)] {
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            ed.bottom.tabs[0].send(b"seq 1 50\n");
+            let mut ready = false;
+            for _ in 0..600 {
+                ed.bottom.tabs[0].feed();
+                if ed.bottom.tabs[0]
+                    .lines()
+                    .iter()
+                    .any(|l| l.plain().trim() == "50")
+                {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(ready, "seq answered at {w}x{h}");
+            let strip = lay.bottom.expect("a strip");
+            let foot_y = h - ed.status_rows() as u16;
+            assert!(
+                strip.y + strip.height <= foot_y,
+                "A: the strip ends above the status row at {w}x{h}: {} vs {foot_y}",
+                strip.y + strip.height
+            );
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let rows = buf.emit(rano::render::Palette::None);
+            for row in foot_y as usize..h as usize {
+                assert!(
+                    !rows[row].contains("dead@") && !rows[row].trim_start().starts_with('['),
+                    "A: no shell text on the status row {row} at {w}x{h}: {:?}",
+                    rows[row]
+                );
+            }
+            // C: the title bar spans the frame after open and close. The reverse-video band
+            // is blank to Palette::None, so the styled copy is what says its width.
+            let styled = buf.emit(rano::render::Palette::Colour);
+            assert!(
+                styled[0].contains("  rano") && styled[0].chars().count() >= w as usize,
+                "C: the title bar spans the frame at {w}x{h}: {} wide",
+                styled[0].chars().count()
+            );
+            // Open and close the panel: the title still spans.
+            ed.panel.open = true;
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let rows = buf.emit(rano::render::Palette::None);
+            let styled = buf.emit(rano::render::Palette::Colour);
+            let er = lay.editor.expect("an editor");
+            assert!(
+                styled[0].contains("  rano") && styled[0].chars().count() >= er.width as usize,
+                "C: the title spans its column with the panel open at {w}x{h}: {} wide",
+                styled[0].chars().count()
+            );
+            // B: with the panel open, text and panel end on the same row.
+            let er = lay.editor.expect("an editor");
+            let pr = lay.panel.expect("a panel");
+            assert_eq!(
+                er.height, pr.height,
+                "B: text and panel end on the same row at {w}x{h}"
+            );
+            ed.panel.open = false;
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let rows = buf.emit(rano::render::Palette::None);
+            let styled = buf.emit(rano::render::Palette::Colour);
+            assert!(
+                styled[0].contains("  rano") && styled[0].chars().count() >= w as usize,
+                "C: the title spans after the close at {w}x{h}: {} wide",
+                styled[0].chars().count()
+            );
+        }
+    }
+
+    /// The terminal's bar says what the terminal answers: its own chords, and none of the
+    /// editor commands that a focused shell would swallow.
+    #[test]
+    fn the_terminals_bar_lists_only_the_terminals_keys() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        let bar = ed.key_hints();
+        let says = |t: &str| bar.iter().any(|(_, title)| title == t);
+        assert!(says("New Tab"), "the terminal's own: {bar:?}");
+        assert!(says("Close Tab"));
+        assert!(says("Text"));
+        for not in ["Write Out", "Exit", "Cut", "Where Is", "Paste"] {
+            assert!(
+                !says(not),
+                "an editor command the shell would swallow: {bar:?}"
             );
         }
     }

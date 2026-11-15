@@ -58,6 +58,17 @@ impl Tab {
                 unsafe {
                     libc::close(slave);
                     libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+                    // A child of the editor (a compiler, a test runner) must not inherit the
+                    // shell's pty: it would hold the terminal open after the tab closed. The
+                    // fcntl is checked, and a failure still kills and reaps the shell.
+                    if libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                        let e = std::io::Error::last_os_error();
+                        libc::close(master);
+                        libc::kill(p, libc::SIGKILL);
+                        let mut status = 0;
+                        libc::waitpid(p, &mut status, 0);
+                        return Err(e);
+                    }
                 }
                 Ok(Tab {
                     parser: Vt::new(cols as usize, rows as usize),
@@ -740,6 +751,24 @@ mod tests {
         unsafe {
             libc::close(slave);
         }
+    }
+
+    /// A child of the editor does not inherit the shell's pty: the master is close-on-exec, and
+    /// a process spawned after the tab opened does not have the fd.
+    #[test]
+    fn a_child_of_the_editor_does_not_inherit_the_pty() {
+        let t = Tab::open(Path::new("/tmp"), 40, 6).expect("a pty");
+        let flags = unsafe { libc::fcntl(t.master, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "FD_CLOEXEC is set"
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("[ ! -e /proc/self/fd/{} ]", t.master))
+            .status()
+            .expect("a child");
+        assert!(status.success(), "fd {} is closed in the child", t.master);
     }
 
     /// A tab is a real pty with a real shell behind it: it answers `echo`.

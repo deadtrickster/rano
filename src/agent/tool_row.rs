@@ -144,6 +144,14 @@ impl ToolRow {
             .map(|(l, t)| (l, t.as_str()))
             .collect();
         let lines: Vec<&str> = kept.iter().map(|(_, t)| *t).collect();
+        // Dropped markers are counted on the header, so the count it shows plus this is the
+        // payload's own line count and nothing leaves the row unsaid.
+        let markers = texts.iter().filter(|t| is_envelope(t)).count();
+        let hidden_note = match markers {
+            0 => String::new(),
+            1 => " · 1 marker line hidden".to_string(),
+            n => format!(" · {n} marker lines hidden"),
+        };
         let bad = !matches!(self.outcome, Outcome::Ok);
         // A tool's own prose is read for `code` spans; a command's output and a file's text are not.
         let is_prose = !matches!(Verb::of(&self.name), Verb::Run | Verb::Read);
@@ -176,8 +184,13 @@ impl ToolRow {
         // at the right, a long target ate the outcome, and `not run` cut off the end is a failed call
         // wearing the shape of a successful one.
         let word = self.outcome.word();
-        let tail_cols =
-            3 + visible_width(word) + visible_width(&took) + 3 + 6 + lines.len().to_string().len();
+        let tail_cols = 3
+            + visible_width(word)
+            + visible_width(&took)
+            + 3
+            + 6
+            + lines.len().to_string().len()
+            + visible_width(&hidden_note);
         // A call the person ran says so, in the glyph and role the operator's own words already
         // wear — the palette has one meaning for the person at the keyboard — and in a glyph as well
         // as a colour, so the provenance survives `Palette::None`. Nothing else changes.
@@ -232,13 +245,17 @@ impl ToolRow {
             && self.diff.is_none())
         .then(|| strip_gutter(lines[0]))
         .filter(|l| !l.is_empty())
-        .filter(|l| head.width() + 3 + visible_width(l) <= w);
+        .filter(|l| head.width() + visible_width(&hidden_note) + 3 + visible_width(l) <= w);
         if let Some(l) = inline {
             head.spans.push(Span::role(" · ", Role::Faint));
             if is_prose {
                 head.spans.extend(prose(&l, Role::Plain).spans);
             } else {
                 head.spans.push(Span::raw(l));
+            }
+            if !hidden_note.is_empty() {
+                head.spans
+                    .push(Span::role(hidden_note.clone(), Role::Faint));
             }
             let mut out = vec![truncate_owned(head, w)];
             // The approval rides the one-line form too.
@@ -260,6 +277,10 @@ impl ToolRow {
             ),
             size_role,
         ));
+        if !hidden_note.is_empty() {
+            head.spans
+                .push(Span::role(hidden_note.clone(), Role::Faint));
+        }
         // No chord on the header: it belongs on the elision row below, which exists exactly when
         // something is hidden.
         let mut out = vec![truncate_owned(head, w)];
@@ -332,7 +353,51 @@ impl ToolRow {
         // 418 KB log's fold reported `+N lines` and the chord revealed nothing, because opening the
         // fold changed the budget and not the offset.
         let window = self.window.is_some();
-        let total = lines.len();
+        // The payload block is faint, and a coloured run inside it stacks its own role over that
+        // and closes back to faint.
+        let faint = Style::of(Role::Faint);
+        // A command's diff or diffstat is painted here: its stdout is not a terminal, so git sent
+        // no colour. Only a line the command left unstyled is repainted.
+        let diff = if matches!(verb_kind, Verb::Run) {
+            diffbody::paint(&lines)
+        } else {
+            Vec::new()
+        };
+        let styled = |n: usize| -> Line {
+            let l = kept[n].0;
+            let unstyled = l.spans.iter().all(|s| s.style == Style::new());
+            if let (true, Some(Some(p))) = (unstyled, diff.get(n)) {
+                return p.clone();
+            }
+            let mut line = if unstyled && is_prose {
+                prose(&l.plain(), Role::Plain)
+            } else {
+                l.clone()
+            };
+            line.style = faint.patch(&line.style);
+            line
+        };
+        // Rows, each with the payload line it shows and whether it ends that line. The open window
+        // wraps, so a line wider than the screen is read whole there; elsewhere a line is one row,
+        // cut at the edge.
+        let rows: Vec<(usize, Line, bool)> = if window {
+            (0..lines.len())
+                .flat_map(|n| {
+                    let mut parts = wrap(&styled(n), w.saturating_sub(2));
+                    if parts.is_empty() {
+                        parts.push(Line::default());
+                    }
+                    let k = parts.len();
+                    parts
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(i, p)| (n, p, i + 1 == k))
+                })
+                .collect()
+        } else {
+            (0..lines.len()).map(|n| (n, styled(n), true)).collect()
+        };
+        let total = rows.len();
         // The window is the row's own length, not the fold's, so one result can be read to its end
         // without unfolding every result — and it fits the screen, where a forty-row window's first
         // lines sat above the top of a 24-row terminal.
@@ -359,37 +424,21 @@ impl ToolRow {
         let end = (page + body).min(total);
         let below = end < total;
         if above {
+            // Counted in payload lines, a line partly above counted with them.
+            let (n, _, _) = &rows[page];
+            let cut = page > 0 && rows[page - 1].0 == *n;
             out.push(one(
-                format!("  ↑ {page} more lines above · ↑ scrolls up"),
+                format!(
+                    "  ↑ {} more lines above · ↑ scrolls up",
+                    n + usize::from(cut)
+                ),
                 Role::Faint,
             ));
         }
-        // The payload's block is faint, and a coloured run inside it stacks its own role over that
-        // and closes back to faint.
-        let faint = Style::of(Role::Faint);
-        // A command's diff or diffstat is painted here: its stdout is not a terminal, so git sent
-        // no colour. Only a line the command left unstyled is repainted.
-        let diff = if matches!(verb_kind, Verb::Run) {
-            diffbody::paint(&lines)
-        } else {
-            Vec::new()
-        };
-        out.extend(kept[page..end].iter().enumerate().map(|(n, (l, _))| {
-            let unstyled = l.spans.iter().all(|s| s.style == Style::new());
-            if let (true, Some(Some(p))) = (unstyled, diff.get(page + n)) {
-                return indent(p.clone(), 2);
-            }
-            let line = if unstyled && is_prose {
-                prose(&l.plain(), Role::Plain)
-            } else {
-                (*l).clone()
-            };
-            let mut row = indent(line, 2);
-            row.style = faint.patch(&row.style);
-            row
-        }));
+        out.extend(rows[page..end].iter().map(|(_, l, _)| indent(l.clone(), 2)));
         if below {
-            let hidden = total - end;
+            let (n, _, whole) = &rows[end - 1];
+            let hidden = lines.len() - n - usize::from(*whole);
             // The seam where content was taken out, not a sentence, and it names which key does what
             // now: the chord opens the view and the arrows move inside it.
             out.push(one(
@@ -630,6 +679,56 @@ mod tests {
             plain(&end.lines)
         );
         assert_eq!(end.max_page, Some(200 - 38));
+    }
+
+    /// The open window wraps: a 400-column line is read whole at 80 columns, the folded row keeps
+    /// its one-line cut, and the seams count payload lines, not rows.
+    #[test]
+    fn a_line_wider_than_the_screen_is_read_whole_in_the_window() {
+        let long: String = (0..45).map(|i| format!("word{i:04} ")).collect();
+        assert!(long.len() >= 400);
+        let text = format!("first\n{long}\nlast\n");
+        let mut r = ToolRow::new("bash", "c1", Outcome::Ok, payload_lines(&text));
+        r.fold = Fold::Open;
+        let folded = plain(&r.lines(80));
+        assert!(folded.iter().all(|l| visible_width(l) <= 80), "{folded:?}");
+        assert!(!folded.join("").contains("word0044"), "{folded:?}");
+
+        r.window = Some(0);
+        let open = plain(&r.lines(80));
+        assert!(open.iter().all(|l| visible_width(l) <= 80), "{open:?}");
+        let joined: String = open.join(" ");
+        for i in 0..45 {
+            assert!(joined.contains(&format!("word{i:04}")), "word{i}: {open:?}");
+        }
+        assert!(joined.contains("end of output"), "{open:?}");
+
+        // Scrolled one row into the long line: one line above, part of it.
+        r.window_rows = 5;
+        r.window = Some(2);
+        let mid = plain(&r.lines(80)).join("\n");
+        assert!(mid.contains("↑ 2 more lines above"), "{mid}");
+        assert!(mid.contains("+2 lines"), "{mid}");
+    }
+
+    /// Envelope markers are hidden and counted: the header's count plus the stated hidden lines is
+    /// the payload's own line count.
+    #[test]
+    fn hidden_marker_lines_are_counted_on_the_header() {
+        let text = "<<<UNTRUSTED_TEXT 5ebf>>>\na\nb\nc\n<<<END_UNTRUSTED_TEXT 5ebf>>>\n";
+        let r = ToolRow::new("webfetch", "c1", Outcome::Ok, payload_lines(text));
+        let head = plain(&r.lines(120))[0].clone();
+        assert!(head.contains("3 lines · 2 marker lines hidden"), "{head}");
+        let body = plain(&r.lines(120)).join("\n");
+        assert!(!body.contains("<<<"), "{body}");
+
+        let one = "<<<TOOL_ERROR 5ebf>>>\nonly\n";
+        let r = ToolRow::new("bash", "c2", Outcome::Ok, payload_lines(one));
+        let head = plain(&r.lines(120))[0].clone();
+        assert!(head.contains("only · 1 marker line hidden"), "{head}");
+
+        let none = ToolRow::new("bash", "c3", Outcome::Ok, numbered(3, "x"));
+        assert!(!plain(&none.lines(120))[0].contains("hidden"));
     }
 
     /// A window reaches its end, comes back at once, and fits the screen.

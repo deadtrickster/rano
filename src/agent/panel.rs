@@ -84,23 +84,37 @@ impl View<'_> {
         let turn_row = chip_row - usize::from(turn);
         let room = composer_row - 1 - usize::from(chips) - usize::from(turn);
         let hint_row = h - 1;
-        let _ = turn_row;
+        // One past the body's last row. The seams and the padding stop HERE, not at the
+        // composer: with a turn row or chips in between, a `below` seam placed by the composer
+        // lands on the turn row and the count of newer lines is overwritten by the status.
+        let body_end = turn_row;
 
         // ---- the top edge: the session, its state, and the folder it follows ----
         buf.set_line(area.x, area.y, &self.top_edge(w), w);
 
         // ---- the conversation, windowed ----
         let len = self.body.len();
-        let shown = if len > room {
+        let mut shown = if len > room {
             room.saturating_sub(1)
         } else {
             len
         };
-        let scroll = if self.follow {
+        let mut scroll = if self.follow {
             len.saturating_sub(shown)
         } else {
             self.scroll.min(len.saturating_sub(shown))
         };
+        // Reading the middle of a long conversation needs BOTH seams, and a seam is a row: with
+        // only one row reserved, the `below` count had nowhere to go. Shrinking the window by
+        // one more only ever grows `below` and loosens the scroll clamp, so one pass settles it.
+        if scroll > 0 && len > scroll + shown {
+            shown = shown.min(room.saturating_sub(2));
+            scroll = if self.follow {
+                len.saturating_sub(shown)
+            } else {
+                self.scroll.min(len.saturating_sub(shown))
+            };
+        }
         let below = len.saturating_sub(scroll + shown);
         let mut row = 1usize;
         if scroll > 0 && room > 0 {
@@ -113,13 +127,13 @@ impl View<'_> {
             row += 1;
         }
         for line in self.body.iter().skip(scroll).take(shown) {
-            if row >= composer_row {
+            if row >= body_end {
                 break;
             }
             buf.set_line(area.x, area.y + row as u16, line, w);
             row += 1;
         }
-        if below > 0 && row < composer_row {
+        if below > 0 && row < body_end {
             buf.set_line(
                 area.x,
                 area.y + row as u16,
@@ -128,13 +142,13 @@ impl View<'_> {
             );
             row += 1;
         }
-        while row < composer_row {
+        while row < body_end {
             buf.set_line(area.x, area.y + row as u16, &Line::raw(" ".repeat(w)), w);
             row += 1;
         }
 
         // ---- the turn's state: one row above the composer, where what is happening sits
-        // next to what you type. Drawn after the body's padding, which fills to the composer.
+        // next to what you type. Drawn after the body's padding, which stops above it.
         if turn && let Some(turn_line) = &self.turn {
             buf.set_line(area.x, area.y + turn_row as u16, turn_line, w);
         }

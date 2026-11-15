@@ -274,8 +274,13 @@ pub struct Panel {
     turn_started: Option<std::time::Instant>,
     /// The second the status line last said, so the host redraws once a second and not more.
     shown_second: u64,
-    /// The card the head is waiting on, as one phrase: the status line names it.
-    pending_ask: Option<String>,
+    /// When the turn last emitted anything — a delta, a call starting or settling. `slow` on the
+    /// status line means SILENT past the widget's threshold, never merely old: a turn streaming
+    /// text for a minute is not slow.
+    last_output: Option<std::time::Instant>,
+    /// The card the head is waiting on: its request id, so another head's answer clears exactly
+    /// this ask, and the one phrase the status line names.
+    pending_ask: Option<(String, String)>,
     /// The conversation's tool fold (`M-t` in the panel): with false, a run of settled calls
     /// collapses to one line and only the newest and the failed stay open.
     pub tools_open: bool,
@@ -321,6 +326,7 @@ impl Default for Panel {
             acts: Vec::new(),
             turn_started: None,
             shown_second: 0,
+            last_output: None,
             pending_ask: None,
             tools_open: false,
             running: Vec::new(),
@@ -368,8 +374,19 @@ impl Panel {
         self.title.clear();
         self.said.clear();
         self.moved = None;
+        self.drop_turn_state();
         self.acts.push(Act::Connect(self.folder.clone()));
         self.touch();
+    }
+
+    /// A different conversation has none of the old one's turn state: a status row naming the
+    /// previous session's ask, or clocking its turn, is the failure this row exists to remove.
+    /// `connect` and `new_session` both start one, and `follow` goes through `connect`.
+    fn drop_turn_state(&mut self) {
+        self.turn_started = None;
+        self.shown_second = 0;
+        self.last_output = None;
+        self.pending_ask = None;
     }
 
     /// The focused buffer's folder, when it is not the one on screen. A live conversation is not
@@ -513,6 +530,8 @@ impl Panel {
         self.session = session.to_string();
         self.picked = true;
         self.state = PanelState::Connecting;
+        // A picked session is a different conversation as much as a followed folder is.
+        self.drop_turn_state();
         self.acts.push(Act::Attach(session.to_string()));
         self.touch();
     }
@@ -603,6 +622,7 @@ impl Panel {
         self.acts.push(Act::New);
         self.state = PanelState::Connecting;
         self.said.clear();
+        self.drop_turn_state();
         self.touch();
     }
 
@@ -610,7 +630,9 @@ impl Panel {
         match event {
             Event::TurnStarted { .. } => {
                 // The clock the status line reads, and no ask is pending in a fresh turn.
-                self.turn_started = Some(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                self.turn_started = Some(now);
+                self.last_output = Some(now);
                 self.pending_ask = None;
                 self.state = PanelState::Thinking;
             }
@@ -619,6 +641,7 @@ impl Panel {
                 text,
                 ..
             } => {
+                self.last_output = Some(std::time::Instant::now());
                 if !matches!(self.rows.last(), Some(Row::Reply(_))) {
                     self.rows.push(Row::Reply(Box::default()));
                 }
@@ -635,11 +658,14 @@ impl Panel {
             // settled row reads its TARGET from it. It is never filed as the payload, which
             // is the tool's output and not on this wire at all.
             Event::Delta { target, text, .. } => {
+                // Streaming call markup is the turn emitting, as much as prose is.
+                self.last_output = Some(std::time::Instant::now());
                 if *target == DeltaTarget::ToolCall {
                     self.call_markup.push_str(text);
                 }
             }
             Event::ToolStarted { call_id, name, .. } => {
+                self.last_output = Some(std::time::Instant::now());
                 // A call that has not settled is a NOTE, not a ToolRow: the row is "one SETTLED
                 // tool call" and its Outcome has no running variant, so drawing one here would
                 // claim `ok` for as long as the command runs. The streamed arguments are kept
@@ -664,6 +690,7 @@ impl Panel {
                 bytes,
                 ..
             } => {
+                self.last_output = Some(std::time::Instant::now());
                 let settled = settled_outcome(outcome, why);
                 match self.running.iter().position(|(id, ..)| id == call_id) {
                     Some(at) => {
@@ -710,6 +737,7 @@ impl Panel {
                 // what only the daemon can tell.
                 self.state = if *ends_turn {
                     self.turn_started = None;
+                    self.last_output = None;
                     PanelState::Idle
                 } else {
                     PanelState::Thinking
@@ -720,6 +748,7 @@ impl Panel {
                 // rather than standing as a call that will never settle.
                 self.call_markup.clear();
                 self.turn_started = None;
+                self.last_output = None;
                 self.pending_ask = None;
                 self.settle_running("interrupted");
                 self.rows.push(Row::Note(if reason.is_empty() {
@@ -732,13 +761,17 @@ impl Panel {
             Event::TurnFailed { error, .. } => {
                 self.call_markup.clear();
                 self.turn_started = None;
+                self.last_output = None;
                 self.pending_ask = None;
                 self.settle_running("not run");
                 self.rows.push(Row::Note(format!("failed: {error}")));
                 self.state = PanelState::Idle;
             }
             Event::DecisionRequested(card) => {
-                self.pending_ask = Some(format!("{} · {}", card.kind, card.summary));
+                self.pending_ask = Some((
+                    card.req_id.clone(),
+                    format!("{} · {}", card.kind, card.summary),
+                ));
                 // This head says `can_decide: false`, so the daemon put the card in front of one
                 // that can answer it; saying where is the panel's whole job here.
                 self.rows.push(Row::Note(format!(
@@ -746,6 +779,25 @@ impl Panel {
                     card.kind, card.summary
                 )));
                 self.state = PanelState::Waiting;
+            }
+            Event::DecisionAnswered { req_id } => {
+                // Answered here or on another head: the card is gone, so the row stops naming
+                // it. Only THIS request's answer clears it — a subagent's card settling is not
+                // the ask this session is waiting on.
+                if self
+                    .pending_ask
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == req_id)
+                {
+                    self.pending_ask = None;
+                    if self.state == PanelState::Waiting {
+                        self.state = if self.turn_started.is_some() {
+                            PanelState::Thinking
+                        } else {
+                            PanelState::Idle
+                        };
+                    }
+                }
             }
             // A citation is a mark on the text, which is where the operator is working: the panel's
             // conversation is the summary, the gutter is the answer.
@@ -1033,11 +1085,10 @@ impl Panel {
         }
     }
 
-    /// The conversation at `width`, oldest first: what the widget windows and draws.
     /// The turn's one status line: `Responding` with its spinner and clock while the turn
     /// runs, or the ask being waited on, named. `None` when nothing is happening.
     pub fn turn_line(&self, w: usize) -> Option<Line> {
-        if let Some(ask) = &self.pending_ask {
+        if let Some((_, ask)) = &self.pending_ask {
             return Some(Line::new(vec![Span::styled(
                 format!("waiting · {ask}"),
                 crate::render::Style::of(Role::Pending),
@@ -1051,7 +1102,11 @@ impl Panel {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let slow = elapsed.is_some_and(|ms| ms > crate::agent::turn_status::SLOW_AFTER_MS);
+        // `slow` is the widget's word for GENERATING AND SILENT, and it only colours the row.
+        // Age alone is not silence: a turn that has streamed text for a minute is not stuck.
+        let slow = self.last_output.or(self.turn_started).is_some_and(|t| {
+            t.elapsed().as_millis() as u64 > crate::agent::turn_status::SLOW_AFTER_MS
+        });
         let line = crate::agent::turn_status::TurnStatus {
             busy: true,
             prefill: None,
@@ -1064,12 +1119,8 @@ impl Panel {
     }
 
     /// True once per whole second while a turn runs: the host redraws on it, so the spinner
-    /// moves and the clock counts without a token arriving.
-    /// The card being waited on, if any: the host keeps a faster clock while one is shown.
-    pub fn pending_ask(&self) -> Option<&str> {
-        self.pending_ask.as_deref()
-    }
-
+    /// moves and the clock counts without a token arriving. The host's ordinary idle poll is
+    /// what calls this — several times a second already, so no shorter wait is needed.
     pub fn tick_turn(&mut self) -> bool {
         if self.state != PanelState::Thinking {
             return false;
@@ -1085,6 +1136,7 @@ impl Panel {
         false
     }
 
+    /// The conversation at `width`, oldest first: what the widget windows and draws.
     pub fn build(&mut self, width: usize) {
         let key = (width, self.version);
         if self.built_for == Some(key) {
@@ -2178,7 +2230,7 @@ mod tests {
             "{:?}",
             line.plain()
         );
-        // The turn's end takes it away.
+        // The turn's end does not take the ask away.
         panel.apply(&Frame::Event {
             seq: 3,
             event: Event::TurnFinished {
@@ -2220,8 +2272,166 @@ mod tests {
                 model: "m".to_string(),
             },
         });
-        let _ = panel.tick_turn();
-        assert!(!panel.tick_turn(), "the second has not changed");
+        assert!(!panel.tick_turn(), "no new second yet: no redraw");
+        panel.turn_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1100));
+        assert!(
+            panel.tick_turn(),
+            "a whole second elapsed: the status redraws even with no event"
+        );
+        assert!(!panel.tick_turn(), "and not again inside the same second");
+    }
+
+    /// The named ask is true or it is not drawn: another head's answer clears exactly that card,
+    /// and a different conversation never inherits it.
+    #[test]
+    fn an_answered_or_abandoned_ask_is_no_longer_named() {
+        let ask = |seq: u64| Frame::Event {
+            seq,
+            event: Event::DecisionRequested(DecisionRequest {
+                req_id: "r-1".to_string(),
+                kind: "permission".to_string(),
+                summary: "bash would run rm -rf build".to_string(),
+                ..DecisionRequest::default()
+            }),
+        };
+        let answered = |seq: u64, req_id: &str| Frame::Event {
+            seq,
+            event: Event::DecisionAnswered {
+                req_id: req_id.to_string(),
+            },
+        };
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        panel.apply(&ask(2));
+        assert_eq!(panel.state, PanelState::Waiting);
+        // Another request's answer is not this card's: a subagent's card settling, say.
+        panel.apply(&answered(3, "r-2"));
+        assert!(
+            panel
+                .turn_line(60)
+                .is_some_and(|l| l.plain().contains("waiting")),
+            "a different card's answer clears nothing"
+        );
+        panel.apply(&answered(4, "r-1"));
+        let line = panel.turn_line(60).expect("the turn still runs");
+        assert!(
+            !line.plain().contains("waiting"),
+            "the answered ask is gone: {:?}",
+            line.plain()
+        );
+        assert!(
+            line.plain().contains("Responding"),
+            "and the turn's own state is back: {:?}",
+            line.plain()
+        );
+        assert_eq!(panel.state, PanelState::Thinking);
+        // Following a moved folder is a different conversation: the old folder's card is not
+        // this session's to name, and no event in the new stream would ever clear it.
+        let mut panel = opened();
+        panel.apply(&ask(1));
+        panel.session = "s-1".to_string();
+        panel.folder_moved(PathBuf::from("/elsewhere"));
+        panel.follow();
+        assert!(
+            panel.turn_line(60).is_none(),
+            "a different conversation has no such ask"
+        );
+        // Nor does a session picked in the same daemon.
+        let mut panel = opened();
+        panel.apply(&ask(1));
+        panel.attach("s-2");
+        assert!(
+            panel.turn_line(60).is_none(),
+            "a picked session starts with no ask of the last one's"
+        );
+    }
+
+    /// `slow` only colours the row, and it means SILENT: a turn that has streamed for twenty
+    /// seconds is not stuck, and one silent for twenty is.
+    #[test]
+    fn a_streaming_turn_is_not_slow_and_a_silent_one_is() {
+        let mut panel = opened();
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        panel.turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(20));
+        // A delta arrives now, as the stream has been doing all along.
+        panel.apply(&Frame::Event {
+            seq: 2,
+            event: Event::Delta {
+                turn_id: "t".to_string(),
+                target: crate::letibot::DeltaTarget::Text,
+                text: "still going".to_string(),
+            },
+        });
+        let line = panel.turn_line(60).expect("the turn runs");
+        assert_eq!(
+            line.spans[0].style.top(),
+            Role::Success,
+            "twenty seconds old and streaming: not slow"
+        );
+        // Silence instead: nothing emitted for the same twenty seconds.
+        panel.last_output = Some(std::time::Instant::now() - std::time::Duration::from_secs(20));
+        let line = panel.turn_line(60).expect("the turn runs");
+        assert_eq!(
+            line.spans[0].style.top(),
+            Role::Pending,
+            "twenty seconds silent: the row turns the slow colour"
+        );
+    }
+
+    /// Scrolled up during a running turn, BOTH seams and the status each keep their own row:
+    /// the count of newer lines is never the row the status draws over.
+    #[test]
+    fn the_seams_and_the_turn_row_do_not_share_a_row() {
+        let body: Vec<Line> = (0..30).map(|i| Line::raw(format!("line {i}"))).collect();
+        let view = crate::agent::panel::View {
+            title: "s".to_string(),
+            state: "thinking",
+            state_role: Role::Faint,
+            folder: "/w".to_string(),
+            moved: None,
+            body: &body,
+            scroll: 10,
+            follow: false,
+            turn: Some(Line::raw("Responding")),
+            input: "typed words",
+            cursor: 11,
+            chips: &[],
+            focus: false,
+            hints: &[],
+        };
+        let area = crate::render::Rect::new(0, 0, 60, 12);
+        let mut buf = crate::render::Buffer::empty(area);
+        view.draw(area, &mut buf);
+        let rows = buf.emit(crate::render::Palette::None);
+        let at = |needle: &str| rows.iter().position(|r| r.contains(needle));
+        let above = at("above").expect("the count of older lines: {rows:?}");
+        let below = at("below").unwrap_or_else(|| panic!("the count of newer lines: {rows:?}"));
+        let turn = at("Responding").expect("the status: {rows:?}");
+        let composer = at("typed words").expect("the composer: {rows:?}");
+        assert!(above < below, "above before below: {rows:?}");
+        assert_eq!(
+            turn,
+            below + 1,
+            "the below seam sits above the status: {rows:?}"
+        );
+        assert_eq!(
+            composer,
+            turn + 1,
+            "and the status above the composer: {rows:?}"
+        );
     }
 
     /// A call that has not settled is a note, never a row claiming an outcome: the wire's

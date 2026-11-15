@@ -266,11 +266,13 @@ impl Editor {
                 true
             }
             _ => {
-                let Some(bytes) = key_bytes(key) else {
-                    return false;
-                };
+                // A focused terminal swallows EVERY key: a chord it cannot spell is swallowed, not
+                // handed to the editor — otherwise Tab indents the file and C-x asks to quit it.
                 if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-                    tab.send(&bytes);
+                    let bytes = tab.key_bytes(key);
+                    if !bytes.is_empty() {
+                        tab.send(&bytes);
+                    }
                 }
                 true
             }
@@ -278,27 +280,6 @@ impl Editor {
     }
 }
 
-/// A key as the shell's bytes: a character is itself, Enter is CR, arrows are the ANSI motion the
-/// terminal expects. Nothing else is translated — the point is that the pty hears the key, not rano.
-fn key_bytes(key: &crate::term::KeyEvent) -> Option<Vec<u8>> {
-    use crate::term::KeyCode;
-    let plain = !key.mods.ctrl() && !key.mods.alt();
-    Some(match key.code {
-        KeyCode::Char(c) if plain => {
-            let mut b = [0u8; 4];
-            c.encode_utf8(&mut b).as_bytes().to_vec()
-        }
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        _ => return None,
-    })
-}
 #[cfg(test)]
 mod key_text_tests {
     use super::*;

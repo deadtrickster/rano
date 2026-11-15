@@ -207,6 +207,28 @@ mod tests {
         assert_eq!(ed.bottom.tabs.len(), 1, "one shell");
     }
 
+    /// A focused terminal must not leak a chord to the editor: Tab does not indent, C-x does not
+    /// ask to quit, and Delete deletes nothing in the file.
+    #[test]
+    fn a_focused_terminal_leaks_no_key_to_the_editor() {
+        let mut ed = ed("abc");
+        ed.bottom.open = true;
+        ed.bottom.focus = true;
+        let before = text(&ed);
+        for (code, mods) in [
+            (KeyCode::Tab, Mods::NONE),
+            (KeyCode::Char('c'), Mods::CTRL),
+            (KeyCode::Char('d'), Mods::CTRL),
+            (KeyCode::Char('k'), Mods::CTRL),
+            (KeyCode::Delete, Mods::NONE),
+            (KeyCode::Char('x'), Mods::CTRL),
+        ] {
+            ed.handle_key(key(code, mods));
+        }
+        assert_eq!(text(&ed), before, "nothing reached the buffer");
+        assert!(!ed.wants_quit(), "C-x did not ask to quit");
+    }
+
     #[test]
     fn an_idle_editor_waits_the_idle_wait() {
         assert_eq!(ed("x").next_wakeup(), IDLE_WAIT);

@@ -630,6 +630,24 @@ mod tests {
         );
     }
 
+    /// The bytes a key becomes: control letters are their control bytes, and the pty gets them.
+    #[test]
+    fn the_pty_receives_the_control_bytes() {
+        let t = Tab::open(Path::new("/tmp"), 40, 6).expect("a pty");
+        use crate::term::{KeyCode, Mods};
+        for (code, mods, want) in [
+            (KeyCode::Tab, Mods::NONE, vec![0x09]),
+            (KeyCode::Char('c'), Mods::CTRL, vec![0x03]),
+            (KeyCode::Char('d'), Mods::CTRL, vec![0x04]),
+            (KeyCode::Char('k'), Mods::CTRL, vec![0x0b]),
+            (KeyCode::Delete, Mods::NONE, b"\x1b[3~".to_vec()),
+            (KeyCode::Char('x'), Mods::CTRL, vec![0x18]),
+        ] {
+            let got = t.key_bytes(&crate::term::KeyEvent { code, mods });
+            assert_eq!(got, want, "{code:?}");
+        }
+    }
+
     /// SGR sets a foreground per cell, and reset clears it.
     #[test]
     fn sgr_colours_are_kept_per_cell() {

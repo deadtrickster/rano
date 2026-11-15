@@ -98,3 +98,25 @@ written.
 
 None taken. Proposed order: terminal correctness and key leak, `--export ansi`, bars, docs for
 panel and terminal, then the keymap decisions in `2026-11-15-keys.md`.
+
+### What was done (2026-11-15, the rano session)
+
+The findings above are untouched; this is the record of what landed against the proposed order.
+
+- Bars: `5eda3ca` — the function bar shows whole entries or none, a gap always between
+  neighbours, entries past the width dropped rather than cut mid-label.
+- The frame: `16a19bf` (the panel a full-height column, the strip under the text, the pty
+  resized on every layout change), then one rule style (`c6664a9`), the grabbable thumb and
+  the preview's single bar on the rule (`2a3b751`), the focused surface marked (`c761da5`),
+  and the terminal's tabs on the strip's rule (`d487e05`).
+- Docs for the panel and terminal: `528cc7f` for the chords, and the keys.md rewrite that
+  adds the terminal's section and makes the doc agree with the maps in both directions by
+  test (see the keys record's own appendix).
+- The panel's letibot surface: a settled tool call is the crate's ToolRow with its real size
+  (`0604738`), a run folds to one line naming the dominant non-success kind (`4b48106`,
+  `34db3e5`), and the turn's state is one line above the composer — Responding with its clock,
+  a pending ask named until it is answered anywhere (`372a553`, `11a5be3`). Attaching still
+  does not replay the conversation: the panel fills from live events only.
+- Terminal correctness and the key leak are track A's, untouched here; `--export ansi` is
+  not done.
+

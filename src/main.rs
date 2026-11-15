@@ -1766,6 +1766,67 @@ mod panel_tests {
         assert_eq!(ed.focus, Focus::Terminal, "and it comes back");
     }
 
+    /// The C-] cycle in every layout: which surfaces are open decides the order, a focus left on
+    /// a surface that has since closed is not a dead key, and with nothing else open the cross
+    /// opens the panel — there is nothing else to cross to.
+    #[test]
+    fn the_cross_cycle_in_each_layout() {
+        let cross = || rano::term::KeyEvent::new(KeyCode::Char(']'), rano::term::event::Mods::CTRL);
+        // Nothing open: the cross opens the panel, and from then on the two trade the keyboard.
+        let mut ed = editor();
+        assert!(!ed.panel.open && !ed.bottom.open, "the bare layout");
+        rano::host::key(&mut ed, cross());
+        assert!(
+            ed.panel.open,
+            "the cross opens the panel when nothing else is"
+        );
+        assert_eq!(ed.focus, Focus::Panel);
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Text, "panel only: panel -> text");
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Panel, "and text -> panel");
+        // Terminal only: the two trade, and the panel is not invented by the cycle.
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Terminal, "terminal only: text -> terminal");
+        assert!(!ed.panel.open, "the panel stays shut in this layout");
+        rano::host::key(&mut ed, cross());
+        assert_eq!(ed.focus, Focus::Text, "and terminal -> text");
+        // A focus on a surface that has since closed: the key still crosses, to the first
+        // surface that IS open, rather than cycling an invisible order.
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.focus = Focus::Terminal; // the strip was closed under the focus
+        rano::host::key(&mut ed, cross());
+        assert_eq!(
+            ed.focus,
+            Focus::Panel,
+            "a stale focus crosses to what is open"
+        );
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Panel; // the panel was closed under the focus
+        rano::host::key(&mut ed, cross());
+        assert_eq!(
+            ed.focus,
+            Focus::Terminal,
+            "and the same with the roles reversed"
+        );
+        // Both open, zoomed panel: zoom is a width, not a surface gone from the cycle.
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.zoom = true;
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        for want in [Focus::Panel, Focus::Terminal, Focus::Text] {
+            rano::host::key(&mut ed, cross());
+            assert_eq!(ed.focus, want, "the zoomed layout cycles the same");
+        }
+    }
+
     /// The strip's last column is a scrollbar — a track with a thumb, always drawn. `↑N more` is
     /// a counter; this is where in the history the view actually is.
     #[test]

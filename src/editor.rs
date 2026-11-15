@@ -219,6 +219,11 @@ pub struct Editor {
     /// `draw_in` then leaves those rows alone. Set when the frame is shared with another
     /// surface, so the bar belongs to the frame and not to the text column.
     pub foot_drawn_by_host: bool,
+    /// The split rule carries the editor's scrollbar: with the panel open there is one column
+    /// between the text and the panel, and a bar beside the rule would read as two rules. Set
+    /// when the frame has a border, so `draw_in` leaves its own scrollbar out and the host
+    /// draws the thumb into the rule.
+    pub scrollbar_in_border: bool,
     pub(crate) proto: Proto,
     pub(crate) picture_view: Option<PictureView>,
     /// The pictures the terminal holds, separate from `images_held` so the two cannot
@@ -362,6 +367,7 @@ impl Editor {
             images: false,
             tmux_passthrough_off: false,
             foot_drawn_by_host: false,
+            scrollbar_in_border: false,
             panel: crate::panel::Panel::default(),
             focus: Focus::Text,
             bottom: crate::bottomterm::BottomTerm::default(),

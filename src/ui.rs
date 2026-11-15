@@ -69,8 +69,9 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
 /// space.
 /// **The scrollbar: where the viewport sits in what there is.** One column, the rightmost,
 /// drawn only when the content outruns the view - a file that fits has nothing to say about
-/// position. Track `│` faint, thumb `█` plain, thumb as tall as the viewport's share of the
-/// whole (at least one row) at the viewport's offset.
+/// position. Track and thumb are the same glyph — `│`, one column wide, never a fatter
+/// block — the thumb as tall as the viewport's share of the whole (at least one row) at the
+/// viewport's offset, told apart by the accent role rather than by weight.
 ///
 /// The question it answers is the operator's: *"no idea at which place in the file i am, how far
 /// below - i guess because no scroll bar"*. `pos` is the viewport's first row, `total` the rows
@@ -79,15 +80,24 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
 /// `pane` is where it is drawn: the column is that rect's right edge, and `y` counts from its
 /// top, so a host's pane sits where its own area says rather than at the buffer's origin.
 pub(crate) fn scrollbar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, total: usize) {
+    if let Some((at, thumb)) = thumb_span(h, pos, total) {
+        bar(pane, buf, y, h, at, thumb);
+    }
+}
+
+/// Where the thumb sits in a track `h` rows tall for a view `pos` into `total`: `None` when
+/// there is nothing to scroll. One sum, so the pane's own bar and the split rule that carries
+/// it cannot disagree about where the thumb is.
+pub fn thumb_span(h: usize, pos: usize, total: usize) -> Option<(usize, usize)> {
     if h < 2 || total <= h {
-        return;
+        return None;
     }
     let thumb = ((h * h) / total).clamp(1, h);
     // The travel the thumb can make, and this viewport's place in it.
     let travel = h - thumb;
     let max = total - h;
     let at = (pos.min(max) * travel) / max.max(1);
-    bar(pane, buf, y, h, at, thumb);
+    Some((at, thumb))
 }
 
 /// A track and a thumb that are ALWAYS drawn: a pane with nothing to scroll yet says so with a
@@ -101,28 +111,22 @@ pub fn bar_always(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, to
         bar(pane, buf, y, h, 0, h);
         return;
     }
-    let thumb = ((h * h) / total).clamp(1, h);
-    let travel = h - thumb;
-    let max = total - h;
-    let at = (pos.min(max) * travel) / max.max(1);
+    let (at, thumb) = thumb_span(h, pos, total).expect("total > h says a thumb");
     bar(pane, buf, y, h, at, thumb);
 }
 
-/// The cells of one bar: `thumb` cells from `at`, the rest the faint track.
+/// The cells of one bar: the thumb is the accent role on the same `│` the track is — colour
+/// says which part of the view a cell names, never a fatter glyph.
 fn bar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, at: usize, thumb: usize) {
     for i in 0..h {
-        let ch = if i >= at && i < at + thumb {
-            '\u{2588}'
-        } else {
-            '\u{2502}'
-        };
-        let role = if i >= at && i < at + thumb {
-            Role::Plain
+        let thumb_here = i >= at && i < at + thumb;
+        let role = if thumb_here {
+            Role::UserAccent
         } else {
             Role::Faint
         };
         let cell = at_rect(pane, pane.width - 1, y + i as u16);
-        put(buf, cell, &Line::styled(ch.to_string(), Style::of(role)));
+        put(buf, cell, &Line::styled("\u{2502}", Style::of(role)));
     }
 }
 
@@ -562,14 +566,18 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
         for (i, l) in lines.iter().enumerate() {
             put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
         }
-        scrollbar(
-            area,
-            buf,
-            t0,
-            text_h,
-            ed.scroll_pos(),
-            ed.scroll_total(text_h),
-        );
+        // With a split rule beside the text, the rule carries the scrollbar: a bar of its own
+        // in the last text column would read as a second rule.
+        if !ed.scrollbar_in_border {
+            scrollbar(
+                area,
+                buf,
+                t0,
+                text_h,
+                ed.scroll_pos(),
+                ed.scroll_total(text_h),
+            );
+        }
 
         // ---- completion popup (LSP) ----
         // A small block below the word being completed, or above it near the bottom.

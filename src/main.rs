@@ -835,14 +835,25 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     // A shared frame: the status row and the key bar are the frame's, drawn full width after
     // the surfaces, and the editor does not paint its own inside its column.
     ed.foot_drawn_by_host = lay.foot.is_some();
+    // The split rule carries the editor's scrollbar, so the editor's own draw leaves it out.
+    ed.scrollbar_in_border = lay.border.is_some();
     if let Some(area) = lay.editor {
         cursor = ui::draw_in(buf, area, ed);
     }
     if let Some(area) = lay.border {
-        // The rule between the two, the same glyph the editor's own sidebar draws.
-        let rule = Line::styled("\u{2502}", Style::of(Role::Faint));
-        for y in area.y..area.y + area.height {
-            buf.set_line(area.x, y, &rule, 1);
+        // The rule between the two, the same glyph the editor's own sidebar draws — and it
+        // carries the editor's scrollbar when there is one, so a bar never stands beside a
+        // rule as a second rule. The thumb is the accent role on the same glyph.
+        let er = lay.editor.unwrap_or(area);
+        let t0 = ed.chrome.top();
+        let rows = (er.height as usize).saturating_sub(usize::from(t0));
+        let span = ui::thumb_span(rows, ed.scroll_pos(), ed.scroll_total(rows));
+        let track = Line::styled("\u{2502}", Style::of(Role::Faint));
+        let thumb = Line::styled("\u{2502}", Style::of(Role::UserAccent));
+        for (j, y) in (area.y..area.y + area.height).enumerate() {
+            let is_thumb = span
+                .is_some_and(|(at, t)| j >= usize::from(t0) + at && j < usize::from(t0) + at + t);
+            buf.set_line(area.x, y, if is_thumb { &thumb } else { &track }, 1);
         }
     }
     if let Some(area) = lay.panel {
@@ -1557,17 +1568,28 @@ mod panel_tests {
             draw_frame(&mut buf, &mut ed, &lay);
             let strip = lay.bottom.expect("a strip");
             let right = (strip.x + strip.width - 1) as usize;
-            let rows = buf.emit(rano::render::Palette::None);
-            let col: Vec<char> = ((strip.y as usize + 2)..(strip.y + strip.height) as usize)
-                .map(|y| rows[y].chars().nth(right).unwrap_or(' '))
+            // One glyph the whole way down — the thumb is the accent role on the track's own
+            // `│`, not a fatter block beside it.
+            let accent = Style::of(Role::UserAccent);
+            let col: Vec<(char, bool)> = ((strip.y as usize + 2)
+                ..(strip.y + strip.height) as usize)
+                .map(|y| {
+                    buf.cell(right as u16, y as u16)
+                        .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
+                        .unwrap_or((' ', false))
+                })
                 .collect();
             assert!(
-                col.iter().all(|c| *c == '\u{2502}' || *c == '\u{2588}'),
-                "track or thumb at {w}x{h}: {col:?}"
+                col.iter().all(|(c, _)| *c == '\u{2502}'),
+                "one glyph, the track's, at {w}x{h}: {col:?}"
             );
             assert!(
-                col.contains(&'\u{2588}'),
-                "the thumb is drawn at {w}x{h}: {col:?}"
+                col.iter().any(|(_, t)| *t),
+                "the thumb is drawn, in the accent, at {w}x{h}: {col:?}"
+            );
+            assert!(
+                col.iter().any(|(_, t)| !*t),
+                "and the track is faint at {w}x{h}: {col:?}"
             );
         }
     }
@@ -1672,10 +1694,14 @@ mod panel_tests {
         assert!(feed_until(&mut ed, |l| l.trim() == "200"), "seq answered");
         let strip = lay.bottom.expect("a strip");
         let right = (strip.x + strip.width - 1) as usize;
-        let track = |buf: &rano::render::Buffer| -> Vec<char> {
-            let rows = buf.emit(rano::render::Palette::None);
+        let accent = Style::of(Role::UserAccent);
+        let track = |buf: &rano::render::Buffer| -> Vec<(char, bool)> {
             ((strip.y as usize + 2)..(strip.y + strip.height) as usize)
-                .map(|y| rows[y].chars().nth(right).unwrap_or(' '))
+                .map(|y| {
+                    buf.cell(right as u16, y as u16)
+                        .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
+                        .unwrap_or((' ', false))
+                })
                 .collect()
         };
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
@@ -1683,14 +1709,12 @@ mod panel_tests {
         let at_bottom = track(&buf);
         assert_eq!(
             at_bottom.last(),
-            Some(&'\u{2588}'),
-            "the thumb is at the foot: {at_bottom:?}"
+            Some(&('\u{2502}', true)),
+            "the thumb is at the foot, in the accent: {at_bottom:?}"
         );
         assert!(
-            at_bottom
-                .iter()
-                .all(|c| *c == '\u{2502}' || *c == '\u{2588}'),
-            "track or thumb, never shell text: {at_bottom:?}"
+            at_bottom.iter().all(|(c, _)| *c == '\u{2502}'),
+            "one glyph, the track's, never shell text: {at_bottom:?}"
         );
         // Three pages back through the host path: the thumb moves up, and the counter agrees.
         for _ in 0..3 {
@@ -1715,6 +1739,71 @@ mod panel_tests {
         );
         draw_frame(&mut buf, &mut ed, &lay);
         assert_eq!(track(&buf), at_bottom, "back at the bottom after a key");
+    }
+
+    /// The split rule carries the editor's scrollbar: with the panel open there is one column
+    /// between the text and the panel, and a bar beside the rule would read as a second rule.
+    /// The thumb is the accent `│` in the rule's own column, and the text's last column is
+    /// text. With the panel away the editor's own bar is back where it always was.
+    #[test]
+    fn the_split_rule_carries_the_editors_scrollbar() {
+        let text = (1..=400)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut file_buf = rano::buffer::Buffer::new();
+        file_buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+        let mut ed = Editor::new(file_buf, Config::default());
+        ed.push_keymap(host_map());
+        ed.panel.open = true;
+        let lay = layout(120, 40, &ed, None);
+        let border = lay.border.expect("a rule");
+        let er = lay.editor.expect("the text column");
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let accent = Style::of(Role::UserAccent);
+        let cell = |x: u16, y: u16| {
+            buf.cell(x, y)
+                .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
+                .unwrap_or((' ', false))
+        };
+        // The rule's column over the text's rows: one glyph, the thumb in the accent.
+        let rule: Vec<(char, bool)> = (1..er.height as usize)
+            .map(|y| cell(border.x, y as u16))
+            .collect();
+        assert!(
+            rule.iter().all(|(c, _)| *c == '\u{2502}'),
+            "one glyph, the rule's: {rule:?}"
+        );
+        assert!(
+            rule.iter().any(|(_, t)| *t),
+            "the thumb lives in the rule: {rule:?}"
+        );
+        // The text's own last column is not a second bar.
+        let beside: Vec<char> = (1..er.height as usize)
+            .map(|y| cell(er.width - 1, y as u16).0)
+            .collect();
+        assert!(
+            beside.iter().all(|c| *c != '\u{2502}'),
+            "no bar beside the rule: {beside:?}"
+        );
+        // Panel away: the editor's own scrollbar is back in its own column.
+        ed.panel.open = false;
+        let lay = layout(120, 40, &ed, None);
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let er = lay.editor.expect("the whole frame");
+        let own: Vec<char> = (1..er.height as usize)
+            .map(|y| {
+                buf.cell(er.width - 1, y as u16)
+                    .map(|c| c.symbol.chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(
+            own.contains(&'\u{2502}'),
+            "the editor's own bar is back: {own:?}"
+        );
     }
 
     /// The status and the key bar are the frame's last rows: the terminal's strip is above them,

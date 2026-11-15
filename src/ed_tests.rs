@@ -1860,12 +1860,15 @@ fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
     ed.text_w = 40;
     ed.text_h = 10;
     let rect = crate::render::Rect::new(0, 0, 40, 14);
-    let col = |buf: &crate::render::Buffer| -> String {
+    // The thumb is the accent role on the track's own `│`, so the column is read with its
+    // style, not for a fatter glyph.
+    let accent = crate::render::Style::of(crate::style::Role::UserAccent);
+    let col = |buf: &crate::render::Buffer| -> Vec<bool> {
         (0..10)
             .map(|r| {
                 buf.cell(39, 1 + r as u16)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default()
+                    .map(|c| c.style == accent)
+                    .unwrap_or(false)
             })
             .collect()
     };
@@ -1873,9 +1876,9 @@ fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
     let at_top = col(&buf);
-    assert!(at_top.starts_with('\u{2588}'), "{at_top:?}");
+    assert!(at_top[0], "the thumb at the head: {at_top:?}");
     assert!(
-        at_top.contains('\u{2502}'),
+        at_top.iter().any(|t| !t),
         "track below the thumb: {at_top:?}"
     );
     assert_eq!(ed.scroll_total(10), 100, "buffer rows, wrap off");
@@ -1884,8 +1887,11 @@ fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
     let at_bot = col(&buf);
-    assert!(at_bot.ends_with('\u{2588}'), "{at_bot:?}");
-    // A file that fits has no scrollbar at all.
+    assert!(
+        *at_bot.last().expect("rows"),
+        "the thumb at the foot: {at_bot:?}"
+    );
+    // A file that fits has no scrollbar at all: the column is blank, thumb and track both.
     let mut small = test_ed("one\ntwo\n");
     small.wrap = false;
     small.show_line_numbers = false;
@@ -1893,7 +1899,14 @@ fn a_scrollbar_marks_the_viewports_place_and_a_press_jumps() {
     small.text_h = 10;
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &small);
-    assert_eq!(col(&buf), "          ", "nothing to scroll");
+    let blank: String = (0..10)
+        .map(|r| {
+            buf.cell(39, 1 + r as u16)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(blank, "          ", "nothing to scroll");
     // A press low in the column jumps near the end, and the cursor stays where it was: the
     // scrollbar is the view's, not the text's.
     let mut ed = test_ed(&text);
@@ -1962,16 +1975,18 @@ fn a_preview_has_a_scrollbar() {
     let rect = crate::render::Rect::new(0, 0, 40, 14);
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
-    let col: String = (0..9)
+    // Thumb and track, told apart by the accent role on the same glyph.
+    let accent = crate::render::Style::of(crate::style::Role::UserAccent);
+    let col: Vec<bool> = (0..9)
         .map(|r| {
             buf.cell(39, 2 + r as u16)
-                .map(|c| c.symbol.clone())
-                .unwrap_or_default()
+                .map(|c| c.style == accent)
+                .unwrap_or(false)
         })
         .collect();
     assert!(
-        col.contains('\u{2588}') && col.contains('\u{2502}'),
-        "{col:?}"
+        col.contains(&true) && col.contains(&false),
+        "thumb and track: {col:?}"
     );
 }
 

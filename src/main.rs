@@ -845,9 +845,12 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         if ed.focus == Focus::Terminal
             && ed.prompt.is_none()
             && let Some(tab) = ed.bottom.tabs.get(ed.bottom.active)
-            && let Some((cx, cy)) = tab.cursor_pos()
+            && let Some((crow, ccol)) = tab.cursor_pos()
         {
-            cursor = Some((area.x + cx, area.y + 2 + cy));
+            // `cursor_position()` answers (row, column): the frame takes (x, y), so the row is
+            // the y and the column the x — used the other way round, the caret walked the strip
+            // sideways and landed on the key bar with a two-line prompt.
+            cursor = Some((area.x + ccol, area.y + 2 + crow));
         }
         if let Some(tab) = ed.bottom.tabs.get(ed.bottom.active) {
             let h = (area.height as usize).saturating_sub(2);
@@ -1233,6 +1236,50 @@ mod panel_tests {
         // A key nobody claimed: nothing happens, which is what the binary did before.
         let _ = ed.handle_key(key(KeyCode::Char('z'), rano::term::event::Mods::ALT));
         assert!(!ed.panel.open && !ed.panel.zoom);
+    }
+
+    /// The shell's caret, exactly where it is: PS1='$ ', then `abc`, puts the frame's caret at
+    /// column 5 of the prompt's own row — and a second line moves it down by the lines printed,
+    /// which is what a swapped (row, column) could not do.
+    #[test]
+    fn the_caret_is_exactly_at_the_shells_caret() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        ed.bottom.tabs[0].send(b"PS1='$ '\n");
+        assert!(feed_until(&mut ed, |l| {
+            l.lines().any(|r| r.trim_end().ends_with("'$ '")) || l.trim_end().ends_with('$')
+        }));
+        ed.bottom.tabs[0].send(b"abc");
+        assert!(feed_until(&mut ed, |l| l.contains("abc")));
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        let caret = draw_frame(&mut buf, &mut ed, &lay).expect("a caret");
+        // The row `$ abc` — the prompt is two columns, abc three: the caret sits after the c.
+        // The caret sits after the c of `abc`: the prompt's width plus three.
+        let after = caret.0 - strip.x;
+        assert!((3..8).contains(&after), "just after abc: {caret:?}");
+        let row = caret.1;
+        assert!(
+            (strip.y + 2..strip.y + strip.height).contains(&row),
+            "inside the shell's rows: {caret:?}"
+        );
+        // A printed line moves the caret down a row, not sideways.
+        ed.bottom.tabs[0].send(b"\r\nz");
+        assert!(feed_until(&mut ed, |l| l.contains('z')));
+        let caret = draw_frame(&mut buf, &mut ed, &lay).expect("a caret");
+        assert!(caret.1 > row, "moved down, not sideways: {caret:?}");
+        assert!(
+            (caret.0 - strip.x) < after,
+            "a fresh short prompt, left of abc's end: {caret:?}"
+        );
     }
 
     /// One real cursor, and it is in the focused pane: the frame's caret lies inside that

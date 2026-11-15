@@ -1,48 +1,57 @@
 # Keys
 
-`C-x` is Ctrl+x, `M-x` is Alt+x, `F8` is a function key. `key_notation = nano` in the config
-prints them nano's way (`^X`, `M-X`). The keys do not change.
+`C-x` is Ctrl+x, `M-x` is Alt+x, `<f8>` is a function key. `key_notation = nano` in the config
+prints them nano's way (^X, M-X). The keys do not change.
 
 ## Finding a key
 
 - `M-x` runs a command by name. A few letters in any order match (`wri out` finds Write Out).
   Recent commands come first, each with its key.
-- `C-g` (or `F1`) is the help prefix: `?` for the help page, `k` then a key to see what it
-  runs, `b` for every key in effect, `m` for rano's own manual, `x` for `M-x`.
-- A prefix key (`M-t`, `M-k`, `C-g`) shows a card of what can follow. `Esc` abandons it.
+- `C-g` is the help prefix, with the sequences below; `<f1>` opens the help page directly.
+- A prefix key (`M-t`, `M-k`, `C-g`) shows a card of what can follow. `ESC` abandons it.
 - The bottom bar shows the keys of the current mode.
+
+| Key | What it does |
+|---|---|
+| `<f1>` | The help page |
+| `C-g ?` | The help page |
+| `C-g C-g` | The help page, again |
+| `C-g k` | What a key runs: the chord is typed next |
+| `C-g b` | Every key in effect |
+| `C-g m` | rano's own manual |
+| `C-g x` | `M-x` |
 
 ## Text
 
 | Key | What it does |
 |---|---|
-| `C-o` / `F2` | Save the buffer, asking for the file name |
-| `C-r` / `F5` | Insert a file's contents at the cursor |
-| `M-o` / `F8` | Open a file. `name:line[:col]` jumps there. Replaces the current buffer unless it has unsaved edits or `multibuffer` is on |
-| `M-c` / `F7` | Copy the file on disk to `file~` |
-| `M-g` | Open a folder as a listing |
+| `C-o` / `<f2>` | Save the buffer, asking for the file name |
+| `C-r` / `<f5>` | Insert a file's contents at the cursor |
+| `M-o` / `<f8>` | Open a file. `name:line[:col]` jumps there. Replaces the current buffer unless it has unsaved edits or `multibuffer` is on |
+| `M-c` / `<f7>` | Copy the file on disk to `file~` |
+| `M-g` | Ask for a folder, then open it as a listing |
 | `C-x` | Quit, offering each modified buffer for saving in turn |
 | `RET` | Break the line, keeping its indent |
 | `TAB` | Insert the indent unit (see [configuration](configuration.md)) |
 | `DEL` / `C-h` | Delete the character before the cursor |
-| `Delete` | Delete the character under the cursor |
+| `<delete>` | Delete the character under the cursor |
 | `C-d` | Delete the character under the cursor into the cutbuffer |
-| `M-u` | Undo. Runs of the same action coalesce into one step |
-| `M-e` | Redo |
-| `C-j` / `F10` | Re-wrap the paragraph to the window width |
-| `M-r` / `F9` | Sort the marked lines, or the whole buffer |
-| `C-t` / `F6` | Run a shell command. Its stdout is inserted below the cursor when it finishes |
-| `M-\|` | Filter the marked lines through a shell command |
+| `M-u` / `C-z` | Undo. Runs of the same action coalesce into one step |
+| `M-e` / `M-z` | Redo |
+| `C-j` / `<f10>` | Re-wrap the paragraph to the window width |
+| `M-r` / `<f9>` | Sort the marked lines, or the whole buffer |
+| `C-t` / `<f6>` | Run a shell command. Its stdout is inserted below the cursor when it finishes |
+| `M-|` | Filter the marked lines through a shell command |
 
 ## Mark and clipboard
 
 | Key | What it does |
 |---|---|
 | `M-a` / `C-a` | Set or clear the mark. The region runs from it to the cursor |
-| `Esc` | Clear the mark, or cancel a prompt |
+| `ESC` | Clear the mark, or cancel a prompt |
 | `C-k` | Cut the line, or the marked region. Repeat to cut more lines |
 | `M-6` | Copy the line, or the marked region |
-| `C-u` | Paste the cutbuffer at the cursor |
+| `C-u` / `C-y` | Paste the cutbuffer at the cursor |
 
 `C-k` and `M-6` reach the system clipboard as well as rano's own cutbuffer.
 
@@ -50,25 +59,23 @@ prints them nano's way (`^X`, `M-X`). The keys do not change.
 
 | Key | What it does |
 |---|---|
-| `C-f` / `F3` | Where is |
+| `C-f` / `<f3>` | Where is |
 | `C-b` | Where was |
 | `M-f` | Jump to the next match of the last search |
 | `M-b` | Jump to the previous match |
-| `C-\` / `F4` | Replace. `y` / `n` / `a` / `q` per match, `a` replaces from the cursor on |
-
-In the search prompt `M-C` toggles case sensitivity and `M-R` toggles regex.
+| `C-\` / `<f4>` | Replace. `y` / `n` / `a` / `q` per match, `a` replaces from the cursor on |
 
 ## Moving
 
 | Key | What it does |
 |---|---|
-| arrows | Left, right, up, down |
+| `<left>` / `<right>` / `<up>` / `<down>` | Left, right, up, down |
 | `C-p` / `C-n` | Up / down a line |
-| `Home` / `End` | Start / end of the line |
+| `<home>` / `<end>` | Start / end of the line |
 | `C-e` | End of the line |
-| `PgUp` / `PgDn` | Up / down a page |
-| `C-Left` / `C-Right`, `M-Left` / `M-Right` | Previous / next word |
-| `C-/` / `F11` | Go to a line, and a column |
+| `<pgup>` / `<pgdn>` | Up / down a page |
+| `C-<left>` / `C-<right>`, `M-<left>` / `M-<right>` | Previous / next word |
+| `C-/` / `<f11>` | Go to a line, and a column |
 | `M-]` | Jump to the bracket matching the one at the cursor |
 | `C-c` | Say where the cursor is |
 
@@ -81,7 +88,7 @@ In the search prompt `M-C` toggles case sensitivity and `M-R` toggles regex.
 | `M-,` | Jump back, one press per jump, from a definition or a usage |
 | `M-d` | Jump to the next mark or diagnostic, wrapping |
 
-`M-h` or `M-x set-mode` sets the current buffer's language. `plain` stops the guessing,
+`M-h` or `M-x` `set-mode` sets the current buffer's language. `plain` stops the guessing,
 `auto` puts it back.
 
 ## Buffers
@@ -125,7 +132,6 @@ marker.
 |---|---|
 | `M-s` | Send the file, cursor and selection to `send_command` (see [embedding](embedding.md)) |
 | `M-v` | Install the newer release the startup check found |
-| `M-q` | Ask a question about the place, typed at the prompt |
 
 ## Quick asks
 
@@ -160,14 +166,14 @@ doing (`idle`, `thinking`, `waiting on you`), or says why there is no daemon.
 | `M-m` | The focused surface takes the whole width, and gives it back |
 | `RET` | Send what the composer says; in the session pick, attach the session under the cursor |
 | `M-n` | A new session in this folder, and into it |
-| `Esc` | Back to the text. The conversation stays open, and keeps streaming |
+| `ESC` | Back to the text. The conversation stays open, and keeps streaming |
 | `C-c` | Stop the running turn |
-| arrows, `C-p` / `C-n`, `PgUp` / `PgDn` | Move in the session pick, or scroll the conversation |
+| `<up>` / `<down>`, `C-p` / `C-n`, `<pgup>` / `<pgdn>` | Move in the session pick, or scroll the conversation |
 | `M-f` | Follow the focused file into another folder: that folder's daemon, that conversation |
 | `M-t` | Fold a run of tool calls to one line, or open every call |
 
-The composer is one line: any character is typed into it, `Home` / `End` / `Left` / `Right` move
-in it, and `RET` sends. In the session pick `n` makes a new session and a digit picks the row
+The composer is one line: any character is typed into it, `<home>` / `<end>` / `<left>` / `<right>` move
+in it, and `RET` sends. In the session pick `M-n` makes a new session and a digit picks the row
 with that number.
 
 The panel takes the second column while the terminal has room for both: two fifths of it, capped
@@ -184,16 +190,35 @@ the model, the mode and the placement are the launcher's to choose. A card the s
 on is named in the rows and answered in letibot: the panel says it can decide nothing, so nothing
 is routed to it that would time out.
 
+## The bottom terminal
+
+`M-0` shows a shell strip under the text and hides it again; while the strip has the keyboard
+the same key hands it back rather than hiding. The tabs live on the strip's rule, the active
+one marked, and a drag on the rule resizes the strip.
+
+| Key | What it does |
+|---|---|
+| `M-0` | Show or hide the terminal; focused, the keyboard back to the text |
+| `M-n` | A new tab |
+| `M-w` | Close the current tab |
+| `M-[` / `M-]` | Previous / next tab |
+| `M-+` / `M--` | A taller / shorter strip |
+| `<pgup>` / `<pgdn>` | Scroll the strip's history; the wheel scrolls too |
+
+A key the strip does not bind goes to the shell, apart from the host's own (`C-]`, `M-i`,
+`M-m`), which work over every surface. `ESC` is the strip's own too: it hands the keyboard
+back to the text rather than to the program in the shell.
+
 ## In a view
 
-Previews, diffs, pictures, reviews and the conflict view replace the text's keys. `F8`,
+Previews, diffs, pictures, reviews and the conflict view replace the text's keys. `<f8>`,
 `M-w`, `M-<` / `M->` and `M-x` still work.
 
 | Key | What it does |
 |---|---|
 | `s` / `TAB` | Switch between two panels and one. The choice sticks for the session |
-| arrows, `C-p` / `C-n`, `PgUp` / `PgDn`, `Space`, `Home` / `End` | Scroll |
-| `Esc`, `q`, `RET`, `C-g`, `C-c`, `M-p` | Back to the text |
+| `<up>` / `<down>`, `C-p` / `C-n`, `<pgup>` / `<pgdn>`, `SPC`, `<home>` / `<end>` | Scroll |
+| `ESC`, `q`, `RET`, `C-g`, `C-c`, `M-p` | Back to the text |
 
 A markdown view and a picture are one column, so `s` says there is nothing to split.
 
@@ -243,19 +268,19 @@ Saving over a file changed on disk since rano read it asks first.
 | `n` / `C-g` | Do not save |
 | `d` | Show what the save would change: disk against buffer, unified or in two panels |
 
-In that diff `y` / `n` answer, `s` switches panels and `Esc` returns to the question. `n`
+In that diff `Y` / `N` answer, `s` switches panels and `ESC` returns to the question. `n`
 also calls off the `C-x` or `M-w` the save was part of.
 
 ## Folder listing
 
-`M-g`, `F8` on a folder, or `rano some/folder/` opens a listing, directories first with `/`.
+`M-g`, `<f8>` on a folder, or `rano some/folder/` opens a listing, directories first with `/`.
 
 | Key | What it does |
 |---|---|
 | `RET` | Enter the entry under the cursor: a folder replaces the listing, a file opens |
 | `-` | The folder above |
 | `r` | Read the folder again, keeping the cursor where it was |
-| `q` / `Esc` / `C-g` | Close the listing |
+| `q` / `ESC` / `C-g` | Close the listing |
 
 The listing is read-only. Motion keys work as over text.
 
@@ -266,32 +291,32 @@ The buffer list and the usage list.
 | Key | What it does |
 |---|---|
 | `RET` | Go to the selected item |
-| arrows, `C-p` / `C-n`, `PgUp` / `PgDn`, `Home` / `End` | Move |
-| `Delete` | In the buffer list: close the selected buffer |
-| `Esc`, `C-g`, `C-c`, `C-x`, `M-l`, `M-?` | Close the list |
+| `<up>` / `<down>`, `C-p` / `C-n`, `<pgup>` / `<pgdn>`, `<home>` / `<end>` | Move |
+| `<delete>` | In the buffer list: close the selected buffer |
+| `ESC`, `C-g`, `C-c`, `C-x`, `M-l`, `M-?` | Close the list |
 
 ## A help page
 
 | Key | What it does |
 |---|---|
-| `q`, `RET`, `Esc`, `C-g` | Close |
-| arrows, `C-p` / `C-n` | Scroll a line |
-| `PgUp` / `PgDn`, `Space` | Previous / next page |
-| `Home` / `End` | Top / bottom |
+| `q`, `RET`, `ESC`, `C-g` | Close |
+| `<up>` / `<down>`, `C-p` / `C-n` | Scroll a line |
+| `<pgup>` / `<pgdn>`, `SPC` | Previous / next page |
+| `<home>` / `<end>` | Top / bottom |
 
 ## M-x
 
 | Key | What it does |
 |---|---|
 | `RET`, `TAB` | Run the selected command |
-| arrows, `C-p` / `C-n` | Pick |
+| `<up>` / `<down>`, `C-p` / `C-n` | Pick |
 | `DEL`, `C-h` | Backspace |
-| `Esc`, `C-g`, `M-x` | Cancel |
+| `ESC`, `C-g`, `M-x` | Cancel |
 
 ## Prompts and mouse
 
-Prompts keep separate histories for search, exec and file names: `Up` / `Down` cycle them,
-`Tab` completes file names, `~` expands to `$HOME`, `M-b` / `M-f` move by word. `Esc` or `C-g`
+Prompts keep separate histories for search, exec and file names: `<up>` / `<down>` cycle them,
+`TAB` completes file names, `~` expands to `$HOME`, `M-b` / `M-f` move by word. `ESC` or `C-g`
 cancels a prompt.
 
 Bracketed paste arrives as a single undoable edit.

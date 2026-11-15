@@ -2945,10 +2945,12 @@ fn the_mouse_is_routed_by_the_strips_rectangle() {
     let mut ready = false;
     for _ in 0..100 {
         ed.bottom.tabs[0].feed();
+        // Exactly the line "60": the echoed command `seq 1 60` also *contains* 60, and a
+        // contains-check lets a slow shell fall through before it has printed anything.
         if ed.bottom.tabs[0]
             .lines()
             .iter()
-            .any(|l| l.plain().contains("60"))
+            .any(|l| l.plain().trim() == "60")
         {
             ready = true;
             break;

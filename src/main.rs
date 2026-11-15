@@ -388,6 +388,7 @@ fn run(
         // a frame may have changed the session, and an act may have opened or closed a socket.
         dirty |= pump(&mut ed, &mut link, &outbox);
         let lay = layout(w, h, &ed, panel_width);
+        sync_bottom_size(&mut ed, &lay);
         dirty |= ed.set_area(lay.editor.unwrap_or(Rect::new(0, 0, w, h)).into());
         // The pollers, the overlays' refreshes, the scroll and the highlight:
         // everything between two events, the same call a host makes.
@@ -779,6 +780,18 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     }
 }
 
+/// The pty is the strip's rectangle: the frame's full width, and only the rows that are drawn —
+/// the rule and the tab strip are not the shell's. Called every frame, so a frame resize and a
+/// dragged rule both reach the shell as TIOCSWINSZ.
+fn sync_bottom_size(ed: &mut Editor, lay: &Layout) {
+    if let Some(area) = lay.bottom {
+        let rows = (area.height as usize).saturating_sub(2).max(1) as u16;
+        for tab in &mut ed.bottom.tabs {
+            tab.resize(area.width, rows);
+        }
+    }
+}
+
 /// Draw the frame the layout asked for, and say where the caret is.
 fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option<(u16, u16)> {
     let mut cursor = None;
@@ -945,6 +958,84 @@ mod panel_tests {
 
     fn editor() -> Editor {
         Editor::new(Buffer::new(), Config::default())
+    }
+
+    /// Feed the shell until one of its screen lines answers `pred`, or give up.
+    fn feed_until(ed: &mut Editor, pred: impl Fn(&str) -> bool) -> bool {
+        for _ in 0..200 {
+            let tab = &mut ed.bottom.tabs[ed.bottom.active];
+            tab.feed();
+            if tab.lines().iter().any(|l| pred(&l.plain())) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// The pty is the strip's rectangle — full width, drawn rows only — and after `seq 1 100`
+    /// the prompt is on the last drawn row, not cut off below it. A frame resize resizes the pty.
+    #[test]
+    fn the_pty_is_the_strips_rectangle_and_the_prompt_stays_visible() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(100, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        let rows = strip.height - 2;
+        ed.bottom.tabs[0].send(b"PS1='PROMPT> '\n");
+        ed.bottom.tabs[0].send(b"stty size\n");
+        let want = format!("{rows} {}", strip.width);
+        assert!(
+            feed_until(&mut ed, |l| l.trim().ends_with(&want)),
+            "stty size is the drawn rectangle: {want}"
+        );
+        ed.bottom.tabs[0].send(b"seq 1 100\n");
+        // Exactly the answer line: the echoed `seq 1 100` also contains 100.
+        assert!(feed_until(&mut ed, |l| l.trim() == "100"), "seq answered");
+        let mut visible = false;
+        for _ in 0..200 {
+            ed.bottom.tabs[0].feed();
+            if ed.bottom.tabs[0]
+                .lines()
+                .last()
+                .is_some_and(|l| l.plain().contains("PROMPT>"))
+            {
+                visible = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(visible, "the prompt is on the last drawn row");
+        let lines = ed.bottom.lines(strip.width as usize, Path::new("/tmp"));
+        assert_eq!(
+            lines.len(),
+            (strip.height - 1) as usize,
+            "every drawn row is a terminal row"
+        );
+        assert!(
+            lines
+                .last()
+                .expect("a last row")
+                .plain()
+                .contains("PROMPT>"),
+            "the prompt is visible after seq 1 100"
+        );
+        // A smaller frame is a smaller terminal, by the same rule.
+        let lay2 = layout(80, 30, &ed, None);
+        sync_bottom_size(&mut ed, &lay2);
+        let strip2 = lay2.bottom.expect("a strip");
+        let want2 = format!("{} {}", strip2.height - 2, strip2.width);
+        ed.bottom.tabs[0].send(b"stty size\n");
+        assert!(
+            feed_until(&mut ed, |l| l.trim().ends_with(&want2)),
+            "after the frame resize, stty size is {want2}"
+        );
     }
 
     /// The strip is a mouse pane with a rectangle: the wheel over it is the terminal's, and

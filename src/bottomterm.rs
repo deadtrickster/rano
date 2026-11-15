@@ -234,6 +234,27 @@ impl Tab {
         }
     }
 
+    /// The strip's rectangle is the shell's terminal: the pty is told with TIOCSWINSZ, so
+    /// `stty size` and full-screen programs agree with what is drawn, and the emulator's screen
+    /// is the same size. A no-op when nothing changed, so a frame costs no ioctl.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        if self.parser.cols == cols as usize && self.parser.rows == rows as usize {
+            return;
+        }
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::ioctl(self.master, libc::TIOCSWINSZ as _, &size as *const _);
+        }
+        self.parser.resize(cols as usize, rows as usize);
+    }
+
     /// How far back the view is scrolled, in lines: the wheel's effect, readable by the host.
     pub fn scroll_pos(&self) -> usize {
         self.parser.scroll
@@ -632,6 +653,28 @@ impl Vt {
         }
     }
 
+    /// A new size, keeping what is on the screen: the strip's rectangle changed under the shell.
+    fn resize(&mut self, cols: usize, rows: usize) {
+        let mut cells = vec![' '; cols * rows];
+        let mut fg = vec![None; cols * rows];
+        let mut bold = vec![false; cols * rows];
+        for y in 0..self.rows.min(rows) {
+            for x in 0..self.cols.min(cols) {
+                cells[y * cols + x] = self.cells[y * self.cols + x];
+                fg[y * cols + x] = self.fg[y * self.cols + x];
+                bold[y * cols + x] = self.bold[y * self.cols + x];
+            }
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.cells = cells;
+        self.fg = fg;
+        self.bold = bold;
+        self.x = self.x.min(cols - 1);
+        self.y = self.y.min(rows - 1);
+        self.scroll = 0;
+    }
+
     /// SGR: the codes a shell actually emits — reset, bold, the sixteen foreground colours.
     /// Anything else is left alone, which is the honest subset for `ls --color` and git.
     fn sgr(&mut self, params: &str) {
@@ -954,6 +997,33 @@ mod tests {
         assert!(n <= 0, "a dead tab took no key: {n}");
         unsafe {
             libc::close(slave);
+        }
+    }
+
+    /// The pty is the size the strip draws: `stty size` says so, before and after a resize.
+    #[test]
+    fn the_pty_size_is_what_stty_reports() {
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        for (cols, rows) in [(40u16, 6u16), (50, 9)] {
+            if (cols, rows) != (40, 6) {
+                t.resize(cols, rows);
+            }
+            t.send(b"stty size\n");
+            let want = format!("{rows} {cols}");
+            let mut saw = false;
+            for _ in 0..100 {
+                t.feed();
+                if t.lines().iter().any(|l| l.plain().trim().ends_with(&want)) {
+                    saw = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                saw,
+                "stty size said {want}: {:?}",
+                t.lines().iter().map(|l| l.plain()).collect::<Vec<_>>()
+            );
         }
     }
 

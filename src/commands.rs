@@ -1138,7 +1138,13 @@ impl Keymaps {
             .bind("<f8>", "open-file")
             .bind("<f9>", "sort-lines")
             .bind("<f10>", "justify")
-            .bind("<f11>", "goto-line");
+            .bind("<f11>", "goto-line")
+            // The F row is a bonus, not a requirement: a laptop keyboard, or a terminal that
+            // takes the F row for itself, reaches every command without it.
+            .bind("M-o", "open-file")
+            .bind("M-c", "make-backup")
+            .bind("M-r", "sort-lines")
+            .bind("M-h", "set-mode");
         g.name_prefix("M-t", "todo");
 
         let mut diff = Keymap::new("diff");
@@ -1204,6 +1210,13 @@ impl Keymaps {
             .bind("r", "mark-reject")
             .bind("A", "mark-accept-all")
             .bind("R", "mark-reject-all")
+            // The wider nets, and the way out: one reply at a time (yes/no), every reply
+            // at once, and the marks cleared.
+            .bind("y", "mark-accept-reply")
+            .bind("n", "mark-reject-reply")
+            .bind("e", "mark-accept-every")
+            .bind("E", "mark-reject-every")
+            .bind("c", "mark-clear")
             .bind("M-p", "diff-close");
 
         let mut list = Keymap::new("list");
@@ -1797,13 +1810,18 @@ mod tests {
             &k.diff,
             &k.save,
             &k.patch,
+            &k.markdown,
+            &k.picture,
+            &k.view,
             &k.conflict,
             &k.review,
+            &k.dir,
             &k.list,
             &k.buffers,
             &k.page,
             &k.palette,
             &k.panel,
+            &k.terminal,
         ]
     }
 
@@ -1827,6 +1845,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The nano keymap carries every command the maps know: nothing in the command table is
+    /// reachable only through a function key — a laptop keyboard, or a terminal that takes the
+    /// F row for itself, can still do everything.
+    #[test]
+    fn every_command_has_a_chord_a_laptop_can_type() {
+        let k = Keymaps::standard();
+        // The host's own chords — M-i, C-], M-m, M-0 — live in the host map the binary
+        // pushes, not in these sixteen; they are laptop chords by design, so the host's
+        // commands are covered by construction and exempt here.
+        let mut covered: Vec<(&'static str, bool)> = commands()
+            .iter()
+            .filter(|c| c.group != Group::Host)
+            .map(|c| (c.name, false))
+            .collect();
+        for m in all_maps(&k) {
+            for (seq, c) in m.flatten() {
+                let laptop = !seq
+                    .iter()
+                    .any(|key| matches!(key.code, crate::term::KeyCode::F(_)));
+                if laptop
+                    && let Some(e) = command(&c)
+                    && let Some(slot) = covered.iter_mut().find(|(n, _)| *n == e.name)
+                {
+                    slot.1 = true;
+                }
+            }
+        }
+        let holes: Vec<&'static str> = covered
+            .iter()
+            .filter(|(_, ok)| !*ok)
+            .map(|(n, _)| *n)
+            .collect();
+        assert!(
+            holes.is_empty(),
+            "commands only on function keys, or bound nowhere: {holes:?}"
+        );
     }
 
     /// Every `ask:<id>` the standard map binds names a compiled-in preset, and the two

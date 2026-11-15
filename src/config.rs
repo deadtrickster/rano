@@ -40,6 +40,20 @@ pub struct Config {
     /// The `M-k` presets, compiled in and then changed field by field by
     /// `ask.<id>.<field>` lines. In the order the key bar shows them.
     pub ask: Vec<crate::ask::AskPreset>,
+    /// `[keys]` and `[keys.<map>]` lines, in file order: what the operator bound.
+    pub key_bindings: Vec<KeyBinding>,
+    /// Why a `[keys]` line was refused, each naming its line. Said at startup.
+    pub key_problems: Vec<String>,
+}
+
+/// One `"chord" = "command"` line of a `[keys]` section: the map it belongs to (`global` for a
+/// bare `[keys]`), the chord, the command — or empty to unbind — and the file's line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBinding {
+    pub map: String,
+    pub chord: String,
+    pub command: String,
+    pub line: usize,
 }
 
 /// What a Tab inserts: Go and the Makefile world want a tab, most everything else
@@ -130,6 +144,8 @@ impl Default for Config {
             capabilities: Vec::new(),
             colors: Vec::new(),
             ask: crate::ask::default_presets(),
+            key_bindings: Vec::new(),
+            key_problems: Vec::new(),
         }
     }
 }
@@ -159,14 +175,40 @@ pub fn load_from(path: &Path) -> Config {
     }
 }
 
-fn parse_config(text: &str) -> Config {
+pub(crate) fn parse_config(text: &str) -> Config {
     let mut cfg = Config::default();
     // A preset edited field by field: a file that changes only the prompt keeps the
     // compiled-in key, and a preset it invents needs a key of its own to reach.
     let mut ask: Vec<(String, Draft)> = Vec::new();
-    for raw in text.lines() {
+    let mut section: Option<String> = None;
+    for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = Some(line[1..line.len() - 1].trim().to_string());
+            continue;
+        }
+        if let Some(sec) = &section {
+            if sec == "keys" || sec.starts_with("keys.") {
+                if let Some((key, value)) = line.split_once('=') {
+                    let map = if sec == "keys" {
+                        "global".to_string()
+                    } else {
+                        sec["keys.".len()..].to_string()
+                    };
+                    let unquote = |s: &str| s.trim().trim_matches('"').to_string();
+                    cfg.key_bindings.push(KeyBinding {
+                        map,
+                        chord: unquote(key),
+                        command: unquote(value.split('#').next().unwrap_or("")),
+                        line: n + 1,
+                    });
+                }
+                continue;
+            }
+            // A section this file does not know: its lines are not settings.
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -538,6 +580,46 @@ mod tests {
         let p = std::env::temp_dir().join("rano-no-such-config-test.toml");
         let _ = std::fs::remove_file(&p);
         assert_eq!(load_from(&p), Config::default());
+    }
+
+    /// `[keys]` lines parse into bindings with their line numbers, and a quoted chord keeps its
+    /// quotes off; `[keys.<map>]` names the map.
+    #[test]
+    fn keys_sections_parse_into_bindings() {
+        let text = concat!(
+            "tab_width = 4\n",
+            "\n",
+            "[keys]\n",
+            "\"C-x k\" = \"cut\"\n",
+            "\"M-q\" = \"\"\n",
+            "\n",
+            "[keys.terminal]\n",
+            "\"M-n\" = \"terminal-new\"\n",
+        );
+        let cfg = parse_config(text);
+        assert_eq!(
+            cfg.key_bindings,
+            vec![
+                KeyBinding {
+                    map: "global".to_string(),
+                    chord: "C-x k".to_string(),
+                    command: "cut".to_string(),
+                    line: 4,
+                },
+                KeyBinding {
+                    map: "global".to_string(),
+                    chord: "M-q".to_string(),
+                    command: String::new(),
+                    line: 5,
+                },
+                KeyBinding {
+                    map: "terminal".to_string(),
+                    chord: "M-n".to_string(),
+                    command: "terminal-new".to_string(),
+                    line: 8,
+                },
+            ]
+        );
     }
 
     #[test]

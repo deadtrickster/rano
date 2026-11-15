@@ -88,6 +88,32 @@ line is reported.
 
 `color.ROLE = "look"` in `config.toml` does the same thing without a file, in file order.
 
+## Key bindings
+
+`[keys]` in `config.toml` rebinds a chord: `"chord" = "command"`, one per line. An empty
+command unbinds it. `[keys.terminal]` (or any map's name) binds inside that map instead of
+the global one.
+
+```toml
+[keys]
+"M-K j" = "cut"
+"M-q" = ""            # unbinds
+
+[keys.terminal]
+"M-n" = "terminal-new"
+```
+
+A chord is `C-x`, `M-x`, `S-tab`, arrows by name, and a space makes a sequence of them
+(`"M-K j"` is `M-K` then `j`). The command is the name `M-x` completes to. A sequence may
+go only through keys that are not themselves commands: `C-x` is Quit, so `"C-x k"` is
+refused as going through a command.
+
+Every refusal names its line: a chord that is not a chord, an empty chord, a chord that
+goes through a bound command, a command there is none of, a map there is none of, and a
+key the host has promised the terminal — `M-i`, `C-]`, `M-m`, however they are spelled,
+and their kind are the host's, and a map may not take one over. Several bad lines are all
+said, not only the first.
+
 ## Environment
 
 | Variable | What it does |

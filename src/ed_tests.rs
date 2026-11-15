@@ -2895,6 +2895,89 @@ fn status_shows_running_command() {
 
 // Bracketed paste: one undo step, \r stripped, cursor at the end.
 
+/// A `[keys]` line against a SHARED host row is refused — by its parsed keys, so another
+/// spelling of the same key is refused too — a bad chord, an empty chord, a chord through a
+/// bound command, an unknown command and an unknown map are all refused, each naming its
+/// line, none silently dropped, and none of them taking the editor down.
+#[test]
+fn keys_refusals_name_their_line() {
+    let text = concat!(
+        "[keys]\n",
+        "\"C-]\" = \"cut\"\n",
+        "\"S-M-i\" = \"cut\"\n",
+        "\"not a chord\" = \"cut\"\n",
+        "\"\" = \"cut\"\n",
+        "\"C-x k\" = \"cut\"\n",
+        "\"M-x\" = \"no-such-command\"\n",
+        "\"M-x\" = \"no-such-map\"\n",
+        "[keys.nosuchmap]\n",
+        "\"M-x\" = \"cut\"\n",
+    );
+    let mut ed = test_ed("x");
+    ed.config.key_bindings = config::parse_config(text).key_bindings;
+    ed.apply_key_config();
+    assert_eq!(
+        ed.config.key_problems,
+        vec![
+            "config.toml:2: C-] belongs to the host, not to a map".to_string(),
+            "config.toml:3: S-M-i belongs to the host, not to a map".to_string(),
+            "config.toml:4: \"not a chord\" is not a chord".to_string(),
+            "config.toml:5: an empty chord".to_string(),
+            "config.toml:6: C-x k goes through C-x, which is a command".to_string(),
+            "config.toml:7: no command \"no-such-command\"".to_string(),
+            "config.toml:8: no command \"no-such-map\"".to_string(),
+            "config.toml:10: no map \"nosuchmap\"".to_string(),
+        ]
+    );
+}
+
+/// Several bad `[keys]` lines are all said at startup: the flash carries three with their
+/// lines and names the count of the rest, so no refusal is invisible.
+#[test]
+fn every_keys_refusal_is_said_not_just_the_first() {
+    let text = concat!(
+        "[keys]\n",
+        "\"C-]\" = \"cut\"\n",
+        "\"not a chord\" = \"cut\"\n",
+        "\"M-x\" = \"no-such-command\"\n",
+        "[keys.nosuchmap]\n",
+        "\"M-x\" = \"cut\"\n",
+    );
+    let cfg = config::parse_config(text);
+    let mut buf = crate::buffer::Buffer::new();
+    buf.set_rows(vec![vec!['x']]);
+    let ed = Editor::new(buf, cfg);
+    let said = ed.status.as_ref().expect("a flash").text.clone();
+    assert!(said.contains("config.toml:2"), "the first: {said:?}");
+    assert!(said.contains("config.toml:3"), "the second: {said:?}");
+    assert!(said.contains("config.toml:4"), "the third: {said:?}");
+    assert!(said.contains("and 1 more"), "the rest counted: {said:?}");
+}
+
+/// A binding lands where it says, and `""` unbinds what was there.
+#[test]
+fn a_keys_binding_binds_and_emptiness_unbinds() {
+    use crate::keymap::{Lookup, lookup, parse_seq};
+    let seq = parse_seq("M-K j").unwrap();
+    let mut ed = test_ed("x");
+    let mut bindings = config::parse_config("[keys]\n\"M-K j\" = \"cut\"\n").key_bindings;
+    bindings.extend(config::parse_config("[keys]\n\"M-K j\" = \"\"\n").key_bindings);
+    ed.config.key_bindings = bindings;
+    ed.apply_key_config();
+    assert!(
+        ed.config.key_problems.is_empty(),
+        "{:?}",
+        ed.config.key_problems
+    );
+    // The binding landed and the later `""` took it off again.
+    assert_eq!(lookup(&[&ed.keymaps.global], &seq), Lookup::Unbound);
+    // Without the unbinding, the command is there.
+    let mut ed = test_ed("x");
+    ed.config.key_bindings = config::parse_config("[keys]\n\"M-K j\" = \"cut\"\n").key_bindings;
+    ed.apply_key_config();
+    assert_eq!(lookup(&[&ed.keymaps.global], &seq), Lookup::Command("cut"));
+}
+
 /// A paste with a prompt open fills the prompt, not the buffer: first line only, at its cursor.
 #[test]
 fn paste_text_with_a_prompt_open_fills_the_prompt() {

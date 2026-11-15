@@ -409,6 +409,19 @@ impl Editor {
         };
         ed.lsp_sync();
         ed.bind_ask();
+        // The operator's `[keys]` lines, after every map the editor builds itself.
+        ed.apply_key_config();
+        if !ed.config.key_problems.is_empty() {
+            // Every refusal is said, not only the first: three with their lines, then the
+            // count of the rest — a config with several bad lines leaves nothing invisible.
+            let said = ed.config.key_problems.len().min(3);
+            let mut text = ed.config.key_problems[..said].join(" · ");
+            let left = ed.config.key_problems.len() - said;
+            if left > 0 {
+                text.push_str(&format!(" · and {left} more"));
+            }
+            ed.flash(&text);
+        }
         ed
     }
 

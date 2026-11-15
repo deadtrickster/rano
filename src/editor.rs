@@ -1681,11 +1681,7 @@ impl Editor {
                     && m.x == self.area.x + self.area.w.saturating_sub(1)
                 {
                     let i = (m.y as usize - first).min(travel);
-                    let at = if travel == 0 {
-                        0
-                    } else {
-                        i * travel_max / travel
-                    };
+                    let at = (i * travel_max).checked_div(travel).unwrap_or(0);
                     tab.scroll_to_top_index(at);
                     return true;
                 }

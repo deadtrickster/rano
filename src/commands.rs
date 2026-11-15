@@ -1020,6 +1020,29 @@ pub const SHOW_AT_ONCE: &[&str] = &["help"];
 pub const CARD_DELAY: Duration = Duration::from_millis(400);
 
 impl Keymaps {
+    /// A map by the name a config names it: `[keys.panel]` is [`Keymaps::panel`].
+    pub fn by_name_mut(&mut self, name: &str) -> Option<&mut Keymap> {
+        Some(match name {
+            "global" => &mut self.global,
+            "diff" => &mut self.diff,
+            "save" => &mut self.save,
+            "patch" => &mut self.patch,
+            "markdown" => &mut self.markdown,
+            "picture" => &mut self.picture,
+            "view" => &mut self.view,
+            "conflict" => &mut self.conflict,
+            "review" => &mut self.review,
+            "dir" => &mut self.dir,
+            "list" => &mut self.list,
+            "buffers" => &mut self.buffers,
+            "page" => &mut self.page,
+            "palette" => &mut self.palette,
+            "panel" => &mut self.panel,
+            "terminal" => &mut self.terminal,
+            _ => return None,
+        })
+    }
+
     pub fn standard() -> Keymaps {
         let mut g = Keymap::new("global");
         // Help is a prefix, as emacs's C-h: ^G and F1 open its card.
@@ -1544,6 +1567,79 @@ impl Editor {
                 t.scroll_down(1);
             }
         }
+    }
+
+    /// The operator's `[keys]` lines, applied once after the maps are built: a binding, an
+    /// unbinding, or a refusal that names the line rather than being silently dropped. A line
+    /// never takes the editor down — everything `Keymap::bind` would panic on is refused here.
+    pub(crate) fn apply_key_config(&mut self) {
+        let bindings = self.config.key_bindings.clone();
+        let mut problems = std::mem::take(&mut self.config.key_problems);
+        // The host's keys are compared as parsed sequences, not spellings: `S-M-i` is the
+        // host's `M-i` written another way, and it is no less a takeover.
+        let host: Vec<Vec<crate::keymap::Key>> = crate::agent::keys::SHARED
+            .iter()
+            .filter(|s| s.scope == crate::agent::keys::Scope::Host)
+            .filter_map(|s| crate::keymap::parse_seq(s.key))
+            .collect();
+        for b in bindings {
+            let Some(seq) = crate::keymap::parse_seq(&b.chord) else {
+                problems.push(format!(
+                    "config.toml:{}: {:?} is not a chord",
+                    b.line, b.chord
+                ));
+                continue;
+            };
+            if seq.is_empty() {
+                problems.push(format!("config.toml:{}: an empty chord", b.line));
+                continue;
+            }
+            if host.contains(&seq) {
+                problems.push(format!(
+                    "config.toml:{}: {} belongs to the host, not to a map",
+                    b.line, b.chord
+                ));
+                continue;
+            }
+            let Some(map) = self.keymaps.by_name_mut(&b.map) else {
+                problems.push(format!("config.toml:{}: no map {:?}", b.line, b.map));
+                continue;
+            };
+            // A chord whose prefix is a bound command is a typo, not a binding: `C-x k` goes
+            // through Quit. `Keymap::bind` panics on it, so it is refused before it runs.
+            let map_ref: &Keymap = &*map;
+            let through =
+                (1..seq.len()).find_map(|i| match crate::keymap::lookup(&[map_ref], &seq[..i]) {
+                    crate::keymap::Lookup::Command(_) => Some(
+                        seq[..i]
+                            .iter()
+                            .map(|k| k.emacs())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    _ => None,
+                });
+            if let Some(prefix) = through {
+                problems.push(format!(
+                    "config.toml:{}: {} goes through {}, which is a command",
+                    b.line, b.chord, prefix
+                ));
+                continue;
+            }
+            if b.command.is_empty() {
+                map.unbind(&b.chord);
+                continue;
+            }
+            if command(&b.command).is_none() {
+                problems.push(format!(
+                    "config.toml:{}: no command {:?}",
+                    b.line, b.command
+                ));
+                continue;
+            }
+            map.bind(&b.chord, &b.command);
+        }
+        self.config.key_problems = problems;
     }
 
     pub(crate) fn run_command(&mut self, name: &str) {

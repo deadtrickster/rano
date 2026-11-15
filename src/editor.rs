@@ -409,6 +409,19 @@ impl Editor {
         };
         ed.lsp_sync();
         ed.bind_ask();
+        // The operator's `[keys]` lines, after every map the editor builds itself.
+        ed.apply_key_config();
+        if let Some(problem) = ed.config.key_problems.first().cloned() {
+            // The flash names the first and counts the rest; every one of them, with its
+            // line, is on stderr, where the theme's problems already go.
+            let left = ed.config.key_problems.len() - 1;
+            let text = if left > 0 {
+                format!("{problem} · and {left} more on stderr")
+            } else {
+                problem
+            };
+            ed.flash(&text);
+        }
         ed
     }
 

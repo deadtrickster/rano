@@ -280,6 +280,12 @@ fn run(
     // exact colours, which is where the severity table gets its orange.
     let mut palette = Palette::detected(false);
     let mut ed = Editor::new(buf, cfg);
+    // Every `[keys]` refusal, on stderr where the theme's problems already go: the flash
+    // names the first and counts the rest, but a record that can be read back must carry
+    // them all, each with its line.
+    for p in &ed.config.key_problems {
+        eprintln!("rano: {p}");
+    }
     // A picture is drawn as placeholder cells a terminal may fill with garbage, so
     // M-P is refused by name where the protocol is not kitty.
     ed.push_keymap(host_map());

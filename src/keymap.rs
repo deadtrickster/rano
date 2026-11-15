@@ -324,6 +324,30 @@ impl Keymap {
         self
     }
 
+    /// Drop a binding: the key answers nothing again. `false` when nothing was bound there.
+    pub fn unbind(&mut self, seq: &str) -> bool {
+        parse_seq(seq).is_some_and(|keys| self.unbind_keys(&keys))
+    }
+
+    fn unbind_keys(&mut self, keys: &[Key]) -> bool {
+        let Some((first, rest)) = keys.split_first() else {
+            return false;
+        };
+        if rest.is_empty() {
+            let before = self.entries.len();
+            self.entries.retain(|(k, _)| k != first);
+            return self.entries.len() != before;
+        }
+        for (k, e) in self.entries.iter_mut() {
+            if k == first
+                && let Entry::Prefix(m) = e
+            {
+                return m.unbind_keys(rest);
+            }
+        }
+        false
+    }
+
     fn bind_keys(&mut self, keys: &[Key], command: &str, seq: &str) {
         let (first, rest) = (keys[0], &keys[1..]);
         if rest.is_empty() {
@@ -644,5 +668,18 @@ mod tests {
     fn binding_through_a_command_is_a_typo() {
         let mut g = Keymap::new("global");
         g.bind("C-o", "save").bind("C-o x", "other");
+    }
+
+    /// The chord forms docs/configuration.md names all parse: a doc that names a chord the
+    /// parser refuses teaches the crash the applier now refuses for it.
+    #[test]
+    fn the_documented_chord_forms_parse() {
+        for s in [
+            "C-x", "M-x", "S-TAB", "<up>", "<left>", "<pgup>", "<f5>", "M-K j",
+        ] {
+            assert!(parse_seq(s).is_some(), "{s:?} parses");
+        }
+        // The wrong case does not: `S-tab` is a letter `t` with shift, not the tab key.
+        assert!(parse_seq("S-tab").is_none());
     }
 }

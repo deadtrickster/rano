@@ -229,6 +229,31 @@ mod tests {
         assert!(!ed.wants_quit(), "C-x did not ask to quit");
     }
 
+    /// A paste at a focused terminal is the shell's input, not the buffer's.
+    #[test]
+    fn a_paste_at_a_focused_terminal_reaches_the_pty() {
+        let mut ed = ed("abc");
+        ed.bottom.open = true;
+        ed.bottom.focus = true;
+        ed.bottom
+            .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let before = text(&ed);
+        ed.paste_text("echo pasted-123");
+        let tab = &mut ed.bottom.tabs[ed.bottom.active];
+        let mut seen = false;
+        for _ in 0..50 {
+            tab.feed();
+            if tab.lines().iter().any(|l| l.plain().contains("pasted-123")) {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seen, "the pty echoed the paste");
+        assert_eq!(text(&ed), before, "the buffer is unmodified");
+    }
+
     #[test]
     fn an_idle_editor_waits_the_idle_wait() {
         assert_eq!(ed("x").next_wakeup(), IDLE_WAIT);

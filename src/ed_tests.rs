@@ -2878,6 +2878,55 @@ fn status_shows_running_command() {
 
 // Bracketed paste: one undo step, \r stripped, cursor at the end.
 
+/// A paste with a prompt open fills the prompt, not the buffer: first line only, at its cursor.
+#[test]
+fn paste_text_with_a_prompt_open_fills_the_prompt() {
+    let mut ed = test_ed("abc");
+    ed.prompt = Some(crate::prompt::Prompt {
+        kind: PromptKind::Search,
+        text: "xy".to_string(),
+        cursor: 1,
+    });
+    ed.paste_text("one\ntwo");
+    assert_eq!(lines(&ed), vec!["abc"], "the buffer is unmodified");
+    let p = ed.prompt.as_ref().expect("the prompt is still open");
+    assert_eq!(p.text, "xoney", "first line only, at the prompt's cursor");
+    assert_eq!(p.cursor, 4);
+}
+
+/// M-| opens the filter prompt, the command is pasted into it, and Enter filters: the mark is
+/// still there, because the paste never touched the buffer.
+#[test]
+fn paste_into_the_filter_prompt_then_enter_does_not_panic() {
+    let mut ed = test_ed("b\na");
+    ed.bs_mut().mark = Some(Pos { row: 0, col: 0 });
+    ed.bs_mut().cursor = Pos { row: 1, col: 1 };
+    press(&mut ed, KeyCode::Char('|'), Mods::ALT);
+    assert!(matches!(
+        ed.prompt.as_ref().map(|p| p.kind),
+        Some(PromptKind::FilterCmd)
+    ));
+    ed.paste_text("sort");
+    assert_eq!(
+        ed.prompt.as_ref().expect("still prompting").text,
+        "sort",
+        "the paste went to the prompt"
+    );
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.prompt.is_none(), "the prompt ran");
+    assert_eq!(lines(&ed), vec!["a", "b"], "the filter sorted the rows");
+}
+
+/// A filter with no mark is a flash, not a panic: an edit between M-| and Enter can clear the
+/// selection, and then the filter has no input.
+#[test]
+fn a_filter_without_a_mark_flashes_instead_of_panicking() {
+    let mut ed = test_ed("b\na");
+    ed.bs_mut().mark = None;
+    ed.do_filter("sort");
+    assert_eq!(lines(&ed), vec!["b", "a"], "nothing was filtered");
+}
+
 #[test]
 fn paste_text_single_and_multiline() {
     let mut ed = test_ed("");

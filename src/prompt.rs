@@ -397,7 +397,7 @@ impl Editor {
 
 // `Prompt::cursor` is a CHAR index while String takes BYTE indices, so editing
 // goes through a Vec<char> to stay multibyte-safe.
-fn prompt_insert(p: &mut Prompt, c: char) {
+pub(crate) fn prompt_insert(p: &mut Prompt, c: char) {
     let idx = p.cursor.min(p.text.chars().count());
     let mut v: Vec<char> = p.text.chars().collect();
     v.insert(idx, c);

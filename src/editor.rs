@@ -2192,9 +2192,30 @@ impl Editor {
     /// Bracketed paste. \r is stripped, newlines split into rows; the whole
     /// paste (including selection replacement) is one undo step.
     pub fn paste_text(&mut self, s: &str) {
-        // A paste goes where the caret is, and while the panel holds the keyboard that is its
-        // composer: one line, so the newlines become spaces.
-        if self.panel.focus && self.prompt.is_none() {
+        // A paste goes where the caret is. An open prompt is one line, so only the first line
+        // is pasted, at the prompt's own cursor.
+        if let Some(p) = self.prompt.as_mut() {
+            let first = s
+                .replace('\r', "")
+                .split('\n')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            for c in first.chars() {
+                crate::prompt::prompt_insert(p, c);
+            }
+            return;
+        }
+        // A focused terminal: the paste is the shell's input, not the file's.
+        if self.bottom.open && self.bottom.focus {
+            if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+                tab.paste(s);
+            }
+            return;
+        }
+        // While the panel holds the keyboard the caret is its composer: one line, so the
+        // newlines become spaces.
+        if self.panel.focus {
             for c in s.chars() {
                 self.panel.insert(c);
             }

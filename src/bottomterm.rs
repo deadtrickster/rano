@@ -115,6 +115,20 @@ impl Tab {
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
     }
 
+    /// A paste is the shell's input, not the editor's: bracketed when the program asked for
+    /// bracketed paste, so readline and editors can tell it apart from typing.
+    pub fn paste(&mut self, s: &str) {
+        let mut out = Vec::new();
+        if self.parser.bracketed {
+            out.extend_from_slice(b"\x1b[200~");
+        }
+        out.extend_from_slice(s.as_bytes());
+        if self.parser.bracketed {
+            out.extend_from_slice(b"\x1b[201~");
+        }
+        self.send(&out);
+    }
+
     /// The terminal's answer to a key, in the mode the program asked for: arrows are SS3 in
     /// application cursor mode (DECCKM), and a paste is bracketed when the program asked.
     pub fn key_bytes(&self, key: &crate::term::KeyEvent) -> Vec<u8> {
@@ -418,6 +432,8 @@ struct Vt {
     cur_bold: bool,
     /// DECCKM: application cursor mode, which makes arrows SS3 rather than CSI.
     pub app_cursor: bool,
+    /// DECSET 2004: the program wants pastes bracketed, so it can tell them from typing.
+    pub bracketed: bool,
 }
 
 impl Vt {
@@ -436,6 +452,7 @@ impl Vt {
             cur_fg: None,
             cur_bold: false,
             app_cursor: false,
+            bracketed: false,
         }
     }
 
@@ -556,6 +573,12 @@ impl Vt {
                     if i < self.cells.len() {
                         self.cells[i] = ' ';
                     }
+                }
+            }
+            'h' | 'l' => {
+                // DECSET/DECRST: the only private mode the paste path reads is 2004.
+                if params == "?2004" {
+                    self.bracketed = last == 'h';
                 }
             }
             'm' => self.sgr(params),
@@ -806,6 +829,39 @@ mod tests {
             "the oldest lines scrolled out of the kept history"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A paste is the pty's input, and it is bracketed exactly when the program asked (2004).
+    #[test]
+    fn a_paste_reaches_the_pty_bracketed_when_asked() {
+        let (mut t, slave) = pipe_tab();
+        // Raw mode on the slave: a canonical line discipline would hold the paste until a
+        // newline, and the test would be reading its own timeout.
+        unsafe {
+            let mut tio: libc::termios = std::mem::zeroed();
+            libc::tcgetattr(slave, &mut tio);
+            libc::cfmakeraw(&mut tio);
+            libc::tcsetattr(slave, libc::TCSANOW, &tio);
+        }
+        let mut buf = [0u8; 64];
+        t.paste("ab");
+        let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(&buf[..n as usize], b"ab", "unbracketed by default");
+        t.parser.process(b"\x1b[?2004h");
+        t.paste("cd");
+        let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(
+            &buf[..n as usize],
+            b"\x1b[200~cd\x1b[201~",
+            "bracketed when asked"
+        );
+        t.parser.process(b"\x1b[?2004l");
+        t.paste("ef");
+        let n = unsafe { libc::read(slave, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(&buf[..n as usize], b"ef", "and off again");
+        unsafe {
+            libc::close(slave);
+        }
     }
 
     /// A tab is a real pty with a real shell behind it: it answers `echo`.

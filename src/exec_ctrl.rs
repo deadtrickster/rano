@@ -95,7 +95,12 @@ impl Editor {
         if cmd.is_empty() {
             return;
         }
-        let mark = self.bs().mark.expect("start_filter guarantees mark");
+        let Some(mark) = self.bs().mark else {
+            // A paste or an edit between M-| and Enter can clear the selection; the filter
+            // then has no input, which is a message, not a panic.
+            self.flash("No selection");
+            return;
+        };
         let (a, b) = normalize(mark, self.bs().cursor);
         let input: String = self
             .bs()

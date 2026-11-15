@@ -128,12 +128,18 @@ impl Tab {
             // Nothing is written to a dead shell: the keystrokes are not its input any more.
             return;
         }
+        // A key sent to the shell snaps the view to the bottom: what the operator types is an
+        // answer to the newest output, and the scrollback is for reading, not for typing into.
+        // A key sent to the shell snaps the view to the bottom: what the operator types is an
+        // answer to the newest output, and the scrollback is for reading, not for typing into.
+        self.parser.scroll = 0;
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
     }
 
     /// A paste is the shell's input, not the editor's: bracketed when the program asked for
     /// bracketed paste, so readline and editors can tell it apart from typing.
     pub fn paste(&mut self, s: &str) {
+        self.parser.scroll = 0;
         let mut out = Vec::new();
         if self.parser.bracketed {
             out.extend_from_slice(b"\x1b[200~");

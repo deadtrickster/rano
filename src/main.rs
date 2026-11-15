@@ -1201,6 +1201,47 @@ mod panel_tests {
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
+    /// Scrolled back, a key sent to the shell snaps the view to the bottom: the strip's "N more"
+    /// marker is gone, because the operator is answering the newest output now.
+    #[test]
+    fn a_key_sent_to_the_shell_snaps_the_view_to_the_bottom() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        ed.bottom.tabs[0].send(b"seq 1 30\n");
+        assert!(feed_until(&mut ed, |l| l.trim() == "30"), "seq answered");
+        ed.bottom.tabs[0].scroll_up(2);
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        assert!(
+            buf.emit(rano::render::Palette::None)
+                .join("")
+                .contains("more"),
+            "the strip says how far back the view is"
+        );
+        // A key through the host's path is the shell's input, and the view snaps to the bottom.
+        rano::host::key(
+            &mut ed,
+            rano::term::KeyEvent::new(
+                rano::term::KeyCode::Char('x'),
+                rano::term::event::Mods::NONE,
+            ),
+        );
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rows = buf.emit(rano::render::Palette::None);
+        assert!(
+            !rows.join("").contains("more"),
+            "the marker is gone: {rows:?}"
+        );
+    }
+
     /// Scrolled back, a short history row painted over a longer live row leaves no tail: the
     /// terminal's rows are the pane's width, because `Buffer::set_line` writes only the spans.
     #[test]

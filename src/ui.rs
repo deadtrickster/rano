@@ -267,6 +267,20 @@ const HINT_ROWS: usize = 4;
 
 /// Lay path suggestions out in rows of `width`, at most `max` rows; a row that
 /// cannot hold the rest ends with how many were left out.
+/// A title and the hints that fit after it, each kept WHOLE: a hint cut at the right edge reads
+/// as a different one (`PgUp PgDn: scrol`), so the first that does not fit is the end of the bar.
+pub(crate) fn titled_hints(title: &str, hints: &[&str], w: usize) -> String {
+    let mut out = format!(" {title}");
+    for h in hints {
+        if out.chars().count() + 2 + h.chars().count() > w {
+            break;
+        }
+        out.push_str("  ");
+        out.push_str(h);
+    }
+    out
+}
+
 pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -796,9 +810,10 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor) -> Option<(u16, u16)
     if let Some(v) = &ed.info {
         let area_text = at(0, t0, width, text_h as u16);
         buf.fill(area_text, &Style::new());
-        let header = format!(
-            " {}   q: close  \u{2191}\u{2193} PgUp PgDn: scroll",
-            v.title
+        let header = titled_hints(
+            &v.title,
+            &["q: close", "\u{2191}\u{2193} PgUp PgDn: scroll"],
+            width as usize,
         );
         band(buf, at(0, t0, width, 1), Line::from(header), head());
         let rows = crate::diffview::body_rows(text_h);
@@ -1723,6 +1738,35 @@ mod tests {
         assert!(after.contains("\x1b[38;2;0;0;255m"), "blue, the process's");
         crate::theme::set_active(None);
         assert_eq!(crate::theme::active_name(), None);
+    }
+
+    /// A bar keeps whole hints: a narrow frame drops the ones that do not fit, it never cuts
+    /// one into a different hint.
+    #[test]
+    fn a_bar_drops_whole_hints_instead_of_cutting_them() {
+        let hints = ["q: close", "\u{2191}\u{2193} PgUp PgDn: scroll"];
+        let wide = titled_hints("file.txt", &hints, 60);
+        assert!(wide.ends_with("PgUp PgDn: scroll"), "{wide}");
+        let narrow = titled_hints("file.txt", &hints, 20);
+        assert!(narrow.ends_with("q: close"), "the one that fits: {narrow}");
+        assert!(
+            !narrow.contains("PgUp"),
+            "the one that does not is gone: {narrow}"
+        );
+        // The global bar's rows are whole entries too.
+        let names = vec!["C-g Help…".to_string(), "C-x Exit".to_string()];
+        let rows = hint_rows(&names, 10, 1);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("C-g"), "{rows:?}");
+        assert!(!rows[0].contains("C-x"), "no half of the next: {rows:?}");
+        assert!(
+            rows[0].contains("(+1)"),
+            "and it says what it left out: {rows:?}"
+        );
+        // With a second row allowed the next name goes there whole, never cut.
+        let rows = hint_rows(&names, 10, 2);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1].trim(), "C-x Exit");
     }
 
     #[test]

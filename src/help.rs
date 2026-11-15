@@ -436,6 +436,31 @@ mod tests {
         assert!(title > doc);
     }
 
+    /// The page's key bar keeps whole hints: at a narrow width it drops one rather than cutting
+    /// it into a different hint.
+    #[test]
+    fn the_pages_key_bar_drops_whole_hints() {
+        use crate::buffer::Buffer;
+        let mut ed = crate::editor::Editor::new(Buffer::new(), crate::config::Config::default());
+        // Wide enough that the OLD literal header would show its first four letters of `PgUp`,
+        // too narrow for the whole `PgUp PgDn: scroll` hint.
+        ed.text_w = 28;
+        ed.text_h = 8;
+        ed.open_page("Page", PageKind::Overview);
+        let mut buf = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 28, 8));
+        crate::ui::draw(&mut buf, &ed);
+        let rows = buf.emit(crate::render::Palette::None);
+        let all = rows.join("\n");
+        assert!(
+            !all.contains("PgUp"),
+            "the hint that does not fit is gone: {rows:?}"
+        );
+        assert!(
+            all.contains("q: close"),
+            "the one that fits stays: {rows:?}"
+        );
+    }
+
     #[test]
     fn cards_fit_the_width() {
         let entries: Vec<(String, String)> = (0..10)

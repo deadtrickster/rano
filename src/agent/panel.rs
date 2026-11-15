@@ -234,21 +234,23 @@ impl View<'_> {
         let mut spans: Vec<Span> = Vec::new();
         let mut used = 0usize;
         for (key, title) in self.hints {
-            let room = w.saturating_sub(used + 1);
-            if room < key.chars().count() + 2 {
+            // Whole entries only: a hint cut at the right edge reads as a different hint
+            // ("Copy from t"), so the first one that does not fit is the end of the bar.
+            let gap = usize::from(used > 0);
+            let need = gap + key.chars().count() + 1 + title.chars().count();
+            if used + need > w {
                 break;
             }
             if used > 0 {
                 spans.push(Span::raw(" "));
-                used += 1;
             }
-            let key = crate::width::text::truncate(key, room);
             used += key.chars().count();
-            spans.push(Span::styled(key, Style::of(Role::Strong).reverse()));
-            let room = w.saturating_sub(used + 1);
-            let tag = crate::width::text::truncate(title, room);
-            used += 1 + tag.chars().count();
-            spans.push(Span::raw(format!(" {tag}")));
+            spans.push(Span::styled(
+                key.to_string(),
+                Style::of(Role::Strong).reverse(),
+            ));
+            used += 1 + title.chars().count();
+            spans.push(Span::raw(format!(" {title}")));
         }
         while used < w {
             spans.push(Span::raw(" "));
@@ -387,6 +389,25 @@ mod tests {
         view.focus = false;
         let mut buf = Buffer::empty(rect);
         assert_eq!(view.draw(rect, &mut buf).cursor, None);
+    }
+
+    /// The panel's bar keeps whole entries: at a width where the next hint does not fit, the bar
+    /// ends instead of cutting its title.
+    #[test]
+    fn the_panel_bar_drops_whole_entries_instead_of_cutting_them() {
+        let hints = vec![
+            ("M-6".to_string(), "Copy from the cursor".to_string()),
+            ("C-x".to_string(), "Exit".to_string()),
+        ];
+        let view = blank_panel(&hints);
+        let wide = view.hint_line(60).plain();
+        assert!(wide.contains("Copy from the cursor"), "{wide:?}");
+        let narrow = view.hint_line(12).plain();
+        assert!(
+            !narrow.contains("Copy from th"),
+            "a cut title is a different hint: {narrow:?}"
+        );
+        assert_eq!(narrow.trim(), "", "nothing fits whole: {narrow:?}");
     }
 
     /// The keys the panel is listening for are the bar's own entries, on one row above the

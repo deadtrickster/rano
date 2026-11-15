@@ -1882,7 +1882,6 @@ mod panel_tests {
     #[test]
     fn the_text_fills_its_column_and_the_title_spans_it() {
         use std::path::Path;
-        let mut ed = editor();
         // A file long enough that the editor has lines to draw past where the foot was.
         let text = (1..=120)
             .map(|i| format!("line {i} of the file"))
@@ -1891,8 +1890,8 @@ mod panel_tests {
         let mut file_buf = rano::buffer::Buffer::new();
         file_buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
         file_buf.name = Some(PathBuf::from("fill.txt"));
-        // Rebuild the editor with this buffer: the one the test drives is fresh, so swap.
-        ed = Editor::new(file_buf, Config::default());
+        // The editor is built on this buffer directly: a fresh one has no lines to fill a frame.
+        let mut ed = Editor::new(file_buf, Config::default());
         ed.push_keymap(host_map());
         ed.bottom.open = true;
         ed.bottom.height = 12;

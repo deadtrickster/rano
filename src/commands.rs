@@ -1608,10 +1608,10 @@ impl Editor {
             for m in host {
                 for (k, e) in m.entries() {
                     if let Entry::Command(c) = e
-                        && !out.iter().any(|(key, _)| {
-                            crate::keymap::lookup(&[term], std::slice::from_ref(k))
-                                == crate::keymap::Lookup::Command(c.as_str())
-                        })
+                        // The terminal's own map may already carry this host key to the same
+                        // command; the bar need not say it twice.
+                        && crate::keymap::lookup(&[term], std::slice::from_ref(k))
+                            != crate::keymap::Lookup::Command(c.as_str())
                         && let Some(cmd) = command(c)
                     {
                         out.push((note(std::slice::from_ref(k)), cmd.title.to_string()));

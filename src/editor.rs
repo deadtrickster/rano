@@ -1559,6 +1559,15 @@ impl Editor {
 
     /// Whether the status row is on this frame: `WhenBusy` shows it only while it has a prompt or
     /// a message, and gives the row to the text otherwise.
+    /// The rows the status and the key bar take at the frame's foot. The terminal's strip goes
+    /// above them: they belong to the frame, not to the editor's text rows.
+    pub fn status_rows(&self) -> usize {
+        if !self.status_shown() {
+            return 0;
+        }
+        1 + if self.chrome.keys { 2 } else { 0 }
+    }
+
     pub fn status_shown(&self) -> bool {
         self.chrome.status == StatusMode::Always
             || self.prompt.is_some()

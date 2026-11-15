@@ -390,6 +390,13 @@ fn run(
         let lay = layout(w, h, &ed, panel_width);
         sync_bottom_size(&mut ed, &lay);
         dirty |= ed.set_area(lay.editor.unwrap_or(Rect::new(0, 0, w, h)).into());
+        // The strip covers text rows: the editor must not scroll the cursor under it.
+        let text_rows = lay.editor.unwrap_or(Rect::new(0, 0, w, h)).height as usize;
+        let covered = lay.bottom.map_or(0, |r| r.height as usize);
+        ed.text_h = text_rows
+            .saturating_sub(ed.chrome_rows())
+            .saturating_sub(covered)
+            .max(1);
         // The pollers, the overlays' refreshes, the scroll and the highlight:
         // everything between two events, the same call a host makes.
         dirty |= ed.tick(Instant::now());
@@ -739,14 +746,15 @@ struct Layout {
 /// its minimum.
 fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     let whole = Rect::new(0, 0, w, h);
-    // The terminal is a strip off the foot, taken before the editor/panel split: twelve rows, or a
-    // third of a short frame, and never the whole frame.
-    let (whole, bottom) = if ed.bottom.open && h > 6 {
+    // The terminal is a strip above the status and the key bar, which stay at the frame's foot:
+    // twelve rows, or a third of a short frame, and never the whole frame. The editor keeps the
+    // frame, so its status is drawn at the foot, and the strip covers text rows above it.
+    let bottom = if ed.bottom.open && h > 6 {
         let strip = ed.bottom.height.min((h / 3) as usize) as u16;
-        let (above, below) = whole.split_top(h - strip);
-        (above, Some(below))
+        let y = (h - strip).saturating_sub(ed.status_rows() as u16);
+        Some(Rect::new(0, y, w, strip))
     } else {
-        (whole, None)
+        None
     };
     if !ed.panel.open || w == 0 || h == 0 {
         return Layout {
@@ -1054,7 +1062,11 @@ mod panel_tests {
         ed.bottom.height = 12;
         let lay = layout(120, 30, &ed, None);
         let strip = lay.bottom.expect("a strip");
-        assert_eq!(strip.y + strip.height, 30, "the strip ends at the foot");
+        assert_eq!(
+            strip.y + strip.height,
+            30 - ed.status_rows() as u16,
+            "the strip ends above the status and the key bar"
+        );
         let mut width = None;
         let mut dragging = false;
         let wheel = MouseEvent {
@@ -1083,7 +1095,7 @@ mod panel_tests {
             mods: Mods::NONE,
         };
         assert!(mouse(&mut ed, &lay, &drag, 120, &mut width, &mut dragging));
-        assert_eq!(ed.bottom.height, 20, "the drag resized the strip");
+        assert_eq!(ed.bottom.height, 17, "the drag resized the strip");
     }
 
     /// A closed panel is not a pane: the text keeps the whole frame, as it always did.
@@ -1201,6 +1213,38 @@ mod panel_tests {
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
+    /// The status and the key bar are the frame's last rows: the terminal's strip is above them,
+    /// not the other way round.
+    #[test]
+    fn the_strip_sits_above_the_status_and_the_key_bar() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        assert_eq!(
+            strip.y + strip.height,
+            40 - ed.status_rows() as u16,
+            "the strip ends above the status"
+        );
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rows = buf.emit(rano::render::Palette::None);
+        assert!(rows[39].contains("C-x Exit"), "the key bar is the last row");
+        assert!(rows[38].contains("C-g Help"), "and its second row above it");
+        assert!(
+            rows[strip.y as usize].contains('─'),
+            "the strip's rule is above them"
+        );
+        // And the editor does not scroll the cursor under the strip.
+        assert!(ed.text_h <= 40 - ed.chrome_rows() - strip.height as usize);
+    }
+
     /// The strip is real tabs — index, title, the active one marked, the exit status when the
     /// shell is gone — and the terminal's keys are in the frame's bar while it has focus.
     #[test]
@@ -1303,7 +1347,7 @@ mod panel_tests {
         let lay = layout(120, 40, &ed, None);
         sync_bottom_size(&mut ed, &lay);
         ed.bottom.tabs[0].send(b"seq 1 30\n");
-        ed.bottom.tabs[0].send(b"printf 'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\n'\n");
+        ed.bottom.tabs[0].send(b"head -c 40 /dev/zero | tr '\\0' 'Z'; echo\n");
         assert!(
             feed_until(&mut ed, |l| l.contains("ZZZZZZ")),
             "the long row is on the live screen"
@@ -1349,8 +1393,8 @@ mod panel_tests {
         let count = |needle: &str| rows.iter().flat_map(|r| r.match_indices(needle)).count();
         assert_eq!(count("composer-words"), 1, "the composer appears once");
         assert_eq!(count("RET Send"), 1, "the key hints appear once");
-        // The one copy is the frame's bar, which is where a reader looks for keys.
-        let bar = rows[26].clone() + &rows[27];
+        // The one copy is the frame's bar at the foot, which is where a reader looks for keys.
+        let bar = rows[rows.len() - 3..].join("");
         assert!(bar.contains("RET Send"), "the bar has the keys");
     }
 
@@ -1392,19 +1436,19 @@ mod panel_tests {
         let strip = lay.bottom.expect("the strip is still drawn");
         assert_eq!(
             strip.y + strip.height,
-            30,
-            "on its reserved rows at the foot"
+            30 - ed.status_rows() as u16,
+            "above the status and the key bar at the foot"
         );
-        let panel = lay.panel.expect("the panel takes the width above it");
-        assert_eq!(panel.height, strip.y, "and does not overlap the strip");
+        let panel = lay.panel.expect("the panel takes the frame");
+        assert_eq!(
+            panel.height, 30,
+            "the frame, with the strip over its text rows"
+        );
         // Zoomed is the same answer: the strip is drawn, not a blank band.
         ed.panel.zoom = true;
         let lay = layout(120, 30, &ed, None);
         assert!(lay.bottom.is_some(), "zoomed still draws the strip");
-        assert_eq!(
-            lay.panel.expect("a zoomed panel").height,
-            lay.bottom.unwrap().y
-        );
+        assert_eq!(lay.panel.expect("a zoomed panel").height, 30);
     }
 
     /// A click in the panel takes the keyboard there, and a click in the text gives it back: the

@@ -269,6 +269,9 @@ pub struct Panel {
     /// The file the folder was last worked out for, so the git call happens once per buffer.
     seen_name: Option<PathBuf>,
     acts: Vec<Act>,
+    /// The conversation's tool fold (`M-t` in the panel): with false, a run of settled calls
+    /// collapses to one line and only the newest and the failed stay open.
+    pub tools_open: bool,
     /// Tool calls still running: `(call_id, row, name, started, call markup)`.
     running: Vec<(String, usize, String, std::time::Instant, String)>,
     /// The model's raw call markup for the call about to start: the wire sends a tool's
@@ -309,6 +312,7 @@ impl Default for Panel {
             waiting: Vec::new(),
             seen_name: None,
             acts: Vec::new(),
+            tools_open: false,
             running: Vec::new(),
             call_markup: String::new(),
             built: Vec::new(),
@@ -1020,9 +1024,14 @@ impl Panel {
         if self.state == PanelState::Picking {
             self.build_pick(&mut out, w);
         } else {
+            let fold = tool_fold(&self.rows, self.tools_open);
+
             let mut it = self.rows.iter_mut().peekable();
+            let mut i = 0usize;
             while let Some(row) = it.next() {
                 let next_row = it.peek().is_some_and(|r| matches!(r, Row::Tool(_)));
+                let this_row = i;
+                i += 1;
                 match row {
                     Row::User(text) => {
                         let text = crate::agent::text::clean(text).into_owned();
@@ -1040,10 +1049,13 @@ impl Panel {
                     }
                     Row::Note(note) => out.push(note_line(note)),
                     Row::Tool(t) => {
-                        out.extend(t.lines(w));
-                        // Replies breathe; a run of tool calls is one block of work and reads
-                        // as such — no blank row between neighbours.
+                        if !fold.hidden[this_row] {
+                            out.extend(t.lines(w));
+                        }
                         if !next_row {
+                            if let Some(summary) = &fold.summary_at[this_row] {
+                                out.push(note_line(summary));
+                            }
                             out.push(Line::default());
                         }
                         continue;
@@ -1103,6 +1115,12 @@ impl Panel {
     }
 
     /// The built rows the widget draws, and the state the top edge names.
+    /// The next build lays the conversation out again — the tool fold changed what is drawn
+    /// without a row changing.
+    pub fn rebuilt(&mut self) {
+        self.built_for = None;
+    }
+
     pub fn lines(&self) -> &[Line] {
         &self.built
     }
@@ -1139,6 +1157,69 @@ impl Panel {
         }
         self.touch();
     }
+}
+
+/// What the conversation's tool fold hides: `hidden[i]` for a Tool row folded away, and
+/// `summary_at[i]` for the run's one line — `8 tool calls · 1 failed` — drawn after its open
+/// rows, which are the newest call and any failure.
+struct ToolFold {
+    hidden: Vec<bool>,
+    summary_at: Vec<Option<String>>,
+}
+
+/// A run of consecutive Tool rows: folded, its settled non-newest successes hide behind one
+/// line and the newest and failed stay open; open, nothing is hidden and no line is added.
+fn tool_fold(rows: &[Row], open: bool) -> ToolFold {
+    let mut fold = ToolFold {
+        hidden: vec![false; rows.len()],
+        summary_at: vec![None; rows.len()],
+    };
+    if open {
+        return fold;
+    }
+    let mut i = 0;
+    while i < rows.len() {
+        if !matches!(rows[i], Row::Tool(_)) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < rows.len() && matches!(rows[i], Row::Tool(_)) {
+            i += 1;
+        }
+        let run = &rows[start..i];
+        let mut failed = 0usize;
+        let mut hidden = 0usize;
+        for (k, r) in run.iter().enumerate() {
+            let Row::Tool(t) = r else { continue };
+            let failed_here = !matches!(t.outcome, crate::agent::outcome::Outcome::Ok)
+                && !matches!(t.outcome, crate::agent::outcome::Outcome::Abstained(_));
+            if failed_here {
+                failed += 1;
+            }
+            // The newest call is the run's last row whatever its outcome; a failure keeps
+            // its own line wherever it sits.
+            if t.newest || k + 1 == run.len() || failed_here {
+                continue;
+            }
+            fold.hidden[start + k] = true;
+            hidden += 1;
+        }
+        if hidden > 0 {
+            let calls = if run.len() == 1 {
+                "tool call"
+            } else {
+                "tool calls"
+            };
+            let summary = if failed > 0 {
+                format!("{} {calls} · {failed} failed", run.len())
+            } else {
+                format!("{} {calls}", run.len())
+            };
+            fold.summary_at[i - 1] = Some(summary);
+        }
+    }
+    fold
 }
 
 /// The call's target: the first named string among its arguments — a command, a path, a
@@ -2088,6 +2169,80 @@ mod tests {
         );
     }
 
+    /// A run of settled calls folds to one line — `8 tool calls · 1 failed` — with the newest
+    /// and the failed kept open; the key opens every call again.
+    #[test]
+    fn a_run_of_tool_calls_folds_to_one_line() {
+        let mut panel = opened();
+        let mut seq = 1;
+        for i in 1..=8 {
+            let id = format!("c-{i}");
+            panel.apply(&Frame::Event {
+                seq,
+                event: Event::ToolStarted {
+                    turn_id: "t".to_string(),
+                    call_id: id.clone(),
+                    name: "read".to_string(),
+                    access: "read".to_string(),
+                },
+            });
+            seq += 1;
+            panel.apply(&Frame::Event {
+                seq,
+                event: Event::ToolFinished {
+                    turn_id: "t".to_string(),
+                    call_id: id,
+                    outcome: if i == 4 { "failed" } else { "ok" }.to_string(),
+                    why: if i == 4 {
+                        "gone".to_string()
+                    } else {
+                        String::new()
+                    },
+                    edits: Vec::new(),
+                    bytes: Some((0, 0)),
+                },
+            });
+            seq += 1;
+        }
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("8 tool calls · 1 failed"),
+            "one line names the run: {text}"
+        );
+        // The newest and the failed stay open: three rows of calls and the summary — not
+        // eight calls and a summary.
+        let call_rows = text.matches("Read").count();
+        assert_eq!(
+            call_rows, 2,
+            "the newest and the failed stay open, the other six fold: {text}"
+        );
+        // The key opens every call.
+        panel.tools_open = true;
+        panel.rebuilt();
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            text.matches("Read").count(),
+            8,
+            "the fold is open: every call drawn: {text}"
+        );
+        assert!(
+            !text.contains("tool calls ·"),
+            "and no summary line while open: {text}"
+        );
+    }
+
     /// Consecutive tool rows touch: a run of calls is one block of work, no blank row between
     /// neighbours, and a reply after them still breathes.
     #[test]
@@ -2116,6 +2271,8 @@ mod tests {
                 },
             });
         }
+        // The fold open: the test is about the rows touching, not about the fold.
+        panel.tools_open = true;
         panel.build(60);
         let lines = panel.lines();
         // Every rendered row between the first tool's row and the last non-blank row is a

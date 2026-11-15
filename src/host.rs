@@ -211,6 +211,10 @@ mod tests {
     #[test]
     fn m_zero_opens_the_bottom_terminal() {
         let mut ed = ed("abc");
+        // The host's map is where the toggle lives: an embedder pushes it, or has no terminal.
+        let mut host = crate::keymap::Keymap::new("host");
+        host.bind("M-0", "toggle-terminal");
+        ed.push_keymap(host);
         let out = super::key(&mut ed, key(crate::term::KeyCode::Char('0'), Mods::ALT));
         assert_eq!(out, crate::editor::KeyOutcome::Handled);
         assert!(ed.bottom.open, "M-0 opens it");
@@ -288,6 +292,45 @@ mod tests {
         assert_eq!(ed.bottom.tabs.len(), 1, "the dead tab is still there");
         super::key(&mut ed, key(KeyCode::Enter, Mods::NONE));
         assert!(ed.bottom.tabs.is_empty(), "Enter closed the dead tab");
+    }
+
+    /// The terminal's chords are its map's, and the map's entries are commands: help, M-x and
+    /// the bars read what the terminal answers, and a chord through the host path runs it.
+    #[test]
+    fn the_terminals_chords_are_map_commands() {
+        use crate::keymap::{Lookup, lookup, parse_seq};
+        let mut ed = ed("abc");
+        for (chord, name) in [
+            ("M-n", "terminal-new"),
+            ("M-w", "terminal-close"),
+            ("M-[", "terminal-prev"),
+            ("M-]", "terminal-next"),
+            ("<pgup>", "terminal-scroll-up"),
+            ("<pgdn>", "terminal-scroll-down"),
+            ("M-0", "terminal-focus-text"),
+        ] {
+            let seq = parse_seq(chord).expect("a chord");
+            assert_eq!(
+                lookup(&[&ed.keymaps.terminal], &seq),
+                Lookup::Command(name),
+                "{chord}"
+            );
+            assert!(
+                crate::commands::command(name).is_some(),
+                "{name} is a command"
+            );
+        }
+        // Through the host path: M-n opens a second tab, and M-w closes it again.
+        let mut host = crate::keymap::Keymap::new("host");
+        host.bind("M-0", "toggle-terminal");
+        ed.push_keymap(host);
+        let m0 = key(KeyCode::Char('0'), Mods::ALT);
+        super::key(&mut ed, m0);
+        assert!(ed.bottom.open && ed.focus == crate::editor::Focus::Terminal);
+        super::key(&mut ed, key(KeyCode::Char('n'), Mods::ALT));
+        assert_eq!(ed.bottom.tabs.len(), 2, "M-n is the map's terminal-new");
+        super::key(&mut ed, key(KeyCode::Char('w'), Mods::ALT));
+        assert_eq!(ed.bottom.tabs.len(), 1, "and M-w its terminal-close");
     }
 
     /// An embedder that drives `Editor::handle_key` alone never forks a shell: the terminal's

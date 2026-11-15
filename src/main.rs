@@ -5,14 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rano::buffer::{Buffer, Pos};
-use rano::editor::KeyOutcome;
 use rano::editor::{Area, Editor, Focus};
 use rano::expand_tilde;
 use rano::panel::Act;
 use rano::render::{self, Line, Palette, Rect, Style};
 use rano::send_ctrl::split_position;
 use rano::style::Role;
-use rano::term::{self, Event, KeyCode, MouseButton, MouseKind, Terminal};
+use rano::term::{self, Event, MouseButton, MouseKind, Terminal};
 use rano::{config, export, send_ctrl, syntax, ui};
 
 /// The command line, parsed by hand: files, a few flags, no subcommands.
@@ -283,6 +282,7 @@ fn run(
     let mut ed = Editor::new(buf, cfg);
     // A picture is drawn as placeholder cells a terminal may fill with garbage, so
     // M-P is refused by name where the protocol is not kitty.
+    ed.push_keymap(host_map());
     // The detected protocol, not a guess: inside tmux the upload must be DCS-wrapped, and only
     // `set_pictures` knows that — `images = true` alone would send it bare, as plain kitty.
     ed.set_pictures(terminal.features().proto);
@@ -440,12 +440,9 @@ fn run(
         for ev in terminal.events() {
             match ev {
                 Event::Key(k) => {
-                    // The terminal's keys are the host's, ahead of the editor's maps: a focused
-                    // terminal's typing must never edit the file behind it. A key neither has a
-                    // use for is the host's three the design shares.
-                    if rano::host::key(&mut ed, k) == KeyOutcome::Unhandled {
-                        host_key(&mut ed, &k);
-                    }
+                    // The terminal's keys come first: a focused terminal's typing must never
+                    // edit the file behind it. Everything else is the editor's own maps.
+                    let _ = rano::host::key(&mut ed, k);
                     dirty = true;
                 }
                 Event::Paste(t) => {
@@ -883,22 +880,19 @@ fn panel_view<'a>(
     }
 }
 
-/// The three keys the design puts above both programs, pressed where rano binds none of them: the
-/// crossing, the side surface and the zoom. A key the editor did not want and this does not know is
-/// dropped, as it always was.
-fn host_key(ed: &mut Editor, key: &rano::term::KeyEvent) {
-    let alt = key.mods.alt();
-    let ctrl = key.mods.ctrl();
-    match key.code {
-        KeyCode::Char(']') if ctrl && !alt => ed.panel_cross(),
-        KeyCode::Char('i') if alt && !ctrl => ed.panel_toggle(),
-        KeyCode::Char('m') if alt && !ctrl => ed.panel_zoom(),
-        _ => {}
-    }
-}
-
 /// A mouse event in the frame: a click in the panel takes the keyboard there, a held border resizes
 /// it, and anything else is the editor's.
+/// The host's own keys, in the host's map: the strip's toggle and the panel's three. An
+/// embedder that pushes no such map never gets them, and never forks a shell it cannot draw.
+fn host_map() -> rano::keymap::Keymap {
+    let mut host = rano::keymap::Keymap::new("host");
+    host.bind("M-0", "toggle-terminal")
+        .bind("M-i", "toggle-panel")
+        .bind("C-]", "cross-panel")
+        .bind("M-m", "zoom-panel");
+    host
+}
+
 fn mouse(
     ed: &mut Editor,
     lay: &Layout,
@@ -969,10 +963,13 @@ mod panel_tests {
     use super::*;
     use rano::buffer::Buffer;
     use rano::config::Config;
+    use rano::term::KeyCode;
     use rano::term::{Mods, MouseButton, MouseEvent};
 
     fn editor() -> Editor {
-        Editor::new(Buffer::new(), Config::default())
+        let mut ed = Editor::new(Buffer::new(), Config::default());
+        ed.push_keymap(host_map());
+        ed
     }
 
     /// Feed the shell until one of its screen lines answers `pred`, or give up.
@@ -1182,34 +1179,31 @@ mod panel_tests {
         assert!(lay.editor.is_some() && lay.panel.is_some(), "split again");
     }
 
-    /// The three host keys: the crossing, the side surface and the zoom. Every other key the editor
-    /// did not want changes nothing.
+    /// The three host keys are the global map's, so help, M-x and the bars see them; they reach
+    /// the same places they did when the binary answered them itself.
     #[test]
     fn the_host_keys_are_the_three_the_design_shares() {
         let mut ed = editor();
         let key =
             |code: KeyCode, mods: rano::term::event::Mods| rano::term::KeyEvent { code, mods };
         let alt_i = key(KeyCode::Char('i'), rano::term::event::Mods::ALT);
-        host_key(&mut ed, &alt_i);
+        ed.handle_key(alt_i);
         assert!(
             ed.panel.open && ed.focus == Focus::Panel,
             "alt-i opens it, focused"
         );
         let cross = key(KeyCode::Char(']'), rano::term::event::Mods::CTRL);
-        host_key(&mut ed, &cross);
+        let _ = ed.handle_key(cross);
         assert!(ed.focus == Focus::Text, "ctrl-] crosses to the text");
-        host_key(&mut ed, &cross);
+        let _ = ed.handle_key(cross);
         assert!(ed.focus == Focus::Panel, "and back");
         let alt_m = key(KeyCode::Char('m'), rano::term::event::Mods::ALT);
-        host_key(&mut ed, &alt_m);
+        let _ = ed.handle_key(alt_m);
         assert!(ed.panel.zoom, "alt-m zooms");
-        host_key(&mut ed, &alt_i);
+        let _ = ed.handle_key(alt_i);
         assert!(!ed.panel.open, "alt-i hides it again");
         // A key nobody claimed: nothing happens, which is what the binary did before.
-        host_key(
-            &mut ed,
-            &key(KeyCode::Char('z'), rano::term::event::Mods::ALT),
-        );
+        let _ = ed.handle_key(key(KeyCode::Char('z'), rano::term::event::Mods::ALT));
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
@@ -1427,10 +1421,10 @@ mod panel_tests {
         let mut ed = editor();
         ed.bottom.open = true;
         let narrow = EDITOR_MIN + PANEL_MIN; // one short of the two-column split
-        host_key(
-            &mut ed,
-            &rano::term::KeyEvent::new(KeyCode::Char('i'), rano::term::event::Mods::ALT),
-        );
+        let _ = ed.handle_key(rano::term::KeyEvent::new(
+            KeyCode::Char('i'),
+            rano::term::event::Mods::ALT,
+        ));
         assert!(ed.panel.open, "M-i opened the panel");
         let lay = layout(narrow, 30, &ed, None);
         let strip = lay.bottom.expect("the strip is still drawn");

@@ -559,6 +559,97 @@ pub fn commands() -> &'static [Command] {
                 |e| e.wrap = !e.wrap,
             ),
             cmd(
+                "toggle-terminal",
+                "Terminal",
+                Host,
+                "Open the bottom terminal, or give the keyboard back to the text.",
+                |e| e.terminal_toggle(),
+            ),
+            cmd(
+                "terminal-focus-text",
+                "Text",
+                Host,
+                "Leave the terminal: the shell keeps running.",
+                |e| e.terminal_focus_text(),
+            ),
+            cmd(
+                "terminal-new",
+                "New Tab",
+                Host,
+                "Open a shell in a new bottom-terminal tab.",
+                |e| e.terminal_new(),
+            ),
+            cmd(
+                "terminal-close",
+                "Close Tab",
+                Host,
+                "Close the terminal's active tab.",
+                |e| e.terminal_close(),
+            ),
+            cmd(
+                "terminal-prev",
+                "Prev Tab",
+                Host,
+                "Switch to the terminal tab on the left.",
+                |e| e.bottom.prev(),
+            ),
+            cmd(
+                "terminal-next",
+                "Next Tab",
+                Host,
+                "Switch to the terminal tab on the right.",
+                |e| e.bottom.next(),
+            ),
+            cmd(
+                "terminal-grow",
+                "Grow",
+                Host,
+                "Make the terminal strip taller.",
+                |e| e.bottom.grow(),
+            ),
+            cmd(
+                "terminal-shrink",
+                "Shrink",
+                Host,
+                "Make the terminal strip shorter.",
+                |e| e.bottom.shrink(),
+            ),
+            cmd(
+                "terminal-scroll-up",
+                "Scroll Back",
+                Host,
+                "Scroll the terminal's scrollback back one line.",
+                |e| e.terminal_scroll(true),
+            ),
+            cmd(
+                "terminal-scroll-down",
+                "Scroll Forward",
+                Host,
+                "Scroll the terminal's scrollback forward one line.",
+                |e| e.terminal_scroll(false),
+            ),
+            cmd(
+                "toggle-panel",
+                "Panel",
+                Host,
+                "Show the conversation panel, or hide it.",
+                |e| e.panel_toggle(),
+            ),
+            cmd(
+                "cross-panel",
+                "Cross",
+                Host,
+                "Give the keyboard to the other surface, opening the panel when it is shut.",
+                |e| e.panel_cross(),
+            ),
+            cmd(
+                "zoom-panel",
+                "Zoom",
+                Host,
+                "The focused surface takes the whole width, or gives it back.",
+                |e| e.panel_zoom(),
+            ),
+            cmd(
                 "send-position",
                 "Send Position",
                 Host,
@@ -917,6 +1008,9 @@ pub struct Keymaps {
     pub palette: Keymap,
     /// The panel holds the keyboard: the conversation, its composer and its session pick.
     pub panel: Keymap,
+    /// The bottom terminal holds the keyboard: its own chords, and everything else is the
+    /// shell's (see `Editor::bottom_key`).
+    pub terminal: Keymap,
 }
 
 /// Prefix maps whose card shows at once: a help key is pressed to be shown something.
@@ -1151,6 +1245,18 @@ impl Keymaps {
             .bind("C-c", "panel-interrupt")
             .bind("M-f", "panel-follow");
 
+        let mut terminal = Keymap::new("terminal");
+        terminal
+            .bind("M-0", "terminal-focus-text")
+            .bind("M-n", "terminal-new")
+            .bind("M-w", "terminal-close")
+            .bind("M-[", "terminal-prev")
+            .bind("M-]", "terminal-next")
+            .bind("M-+", "terminal-grow")
+            .bind("M--", "terminal-shrink")
+            .bind("<pgup>", "terminal-scroll-up")
+            .bind("<pgdn>", "terminal-scroll-down");
+
         let mut k = Keymaps {
             global: g,
             diff,
@@ -1167,6 +1273,7 @@ impl Keymaps {
             page,
             palette,
             panel,
+            terminal,
         };
         // The compiled-in presets, so `Keymaps::standard()` alone has a working M-k;
         // `Editor::new` binds the host's config over them.
@@ -1260,6 +1367,10 @@ impl Editor {
     /// character is typed, which a host map on top must not change.
     pub(crate) fn editor_keymaps(&self) -> Vec<&Keymap> {
         let k = &self.keymaps;
+        if self.focus == crate::editor::Focus::Terminal && self.bottom.open {
+            // The terminal's own chords, over the global layer: what help, M-x and the bars read.
+            return vec![&k.terminal, &k.global];
+        }
         if self.palette.is_some() {
             return vec![&k.palette];
         }
@@ -1379,6 +1490,53 @@ impl Editor {
     }
 
     /// Run a command by name, and remember it for `M-x`'s ordering.
+    /// The strip's open/shut and the keyboard that follows it: the map's `toggle-terminal`.
+    pub(crate) fn terminal_toggle(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let _ = self.bottom.toggle(
+            &cwd,
+            self.text_w as u16,
+            12,
+            self.config.terminal_scrollback,
+        );
+        self.focus = if self.bottom.open {
+            crate::editor::Focus::Terminal
+        } else {
+            crate::editor::Focus::Text
+        };
+    }
+
+    pub(crate) fn terminal_focus_text(&mut self) {
+        self.focus = crate::editor::Focus::Text;
+    }
+
+    pub(crate) fn terminal_new(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let _ = self.bottom.new_tab(
+            &cwd,
+            self.text_w as u16,
+            12,
+            self.config.terminal_scrollback,
+        );
+    }
+
+    pub(crate) fn terminal_close(&mut self) {
+        self.bottom.close_active();
+        if !self.bottom.open {
+            self.focus = crate::editor::Focus::Text;
+        }
+    }
+
+    pub(crate) fn terminal_scroll(&mut self, up: bool) {
+        if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {
+            if up {
+                t.scroll_up(1);
+            } else {
+                t.scroll_down(1);
+            }
+        }
+    }
+
     pub(crate) fn run_command(&mut self, name: &str) {
         let Some(c) = command(name) else {
             self.flash(&format!("No command {name}"));
@@ -1415,23 +1573,6 @@ impl Editor {
     /// The bar's entries for what is in effect, `(key, title)` in the configured
     /// notation: a pending prefix, the global layer's [`BAR`], or a mode's maps.
     pub(crate) fn bar_items(&self) -> Vec<(String, String)> {
-        if self.focus == crate::editor::Focus::Terminal && self.bottom.open {
-            // The terminal's chords, said in the frame's bar where a reader looks for keys —
-            // not baked into the tab strip. Fixed chords until K2 puts them in a map the bar
-            // can read like every other map's.
-            return [
-                ("M-0", "Text"),
-                ("M-n", "New Tab"),
-                ("M-w", "Close Tab"),
-                ("M-[", "Prev Tab"),
-                ("M-]", "Next Tab"),
-                ("PgUp", "Scroll Back"),
-                ("PgDn", "Scroll Forward"),
-            ]
-            .iter()
-            .map(|(k, t)| (k.to_string(), t.to_string()))
-            .collect();
-        }
         let nano = self.config.notation;
         let note = |seq: &[Key]| crate::help::notation(nano, seq);
         let stack = self.active_keymaps();

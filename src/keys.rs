@@ -199,28 +199,8 @@ impl Editor {
     /// terminal's typing is the shell's, and an embedder that never draws the strip never forks
     /// a shell it cannot show.
     pub fn bottom_key(&mut self, key: &crate::term::KeyEvent) -> bool {
-        let ctrl = key.mods.ctrl();
-        let alt = key.mods.alt();
-        // `ctrl-\`` is NUL in ASCII, so it cannot be a chord. The toggle is `M-0`: free in the map,
-        // and not a key any test uses as an unbound example — binding M-y broke the describe-key
-        // test's unbound case, which is exactly the trap to avoid here.
-        if alt && matches!(key.code, crate::term::KeyCode::Char('0')) {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let _ = self.bottom.toggle(
-                &cwd,
-                self.text_w as u16,
-                12,
-                self.config.terminal_scrollback,
-            );
-            // The keyboard follows the strip: open takes it, shut gives it back to the text.
-            self.focus = if self.bottom.open {
-                crate::editor::Focus::Terminal
-            } else {
-                crate::editor::Focus::Text
-            };
-            return true;
-        }
-        if !self.bottom.open || self.focus != crate::editor::Focus::Terminal {
+        if self.focus != crate::editor::Focus::Terminal || !self.bottom.open {
+            // Not focused: the strip is only the global map's `M-0` (toggle-terminal).
             return false;
         }
         // A dead shell takes no more keys: its tab says how it exited, Enter or M-w closes it,
@@ -232,86 +212,37 @@ impl Editor {
             .is_some_and(|t| t.exited.is_some())
         {
             if matches!(key.code, crate::term::KeyCode::Enter)
-                || (alt && matches!(key.code, crate::term::KeyCode::Char('w')))
+                || (key.mods.alt() && matches!(key.code, crate::term::KeyCode::Char('w')))
             {
-                self.bottom.close_active();
-                if !self.bottom.open {
-                    self.focus = crate::editor::Focus::Text;
-                }
+                self.terminal_close();
             }
             return true;
         }
-        let cwd = std::env::current_dir().unwrap_or_default();
-        match (ctrl, alt, key.code) {
-            (false, false, crate::term::KeyCode::Esc) => {
-                // Esc is a key programs need (vi, less, fzf): it goes to the shell, not to the
-                // editor. Leaving the terminal is M-0, which no program needs.
-                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-                    tab.send(&[0x1b]);
-                }
-                true
-            }
-            // M-0 while focused unfocuses rather than closes: the shell keeps running.
-            (false, true, crate::term::KeyCode::Char('0')) => {
-                self.focus = crate::editor::Focus::Text;
-                true
-            }
-            (false, true, crate::term::KeyCode::Char('n')) => {
-                let _ = self.bottom.new_tab(
-                    &cwd,
-                    self.text_w as u16,
-                    12,
-                    self.config.terminal_scrollback,
-                );
-                true
-            }
-            (false, true, crate::term::KeyCode::Char('w')) => {
-                self.bottom.close_active();
-                if !self.bottom.open {
-                    self.focus = crate::editor::Focus::Text;
-                }
-                true
-            }
-            (false, true, crate::term::KeyCode::Char('[')) => {
-                self.bottom.prev();
-                true
-            }
-            (false, true, crate::term::KeyCode::Char(']')) => {
-                self.bottom.next();
-                true
-            }
-            (false, true, crate::term::KeyCode::Char('+')) => {
-                self.bottom.grow();
-                true
-            }
-            (false, true, crate::term::KeyCode::Char('-')) => {
-                self.bottom.shrink();
-                true
-            }
-            (false, false, crate::term::KeyCode::PageUp) => {
-                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-                    tab.scroll_up(1);
-                }
-                true
-            }
-            (false, false, crate::term::KeyCode::PageDown) => {
-                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-                    tab.scroll_down(1);
-                }
-                true
-            }
-            _ => {
-                // A focused terminal swallows EVERY key: a chord it cannot spell is swallowed, not
-                // handed to the editor — otherwise Tab indents the file and C-x asks to quit it.
-                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-                    let bytes = tab.key_bytes(key);
-                    if !bytes.is_empty() {
-                        tab.send(&bytes);
-                    }
-                }
-                true
-            }
+        // The terminal's own chords are its MAP's, so help, M-x and the bars can see them; a key
+        // the map does not know is the shell's, never the editor's.
+        let k = crate::keymap::Key::from_event(key);
+        let found = crate::keymap::lookup(&[&self.keymaps.terminal], std::slice::from_ref(&k));
+        if let crate::keymap::Lookup::Command(name) = found {
+            let name = name.to_string();
+            self.run_command(&name);
+            return true;
         }
+        let bytes = if matches!(key.code, crate::term::KeyCode::Esc) {
+            // Esc is a key programs need (vi, less, fzf), and no program binds M-0.
+            vec![0x1b]
+        } else {
+            self.bottom
+                .tabs
+                .get(self.bottom.active)
+                .map(|t| t.key_bytes(key))
+                .unwrap_or_default()
+        };
+        if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active)
+            && !bytes.is_empty()
+        {
+            tab.send(&bytes);
+        }
+        true
     }
 }
 

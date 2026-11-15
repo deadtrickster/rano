@@ -193,8 +193,27 @@ impl Drop for Tab {
         unsafe {
             libc::close(self.master);
             libc::kill(self.pid, libc::SIGHUP);
+            // A short grace, then SIGKILL, and the reap happens on a detached thread: closing a
+            // tab must never block the editor on a child that ignores SIGHUP, and a closed tab
+            // must not stay a zombie for the life of the process.
             let mut status = 0;
-            libc::waitpid(self.pid, &mut status, 0);
+            let mut reaped = false;
+            for _ in 0..20 {
+                let r = libc::waitpid(self.pid, &mut status, libc::WNOHANG);
+                if r == self.pid || r == -1 {
+                    reaped = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if !reaped {
+                libc::kill(self.pid, libc::SIGKILL);
+                let pid = self.pid;
+                std::thread::spawn(move || {
+                    let mut status = 0;
+                    libc::waitpid(pid, &mut status, 0);
+                });
+            }
         }
     }
 }
@@ -670,6 +689,54 @@ mod tests {
             "data was left for the next call: the first pass stopped at its budget"
         );
         assert!(!t.feed_budget(1000), "now the pty is drained");
+        unsafe {
+            libc::close(slave);
+        }
+    }
+
+    /// Closing a tab kills even a shell that ignores SIGHUP, returns promptly, and reaps the
+    /// pid: no zombie left for the life of the editor.
+    #[test]
+    fn drop_kills_a_shell_that_ignores_sighup_and_reaps_it() {
+        let (master, slave) = openpty(40, 6).expect("a pty");
+        // An ignored signal survives exec, so this `sleep` really does ignore SIGHUP.
+        let child = std::process::Command::new("sh")
+            .args(["-c", "trap '' HUP; exec sleep 5"])
+            .spawn()
+            .expect("a shell");
+        let pid = child.id() as libc::pid_t;
+        std::mem::forget(child);
+        let t = Tab {
+            parser: Vt::new(40, 6),
+            master,
+            pid,
+            title: "t".to_string(),
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the child is alive");
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the child ignores SIGHUP");
+        let start = std::time::Instant::now();
+        drop(t);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "Drop returned in {elapsed:?}, not parked behind a child that ignores SIGHUP"
+        );
+        let mut gone = false;
+        for _ in 0..100 {
+            // A zombie still answers kill(pid, 0); ESRCH means the pid was reaped.
+            let r = unsafe { libc::kill(pid, 0) };
+            if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone, "the pid is reaped, not left a zombie");
         unsafe {
             libc::close(slave);
         }

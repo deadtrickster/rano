@@ -844,16 +844,15 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         // The rule between the two, the same glyph the editor's own sidebar draws — and it
         // carries the editor's scrollbar when there is one, so a bar never stands beside a
         // rule as a second rule. The thumb is the accent role on the same glyph, and it names
-        // the view the text shows: a preview's place in its lines when one is open, the
-        // buffer's otherwise.
+        // the view the text shows: a preview's place in its rendered lines when one is open,
+        // the buffer's otherwise — one sum either way.
         let er = lay.editor.unwrap_or(area);
         let t0 = ed.chrome.top();
         let rows = (er.height as usize).saturating_sub(usize::from(t0));
-        let (pos, total) = match &ed.diff_view {
-            Some(v) => (v.top, v.lines.len()),
-            None => (ed.scroll_pos(), ed.scroll_total(rows)),
+        let span = match &ed.diff_view {
+            Some(v) => ui::thumb_span(rano::diffview::body_rows(rows), v.top, v.lines.len()),
+            None => ui::thumb_span(rows, ed.scroll_pos(), ed.scroll_total(rows)),
         };
-        let span = ui::thumb_span(rows, pos, total);
         let track = Line::styled("\u{2502}", Style::of(Role::Faint));
         let thumb = Line::styled("\u{2502}", Style::of(Role::UserAccent));
         for (j, y) in (area.y..area.y + area.height).enumerate() {
@@ -992,6 +991,13 @@ fn mouse(
     dragging: &mut bool,
 ) -> bool {
     let inside = |r: Option<Rect>| r.is_some_and(|r| r.contains(m.x, m.y));
+    // A held thumb lets go wherever the release lands — over the text or the panel as
+    // readily as over the rule — or the next press on the rule would scroll instead of
+    // resizing.
+    if ed.scroll_grab && matches!(m.kind, MouseKind::Release(_)) {
+        ed.scroll_grab = false;
+        return true;
+    }
     // A held border is the width, whatever the pointer is over now.
     if *dragging {
         match m.kind {
@@ -1011,10 +1017,6 @@ fn mouse(
         // drawn affordance — grabs the view, drags in the rule follow the pointer's row until
         // the release, and a press on the rule elsewhere drags the width. Where the drawing
         // is, the hit-testing is.
-        if matches!(m.kind, MouseKind::Release(_)) && ed.scroll_grab {
-            ed.scroll_grab = false;
-            return true;
-        }
         if matches!(
             m.kind,
             MouseKind::Press(MouseButton::Left) | MouseKind::Drag(MouseButton::Left)
@@ -1042,8 +1044,9 @@ fn mouse(
             if grab_now && let Some(er) = lay.editor {
                 ed.scroll_grab = true;
                 let body = rows_of(ed, er);
-                // The last track row is the view's end: the whole rule is the travel.
-                let into = (m.y - ed.chrome.top()) as usize;
+                // The last track row is the view's end: the whole rule is the travel. The
+                // title row sits above the track, so the subtraction saturates.
+                let into = (m.y.saturating_sub(ed.chrome.top())) as usize;
                 let frac = (into as f64 / (body as f64 - 1.0).max(1.0)).clamp(0.0, 1.0);
                 let max = ed.max_scroll(body);
                 let scroll = (frac * max as f64).round() as usize;
@@ -1489,10 +1492,18 @@ mod panel_tests {
         let lay = layout(120, 40, &ed, None);
         sync_bottom_size(&mut ed, &lay);
         let strip = lay.bottom.expect("a strip");
+        // The prompt is set and the per-command hook cleared: the operator's own
+        // PROMPT_COMMAND rewrites PS1 on every prompt, which moves the caret off where the
+        // test reads it.
+        ed.bottom.tabs[0].send(b"PROMPT_COMMAND=\n");
         ed.bottom.tabs[0].send(b"PS1='$ '\n");
-        assert!(feed_until(&mut ed, |l| {
-            l.lines().any(|r| r.trim_end().ends_with("'$ '")) || l.trim_end().ends_with('$')
-        }));
+        // A cleared screen with the bare prompt home: the wait cannot be satisfied by the
+        // echoed command, and whatever the shell printed before is gone.
+        ed.bottom.tabs[0].send(b"clear\n");
+        assert!(
+            feed_until(&mut ed, |l| l.trim_end() == "$"),
+            "the bare prompt on a cleared screen"
+        );
         ed.bottom.tabs[0].send(b"abc");
         assert!(feed_until(&mut ed, |l| l.contains("abc")));
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
@@ -1928,6 +1939,50 @@ mod panel_tests {
             "the thumb dragged to the foot is the view at its end"
         );
         assert!(!dragging, "a thumb drag is not a rule drag");
+        // A drag above the track — the rule's title row — is the view's start, not a panic.
+        let (at2, thumb2) =
+            ui::thumb_span(rows, ed.scroll_pos(), ed.scroll_total(rows)).expect("still long");
+        send(
+            &mut ed,
+            rano::term::MouseKind::Press(rano::term::MouseButton::Left),
+            (t0 + at2 + thumb2 / 2) as u16,
+            &mut dragging,
+        );
+        send(
+            &mut ed,
+            rano::term::MouseKind::Drag(rano::term::MouseButton::Left),
+            0,
+            &mut dragging,
+        );
+        assert_eq!(
+            ed.bs_mut().scroll,
+            0,
+            "a drag to the title row is the view's start"
+        );
+        send(
+            &mut ed,
+            rano::term::MouseKind::Release(rano::term::MouseButton::Left),
+            0,
+            &mut dragging,
+        );
+
+        // A grab released over the TEXT lets go too: the next press on the rule resizes
+        // rather than scrolling on a stale hold. (The closure above is done with by now.)
+        ed.scroll_grab = true;
+        mouse(
+            &mut ed,
+            &lay,
+            &rano::term::MouseEvent {
+                kind: rano::term::MouseKind::Release(rano::term::MouseButton::Left),
+                x: er.width - 1,
+                y: mid as u16,
+                mods: rano::term::event::Mods::NONE,
+            },
+            120,
+            &mut width,
+            &mut dragging,
+        );
+        assert!(!ed.scroll_grab, "a release over the text lets go");
         // A press on the rule outside the thumb drags the width, and does not scroll.
         ed.scroll_to(0);
         let mut dragging = false;
@@ -1968,8 +2023,10 @@ mod panel_tests {
     /// its lines, and the text column draws no second bar beside it.
     #[test]
     fn a_preview_keeps_one_bar_in_the_rule() {
+        // Blank lines between the paragraphs, or the renderer merges them into one wrapped
+        // block: 200 numbered paragraphs must stay 200 blocks, more than the view holds.
         let text = (1..=200)
-            .map(|i| format!("paragraph {i}\n"))
+            .map(|i| format!("paragraph {i}\n\n"))
             .collect::<String>();
         let mut file_buf = rano::buffer::Buffer::new();
         file_buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
@@ -1987,16 +2044,24 @@ mod panel_tests {
         draw_frame(&mut buf, &mut ed, &lay);
         let border = lay.border.expect("a rule");
         let er = lay.editor.expect("the text column");
-        // The view keeps its lines windowed, so the rule carries no thumb for a preview —
-        // the preview never had a bar of its own to name its place, and inventing one here
-        // would name the wrong surface. The rule is a rule, faint the whole way.
+        // The rule carries the preview's thumb: the accent sits exactly where the one sum
+        // puts it for the preview's place in its rendered lines.
         let accent = Style::of(Role::UserAccent);
         let t0 = ed.chrome.top() as usize;
+        let rows = er.height as usize - t0;
+        let v = ed.diff_view.as_ref().expect("the preview");
+        let (at, thumb) = ui::thumb_span(rano::diffview::body_rows(rows), v.top, v.lines.len())
+            .expect("a long preview scrolls");
         for y in t0..er.height as usize {
             let cell = buf
                 .cell(border.x, y as u16)
                 .expect("the rule is drawn through the text's rows");
-            assert_ne!(cell.style, accent, "row {y}: no thumb for a windowed view");
+            let in_thumb = y >= t0 + at && y < t0 + at + thumb;
+            assert_eq!(
+                cell.style == accent,
+                in_thumb,
+                "row {y}: the thumb names the preview's place"
+            );
         }
         // And no second bar in the text's own last column.
         let beside: Vec<char> = (1..er.height as usize)

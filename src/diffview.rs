@@ -233,8 +233,9 @@ impl DiffView {
     }
 }
 
-/// Rows of the text area the diff lines get: all of it but the header.
-pub(crate) fn body_rows(text_h: usize) -> usize {
+/// Rows of the text area the diff lines get: all of it but the header. Public because the
+/// host's frame draws the split rule's thumb for a preview from the same number.
+pub fn body_rows(text_h: usize) -> usize {
     text_h.saturating_sub(1).max(1)
 }
 

@@ -74,7 +74,9 @@ pub(crate) use bufstate::RowWrap;
 
 mod commands;
 pub mod config;
-mod diffview;
+/// Public for the host's frame: the split rule draws a view's thumb from `body_rows` and the
+/// view's own top and lines.
+pub mod diffview;
 pub mod editor;
 mod exec;
 mod exec_ctrl;

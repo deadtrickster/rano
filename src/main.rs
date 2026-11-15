@@ -746,8 +746,9 @@ struct Layout {
 /// its minimum.
 fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     // The status row and the key bar are the frame's foot. With the panel open the host draws
-    // them full width and the surfaces stop above the strip; without it the editor owns the
-    // whole frame and draws its own, with the strip painted over the rows above them.
+    // them full width, the text stops above the strip and the panel runs down to the foot;
+    // without the panel the editor owns the whole frame and draws its own, with the strip
+    // painted over the rows above them and spanning the frame.
     let status = ed.status_rows() as u16;
     let strip = if ed.bottom.open && h > 6 {
         ed.bottom.height.min((h / 3) as usize) as u16
@@ -792,18 +793,24 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     let default = (u32::from(w) * 2 / 5).min(u32::from(PANEL_MAX)) as u16;
     let pw = want.unwrap_or(default).clamp(PANEL_MIN, w - EDITOR_MIN - 1);
     let ew = w - pw - 1;
+    // The panel is a full-height column: its side runs down to the foot, past the strip's
+    // rows, while the strip sits under the text column only. The composer and the shell's
+    // last drawn row therefore end on the same row, and the split rule is drawn through the
+    // strip to the foot rather than stopping at it.
+    let side_h = foot.map(|f| f.y).unwrap_or(whole.height);
     Layout {
         editor: Some(Rect::new(0, whole.y, ew, whole.height)),
-        border: Some(Rect::new(ew, whole.y, 1, whole.height)),
-        panel: Some(Rect::new(ew + 1, whole.y, pw, whole.height)),
-        bottom,
+        border: Some(Rect::new(ew, whole.y, 1, side_h)),
+        panel: Some(Rect::new(ew + 1, whole.y, pw, side_h)),
+        bottom: (strip > 0).then(|| Rect::new(0, strip_y, ew, strip)),
         foot,
     }
 }
 
-/// The pty is the strip's rectangle: the frame's full width, and only the rows that are drawn —
-/// the rule and the tab strip are not the shell's. Called every frame, so a frame resize and a
-/// dragged rule both reach the shell as TIOCSWINSZ.
+/// The pty is the strip's rectangle — the text column's width while the panel is open, the
+/// frame's while it is not — and only the rows that are drawn: the rule and the tab strip are
+/// not the shell's. Called every frame, so a frame resize, a dragged rule and M-i all reach the
+/// shell as TIOCSWINSZ.
 fn sync_bottom_size(ed: &mut Editor, lay: &Layout) {
     if let Some(area) = lay.bottom {
         let rows = (area.height as usize).saturating_sub(2).max(1) as u16;
@@ -865,6 +872,16 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             crate::render::Style::of(Role::Faint),
         );
         buf.set_line(area.x, area.y, &rule, area.width as usize);
+        // Where the strip's rule meets the split rule the two join: one drawn corner, not two
+        // lines that happen to touch.
+        if let Some(b) = lay.border {
+            buf.set_line(
+                b.x,
+                area.y,
+                &Line::styled("\u{2524}", crate::render::Style::of(Role::Faint)),
+                1,
+            );
+        }
         for (i, l) in lines
             .iter()
             .take((area.height as usize).saturating_sub(1))
@@ -1099,6 +1116,136 @@ mod panel_tests {
             feed_until(&mut ed, |l| l.trim().ends_with(&want2)),
             "after the frame resize, stty size is {want2}"
         );
+    }
+
+    /// The panel is a full-height column and the strip runs under the text only: the composer
+    /// and the shell's last drawn row end on the same row above the foot, the split rule is
+    /// drawn through the strip's rows with a junction, no shell cell sits right of the split,
+    /// and the pty is the text column — proved against a real pty, before and after M-i.
+    #[test]
+    fn the_panel_is_a_full_height_column_and_the_strip_runs_under_the_text() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.panel.input = "composer-words".to_string();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        for (w, h) in [(239u16, 68u16), (100, 30)] {
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let strip = lay.bottom.expect("a strip");
+            let text = lay.editor.expect("the text column");
+            let panel = lay.panel.expect("the panel column");
+            let split = lay.border.expect("the split rule");
+            let foot_y = h - ed.status_rows() as u16;
+            // The geometry: the strip is the text column's width, the panel runs to the foot.
+            assert_eq!(
+                strip.width, text.width,
+                "the strip is under the text only at {w}x{h}"
+            );
+            assert_eq!(split.x, text.width, "the rule is at the split");
+            assert_eq!(
+                panel.y + panel.height,
+                foot_y,
+                "the panel runs to the foot at {w}x{h}"
+            );
+            assert_eq!(
+                text.y + text.height,
+                strip.y,
+                "the text ends where the strip begins at {w}x{h}"
+            );
+            // The shell must be told the rectangle it was given: stty says the drawn columns.
+            ed.bottom.tabs[0].send(b"PS1='PROMPT> '\n");
+            ed.bottom.tabs[0].send(b"stty size\n");
+            let want = format!("{} {}", strip.height - 2, strip.width - 1);
+            assert!(
+                feed_until(&mut ed, |l| l.trim().ends_with(&want)),
+                "stty is the text column at {w}x{h}: {want}"
+            );
+            // A run of Zs wider than the pty fills every column the shell has; the split, the
+            // scrollbar and the panel's columns must all stay free of them.
+            ed.bottom.tabs[0].send(b"head -c 300 /dev/zero | tr '\\0' 'Z'\n");
+            let full_line = (strip.width - 1) as usize;
+            assert!(
+                feed_until(&mut ed, |l| l.chars().filter(|c| *c == 'Z').count()
+                    >= full_line),
+                "the Zs are on the glass at {w}x{h}"
+            );
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let rows = buf.emit(rano::render::Palette::None);
+            let split_at = split.x as usize;
+            assert_eq!(
+                rows[strip.y as usize].chars().nth(split_at),
+                Some('\u{2524}'),
+                "the strip's rule joins the split rule at {w}x{h}"
+            );
+            for (y, row) in rows
+                .iter()
+                .enumerate()
+                .take(foot_y as usize)
+                .skip((strip.y + 1) as usize)
+            {
+                let cell = row.chars().nth(split_at);
+                assert_eq!(
+                    cell,
+                    Some('\u{2502}'),
+                    "the split runs through the strip's row {y} at {w}x{h}"
+                );
+                let right = row.chars().skip(split_at).collect::<String>();
+                assert!(
+                    !right.contains('Z'),
+                    "no shell cell right of the split at {w}x{h} row {y}: {:?}",
+                    &right[..right.len().min(30)]
+                );
+            }
+            // The composer and the shell's last row end together, above the foot.
+            let composer_row = rows
+                .iter()
+                .position(|r| r.contains("composer-words"))
+                .unwrap_or_else(|| panic!("the composer is drawn at {w}x{h}"));
+            assert_eq!(
+                composer_row as u16,
+                strip.y + strip.height - 1,
+                "the composer is on the strip's last row at {w}x{h}"
+            );
+            let at = rows[composer_row]
+                .find("composer-words")
+                .expect("in its row");
+            assert!(
+                at > split_at,
+                "the composer is in the panel's columns at {w}x{h}"
+            );
+            // M-i: the panel away, the strip spans the frame, and the shell is told again.
+            ed.panel.open = false;
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let wide = lay.bottom.expect("a strip without the panel");
+            assert_eq!(wide.width, w, "M-i: the strip spans the frame at {w}x{h}");
+            ed.bottom.tabs[0].send(b"clear\n");
+            assert!(feed_until(&mut ed, |l| l.contains("PROMPT> ")));
+            ed.bottom.tabs[0].send(b"stty size\n");
+            let want_wide = format!("{} {}", wide.height - 2, wide.width - 1);
+            assert!(
+                feed_until(&mut ed, |l| l.trim().ends_with(&want_wide)),
+                "after M-i the pty is the frame at {w}x{h}: {want_wide}"
+            );
+            // M-i again: back to the text column.
+            ed.panel.open = true;
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            ed.bottom.tabs[0].send(b"clear\n");
+            assert!(feed_until(&mut ed, |l| l.contains("PROMPT> ")));
+            ed.bottom.tabs[0].send(b"stty size\n");
+            assert!(
+                feed_until(&mut ed, |l| l.trim().ends_with(&want)),
+                "M-i again: the pty is the text column at {w}x{h}: {want}"
+            );
+        }
     }
 
     /// The strip is a mouse pane with a rectangle: the wheel over it is the terminal's, and
@@ -1755,9 +1902,9 @@ mod panel_tests {
         );
     }
 
-    /// The frame's foot is full width and the panel ends above it: the composer is the panel's
-    /// last row, inside the panel's columns, above the strip — not on the frame's last row
-    /// beside the key bar.
+    /// The frame's foot is full width: the composer is the panel's last row, inside the panel's
+    /// columns, on the strip's last row — the two end together above the foot, not on the
+    /// frame's last row beside the key bar.
     #[test]
     fn the_foot_is_full_width_and_the_composer_stays_in_the_panel() {
         use std::path::Path;
@@ -1789,10 +1936,10 @@ mod panel_tests {
                 .position(|r| r.contains("composer-words"))
                 .unwrap_or_else(|| panic!("the composer is drawn at {w}x{h}"));
             let panel = lay.panel.expect("a panel column");
-            assert!(
-                (composer_row as u16) < strip.y,
-                "the composer is above the strip at {w}x{h}: row {composer_row} vs strip {}",
-                strip.y
+            assert_eq!(
+                composer_row as u16,
+                strip.y + strip.height - 1,
+                "the composer is on the strip's last row at {w}x{h}: row {composer_row}"
             );
             let at = rows[composer_row]
                 .find("composer-words")
@@ -1811,8 +1958,8 @@ mod panel_tests {
     }
 
     /// The foot's rows are nobody else's: the strip ends above the status row, the status row
-    /// holds no shell text, text and panel end on the same row, and the title bar spans the
-    /// frame at every open/close transition.
+    /// holds no shell text, the text ends where the strip begins while the panel runs beside
+    /// it to the foot, and the title bar spans the frame at every open/close transition.
     #[test]
     fn the_foots_rows_are_nobody_elses() {
         use std::path::Path;
@@ -1882,12 +2029,20 @@ mod panel_tests {
                 "C: the title spans its column with the panel open at {w}x{h}: {} wide",
                 styled[0].chars().count()
             );
-            // B: with the panel open, text and panel end on the same row.
+            // B: with the panel open, the text ends where the strip begins and the panel runs
+            // on beside the strip to the foot.
             let er = lay.editor.expect("an editor");
             let pr = lay.panel.expect("a panel");
+            let strip2 = lay.bottom.expect("the strip beside the panel");
             assert_eq!(
-                er.height, pr.height,
-                "B: text and panel end on the same row at {w}x{h}"
+                er.y + er.height,
+                strip2.y,
+                "B: the text ends where the strip begins at {w}x{h}"
+            );
+            assert_eq!(
+                pr.y + pr.height,
+                h - ed.status_rows() as u16,
+                "B: the panel runs to the foot at {w}x{h}"
             );
             ed.panel.open = false;
             let lay = layout(w, h, &ed, None);

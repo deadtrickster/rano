@@ -18,8 +18,8 @@ prints them nano's way (`^X`, `M-X`). The keys do not change.
 |---|---|
 | `C-o` / `F2` | Save the buffer, asking for the file name |
 | `C-r` / `F5` | Insert a file's contents at the cursor |
-| `F8` | Open a file. `name:line[:col]` jumps there. Replaces the current buffer unless it has unsaved edits or `multibuffer` is on |
-| `F7` | Copy the file on disk to `file~` |
+| `M-o` / `F8` | Open a file. `name:line[:col]` jumps there. Replaces the current buffer unless it has unsaved edits or `multibuffer` is on |
+| `M-c` / `F7` | Copy the file on disk to `file~` |
 | `M-g` | Open a folder as a listing |
 | `C-x` | Quit, offering each modified buffer for saving in turn |
 | `RET` | Break the line, keeping its indent |
@@ -30,7 +30,7 @@ prints them nano's way (`^X`, `M-X`). The keys do not change.
 | `M-u` | Undo. Runs of the same action coalesce into one step |
 | `M-e` | Redo |
 | `C-j` / `F10` | Re-wrap the paragraph to the window width |
-| `F9` | Sort the marked lines, or the whole buffer |
+| `M-r` / `F9` | Sort the marked lines, or the whole buffer |
 | `C-t` / `F6` | Run a shell command. Its stdout is inserted below the cursor when it finishes |
 | `M-\|` | Filter the marked lines through a shell command |
 
@@ -81,8 +81,8 @@ In the search prompt `M-C` toggles case sensitivity and `M-R` toggles regex.
 | `M-,` | Jump back, one press per jump, from a definition or a usage |
 | `M-d` | Jump to the next mark or diagnostic, wrapping |
 
-`M-x set-mode` sets the current buffer's language. `plain` stops the guessing, `auto` puts it
-back.
+`M-h` or `M-x set-mode` sets the current buffer's language. `plain` stops the guessing,
+`auto` puts it back.
 
 ## Buffers
 
@@ -206,6 +206,9 @@ review: `before` against `after`, over the file. `M-d` walks them with the diagn
 | `a` | Take the suggestion, or keep the edit: the hunk's mark goes |
 | `r` | Drop the suggestion, or put the edited lines back |
 | `A` / `R` | The same for every hunk in the file |
+| `y` / `n` | The same for every hunk of one reply set, in every open file the set touched |
+| `e` / `E` | The same for every reply set at once, in every open file |
+| `c` | Clear every mark in every open file, taking nothing |
 | `M-d` | The next hunk or diagnostic |
 
 Taking a suggestion and reverting an edit are each one undo step (`M-u`), and neither saves:

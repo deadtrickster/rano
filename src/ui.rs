@@ -778,47 +778,43 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
     }
 
     // ---- function bar (last two rows, reversed) ----
-    // nano's layout: total = min(items, ((COLS + 40) / 20) * 2), filled
-    // column-major with the last column absorbing the slack.
+    // nano's two rows, but an entry is shown whole or not at all: a key cut at the right
+    // edge (`Next Diagnost`) reads as a different command. A cell is the widest shown entry
+    // plus one column, so a gap always stands between neighbours, and entries past what the
+    // width holds are dropped rather than squeezed.
     let items = if chrome.keys {
         ed.bar_items()
     } else {
         Vec::new()
     };
-    let total = items.len().min(((width as usize) + 40) / 20 * 2);
+    // Key, one gap inside the cell, tag: what the widest entry costs.
+    let widest = items
+        .iter()
+        .map(|(k, t)| k.chars().count() + 1 + t.chars().count())
+        .max()
+        .unwrap_or(0);
+    let per_row = if items.is_empty() {
+        0
+    } else {
+        (width as usize) / (widest + 1)
+    };
+    let total = items.len().min(per_row.saturating_mul(2));
     if total > 0 {
-        let per_row = total.div_ceil(2);
-        let itemw = (width as usize) / per_row;
-        if itemw > 0 {
-            for r in 0..2u16 {
-                let mut spans: Vec<Span> = Vec::with_capacity(per_row * 3);
-                for c in 0..per_row {
-                    let i = 2 * c + r as usize;
-                    let w = if c + 1 >= per_row {
-                        itemw + (width as usize) % itemw
-                    } else {
-                        itemw
-                    };
-                    if i < total {
-                        let (k, l) = (&items[i].0, &items[i].1);
-                        // nano: the key combo reversed, the tag skipped when few
-                        // columns remain.
-                        let kw = k.chars().count();
-                        let key: String = k.chars().take(w).collect();
-                        spans.push(Span::styled(key, rev()));
-                        let mut used = kw.min(w);
-                        if w > used + 1 {
-                            let tag: String = l.chars().take(w - used - 1).collect();
-                            used += 1 + tag.chars().count();
-                            spans.push(Span::raw(format!(" {}", tag)));
-                        }
-                        spans.push(Span::raw(" ".repeat(w - used)));
-                    } else {
-                        spans.push(Span::raw(" ".repeat(w)));
-                    }
+        for r in 0..2u16 {
+            let mut spans: Vec<Span> = Vec::with_capacity(per_row * 3);
+            for c in 0..per_row {
+                let i = 2 * c + r as usize;
+                if i < total {
+                    let (k, t) = &items[i];
+                    let used = k.chars().count() + 1 + t.chars().count();
+                    spans.push(Span::styled(k.clone(), rev()));
+                    spans.push(Span::raw(format!(" {}", t)));
+                    spans.push(Span::raw(" ".repeat(widest + 1 - used)));
+                } else {
+                    spans.push(Span::raw(" ".repeat(widest + 1)));
                 }
-                put(buf, at(0, area.height - 2 + r, width, 1), &Line::new(spans));
             }
+            put(buf, at(0, area.height - 2 + r, width, 1), &Line::new(spans));
         }
     }
 
@@ -1064,6 +1060,56 @@ mod tests {
     /// A window for a one-column test row: display col == char index.
     fn win(chars: &[char], lo: usize, hi: usize) -> Vec<(usize, char)> {
         simple_window(chars, lo, hi).collect()
+    }
+
+    /// The function bar shows whole entries or none: a cell is the widest shown entry plus one
+    /// column, every shown entry sits whole in its cell with a blank after it, and the rest are
+    /// dropped — a bar that said `Next Diagnost` said a different command.
+    #[test]
+    fn the_function_bar_shows_whole_entries_or_none() {
+        let e = ed("x");
+        let items = e.bar_items();
+        assert!(!items.is_empty(), "the standard map has entries");
+        let widest = items
+            .iter()
+            .map(|(k, t)| k.chars().count() + 1 + t.chars().count())
+            .max()
+            .unwrap();
+        let cell = widest + 1;
+        for w in [239u16, 80, 40, 24] {
+            let screen = Screen::of(&e, w, 24);
+            let per_row = (w as usize) / cell;
+            assert!(per_row > 0, "at {w} the bar has a column");
+            for (r, y) in [(0usize, 22u16), (1, 23)] {
+                let text = screen.row(y);
+                for c in 0..per_row {
+                    let i = 2 * c + r;
+                    let shown: String = text.chars().skip(c * cell).take(cell).collect();
+                    if i < items.len() {
+                        let (k, t) = &items[i];
+                        let whole = format!("{k} {t}");
+                        assert_eq!(
+                            shown.trim(),
+                            whole,
+                            "at {w} col {c} row {y}: whole entries only"
+                        );
+                        // A gap always: the column after the entry is blank.
+                        assert_eq!(
+                            shown.chars().nth(whole.chars().count()),
+                            Some(' '),
+                            "at {w} col {c} row {y}: a gap after the entry"
+                        );
+                    } else {
+                        assert!(
+                            shown.trim().is_empty(),
+                            "at {w} col {c} row {y}: no entry, no text"
+                        );
+                    }
+                }
+                // The bar never runs past the width.
+                assert!(per_row * cell <= w as usize);
+            }
+        }
     }
 
     /// A view's status reads `Row N`, not `Ln N`: a rendering's row is not a file

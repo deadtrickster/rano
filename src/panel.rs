@@ -1728,6 +1728,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Zero sessions here, two above: the walk asks the parent, and the parent's two are a pick.
+    #[test]
+    fn no_sessions_here_asks_the_parent_and_the_parents_two_are_a_pick() {
+        let mut panel = Panel::default();
+        panel.open(PathBuf::from("/w/sub"));
+        panel.take_acts();
+        panel.apply(&sessions(&[]));
+        assert_eq!(
+            panel.take_acts(),
+            vec![Act::Connect(PathBuf::from("/w"))],
+            "the parent is asked, not a blank panel"
+        );
+        assert_eq!(panel.state, PanelState::Connecting);
+        assert!(panel.said.contains("no session here"), "{}", panel.said);
+        panel.apply(&sessions(&["s-2", "s-1"]));
+        assert_eq!(
+            panel.state,
+            PanelState::Picking,
+            "the parent's two are a pick"
+        );
+    }
+
+    /// Zero sessions at the top: the walk stops and says so, and Enter starts one.
+    #[test]
+    fn no_sessions_anywhere_above_says_so_and_enter_starts_one() {
+        let mut panel = Panel::default();
+        panel.open(PathBuf::from("/"));
+        panel.take_acts();
+        panel.apply(&sessions(&[]));
+        assert!(panel.take_acts().is_empty(), "nobody above to ask");
+        assert_eq!(panel.state, PanelState::Idle);
+        assert!(
+            panel.said.contains("no session anywhere above this folder"),
+            "{}",
+            panel.said
+        );
+        panel.new_session();
+        assert_eq!(panel.take_acts(), vec![Act::New], "Enter starts one");
+    }
+
+    /// Two sessions here: no walk at all, just the pick.
+    #[test]
+    fn two_sessions_here_never_asks_the_parent() {
+        let mut panel = Panel::default();
+        panel.open(PathBuf::from("/w/sub"));
+        panel.take_acts();
+        panel.apply(&sessions(&["s-2", "s-1"]));
+        assert!(panel.take_acts().is_empty(), "no parent is asked");
+        assert_eq!(panel.state, PanelState::Picking);
+    }
+
     /// A `NewSession` is answered by the frame a list is answered with, `created` naming the one to
     /// enter: a session made must be moved into, not left behind.
     #[test]

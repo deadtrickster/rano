@@ -82,9 +82,79 @@ impl Tab {
         dirty
     }
 
-    /// A key, as the shell's bytes.
+    /// A key, as the shell's bytes. Every key translates or is swallowed: a chord this cannot
+    /// spell must not fall through to the editor, which would cut or indent the file behind the
+    /// reader's back.
     pub fn send(&mut self, bytes: &[u8]) {
         let _ = unsafe { libc::write(self.master, bytes.as_ptr() as *const _, bytes.len()) };
+    }
+
+    /// The terminal's answer to a key, in the mode the program asked for: arrows are SS3 in
+    /// application cursor mode (DECCKM), and a paste is bracketed when the program asked.
+    pub fn key_bytes(&self, key: &crate::term::KeyEvent) -> Vec<u8> {
+        use crate::term::KeyCode;
+        let ctrl = key.mods.ctrl();
+        let alt = key.mods.alt();
+        let plain = !ctrl && !alt;
+        let code = key.code;
+        let ch = match code {
+            KeyCode::Char(c) => c,
+            _ => '\0',
+        };
+        if ctrl && ch.is_ascii_alphabetic() {
+            // C-a..C-z are the control bytes 0x01..0x1a, which is what a shell's readline wants.
+            return vec![(ch.to_ascii_lowercase() as u8) - b'a' + 1];
+        }
+        if alt && ch != '\0' {
+            let mut out = vec![0x1b];
+            let mut b = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut b).as_bytes());
+            return out;
+        }
+        match code {
+            KeyCode::Char(c) if plain => {
+                let mut b = [0u8; 4];
+                c.encode_utf8(&mut b).as_bytes().to_vec()
+            }
+            KeyCode::Enter => vec![b'\n'],
+            KeyCode::Backspace => vec![0x7f],
+            KeyCode::Tab => vec![b'\t'],
+            KeyCode::Delete => b"\x1b[3~".to_vec(),
+            KeyCode::Insert => b"\x1b[2~".to_vec(),
+            KeyCode::PageUp => b"\x1b[5~".to_vec(),
+            KeyCode::PageDown => b"\x1b[6~".to_vec(),
+            KeyCode::Up => self.arrow('A'),
+            KeyCode::Down => self.arrow('B'),
+            KeyCode::Right => self.arrow('C'),
+            KeyCode::Left => self.arrow('D'),
+            KeyCode::Home => b"\x1b[H".to_vec(),
+            KeyCode::End => b"\x1b[F".to_vec(),
+            KeyCode::F(n) => match n {
+                1 => b"\x1bOP".to_vec(),
+                2 => b"\x1bOQ".to_vec(),
+                3 => b"\x1bOR".to_vec(),
+                4 => b"\x1bOS".to_vec(),
+                5 => b"\x1b[15~".to_vec(),
+                6 => b"\x1b[17~".to_vec(),
+                7 => b"\x1b[18~".to_vec(),
+                8 => b"\x1b[19~".to_vec(),
+                9 => b"\x1b[20~".to_vec(),
+                10 => b"\x1b[21~".to_vec(),
+                11 => b"\x1b[23~".to_vec(),
+                12 => b"\x1b[24~".to_vec(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// An arrow, in the mode the program set: application cursor mode sends SS3, the default CSI.
+    fn arrow(&self, which: char) -> Vec<u8> {
+        if self.parser.app_cursor {
+            vec![0x1b, b'O', which as u8]
+        } else {
+            vec![0x1b, b'[', which as u8]
+        }
     }
 
     /// Scroll back by `n` lines, capped at what the scrollback holds.
@@ -120,6 +190,9 @@ pub struct BottomTerm {
     pub focus: bool,
     pub tabs: Vec<Tab>,
     pub active: usize,
+    /// The strip's height in rows, remembered across toggles: a terminal the operator has resized
+    /// stays that size.
+    pub height: usize,
 }
 
 impl BottomTerm {
@@ -129,6 +202,7 @@ impl BottomTerm {
             focus: false,
             tabs: Vec::new(),
             active: 0,
+            height: 12,
         }
     }
 
@@ -146,6 +220,15 @@ impl BottomTerm {
         self.tabs.push(Tab::open(cwd, cols, rows)?);
         self.active = self.tabs.len() - 1;
         Ok(())
+    }
+
+    /// The strip is resizable by key too: `M-+` grows it, `M--` shrinks it, and the choice sticks.
+    pub fn grow(&mut self) {
+        self.height = (self.height + 1).min(40);
+    }
+
+    pub fn shrink(&mut self) {
+        self.height = self.height.saturating_sub(1).max(4);
     }
 
     pub fn next(&mut self) {
@@ -199,6 +282,14 @@ impl BottomTerm {
             strip.push_str(&format!("{mark}{} ", i + 1));
         }
         strip.push_str("(M-n new, M-[ M-] switch, M-w close)");
+        // A scroll position that is off the bottom says so: the view is not the newest output, and
+        // that must be visible or a reader thinks the shell is quiet.
+        if self.tabs[self.active].parser.scroll > 0 {
+            strip.push_str(&format!(
+                " ↑{} more",
+                self.tabs[self.active].parser.scroll
+            ));
+        }
         out.push(Line::new(vec![Span::role(
             crate::width::text::truncate(&strip, w),
             Role::Faint,
@@ -269,6 +360,8 @@ struct Vt {
     /// The style SGR is currently setting, applied to every character that follows.
     cur_fg: Option<[u8; 3]>,
     cur_bold: bool,
+    /// DECCKM: application cursor mode, which makes arrows SS3 rather than CSI.
+    pub app_cursor: bool,
 }
 
 impl Vt {
@@ -285,6 +378,7 @@ impl Vt {
             y: 0,
             cur_fg: None,
             cur_bold: false,
+            app_cursor: false,
         }
     }
 

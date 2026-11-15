@@ -217,6 +217,15 @@ impl Editor {
         let cwd = std::env::current_dir().unwrap_or_default();
         match (ctrl, alt, key.code) {
             (false, false, crate::term::KeyCode::Esc) => {
+                // Esc is a key programs need (vi, less, fzf): it goes to the shell, not to the
+                // editor. Leaving the terminal is M-0, which no program needs.
+                if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
+                    tab.send(&[0x1b]);
+                }
+                true
+            }
+            // M-0 while focused unfocuses rather than closes: the shell keeps running.
+            (false, true, crate::term::KeyCode::Char('0')) if self.bottom.focus => {
                 self.bottom.focus = false;
                 true
             }
@@ -234,6 +243,14 @@ impl Editor {
             }
             (false, true, crate::term::KeyCode::Char(']')) => {
                 self.bottom.next();
+                true
+            }
+            (false, true, crate::term::KeyCode::Char('+')) => {
+                self.bottom.grow();
+                true
+            }
+            (false, true, crate::term::KeyCode::Char('-')) => {
+                self.bottom.shrink();
                 true
             }
             (false, false, crate::term::KeyCode::PageUp) => {

@@ -1639,6 +1639,14 @@ impl Editor {
         // document above it. Open, not focused — a touchpad over the panel must not have to click
         // into it first, which is what the old guard required.
         if self.bottom.open {
+            // Dragging the rule resizes the strip, as a window's border does.
+            if m.kind == MouseKind::Drag(MouseButton::Left)
+                && m.y == self.area.h.saturating_sub(self.bottom.height as u16)
+            {
+                let want = (self.area.h as isize - m.y as isize).max(4) as usize;
+                self.bottom.height = want.clamp(4, 40);
+                return true;
+            }
             return match m.kind {
                 MouseKind::WheelUp => {
                     if let Some(t) = self.bottom.tabs.get_mut(self.bottom.active) {

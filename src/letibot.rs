@@ -418,6 +418,9 @@ pub enum Event {
         outcome: String,
         why: String,
         edits: Vec<ToolEdit>,
+        /// The result's inline and full sizes in bytes, when the daemon reports them. The
+        /// payload itself is not on this wire; the row can still say how big it was.
+        bytes: Option<(u64, u64)>,
     },
     /// One round's ending. `ends_turn` says whether the whole prompt is over, because only the
     /// daemon knows what follows a round.
@@ -941,6 +944,15 @@ fn event(v: &Value) -> Event {
                     text(outcome, "why")
                 } else {
                     why
+                },
+                // How large the result was, when the daemon says: the payload itself is not on
+                // this wire, so a row names the size rather than inventing a line count.
+                bytes: match (
+                    v.get("inline_bytes").and_then(Value::as_u64),
+                    v.get("full_bytes").and_then(Value::as_u64),
+                ) {
+                    (Some(inline), Some(full)) => Some((inline, full)),
+                    _ => None,
                 },
                 // One object rather than a list is what a row written before the list existed
                 // carries, and a `null` is a call that changed nothing.

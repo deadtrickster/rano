@@ -91,6 +91,16 @@ pub fn clean_line(s: &str) -> String {
 }
 
 /// A duration a person reads: `412ms`, `4.2s`, `3m07s`, `1h04m`.
+/// `931 B`, `4.2 KiB`, `1.3 MiB`: how large a result was, in the shortest honest form.
+pub fn bytes_word(n: u64) -> String {
+    const K: u64 = 1024;
+    match n {
+        0..=1023 => format!("{n} B"),
+        1024..=1_048_575 => format!("{:.1} KiB", n as f64 / K as f64),
+        _ => format!("{:.1} MiB", n as f64 / (K * K) as f64),
+    }
+}
+
 pub fn duration(ms: u64) -> String {
     if ms < 1000 {
         return format!("{ms}ms");

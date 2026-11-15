@@ -740,7 +740,7 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     // The terminal is a strip off the foot, taken before the editor/panel split: twelve rows, or a
     // third of a short frame, and never the whole frame.
     let (whole, bottom) = if ed.bottom.open && h > 6 {
-        let strip = ed.bottom.height.min(h / 3);
+        let strip = ed.bottom.height.min((h / 3) as usize) as u16;
         let (above, below) = whole.split_top(h - strip);
         (above, Some(below))
     } else {

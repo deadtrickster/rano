@@ -845,7 +845,8 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         // carries the editor's scrollbar when there is one, so a bar never stands beside a
         // rule as a second rule. The thumb is the accent role on the same glyph, and it names
         // the view the text shows: a preview's place in its rendered lines when one is open,
-        // the buffer's otherwise — one sum either way.
+        // the buffer's otherwise — one sum either way. The text's focus is said here too:
+        // its rule carries the accent, track and thumb alike.
         let er = lay.editor.unwrap_or(area);
         let t0 = ed.chrome.top();
         let rows = (er.height as usize).saturating_sub(usize::from(t0));
@@ -853,8 +854,24 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             Some(v) => ui::thumb_span(rano::diffview::body_rows(rows), v.top, v.lines.len()),
             None => ui::thumb_span(rows, ed.scroll_pos(), ed.scroll_total(rows)),
         };
-        let track = Line::styled("\u{2502}", Style::of(Role::Faint));
-        let thumb = Line::styled("\u{2502}", Style::of(Role::UserAccent));
+        // The text's focus is said here, without eating the bar: focused, the track carries
+        // the accent and the thumb is the accent REVERSED, so the rule is the text's marker
+        // and the thumb still reads against it; unfocused, the track is faint and the thumb
+        // is Strong — the scroll cue stays, and no accent sits on another surface's glass.
+        let text_focus = ed.focus == Focus::Text;
+        let track = Line::styled(
+            "\u{2502}",
+            if text_focus {
+                Style::of(Role::UserAccent)
+            } else {
+                Style::of(Role::Faint)
+            },
+        );
+        let thumb = if text_focus {
+            Line::styled("\u{2502}", Style::of(Role::UserAccent).reverse())
+        } else {
+            Line::styled("\u{2502}", Style::of(Role::Strong))
+        };
         for (j, y) in (area.y..area.y + area.height).enumerate() {
             let is_thumb = span
                 .is_some_and(|(at, t)| j >= usize::from(t0) + at && j < usize::from(t0) + at + t);
@@ -888,21 +905,20 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         let lines = ed
             .bottom
             .lines_for(content_w, &cwd, ed.focus == Focus::Terminal);
-        // A rule above the strip: the terminal is a pane, not more of the file's text.
-        let rule = Line::styled(
-            "─".repeat(area.width as usize),
-            crate::render::Style::of(Role::Faint),
-        );
+        // A rule above the strip: the terminal is a pane, not more of the file's text — and
+        // the terminal's focus is said here, the rule carrying the accent while the shell
+        // has the keyboard.
+        let term_rule = if ed.focus == Focus::Terminal {
+            Style::of(Role::UserAccent)
+        } else {
+            Style::of(Role::Faint)
+        };
+        let rule = Line::styled("─".repeat(area.width as usize), term_rule.clone());
         buf.set_line(area.x, area.y, &rule, area.width as usize);
         // Where the strip's rule meets the split rule the two join: one drawn corner, not two
         // lines that happen to touch.
         if let Some(b) = lay.border {
-            buf.set_line(
-                b.x,
-                area.y,
-                &Line::styled("\u{2524}", crate::render::Style::of(Role::Faint)),
-                1,
-            );
+            buf.set_line(b.x, area.y, &Line::styled("\u{2524}", term_rule), 1);
         }
         for (i, l) in lines
             .iter()
@@ -933,7 +949,7 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             // `pos` counts from the top of the history: offset 0 is its foot, which is the
             // thumb at the bottom of the track.
             let pos = history.saturating_sub(tab.scroll_pos());
-            crate::ui::bar_always(area, buf, 2, h, pos, total);
+            crate::ui::bar_always(area, buf, 2, h, pos, total, ed.focus == Focus::Terminal);
         }
     }
     if let Some(area) = lay.foot {
@@ -1494,18 +1510,22 @@ mod panel_tests {
         let strip = lay.bottom.expect("a strip");
         // The prompt is set and the per-command hook cleared: the operator's own
         // PROMPT_COMMAND rewrites PS1 on every prompt, which moves the caret off where the
-        // test reads it.
+        // test reads it. The waits accept only the TYPED ECHO at the new prompt — a line
+        // starting `$ ` — so no earlier line, whatever the hook printed, can satisfy them.
         ed.bottom.tabs[0].send(b"PROMPT_COMMAND=\n");
         ed.bottom.tabs[0].send(b"PS1='$ '\n");
-        // A cleared screen with the bare prompt home: the wait cannot be satisfied by the
-        // echoed command, and whatever the shell printed before is gone.
-        ed.bottom.tabs[0].send(b"clear\n");
+        ed.bottom.tabs[0].send(b"printf '\\033[2J\\033[H'\n");
+        // The clear must FINISH before anything is typed, or the clear eats the echo: wait
+        // for the new prompt to be the screen's first row.
         assert!(
             feed_until(&mut ed, |l| l.trim_end() == "$"),
-            "the bare prompt on a cleared screen"
+            "the cleared screen shows the bare prompt"
         );
         ed.bottom.tabs[0].send(b"abc");
-        assert!(feed_until(&mut ed, |l| l.contains("abc")));
+        assert!(
+            feed_until(&mut ed, |l| l.trim_start().starts_with("$ abc")),
+            "the typed echo at the new prompt"
+        );
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
         let caret = draw_frame(&mut buf, &mut ed, &lay).expect("a caret");
         // The row `$ abc` — the prompt is two columns, abc three: the caret sits after the c.
@@ -1518,6 +1538,8 @@ mod panel_tests {
             "inside the shell's rows: {caret:?}"
         );
         // A printed line moves the caret down a row, not sideways.
+        // The shell may be dash, where the kernel echoes the typed `z` wherever the cursor
+        // is — no readline — so the wait is the ECHO ITSELF: `z` on the glass.
         ed.bottom.tabs[0].send(b"\r\nz");
         assert!(feed_until(&mut ed, |l| l.contains('z')));
         let caret = draw_frame(&mut buf, &mut ed, &lay).expect("a caret");
@@ -1630,14 +1652,15 @@ mod panel_tests {
             draw_frame(&mut buf, &mut ed, &lay);
             let strip = lay.bottom.expect("a strip");
             let right = (strip.x + strip.width - 1) as usize;
-            // One glyph the whole way down — the thumb is the accent role on the track's own
-            // `│`, not a fatter block beside it.
-            let accent = Style::of(Role::UserAccent);
+            // One glyph the whole way down — the thumb is told from the track by role, not by
+            // a fatter glyph. The panel holds the keyboard here, so the thumb is Strong (the
+            // accent is the focused surface's alone) and the track faint.
+            let faint = Style::of(Role::Faint);
             let col: Vec<(char, bool)> = ((strip.y as usize + 2)
                 ..(strip.y + strip.height) as usize)
                 .map(|y| {
                     buf.cell(right as u16, y as u16)
-                        .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
+                        .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style != faint))
                         .unwrap_or((' ', false))
                 })
                 .collect();
@@ -1647,7 +1670,7 @@ mod panel_tests {
             );
             assert!(
                 col.iter().any(|(_, t)| *t),
-                "the thumb is drawn, in the accent, at {w}x{h}: {col:?}"
+                "the thumb is drawn, told from the track by role, at {w}x{h}: {col:?}"
             );
             assert!(
                 col.iter().any(|(_, t)| !*t),
@@ -1823,13 +1846,21 @@ mod panel_tests {
         let er = lay.editor.expect("the text column");
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
         draw_frame(&mut buf, &mut ed, &lay);
-        let accent = Style::of(Role::UserAccent);
+        // The text holds the keyboard here, so the thumb is the accent REVERSED on the accent
+        // track — the rule is the text's marker and the thumb still reads against it.
+        let thumb_style = Style::of(Role::UserAccent).reverse();
         let cell = |x: u16, y: u16| {
             buf.cell(x, y)
-                .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
+                .map(|c| {
+                    (
+                        c.symbol.chars().next().unwrap_or(' '),
+                        c.style == thumb_style,
+                    )
+                })
                 .unwrap_or((' ', false))
         };
-        // The rule's column over the text's rows: one glyph, the thumb in the accent.
+        // The rule's column over the text's rows: one glyph, the thumb in the accent,
+        // reversed against the accent track.
         let rule: Vec<(char, bool)> = (1..er.height as usize)
             .map(|y| cell(border.x, y as u16))
             .collect();
@@ -2034,6 +2065,9 @@ mod panel_tests {
         let mut ed = Editor::new(file_buf, Config::default());
         ed.push_keymap(host_map());
         ed.panel.open = true;
+        // The panel holds the keyboard, so the rule's track is faint and an accent cell can
+        // only be the thumb.
+        ed.focus = Focus::Panel;
         let _ = ed.handle_key(rano::term::KeyEvent::new(
             KeyCode::Char('p'),
             rano::term::event::Mods::ALT,
@@ -2044,9 +2078,11 @@ mod panel_tests {
         draw_frame(&mut buf, &mut ed, &lay);
         let border = lay.border.expect("a rule");
         let er = lay.editor.expect("the text column");
-        // The rule carries the preview's thumb: the accent sits exactly where the one sum
-        // puts it for the preview's place in its rendered lines.
-        let accent = Style::of(Role::UserAccent);
+        // The rule carries the preview's thumb: the panel holds the keyboard here, so the
+        // thumb is Strong on the faint track — the cue without an accent, which is the
+        // panel's marker to carry — and it sits exactly where the one sum puts it for the
+        // preview's place in its rendered lines.
+        let strong = Style::of(Role::Strong);
         let t0 = ed.chrome.top() as usize;
         let rows = er.height as usize - t0;
         let v = ed.diff_view.as_ref().expect("the preview");
@@ -2058,9 +2094,9 @@ mod panel_tests {
                 .expect("the rule is drawn through the text's rows");
             let in_thumb = y >= t0 + at && y < t0 + at + thumb;
             assert_eq!(
-                cell.style == accent,
+                cell.style == strong,
                 in_thumb,
-                "row {y}: the thumb names the preview's place"
+                "row {y}: the thumb names the preview's place, in Strong"
             );
         }
         // And no second bar in the text's own last column.
@@ -2107,6 +2143,60 @@ mod panel_tests {
         );
         // And the editor does not scroll the cursor under the strip.
         assert!(ed.text_h <= 40 - ed.chrome_rows() - strip.height as usize);
+    }
+
+    /// Each surface's own marker carries the accent while it has the keyboard — the split rule
+    /// (track accent, thumb the accent reversed) for the text, the strip's rule for the
+    /// terminal, the panel's header (bar and title) for the panel — and NO other marker does.
+    /// The frame has a real thumb (a long file), and every accent cell on the glass is read:
+    /// one accent says who types.
+    #[test]
+    fn the_focused_surface_is_marked() {
+        let text = (1..=400)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut file_buf = rano::buffer::Buffer::new();
+        file_buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+        let mut ed = Editor::new(file_buf, Config::default());
+        ed.push_keymap(host_map());
+        ed.panel.open = true;
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        let accent = Style::of(Role::UserAccent);
+        for focus in [Focus::Text, Focus::Terminal, Focus::Panel] {
+            ed.focus = focus;
+            let lay = layout(120, 40, &ed, None);
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let border = lay.border.expect("a rule");
+            let strip = lay.bottom.expect("a strip");
+            let panel = lay.panel.expect("a panel");
+            // Every accent cell in the three markers' rows and columns.
+            let split_accent = (1..lay.editor.expect("text").height as usize).any(|y| {
+                buf.cell(border.x, y as u16)
+                    .is_some_and(|c| c.style == accent)
+            });
+            let strip_accent =
+                (0..strip.width).any(|x| buf.cell(x, strip.y).is_some_and(|c| c.style == accent));
+            let header_accent = (panel.x..panel.x + panel.width)
+                .any(|x| buf.cell(x, 0).is_some_and(|c| c.style == accent));
+            assert_eq!(
+                split_accent,
+                focus == Focus::Text,
+                "{focus:?}: the split rule is the text's marker, thumb included"
+            );
+            assert_eq!(
+                strip_accent,
+                focus == Focus::Terminal,
+                "{focus:?}: the strip's rule is the terminal's marker"
+            );
+            assert_eq!(
+                header_accent,
+                focus == Focus::Panel,
+                "{focus:?}: the panel's header is the panel's marker, bar and title"
+            );
+        }
     }
 
     /// The strip is real tabs — index, title, the active one marked, the exit status when the

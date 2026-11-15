@@ -1,5 +1,5 @@
 use crate::buffer::Pos;
-use crate::editor::Editor;
+use crate::editor::{Editor, Focus};
 use crate::lsp;
 use crate::prompt::{Prompt, prompt_label};
 use crate::render::{Buffer, Line, Paragraph, Rect, Span, Style, Widget};
@@ -79,9 +79,19 @@ pub(crate) fn kind_tag(kind: u64) -> &'static str {
 ///
 /// `pane` is where it is drawn: the column is that rect's right edge, and `y` counts from its
 /// top, so a host's pane sits where its own area says rather than at the buffer's origin.
-pub(crate) fn scrollbar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, total: usize) {
+/// `focused` says whether the pane this bar belongs to has the keyboard: the thumb is the
+/// accent only then, Strong otherwise — one accent on the glass says who types.
+pub(crate) fn scrollbar(
+    pane: Rect,
+    buf: &mut Buffer,
+    y: u16,
+    h: usize,
+    pos: usize,
+    total: usize,
+    focused: bool,
+) {
     if let Some((at, thumb)) = thumb_span(h, pos, total) {
-        bar(pane, buf, y, h, at, thumb);
+        bar(pane, buf, y, h, at, thumb, focused);
     }
 }
 
@@ -102,26 +112,40 @@ pub fn thumb_span(h: usize, pos: usize, total: usize) -> Option<(usize, usize)> 
 
 /// A track and a thumb that are ALWAYS drawn: a pane with nothing to scroll yet says so with a
 /// full-height thumb rather than with no scrollbar at all — the terminal's, where `↑N more` was
-/// the only sign of a scrollback.
-pub fn bar_always(pane: Rect, buf: &mut Buffer, y: u16, h: usize, pos: usize, total: usize) {
+/// the only sign of a scrollback. `focused` is the thumb's accent: on only while the pane
+/// this bar belongs to has the keyboard.
+pub fn bar_always(
+    pane: Rect,
+    buf: &mut Buffer,
+    y: u16,
+    h: usize,
+    pos: usize,
+    total: usize,
+    focused: bool,
+) {
     if h < 2 {
         return;
     }
     if total <= h {
-        bar(pane, buf, y, h, 0, h);
+        bar(pane, buf, y, h, 0, h, focused);
         return;
     }
     let (at, thumb) = thumb_span(h, pos, total).expect("total > h says a thumb");
-    bar(pane, buf, y, h, at, thumb);
+    bar(pane, buf, y, h, at, thumb, focused);
 }
 
-/// The cells of one bar: the thumb is the accent role on the same `│` the track is — colour
-/// says which part of the view a cell names, never a fatter glyph.
-fn bar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, at: usize, thumb: usize) {
+/// The cells of one bar: the thumb is the accent role on the same `│` the track is while the
+/// pane has the keyboard, Strong otherwise — colour says which part of the view a cell names
+/// and who types, never a fatter glyph.
+fn bar(pane: Rect, buf: &mut Buffer, y: u16, h: usize, at: usize, thumb: usize, focused: bool) {
     for i in 0..h {
         let thumb_here = i >= at && i < at + thumb;
         let role = if thumb_here {
-            Role::UserAccent
+            if focused {
+                Role::UserAccent
+            } else {
+                Role::Strong
+            }
         } else {
             Role::Faint
         };
@@ -576,6 +600,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                 text_h,
                 ed.scroll_pos(),
                 ed.scroll_total(text_h),
+                ed.focus == Focus::Text,
             );
         }
 
@@ -697,7 +722,15 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
             // With the panel open the split rule is the bar — the preview's place in its
             // lines carried there, not drawn beside the rule as a second bar.
             if !ed.scrollbar_in_border {
-                scrollbar(area, buf, t0 + 1, rows, v.top, v.lines.len());
+                scrollbar(
+                    area,
+                    buf,
+                    t0 + 1,
+                    rows,
+                    v.top,
+                    v.lines.len(),
+                    ed.focus == Focus::Text,
+                );
             }
         }
     } // !foot_only: the pane's own rows

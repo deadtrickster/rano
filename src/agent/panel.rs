@@ -166,11 +166,19 @@ impl View<'_> {
         } else {
             self.title.clone()
         };
+        // The panel's focus is said here: its header carries the accent while the panel has
+        // the keyboard — the bar and the title both — and Strong otherwise, so no other
+        // surface's glass shows an accent.
+        let title_role = if self.focus {
+            Role::UserAccent
+        } else {
+            Role::Strong
+        };
         let mut spans = vec![
-            Span::role("▌ ", Role::UserAccent),
+            Span::role("▌ ", title_role),
             Span::role(
                 crate::width::text::truncate(&title, w.saturating_sub(3)),
-                Role::Strong,
+                title_role,
             ),
             Span::role(format!(" · {}", self.state), self.state_role),
         ];

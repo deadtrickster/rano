@@ -442,8 +442,8 @@ impl BottomTerm {
         self.lines_for(w, cwd, false)
     }
 
-    /// The strip's rows, with the active tab's caret painted dim unless the strip has the
-    /// keyboard (then the frame places the real one).
+    /// The strip's rows, with the active tab's caret painted in the theme's faint role
+    /// reversed unless the strip has the keyboard (then the frame places the real one).
     pub fn lines_for(&self, w: usize, cwd: &Path, focused: bool) -> Vec<Line> {
         let mut out = Vec::new();
         if self.tabs.is_empty() {
@@ -606,9 +606,12 @@ fn row_line(screen: &vt100::Screen, y: usize, cols: usize, focused: bool) -> Lin
             st = st.reverse();
         }
         if painted && cursor == Some((y as u16, x as u16)) {
-            // An unfocused strip's caret is painted and dim: the glass says who has the keyboard,
-            // and the real cursor is in the focused pane.
-            st = st.reverse().dim();
+            // An unfocused strip's caret is the theme's faint role REVERSED, replacing the
+            // cell's own style: the real cursor is in the focused pane. The theme is the
+            // mechanism — the base table's faint is `dim`, which some terminals ignore, and a
+            // theme file can name `faint` as a colour; either way the caret reads as the
+            // theme's own idea of unimportant, never as a bright block over a reverse cell.
+            st = crate::render::Style::of(crate::style::Role::Faint).reverse();
         }
         if st != style {
             if !text.is_empty() {
@@ -1095,10 +1098,9 @@ mod tests {
         assert!(row.starts_with('a'), "{row:?}");
         assert!(!row.starts_with("ab"), "the b is erased: {row:?}");
         assert!(
-            t.lines()[0]
-                .spans
-                .iter()
-                .any(|s| s.style.attrs.contains(crate::style::Attrs::REVERSE)),
+            t.lines()[0].spans.iter().any(|s| {
+                s.style == crate::render::Style::of(crate::style::Role::Faint).reverse()
+            }),
             "a caret cell"
         );
         unsafe {
@@ -1154,27 +1156,42 @@ mod tests {
     }
 
     /// The painted caret is for an UNFOCUSED strip only: a focused one's caret is the real
-    /// cursor, which the frame places, and drawing both would be two.
+    /// cursor, which the frame places, and drawing both would be two. Unfocused, it is the
+    /// theme's faint role REVERSED, REPLACING the cell's own style — a reverse-video cell
+    /// under the caret cannot stay a bright block, and a theme can name `faint` as a colour
+    /// where a terminal ignores `dim`.
     #[test]
     fn the_painted_caret_is_for_an_unfocused_strip_only() {
         let (mut t, slave) = pipe_tab();
-        write_all(slave, b"ab");
+        // A reverse-video line, then the caret at its end: the caret must REPLACE the cell's
+        // reverse style, not merge with it.
+        write_all(slave, b"\x1b[7mXX\x1b[0m");
         assert!(feed_until(&mut t, |t| t.lines()[0]
             .plain()
-            .starts_with("ab")));
-        let painted = |lines: Vec<Line>| {
-            lines[0].spans.iter().any(|s| {
-                s.style.attrs.contains(crate::style::Attrs::REVERSE)
-                    && s.style.attrs.contains(crate::style::Attrs::DIM)
-            })
-        };
+            .starts_with("XX")));
+        let faint_block = crate::render::Style::of(crate::style::Role::Faint).reverse();
+        let painted = |lines: Vec<Line>| lines[0].spans.iter().any(|s| s.style == faint_block);
         assert!(
             painted(t.lines_for(false)),
-            "painted and dim without the keyboard"
+            "the theme's faint block over a reverse cell"
         );
         assert!(
             !painted(t.lines_for(true)),
             "no painted caret with it: the real cursor is there"
+        );
+        // And the span is the caret cell alone, its own text kept: the caret is the faint
+        // block over the cell, not a bright block added to it.
+        let painted_lines = t.lines_for(false);
+        let span = painted_lines[0]
+            .spans
+            .iter()
+            .find(|s| s.style == faint_block)
+            .expect("the caret span");
+        assert_eq!(
+            span.content.trim(),
+            "",
+            "one cell, blank or not: {:?}",
+            span.content
         );
         unsafe {
             libc::close(slave);

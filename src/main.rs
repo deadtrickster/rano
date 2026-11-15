@@ -818,6 +818,174 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             buf.set_line(area.x, y, &rule, 1);
         }
     }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
+    if let Some(area) = lay.panel {
+        ed.panel.build(area.width as usize);
+        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
+        // the panel repeats them only when it is the whole frame and there is no bar to say them.
+        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
+            ed.key_hints()
+        } else {
+            Vec::new()
+        };
+        let chips: Vec<String> = ed
+            .panel
+            .chips
+            .iter()
+            .map(|c| c.label(&ed.panel.folder))
+            .collect();
+        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
+        ed.panel.scroll = drawn.scroll;
+        if drawn.cursor.is_some() {
+            cursor = drawn.cursor;
+        }
+    }
     if let Some(area) = lay.bottom {
         let cwd = std::env::current_dir().unwrap_or_default();
         let content_w = (area.width as usize).saturating_sub(1);
@@ -860,27 +1028,6 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             // thumb at the bottom of the track.
             let pos = history.saturating_sub(tab.scroll_pos());
             crate::ui::bar_always(area, buf, 2, h, pos, total);
-        }
-    }
-    if let Some(area) = lay.panel {
-        ed.panel.build(area.width as usize);
-        // The frame's key bar already shows the focused surface's keys when the editor is drawn;
-        // the panel repeats them only when it is the whole frame and there is no bar to say them.
-        let hints = if ed.focus == Focus::Panel && lay.editor.is_none() {
-            ed.key_hints()
-        } else {
-            Vec::new()
-        };
-        let chips: Vec<String> = ed
-            .panel
-            .chips
-            .iter()
-            .map(|c| c.label(&ed.panel.folder))
-            .collect();
-        let drawn = panel_view(ed, &hints, &chips).draw(area, buf);
-        ed.panel.scroll = drawn.scroll;
-        if drawn.cursor.is_some() {
-            cursor = drawn.cursor;
         }
     }
     cursor
@@ -1338,6 +1485,65 @@ mod panel_tests {
             "the prompt's caret is in the frame: {cur:?}"
         );
         assert!(!strip.contains(cur.0, cur.1), "and not in the strip");
+    }
+
+    /// With the panel open, the strip still has its scrollbar: the panel used to paint over
+    /// the strip's rows, track and all, because it was drawn after them.
+    #[test]
+    fn the_strip_keeps_its_scrollbar_with_the_panel_open() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.panel.open = true;
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Panel;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        // A conversation long enough that the panel's body paints every row it is given,
+        // including the rows the strip sits on: the panel's lines come from its session, and a
+        // long reply fills the column to its foot.
+        ed.panel.session = "s-1".to_string();
+        for i in 0..120 {
+            ed.panel
+                .rows
+                .push(rano::panel::Row::Note(format!("row {i}")));
+        }
+        for (w, h) in [(239u16, 68u16), (100, 30)] {
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            ed.bottom.tabs[0].send(b"seq 1 200\n");
+            let mut ready = false;
+            for _ in 0..600 {
+                ed.bottom.tabs[0].feed();
+                if ed.bottom.tabs[0]
+                    .lines()
+                    .iter()
+                    .any(|l| l.plain().trim() == "200")
+                {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(ready, "seq answered at {w}x{h}");
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let strip = lay.bottom.expect("a strip");
+            let right = (strip.x + strip.width - 1) as usize;
+            let rows = buf.emit(rano::render::Palette::None);
+            let col: Vec<char> = ((strip.y as usize + 2)..(strip.y + strip.height) as usize)
+                .map(|y| rows[y].chars().nth(right).unwrap_or(' '))
+                .collect();
+            assert!(
+                col.iter().all(|c| *c == '\u{2502}' || *c == '\u{2588}'),
+                "track or thumb at {w}x{h}: {col:?}"
+            );
+            assert!(
+                col.contains(&'\u{2588}'),
+                "the thumb is drawn at {w}x{h}: {col:?}"
+            );
+        }
     }
 
     /// A click in the strip takes the keyboard there; a click in the text gives it back.

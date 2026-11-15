@@ -283,10 +283,9 @@ fn run(
     let mut ed = Editor::new(buf, cfg);
     // A picture is drawn as placeholder cells a terminal may fill with garbage, so
     // M-P is refused by name where the protocol is not kitty.
-    ed.images = matches!(
-        terminal.features().proto,
-        rano::term::Proto::Kitty | rano::term::Proto::KittyPassthrough
-    );
+    // The detected protocol, not a guess: inside tmux the upload must be DCS-wrapped, and only
+    // `set_pictures` knows that — `images = true` alone would send it bare, as plain kitty.
+    ed.set_pictures(terminal.features().proto);
     ed.tmux_passthrough_off = terminal.features().tmux_passthrough_off;
     // `--edit`: the escape from the mode a `.log` name puts it in, set before any
     // load.

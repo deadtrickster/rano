@@ -36,7 +36,7 @@ struct Pen {
     attrs: Attrs,
     fg: Option<Ink>,
     bg: Option<Ink>,
-    underline: Option<u8>,
+    underline: Option<[u8; 3]>,
 }
 
 impl Pen {
@@ -73,7 +73,7 @@ impl Pen {
             out.push(s);
         }
         if let Some(u) = self.underline {
-            out.push(format!("58;5;{u}"));
+            out.push(format!("58;2;{};{};{}", u[0], u[1], u[2]));
         }
     }
 }
@@ -130,7 +130,7 @@ fn transition(from: Pen, to: Pen) -> String {
     }
     if from.underline != to.underline {
         match to.underline {
-            Some(u) => inc.push(format!("58;5;{u}")),
+            Some(u) => inc.push(format!("58;2;{};{};{}", u[0], u[1], u[2])),
             None => inc.push("59".into()),
         }
     }
@@ -306,7 +306,7 @@ mod tests {
                 "\u{10EEEE}",
                 Style::new().raw(Raw {
                     fg_rgb: Some([0, 0, 7]),
-                    underline: Some(1),
+                    underline: Some([0, 0, 1]),
                 }),
             ),
         ]);
@@ -365,7 +365,7 @@ mod tests {
     fn a_graphics_placeholder_row_survives_intact() {
         let raw = Raw {
             fg_rgb: Some([0x12, 0x34, 0x56]),
-            underline: Some(1),
+            underline: Some([0, 0, 1]),
         };
         let st = Style::new().raw(raw);
         let l = Line::new(vec![Span::styled(
@@ -375,7 +375,7 @@ mod tests {
         let r = row(&l, 3, Palette::Colour);
         assert_eq!(
             r,
-            "\x1b[38;2;18;52;86;58;5;1m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\u{10EEEE}\x1b[0m"
+            "\x1b[38;2;18;52;86;58;2;0;0;1m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\u{10EEEE}\x1b[0m"
         );
         assert_eq!(width(&r), 3);
     }

@@ -33,8 +33,9 @@ pub struct Style {
 pub struct Raw {
     /// A 24-bit foreground, `38;2;r;g;b`.
     pub fg_rgb: Option<[u8; 3]>,
-    /// An underline colour index, `58;5;n`.
-    pub underline: Option<u8>,
+    /// An underline colour as 24-bit RGB, `58;2;r;g;b`: a placement id rides it, and tmux
+    /// rewrites a palette index to RGB of its own choosing, which loses the id.
+    pub underline: Option<[u8; 3]>,
 }
 
 impl Style {
@@ -191,7 +192,7 @@ mod tests {
             .link("https://x.org")
             .raw(Raw {
                 fg_rgb: Some([1, 2, 3]),
-                underline: Some(1),
+                underline: Some([0, 0, 1]),
             });
         assert_eq!(s.look(Palette::None), Look::PLAIN);
     }

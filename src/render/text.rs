@@ -147,7 +147,7 @@ fn push_span_ansi(out: &mut String, sp: &Span, look: Look, restore: Option<Look>
         let _ = write!(out, "\x1b[38;2;{r};{g};{b}m");
     }
     if let Some(u) = raw.underline {
-        let _ = write!(out, "\x1b[58;5;{u}m");
+        let _ = write!(out, "\x1b[58;2;{};{};{}m", u[0], u[1], u[2]);
     }
     look.write_sgr(out);
     for_each_cell(&sp.content, |c| out.push_str(c.text));

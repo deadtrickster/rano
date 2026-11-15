@@ -196,6 +196,32 @@ impl Proto {
         }
     }
 
+    /// A whole stream of kitty sequences as this terminal must receive it: for tmux, EACH
+    /// sequence in its own DCS wrapper, so a 4096-byte chunk is a wrapper of its own and no
+    /// single wrapper grows past the multiplexer's input buffer.
+    pub fn wrap_stream(self, bytes: &[u8]) -> Vec<u8> {
+        match self {
+            Proto::None => Vec::new(),
+            Proto::Kitty | Proto::Iterm => bytes.to_vec(),
+            Proto::KittyPassthrough => {
+                let mut out = Vec::with_capacity(bytes.len() + 64);
+                let mut rest = bytes;
+                while !rest.is_empty() {
+                    // Each `ESC _G ... ESC \` is a sequence of its own; anything that is not one
+                    // goes out as it came.
+                    let end = rest
+                        .windows(2)
+                        .position(|w| w == b"\x1b\\")
+                        .map(|i| i + 2)
+                        .unwrap_or(rest.len());
+                    out.extend_from_slice(&self.wrap(&rest[..end]));
+                    rest = &rest[end..];
+                }
+                out
+            }
+        }
+    }
+
     /// A sequence as this terminal must receive it: unchanged for a direct kitty or iTerm2
     /// terminal, DCS-wrapped for tmux, dropped for [`Proto::None`] — a byte written to a terminal
     /// that cannot read it is text at the prompt.
@@ -356,6 +382,27 @@ mod tests {
             passthrough: pass,
             ..Env::default()
         }
+    }
+
+    /// A stream is wrapped sequence by sequence, so a 4096-byte chunk is a DCS of its own and
+    /// no single wrapper grows past the multiplexer's input buffer.
+    #[test]
+    fn a_stream_is_wrapped_sequence_by_sequence() {
+        fn count(hay: &[u8], needle: &[u8]) -> usize {
+            hay.windows(needle.len()).filter(|w| *w == needle).count()
+        }
+        let bytes = crate::term::graphics::image_upload(7, &"A".repeat(9000));
+        let wrapped = Proto::KittyPassthrough.wrap_stream(&bytes);
+        // 9000 bytes is three chunks, so three wrappers, not one long one.
+        assert_eq!(count(&wrapped, b"\x1bPtmux;"), 3, "one DCS per chunk");
+        // Every sequence's `ESC _G` is doubled inside its wrapper, never bare outside one.
+        assert_eq!(count(&wrapped, b"\x1b\x1b_G"), 3, "each sequence wrapped");
+        assert!(
+            wrapped.ends_with(b"\x1b\\"),
+            "and the last wrapper is closed"
+        );
+        // An unchanged protocol does not wrap at all.
+        assert_eq!(Proto::Kitty.wrap_stream(&bytes), bytes);
     }
 
     /// Inside tmux the client's own name decides, and passthrough is the gate: over ssh there is

@@ -169,8 +169,11 @@ impl Picture {
         match proto {
             Proto::None => Vec::new(),
             Proto::Kitty | Proto::KittyPassthrough => vec![
-                proto.wrap(&self.upload()),
-                proto.wrap(&graphics::image_place(self.id, cols, rows)),
+                // Each sequence in its own DCS wrapper: a 4096-byte chunk is a wrapper of its
+                // own, never one wrapper the size of the whole picture, which a multiplexer
+                // with a finite input buffer drops whole and silently.
+                proto.wrap_stream(&self.upload()),
+                proto.wrap_stream(&graphics::image_place(self.id, cols, rows)),
             ],
             // A picture that is pixels has no iTerm2 escape: that protocol carries a file, and
             // [`Picture::refusal`] is what the caller asked first.
@@ -338,7 +341,7 @@ mod tests {
         // `erasing_op`, and the shifts are what the colour is made of.
         let id: u32 = 7;
         let colour = format!(
-            "38;2;{};{};{};58;5;1",
+            "38;2;{};{};{};58;2;0;0;1",
             (id >> 16) & 0xff,
             (id >> 8) & 0xff,
             id & 0xff

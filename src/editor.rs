@@ -4289,7 +4289,7 @@ mod tests {
         let mut frame = crate::render::Buffer::empty(crate::render::Rect::new(0, 0, 120, 24));
         crate::ui::draw(&mut frame, &ed);
         let colour = format!(
-            "38;2;{};{};{};58;5;1m",
+            "38;2;{};{};{};58;2;0;0;1m",
             (id >> 16) & 0xff,
             (id >> 8) & 0xff,
             id & 0xff
@@ -4311,6 +4311,38 @@ mod tests {
         );
         assert!(out[1].contains("a=p,U=1") && out[1].contains(&format!("c={},", cells.0)));
         assert!(graphics(&mut ed).is_empty());
+    }
+
+    /// Inside tmux the upload, the placement and the delete are DCS-wrapped, each sequence in
+    /// its own wrapper, and the placeholder rows name the placement with 24 bits, not a palette
+    /// index the multiplexer would rewrite.
+    #[test]
+    fn a_provider_picture_in_tmux_is_uploaded_through_the_wrapper() {
+        let mut ed = view_ed("the buffer this picture replaced");
+        ed.set_pictures(crate::term::Proto::KittyPassthrough);
+        let path = PathBuf::from("/tmp/part.stl");
+        assert!(ed.open_provider_picture(&path, &plugin_pic(64, 48)));
+        let out = graphics(&mut ed);
+        assert_eq!(out.len(), 2, "{out:?}");
+        for seq in &out {
+            assert!(seq.starts_with("\x1bPtmux;"), "DCS-wrapped: {seq:.40}");
+            assert!(seq.ends_with("\x1b\\"), "and closed: {seq:.40}");
+            assert!(
+                !seq.contains("58;5;"),
+                "no palette index for tmux to rewrite"
+            );
+        }
+        // 64x48 RGB is 12288 base64 characters: three 4096-byte chunks, so three wrappers.
+        let dcs = out[0].matches("\x1bPtmux;").count();
+        assert_eq!(
+            dcs, 3,
+            "each 4096-byte chunk in its own DCS, not one giant one"
+        );
+        assert!(out[1].contains("a=p,U=1"), "the placement is made: {out:?}");
+        let style = ed.char_style_with(Pos { row: 0, col: 0 }, &[]);
+        let id = crate::term::graphics::image_id(&format!("plugin:{}", path.display()));
+        assert_eq!(style, crate::term::graphics::placeholder_style(id));
+        assert!(style.raw.underline.is_some(), "24-bit placement id");
     }
 
     /// A terminal without a picture protocol draws nothing, and false lets the

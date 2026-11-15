@@ -53,10 +53,13 @@ pub fn image_rows(id: u32, cols: u32, rows: u32) -> Vec<String> {
     // The image id in the foreground and the placement id in the underline colour, or a terminal
     // with two placements picks one itself.
     let colour = format!(
-        "\x1b[38;2;{};{};{}m\x1b[58;5;{PLACEMENT}m",
+        "\x1b[38;2;{};{};{}m\x1b[58;2;{};{};{}m",
         (id >> 16) & 0xff,
         (id >> 8) & 0xff,
-        id & 0xff
+        id & 0xff,
+        (PLACEMENT >> 16) & 0xff,
+        (PLACEMENT >> 8) & 0xff,
+        PLACEMENT & 0xff
     );
     (0..rows.min(IMAGE_MAX_ROWS))
         .map(|r| {
@@ -77,7 +80,11 @@ pub fn image_rows(id: u32, cols: u32, rows: u32) -> Vec<String> {
 pub fn placeholder_style(id: u32) -> Style {
     Style::new().raw(Raw {
         fg_rgb: Some([(id >> 16) as u8, (id >> 8) as u8, id as u8]),
-        underline: Some(PLACEMENT as u8),
+        underline: Some([
+            (PLACEMENT >> 16) as u8,
+            (PLACEMENT >> 8) as u8,
+            PLACEMENT as u8,
+        ]),
     })
 }
 
@@ -185,7 +192,7 @@ mod tests {
             "\x1b_Ga=d,d=i,i=9,q=2\x1b\\\x1b_Ga=p,U=1,i=9,p=1,c=40,r=5,q=2\x1b\\",
             "the image's old placements go first, then the one the rows name"
         );
-        assert!(image_rows(9, 4, 1)[0].contains("\x1b[58;5;1m"));
+        assert!(image_rows(9, 4, 1)[0].contains("\x1b[58;2;0;0;1m"));
         assert_ne!(image_id("a"), image_id("b"));
         assert!(image_id("") > 0 && image_id("x") <= 0xff_ffff);
         assert_eq!(
@@ -238,7 +245,7 @@ mod tests {
             b.set_line(2, i as u16, l, 20);
         }
         let colour = format!(
-            "38;2;{};{};{};58;5;{PLACEMENT}m",
+            "38;2;{};{};{};58;2;0;0;1m",
             (id >> 16) & 0xff,
             (id >> 8) & 0xff,
             id & 0xff

@@ -541,6 +541,10 @@ impl Editor {
     /// Bring the terminal's pictures in line with the open view: upload one it lacks,
     /// re-place one whose box moved, drop one no longer drawn.
     fn sync_image(&mut self) {
+        // The preview's own pictures are wrapped here, per sequence, exactly as `Picture::bytes`
+        // wraps the ones a `Pictures` holder owns: inside tmux every chunk needs its own DCS,
+        // and a bare APC is text the multiplexer shows on its status line.
+        let proto = self.picture_proto();
         let want = match &self.diff_view {
             Some(v) => v.images(),
             None => Vec::new(),
@@ -556,7 +560,7 @@ impl Editor {
         for id in stale {
             self.images_held.remove(&id);
             self.graphics_out
-                .push(crate::term::graphics::image_delete(id));
+                .push(proto.wrap_stream(&crate::term::graphics::image_delete(id)));
         }
         for (id, cells, png) in want {
             if self.images_held.get(&id) == Some(&cells) {
@@ -564,9 +568,9 @@ impl Editor {
             }
             self.images_held.insert(id, cells);
             self.graphics_out
-                .push(crate::term::graphics::image_upload(id, png));
+                .push(proto.wrap_stream(&crate::term::graphics::image_upload(id, png)));
             self.graphics_out
-                .push(crate::term::graphics::image_place(id, cells.0, cells.1));
+                .push(proto.wrap_stream(&crate::term::graphics::image_place(id, cells.0, cells.1)));
         }
     }
 

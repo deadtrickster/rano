@@ -442,8 +442,9 @@ impl BottomTerm {
         self.lines_for(w, cwd, false)
     }
 
-    /// The strip's rows, with the active tab's caret painted in the theme's faint role
-    /// reversed unless the strip has the keyboard (then the frame places the real one).
+    /// The strip's rows: the SHELL's rows only, the tabs living on the rule above them (see
+    /// [`BottomTerm::tab_rule`]). With the active tab's caret painted in the theme's faint
+    /// role reversed unless the strip has the keyboard (then the frame places the real one).
     pub fn lines_for(&self, w: usize, cwd: &Path, focused: bool) -> Vec<Line> {
         let mut out = Vec::new();
         if self.tabs.is_empty() {
@@ -453,24 +454,6 @@ impl BottomTerm {
             )]));
             return out.into_iter().map(|l| pad_to_width(l, w)).collect();
         }
-        // Real tabs: the index and the shell's title, the active one marked. A dead shell's
-        // title already carries its exit status. The keys are in the frame's bar, not here.
-        let mut strip = String::new();
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let mark = if i == self.active { ">" } else { " " };
-            strip.push_str(&format!("{mark}{} {}  ", i + 1, tab.title));
-        }
-        let mut strip = strip.trim_end().to_string();
-        // A scroll position that is off the bottom says so: the view is not the newest output, and
-        // that must be visible or a reader thinks the shell is quiet.
-        let scrolled = self.tabs[self.active].parser.screen().scrollback();
-        if scrolled > 0 {
-            strip.push_str(&format!(" ↑{scrolled} more"));
-        }
-        out.push(Line::new(vec![Span::role(
-            crate::width::text::truncate(&strip, w),
-            Role::Faint,
-        )]));
         out.extend(
             self.tabs[self.active]
                 .lines_for(focused)
@@ -481,6 +464,61 @@ impl BottomTerm {
         // short row painted over a longer one would leave the old row's tail behind. The parser
         // is not to blame — scrollback rows are stored trimmed, so padding belongs here.
         out.into_iter().map(|l| pad_to_width(l, w)).collect()
+    }
+
+    /// The strip's rule WITH ITS TABS: `── 1 sh ── 2 sh (exited 0) ─────`, the tabs separated
+    /// by rule, the row padded with rule to the width, the active tab Strong (the accent while
+    /// the strip has the keyboard) and the others faint, and the scroll counter — when the
+    /// view is off the bottom — at the right end. Drawing the tabs ON the rule costs no row
+    /// of the strip: an 11-row strip keeps its 11 rows of shell.
+    pub fn tab_rule(&self, w: usize, focused: bool) -> Line {
+        let rule_role = if focused {
+            Role::UserAccent
+        } else {
+            Role::Faint
+        };
+        if self.tabs.is_empty() {
+            let dashes = "─".repeat(w);
+            return Line::new(vec![Span::role(dashes, rule_role)]);
+        }
+        let scrolled = self.tabs[self.active].parser.screen().scrollback();
+        let more = if scrolled > 0 {
+            format!("↑{scrolled} ")
+        } else {
+            String::new()
+        };
+        let mut spans: Vec<Span> = Vec::new();
+        let mut used = 0usize;
+        // The rule carries the strip's focus (the accent while the shell types); the active
+        // tab is marked by weight upon it.
+        let active_role = Role::Strong;
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let label = format!("{} {}", i + 1, tab.title);
+            let sep = if i == 0 { "── " } else { " ── " };
+            let need = sep.chars().count() + label.chars().count();
+            // The counter has the right end reserved; a tab that would run into it is
+            // dropped, never cut — a tab half-drawn is a tab that lies.
+            if used + need + more.chars().count() + 1 > w {
+                break;
+            }
+            spans.push(Span::role(sep.to_string(), rule_role));
+            spans.push(Span::role(
+                label,
+                if i == self.active {
+                    active_role
+                } else {
+                    Role::Faint
+                },
+            ));
+            used += need;
+        }
+        // The rule to the width, then the counter at the right end.
+        let pad = w.saturating_sub(used + more.chars().count() + 1);
+        spans.push(Span::role(" ".to_string() + &"─".repeat(pad), rule_role));
+        if !more.is_empty() {
+            spans.push(Span::role(more, Role::Strong));
+        }
+        Line::new(spans)
     }
 }
 

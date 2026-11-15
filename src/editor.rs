@@ -1703,11 +1703,11 @@ impl Editor {
         // history, exactly as the text pane's scrollbar is. The thumb is the one sum every
         // bar shares, so the click lands where the drawing is.
         if let Some(tab) = self.bottom.tabs.get_mut(self.bottom.active) {
-            let content_h = (strip_h as usize).saturating_sub(2);
+            let content_h = (strip_h as usize).saturating_sub(1);
             let total = tab.history_len() + tab.screen_rows();
             if let Some((_, thumb)) = crate::ui::thumb_span(content_h, 0, total) {
                 let travel = content_h - thumb;
-                let first = strip_y as usize + 2;
+                let first = strip_y as usize + 1;
                 let travel_max = total - content_h;
                 if matches!(
                     m.kind,

@@ -814,12 +814,12 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
 }
 
 /// The pty is the strip's rectangle — the text column's width while the panel is open, the
-/// frame's while it is not — and only the rows that are drawn: the rule and the tab strip are
-/// not the shell's. Called every frame, so a frame resize, a dragged rule and M-i all reach the
-/// shell as TIOCSWINSZ.
+/// frame's while it is not — and only the rows that are drawn: the rule (with its tabs on
+/// it) is not the shell's. Called every frame, so a frame resize, a dragged rule and M-i all
+/// reach the shell as TIOCSWINSZ.
 fn sync_bottom_size(ed: &mut Editor, lay: &Layout) {
     if let Some(area) = lay.bottom {
-        let rows = (area.height as usize).saturating_sub(2).max(1) as u16;
+        let rows = (area.height as usize).saturating_sub(1).max(1) as u16;
         // One column narrower: the strip's last column is the scrollbar, and no shell output
         // may sit under it.
         let cols = area.width.saturating_sub(1).max(1);
@@ -905,15 +905,18 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         let lines = ed
             .bottom
             .lines_for(content_w, &cwd, ed.focus == Focus::Terminal);
-        // A rule above the strip: the terminal is a pane, not more of the file's text — and
-        // the terminal's focus is said here, the rule carrying the accent while the shell
-        // has the keyboard.
+        // A rule above the strip, and the TABS LIVE ON IT: `── 1 sh ── 2 sh ─────` costs no
+        // row of the strip, the active tab carrying the mark, the scroll counter at the right
+        // end. The terminal is a pane, not more of the file's text. The terminal's focus is
+        // said here too: the tabs take the accent while the shell has the keyboard.
         let term_rule = if ed.focus == Focus::Terminal {
             Style::of(Role::UserAccent)
         } else {
             Style::of(Role::Faint)
         };
-        let rule = Line::styled("─".repeat(area.width as usize), term_rule.clone());
+        let rule = ed
+            .bottom
+            .tab_rule(area.width as usize, ed.focus == Focus::Terminal);
         buf.set_line(area.x, area.y, &rule, area.width as usize);
         // Where the strip's rule meets the split rule the two join: one drawn corner, not two
         // lines that happen to touch.
@@ -939,17 +942,18 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
         {
             // `cursor_position()` answers (row, column): the frame takes (x, y), so the row is
             // the y and the column the x — used the other way round, the caret walked the strip
-            // sideways and landed on the key bar with a two-line prompt.
-            cursor = Some((area.x + ccol, area.y + 2 + crow));
+            // sideways and landed on the key bar with a two-line prompt. The tabs took a row
+            // once; living on the rule, the shell's rows start one higher.
+            cursor = Some((area.x + ccol, area.y + 1 + crow));
         }
         if let Some(tab) = ed.bottom.tabs.get(ed.bottom.active) {
-            let h = (area.height as usize).saturating_sub(2);
+            let h = (area.height as usize).saturating_sub(1);
             let history = tab.history_len();
             let total = history + tab.screen_rows();
             // `pos` counts from the top of the history: offset 0 is its foot, which is the
             // thumb at the bottom of the track.
             let pos = history.saturating_sub(tab.scroll_pos());
-            crate::ui::bar_always(area, buf, 2, h, pos, total, ed.focus == Focus::Terminal);
+            crate::ui::bar_always(area, buf, 1, h, pos, total, ed.focus == Focus::Terminal);
         }
     }
     if let Some(area) = lay.foot {
@@ -1153,7 +1157,7 @@ mod panel_tests {
         let lay = layout(100, 40, &ed, None);
         sync_bottom_size(&mut ed, &lay);
         let strip = lay.bottom.expect("a strip");
-        let rows = strip.height - 2;
+        let rows = strip.height - 1;
         ed.bottom.tabs[0].send(b"PS1='PROMPT> '\n");
         ed.bottom.tabs[0].send(b"stty size\n");
         // The pty is one column narrower than the strip: the last column is the scrollbar.
@@ -1197,7 +1201,7 @@ mod panel_tests {
         let lay2 = layout(80, 30, &ed, None);
         sync_bottom_size(&mut ed, &lay2);
         let strip2 = lay2.bottom.expect("a strip");
-        let want2 = format!("{} {}", strip2.height - 2, strip2.width - 1);
+        let want2 = format!("{} {}", strip2.height - 1, strip2.width - 1);
         ed.bottom.tabs[0].send(b"stty size\n");
         assert!(
             feed_until(&mut ed, |l| l.trim().ends_with(&want2)),
@@ -1248,7 +1252,7 @@ mod panel_tests {
             // The shell must be told the rectangle it was given: stty says the drawn columns.
             ed.bottom.tabs[0].send(b"PS1='PROMPT> '\n");
             ed.bottom.tabs[0].send(b"stty size\n");
-            let want = format!("{} {}", strip.height - 2, strip.width - 1);
+            let want = format!("{} {}", strip.height - 1, strip.width - 1);
             assert!(
                 feed_until(&mut ed, |l| l.trim().ends_with(&want)),
                 "stty is the text column at {w}x{h}: {want}"
@@ -1316,7 +1320,7 @@ mod panel_tests {
             ed.bottom.tabs[0].send(b"clear\n");
             assert!(feed_until(&mut ed, |l| l.contains("PROMPT> ")));
             ed.bottom.tabs[0].send(b"stty size\n");
-            let want_wide = format!("{} {}", wide.height - 2, wide.width - 1);
+            let want_wide = format!("{} {}", wide.height - 1, wide.width - 1);
             assert!(
                 feed_until(&mut ed, |l| l.trim().ends_with(&want_wide)),
                 "after M-i the pty is the frame at {w}x{h}: {want_wide}"
@@ -1354,7 +1358,7 @@ mod panel_tests {
         let wheel = MouseEvent {
             kind: MouseKind::WheelUp,
             x: 10,
-            y: strip.y + 2,
+            y: strip.y + 1,
             mods: Mods::NONE,
         };
         assert!(
@@ -1534,7 +1538,7 @@ mod panel_tests {
         assert!((3..8).contains(&after), "just after abc: {caret:?}");
         let row = caret.1;
         assert!(
-            (strip.y + 2..strip.y + strip.height).contains(&row),
+            (strip.y + 1..strip.y + strip.height).contains(&row),
             "inside the shell's rows: {caret:?}"
         );
         // A printed line moves the caret down a row, not sideways.
@@ -1654,9 +1658,10 @@ mod panel_tests {
             let right = (strip.x + strip.width - 1) as usize;
             // One glyph the whole way down — the thumb is told from the track by role, not by
             // a fatter glyph. The panel holds the keyboard here, so the thumb is Strong (the
-            // accent is the focused surface's alone) and the track faint.
+            // accent is the focused surface's alone) and the track faint. The shell's rows
+            // start one below the rule — the tabs live ON the rule.
             let faint = Style::of(Role::Faint);
-            let col: Vec<(char, bool)> = ((strip.y as usize + 2)
+            let col: Vec<(char, bool)> = ((strip.y as usize + 1)
                 ..(strip.y + strip.height) as usize)
                 .map(|y| {
                     buf.cell(right as u16, y as u16)
@@ -1781,7 +1786,7 @@ mod panel_tests {
         let right = (strip.x + strip.width - 1) as usize;
         let accent = Style::of(Role::UserAccent);
         let track = |buf: &rano::render::Buffer| -> Vec<(char, bool)> {
-            ((strip.y as usize + 2)..(strip.y + strip.height) as usize)
+            ((strip.y as usize + 1)..(strip.y + strip.height) as usize)
                 .map(|y| {
                     buf.cell(right as u16, y as u16)
                         .map(|c| (c.symbol.chars().next().unwrap_or(' '), c.style == accent))
@@ -1814,7 +1819,7 @@ mod panel_tests {
         assert!(
             buf.emit(rano::render::Palette::None)
                 .join("")
-                .contains("↑3 more"),
+                .contains("↑3"),
             "the counter agrees with the thumb"
         );
         // A key is an answer to the newest output: back to the bottom, thumb and all.
@@ -2199,6 +2204,66 @@ mod panel_tests {
         }
     }
 
+    /// The tabs live ON the rule's own row: `── 1 sh ── 2 sh ─────` costs no row of the strip
+    /// — an 11-row strip keeps its 11 rows of shell, where `>1 sh` on a row of its own took
+    /// one — the active tab carries the mark, and the scroll counter sits at the right end.
+    #[test]
+    fn the_tabs_live_on_the_rules_own_row() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 11;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a first shell");
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a second shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let strip = lay.bottom.expect("a strip");
+        // The pty is the strip minus its rule only: the tabs took no row of their own.
+        ed.bottom.tabs[1].send(b"stty size\n");
+        let want = format!("{} {}", strip.height - 1, strip.width - 1);
+        assert!(
+            feed_until(&mut ed, |l| l.trim().ends_with(&want)),
+            "an 11-row strip keeps {} rows of shell: {want}",
+            strip.height - 1
+        );
+        ed.bottom.tabs[1].send(b"seq 1 200\n");
+        assert!(feed_until(&mut ed, |l| l.trim() == "200"), "seq answered");
+        ed.bottom.tabs[1].scroll_up(3);
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rule = buf.emit(rano::render::Palette::None)[strip.y as usize].clone();
+        // The tabs are ON the rule, separated by it, the active one among them.
+        assert!(
+            rule.contains("── 1 sh") && rule.contains(" ── 2 sh"),
+            "the rule carries the tabs: {rule:?}"
+        );
+        // The counter is the right end of the row.
+        assert!(
+            rule.trim_end().ends_with("↑3"),
+            "the counter is at the right end: {rule:?}"
+        );
+        // The rule carries the accent while the strip has the keyboard; the active tab is
+        // marked by weight upon it (Strong) and the inactive one faint.
+        let accent = Style::of(Role::Strong);
+        // Cells count CHARS, `find` answers BYTES, and a `─` is three bytes.
+        let cell_at = |needle: &str| rule[..rule.find(needle).expect(needle)].chars().count();
+        let at = cell_at("2 sh");
+        let cell = buf.cell(at as u16, strip.y).expect("a rule cell");
+        assert_eq!(cell.style, accent, "the active tab carries the mark");
+        let old = cell_at("1 sh");
+        let cell = buf.cell(old as u16, strip.y).expect("a rule cell");
+        assert_eq!(
+            cell.style,
+            Style::of(Role::Faint),
+            "the inactive tab stays faint"
+        );
+    }
+
     /// The strip is real tabs — index, title, the active one marked, the exit status when the
     /// shell is gone — and the terminal's keys are in the frame's bar while it has focus.
     #[test]
@@ -2220,7 +2285,11 @@ mod panel_tests {
         draw_frame(&mut buf, &mut ed, &lay);
         let rows = buf.emit(rano::render::Palette::None);
         let frame = rows.join("\n");
-        assert!(frame.contains(">2 sh"), "the active tab is marked: {frame}");
+        let rule = &rows[lay.bottom.map(|s| s.y as usize).unwrap_or(0)];
+        assert!(
+            rule.contains("── 1 sh") && rule.contains("── 2 sh"),
+            "the rule carries both tabs: {rule:?}"
+        );
         assert!(frame.contains("1 sh"), "the other tab is there by index");
         assert!(
             !frame.contains("(M-n new"),
@@ -2266,9 +2335,7 @@ mod panel_tests {
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
         draw_frame(&mut buf, &mut ed, &lay);
         assert!(
-            buf.emit(rano::render::Palette::None)
-                .join("")
-                .contains("more"),
+            buf.emit(rano::render::Palette::None).join("").contains("↑"),
             "the strip says how far back the view is"
         );
         // A key through the host's path is the shell's input, and the view snaps to the bottom.
@@ -2281,10 +2348,7 @@ mod panel_tests {
         );
         draw_frame(&mut buf, &mut ed, &lay);
         let rows = buf.emit(rano::render::Palette::None);
-        assert!(
-            !rows.join("").contains("more"),
-            "the marker is gone: {rows:?}"
-        );
+        assert!(!rows.join("").contains("↑"), "the marker is gone: {rows:?}");
     }
 
     /// Scrolled back, a short history row painted over a longer live row leaves no tail: the

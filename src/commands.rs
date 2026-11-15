@@ -1415,6 +1415,23 @@ impl Editor {
     /// The bar's entries for what is in effect, `(key, title)` in the configured
     /// notation: a pending prefix, the global layer's [`BAR`], or a mode's maps.
     pub(crate) fn bar_items(&self) -> Vec<(String, String)> {
+        if self.focus == crate::editor::Focus::Terminal && self.bottom.open {
+            // The terminal's chords, said in the frame's bar where a reader looks for keys —
+            // not baked into the tab strip. Fixed chords until K2 puts them in a map the bar
+            // can read like every other map's.
+            return [
+                ("M-0", "Text"),
+                ("M-n", "New Tab"),
+                ("M-w", "Close Tab"),
+                ("M-[", "Prev Tab"),
+                ("M-]", "Next Tab"),
+                ("PgUp", "Scroll Back"),
+                ("PgDn", "Scroll Forward"),
+            ]
+            .iter()
+            .map(|(k, t)| (k.to_string(), t.to_string()))
+            .collect();
+        }
         let nano = self.config.notation;
         let note = |seq: &[Key]| crate::help::notation(nano, seq);
         let stack = self.active_keymaps();

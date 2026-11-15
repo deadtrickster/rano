@@ -1201,6 +1201,53 @@ mod panel_tests {
         assert!(!ed.panel.open && !ed.panel.zoom);
     }
 
+    /// The strip is real tabs — index, title, the active one marked, the exit status when the
+    /// shell is gone — and the terminal's keys are in the frame's bar while it has focus.
+    #[test]
+    fn the_strip_is_real_tabs_and_the_bar_has_the_terminals_keys() {
+        use std::path::Path;
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a first shell");
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a second shell");
+        let lay = layout(120, 40, &ed, None);
+        sync_bottom_size(&mut ed, &lay);
+        let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
+        draw_frame(&mut buf, &mut ed, &lay);
+        let rows = buf.emit(rano::render::Palette::None);
+        let frame = rows.join("\n");
+        assert!(frame.contains(">2 sh"), "the active tab is marked: {frame}");
+        assert!(frame.contains("1 sh"), "the other tab is there by index");
+        assert!(
+            !frame.contains("(M-n new"),
+            "no literal key text in the strip"
+        );
+        assert!(frame.contains("New Tab"), "the bar has the terminal's keys");
+        assert!(frame.contains("Close Tab"), "all of them");
+        // A shell that exits says so in its tab.
+        ed.bottom.tabs[1].send(b"exit 42\n");
+        for _ in 0..600 {
+            ed.bottom.tabs[1].feed();
+            if ed.bottom.tabs[1].exited.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ed.bottom.tabs[1].exited, Some(42), "the exit was noticed");
+        draw_frame(&mut buf, &mut ed, &lay);
+        let frame = buf.emit(rano::render::Palette::None).join("\n");
+        assert!(
+            frame.contains("exited 42"),
+            "the tab says the status: {frame}"
+        );
+    }
+
     /// Scrolled back, a key sent to the shell snaps the view to the bottom: the strip's "N more"
     /// marker is gone, because the operator is answering the newest output now.
     #[test]

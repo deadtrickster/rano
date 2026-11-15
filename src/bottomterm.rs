@@ -395,12 +395,14 @@ impl BottomTerm {
             )]));
             return out.into_iter().map(|l| pad_to_width(l, w)).collect();
         }
-        let mut strip = String::from("tabs ");
-        for (i, _) in self.tabs.iter().enumerate() {
+        // Real tabs: the index and the shell's title, the active one marked. A dead shell's
+        // title already carries its exit status. The keys are in the frame's bar, not here.
+        let mut strip = String::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
             let mark = if i == self.active { ">" } else { " " };
-            strip.push_str(&format!("{mark}{} ", i + 1));
+            strip.push_str(&format!("{mark}{} {}  ", i + 1, tab.title));
         }
-        strip.push_str("(M-n new, M-[ M-] switch, M-w close)");
+        let mut strip = strip.trim_end().to_string();
         // A scroll position that is off the bottom says so: the view is not the newest output, and
         // that must be visible or a reader thinks the shell is quiet.
         if self.tabs[self.active].parser.scroll > 0 {

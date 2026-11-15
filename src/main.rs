@@ -1875,6 +1875,76 @@ mod panel_tests {
         }
     }
 
+    /// The text fills its column down to the strip, and the title bar spans the frame: proved
+    /// against a real pty, not the layout's rects — the rects were equal while the editor left
+    /// three blank rows above the strip because it still subtracted the foot's rows from its
+    /// text height.
+    #[test]
+    fn the_text_fills_its_column_and_the_title_spans_it() {
+        use std::path::Path;
+        let mut ed = editor();
+        // A file long enough that the editor has lines to draw past where the foot was.
+        let text = (1..=120)
+            .map(|i| format!("line {i} of the file"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut file_buf = rano::buffer::Buffer::new();
+        file_buf.set_rows(text.lines().map(|l| l.chars().collect()).collect());
+        file_buf.name = Some(PathBuf::from("fill.txt"));
+        // Rebuild the editor with this buffer: the one the test drives is fresh, so swap.
+        ed = Editor::new(file_buf, Config::default());
+        ed.push_keymap(host_map());
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.focus = Focus::Terminal;
+        ed.bottom
+            .new_tab(Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        for (w, h) in [(239u16, 68u16), (100, 30)] {
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let strip = lay.bottom.expect("a strip");
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let rows = buf.emit(rano::render::Palette::None);
+            // B: the row directly above the strip's rule holds a buffer line in its gutter.
+            let above = (strip.y as usize).saturating_sub(1);
+            assert!(
+                rows[above]
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit()),
+                "B: the row above the strip's rule is a buffer line at {w}x{h}: {:?}",
+                &rows[above][..40.min(rows[above].len())]
+            );
+            // C: the title bar's reverse band spans the frame — read the styled copy, which
+            // keeps the video attributes the plain copy trims.
+            let styled = buf.emit(rano::render::Palette::Colour);
+            let visible = styled[0].replace("\u{1b}[7m", "").replace("\u{1b}[0m", "");
+            assert!(
+                visible.chars().count() >= w as usize,
+                "C: the title spans the frame at {w}x{h}: {} wide",
+                visible.chars().count()
+            );
+            // Close the panel (it is closed here) and reopen: still spans.
+            ed.panel.open = true;
+            let lay = layout(w, h, &ed, None);
+            sync_bottom_size(&mut ed, &lay);
+            let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, w, h));
+            draw_frame(&mut buf, &mut ed, &lay);
+            let styled = buf.emit(rano::render::Palette::Colour);
+            let er = lay.editor.expect("an editor");
+            let visible = styled[0].replace("\u{1b}[7m", "").replace("\u{1b}[0m", "");
+            assert!(
+                visible.chars().count() >= er.width as usize,
+                "C: the title spans its column with the panel at {w}x{h}: {}",
+                visible.chars().count()
+            );
+            ed.panel.open = false;
+        }
+    }
+
     /// The terminal's bar says what the terminal answers: its own chords, and none of the
     /// editor commands that a focused shell would swallow.
     #[test]
@@ -1894,6 +1964,9 @@ mod panel_tests {
                 "an editor command the shell would swallow: {bar:?}"
             );
         }
+        // The host's surface keys apply while the shell has focus: the panel and the crossing.
+        assert!(says("Panel"), "the host's surface keys: {bar:?}");
+        assert!(says("Cross"));
     }
 
     /// With the panel and the terminal both open, the composer and the key hints are drawn once

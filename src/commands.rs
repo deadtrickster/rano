@@ -1602,6 +1602,22 @@ impl Editor {
                     out.push((note(std::slice::from_ref(k)), cmd.title.to_string()));
                 }
             }
+            // The host's surface keys apply wherever the keyboard is: the panel and the crossing
+            // are reachable from the shell too.
+            let host: Vec<&crate::keymap::Keymap> = self.host_keymaps.iter().rev().collect();
+            for m in host {
+                for (k, e) in m.entries() {
+                    if let Entry::Command(c) = e
+                        && !out.iter().any(|(key, _)| {
+                            crate::keymap::lookup(&[term], std::slice::from_ref(k))
+                                == crate::keymap::Lookup::Command(c.as_str())
+                        })
+                        && let Some(cmd) = command(c)
+                    {
+                        out.push((note(std::slice::from_ref(k)), cmd.title.to_string()));
+                    }
+                }
+            }
             return out;
         }
         if self

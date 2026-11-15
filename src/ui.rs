@@ -399,8 +399,15 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
         Paragraph::new("Terminal too small").render(whole, buf);
         return None;
     }
-    // A foot-sized pane has no text rows; the overlays below clamp it anyway.
-    let text_h = (area.height as usize).saturating_sub(chrome_rows);
+    // A foot-sized pane has no text rows; the overlays below clamp it anyway. When the host
+    // draws the foot bar, the editor's text runs to the bottom of its area — the status and key
+    // rows are not its to reserve.
+    let reserved = if ed.foot_drawn_by_host {
+        usize::from(chrome.top())
+    } else {
+        chrome_rows
+    };
+    let text_h = (area.height as usize).saturating_sub(reserved);
     let t0 = chrome.top();
     let head = || {
         if chrome.bare() {

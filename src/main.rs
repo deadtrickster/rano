@@ -1686,6 +1686,10 @@ mod panel_tests {
 
     /// Scrolled back, a short history row painted over a longer live row leaves no tail: the
     /// terminal's rows are the pane's width, because `Buffer::set_line` writes only the spans.
+    /// The shell's prompt is set here rather than trusted: the operator's own hook prints a
+    /// timestamped line per command, which moves every row the scroll lands on. The marker is
+    /// `\132` on the command line and `Z` in the output, so echo and output are distinct by
+    /// construction — and the tail is a RUN of Zs, never one.
     #[test]
     fn a_short_history_row_leaves_no_tail_of_the_long_row_it_covers() {
         use std::path::Path;
@@ -1697,12 +1701,36 @@ mod panel_tests {
             .expect("a shell");
         let lay = layout(120, 40, &ed, None);
         sync_bottom_size(&mut ed, &lay);
+        // One prompt shape, no per-command hook: the rows the scroll lands on are then the
+        // same on every machine, whatever ~/.bashrc prints.
+        ed.bottom.tabs[0].send(b"PROMPT_COMMAND=\n");
+        ed.bottom.tabs[0].send(b"PS1='P> '\n");
         ed.bottom.tabs[0].send(b"seq 1 30\n");
-        ed.bottom.tabs[0].send(b"head -c 40 /dev/zero | tr '\\0' 'Z'; echo\n");
+        // `\132` is a Z in the output and four characters in the echo: the echoed command
+        // cannot satisfy a Z assertion, whichever rows the scroll lands on.
+        ed.bottom.tabs[0].send(b"head -c 40 /dev/zero | tr '\\0' '\\132'; echo\n");
+        // Both conditions, not the first: the long row is on the glass AND the shell has come
+        // back to its prompt — under load the two land some time apart.
         assert!(
             feed_until(&mut ed, |l| l.contains("ZZZZZZ")),
             "the long row is on the live screen"
         );
+        let settled = |ed: &mut Editor| {
+            for _ in 0..3000 {
+                let tab = &mut ed.bottom.tabs[ed.bottom.active];
+                tab.feed();
+                let prompt_back = tab
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.plain().trim_end().ends_with("P>"));
+                if prompt_back {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        assert!(settled(&mut ed), "the shell came back to its prompt");
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
         draw_frame(&mut buf, &mut ed, &lay);
         assert!(
@@ -1718,11 +1746,11 @@ mod panel_tests {
         let rows = buf.emit(rano::render::Palette::None);
         let tail = rows
             .iter()
-            .find(|r| r.contains('Z'))
+            .find(|r| r.contains("ZZZZZZ"))
             .cloned()
             .unwrap_or_default();
         assert!(
-            !tail.contains('Z'),
+            !tail.contains("ZZZZZZ"),
             "a tail of the old row survived: {tail:?}"
         );
     }

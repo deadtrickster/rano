@@ -256,7 +256,7 @@ mod tests {
         ed.paste_text("echo pasted-123");
         let tab = &mut ed.bottom.tabs[ed.bottom.active];
         let mut seen = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             tab.feed();
             if tab.lines().iter().any(|l| l.plain().contains("pasted-123")) {
                 seen = true;
@@ -278,7 +278,7 @@ mod tests {
             .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
             .expect("a shell");
         ed.bottom.tabs[0].send(b"exit 0\n");
-        for _ in 0..600 {
+        for _ in 0..3000 {
             ed.bottom.tabs[0].feed();
             if ed.bottom.tabs[0].exited.is_some() {
                 break;
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(text(&ed), before, "the buffer is unmodified");
         let tab = &mut ed.bottom.tabs[0];
         let mut seen = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             tab.feed();
             if tab.lines().iter().any(|l| l.plain().contains('y')) {
                 seen = true;
@@ -356,7 +356,7 @@ mod tests {
         let file = "/tmp/rano-alt-less.txt";
         ed.bottom.tabs[0].send(format!("seq 1 300 > {file}; less {file}\n").as_bytes());
         let mut top = String::new();
-        for _ in 0..600 {
+        for _ in 0..3000 {
             ed.bottom.tabs[0].feed();
             top = ed.bottom.tabs[0].lines()[0].plain();
             if top.trim() == "1" {
@@ -368,7 +368,7 @@ mod tests {
         // PgDn through the host path: the map's scroll-down, but the program has the screen.
         super::key(&mut ed, key(KeyCode::PageDown, Mods::NONE));
         let mut moved = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             ed.bottom.tabs[0].feed();
             if ed.bottom.tabs[0].lines()[0].plain().trim() != "1" {
                 moved = true;

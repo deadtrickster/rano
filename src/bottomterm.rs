@@ -780,7 +780,7 @@ mod tests {
             "Drop returned in {elapsed:?}, not parked behind a child that ignores SIGHUP"
         );
         let mut gone = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             // A zombie still answers kill(pid, 0); ESRCH means the pid was reaped.
             let r = unsafe { libc::kill(pid, 0) };
             if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
@@ -874,9 +874,11 @@ mod tests {
     #[test]
     fn a_shell_that_exits_is_noticed_and_titled() {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        // A shell with no PS1 prints no prompt, and a gate box may spawn one that is not
+        // interactive at all until it has read a line: give it a line to run.
         t.send(b"exit 42\n");
         let mut noticed = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             t.feed();
             if t.exited.is_some() {
                 noticed = true;
@@ -926,7 +928,7 @@ mod tests {
             t.send(b"stty size\n");
             let want = format!("{rows} {cols}");
             let mut saw = false;
-            for _ in 0..600 {
+            for _ in 0..3000 {
                 t.feed();
                 if t.lines().iter().any(|l| l.plain().trim().ends_with(&want)) {
                     saw = true;
@@ -948,7 +950,7 @@ mod tests {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"echo $TERM\n");
         let mut saw = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             t.feed();
             if t.lines()
                 .iter()
@@ -974,7 +976,7 @@ mod tests {
         t.send(b"yes | head -1\n");
         t.send(b"echo after-pipe\n");
         let mut answered = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             t.feed();
             if t.lines()
                 .iter()
@@ -1109,6 +1111,14 @@ mod tests {
     #[test]
     fn clear_and_seq_leave_three_lines_and_a_prompt() {
         let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
+        // The prompt this waits for is not the shell's own: a gate box spawns one with no PS1,
+        // which never prints `$ `. Set one, so what is waited for can actually arrive.
+        t.send(b"PS1='$ '\n");
+        assert!(feed_until(&mut t, |t| {
+            t.lines()
+                .iter()
+                .any(|l| l.plain().trim_end().ends_with('$'))
+        }));
         t.send(b"clear; seq 1 3\n");
         // The numbers and the prompt that follows them: `seq` finishing is not the prompt
         // arriving, and a gate under load can put seconds between the two.

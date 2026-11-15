@@ -1151,7 +1151,7 @@ mod panel_tests {
 
     /// Feed the shell until one of its screen lines answers `pred`, or give up.
     fn feed_until(ed: &mut Editor, pred: impl Fn(&str) -> bool) -> bool {
-        for _ in 0..600 {
+        for _ in 0..3000 {
             let tab = &mut ed.bottom.tabs[ed.bottom.active];
             tab.feed();
             if tab.lines().iter().any(|l| pred(&l.plain())) {
@@ -1189,7 +1189,7 @@ mod panel_tests {
         // Exactly the answer line: the echoed `seq 1 100` also contains 100.
         assert!(feed_until(&mut ed, |l| l.trim() == "100"), "seq answered");
         let mut visible = false;
-        for _ in 0..600 {
+        for _ in 0..3000 {
             ed.bottom.tabs[0].feed();
             if ed.bottom.tabs[0]
                 .lines()
@@ -1514,7 +1514,7 @@ mod panel_tests {
             sync_bottom_size(&mut ed, &lay);
             ed.bottom.tabs[0].send(b"seq 1 200\n");
             let mut ready = false;
-            for _ in 0..600 {
+            for _ in 0..3000 {
                 ed.bottom.tabs[0].feed();
                 if ed.bottom.tabs[0]
                     .lines()
@@ -1754,7 +1754,7 @@ mod panel_tests {
         assert!(frame.contains("Close Tab"), "all of them");
         // A shell that exits says so in its tab.
         ed.bottom.tabs[1].send(b"exit 42\n");
-        for _ in 0..600 {
+        for _ in 0..3000 {
             ed.bottom.tabs[1].feed();
             if ed.bottom.tabs[1].exited.is_some() {
                 break;

@@ -12,6 +12,9 @@ use std::path::Path;
 use crate::render::{Line, Span};
 use crate::style::Role;
 
+/// How many bytes a tab drains per tick before handing the terminal back.
+const FEED_BUDGET: usize = 256 * 1024;
+
 /// One shell: the pty it writes to, its process, and the emulator that makes a screen of it.
 pub struct Tab {
     parser: Vt,
@@ -69,14 +72,26 @@ impl Tab {
 
     /// Whatever the shell wrote since the last pass, into the emulator.
     pub fn feed(&mut self) -> bool {
+        self.feed_budget(FEED_BUDGET)
+    }
+
+    /// A per-tick budget: a shell that never stops writing (`yes`) must not freeze the editor.
+    /// Each read is capped at what is left of the budget, so the rest is still in the pty for the
+    /// next tick and the panel keeps answering keys.
+    fn feed_budget(&mut self, mut budget: usize) -> bool {
         let mut buf = [0u8; 4096];
         let mut dirty = false;
         loop {
-            let n = unsafe { libc::read(self.master, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if budget == 0 {
+                break;
+            }
+            let want = buf.len().min(budget);
+            let n = unsafe { libc::read(self.master, buf.as_mut_ptr() as *mut _, want) };
             if n <= 0 {
                 break;
             }
             dirty = true;
+            budget = budget.saturating_sub(n as usize);
             self.parser.process(&buf[..n as usize]);
         }
         dirty
@@ -610,6 +625,55 @@ fn rgb(n: usize) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab on a pty the test drives: the test writes the slave, the tab reads the master.
+    /// A real `sleep` is the child so Drop's SIGHUP and reap have someone to answer to.
+    fn pipe_tab() -> (Tab, RawFd) {
+        let (master, slave) = openpty(40, 6).expect("a pty");
+        unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let pid = child.id() as libc::pid_t;
+        std::mem::forget(child);
+        (
+            Tab {
+                parser: Vt::new(40, 6),
+                master,
+                pid,
+                title: "t".to_string(),
+            },
+            slave,
+        )
+    }
+
+    fn write_all(fd: RawFd, bytes: &[u8]) {
+        let n = unsafe { libc::write(fd, bytes.as_ptr() as *const _, bytes.len()) };
+        assert_eq!(n, bytes.len() as isize, "the pty took the whole chunk");
+    }
+
+    /// A shell that floods must not be drained in one pass: more than the budget, in odd-sized
+    /// chunks, leaves data in the pty that the next call reads.
+    #[test]
+    fn a_flooding_shell_leaves_data_for_the_next_tick() {
+        let (mut t, slave) = pipe_tab();
+        // 301 + 517 + 433 = 1251 bytes, against a budget of 1000.
+        for n in [301usize, 517, 433] {
+            write_all(slave, &vec![b'x'; n]);
+        }
+        assert!(t.feed_budget(1000), "the first pass read something");
+        assert!(
+            t.feed_budget(1000),
+            "data was left for the next call: the first pass stopped at its budget"
+        );
+        assert!(!t.feed_budget(1000), "now the pty is drained");
+        unsafe {
+            libc::close(slave);
+        }
+    }
 
     /// A tab is a real pty with a real shell behind it: it answers `echo`.
     #[test]

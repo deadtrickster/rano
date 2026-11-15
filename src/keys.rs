@@ -208,7 +208,12 @@ impl Editor {
         // test's unbound case, which is exactly the trap to avoid here.
         if alt && matches!(key.code, crate::term::KeyCode::Char('0')) {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let _ = self.bottom.toggle(&cwd, self.text_w as u16, 12);
+            let _ = self.bottom.toggle(
+                &cwd,
+                self.text_w as u16,
+                12,
+                self.config.terminal_scrollback,
+            );
             return true;
         }
         if !self.bottom.open || !self.bottom.focus {
@@ -230,7 +235,12 @@ impl Editor {
                 true
             }
             (false, true, crate::term::KeyCode::Char('n')) => {
-                let _ = self.bottom.new_tab(&cwd, self.text_w as u16, 12);
+                let _ = self.bottom.new_tab(
+                    &cwd,
+                    self.text_w as u16,
+                    12,
+                    self.config.terminal_scrollback,
+                );
                 true
             }
             (false, true, crate::term::KeyCode::Char('w')) => {

@@ -26,7 +26,7 @@ pub struct Tab {
 
 impl Tab {
     /// Open a shell in `cwd`, its pty `cols`×`rows`. The parent's end is non-blocking.
-    pub fn open(cwd: &Path, cols: u16, rows: u16) -> std::io::Result<Tab> {
+    pub fn open(cwd: &Path, cols: u16, rows: u16, scrollback: usize) -> std::io::Result<Tab> {
         let (master, slave) = openpty(cols, rows)?;
         let pid = unsafe { libc::fork() };
         match pid {
@@ -71,7 +71,7 @@ impl Tab {
                     }
                 }
                 Ok(Tab {
-                    parser: Vt::new(cols as usize, rows as usize),
+                    parser: Vt::new(cols as usize, rows as usize, scrollback),
                     master,
                     pid: p,
                     title: "sh".to_string(),
@@ -252,17 +252,29 @@ impl BottomTerm {
     }
 
     /// Open a tab if there are none, and show it. The first tab opens in the editor's folder.
-    pub fn toggle(&mut self, cwd: &Path, cols: u16, rows: u16) -> std::io::Result<()> {
+    pub fn toggle(
+        &mut self,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
+    ) -> std::io::Result<()> {
         self.open = !self.open;
         self.focus = self.open;
         if self.open && self.tabs.is_empty() {
-            self.tabs.push(Tab::open(cwd, cols, rows)?);
+            self.tabs.push(Tab::open(cwd, cols, rows, scrollback)?);
         }
         Ok(())
     }
 
-    pub fn new_tab(&mut self, cwd: &Path, cols: u16, rows: u16) -> std::io::Result<()> {
-        self.tabs.push(Tab::open(cwd, cols, rows)?);
+    pub fn new_tab(
+        &mut self,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
+    ) -> std::io::Result<()> {
+        self.tabs.push(Tab::open(cwd, cols, rows, scrollback)?);
         self.active = self.tabs.len() - 1;
         Ok(())
     }
@@ -395,6 +407,8 @@ struct Vt {
     bold: Vec<bool>,
     /// The lines that scrolled off the top, for PgUp/PgDn: a scrollback, not a blank pane.
     history: Vec<String>,
+    /// How many scrolled-off lines are kept: `terminal_scrollback` in config.toml.
+    scrollback: usize,
     /// How far back the view is scrolled: 0 is the live screen.
     scroll: usize,
     x: usize,
@@ -407,7 +421,7 @@ struct Vt {
 }
 
 impl Vt {
-    fn new(cols: usize, rows: usize) -> Vt {
+    fn new(cols: usize, rows: usize, scrollback: usize) -> Vt {
         Vt {
             cols,
             rows,
@@ -415,6 +429,7 @@ impl Vt {
             fg: vec![None; cols * rows],
             bold: vec![false; cols * rows],
             history: Vec::new(),
+            scrollback,
             scroll: 0,
             x: 0,
             y: 0,
@@ -469,7 +484,7 @@ impl Vt {
             // The top row is scrollback now, not lost: that is what PgUp reads.
             let top: String = (0..self.cols).map(|x| self.cells[x]).collect();
             self.history.push(top.trim_end().to_string());
-            if self.history.len() > 200 {
+            if self.history.len() > self.scrollback {
                 self.history.remove(0);
             }
             self.cells.drain(..self.cols);
@@ -671,7 +686,7 @@ mod tests {
         std::mem::forget(child);
         (
             Tab {
-                parser: Vt::new(40, 6),
+                parser: Vt::new(40, 6, 200),
                 master,
                 pid,
                 title: "t".to_string(),
@@ -718,7 +733,7 @@ mod tests {
         let pid = child.id() as libc::pid_t;
         std::mem::forget(child);
         let t = Tab {
-            parser: Vt::new(40, 6),
+            parser: Vt::new(40, 6, 200),
             master,
             pid,
             title: "t".to_string(),
@@ -757,7 +772,7 @@ mod tests {
     /// a process spawned after the tab opened does not have the fd.
     #[test]
     fn a_child_of_the_editor_does_not_inherit_the_pty() {
-        let t = Tab::open(Path::new("/tmp"), 40, 6).expect("a pty");
+        let t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         let flags = unsafe { libc::fcntl(t.master, libc::F_GETFD) };
         assert!(
             flags >= 0 && flags & libc::FD_CLOEXEC != 0,
@@ -771,10 +786,32 @@ mod tests {
         assert!(status.success(), "fd {} is closed in the child", t.master);
     }
 
+    /// `terminal_scrollback = 5` in config.toml is the history limit: five lines are kept, and
+    /// the oldest are gone — not the compiled-in 200.
+    #[test]
+    fn the_config_sets_the_scrollback() {
+        let dir = std::env::temp_dir().join(format!("rano-scrollback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "terminal_scrollback = 5\n").expect("a config");
+        let cfg = crate::config::load_from(&path);
+        assert_eq!(cfg.terminal_scrollback, 5, "parsed from config.toml");
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, cfg.terminal_scrollback).expect("a pty");
+        for i in 0..20 {
+            t.parser.process(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(t.parser.history.len(), 5, "five lines kept");
+        assert!(
+            !t.parser.history.iter().any(|l| l.contains("line0")),
+            "the oldest lines scrolled out of the kept history"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A tab is a real pty with a real shell behind it: it answers `echo`.
     #[test]
     fn a_tab_answers_a_command() {
-        let mut t = Tab::open(Path::new("/tmp"), 40, 6).expect("a pty");
+        let mut t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         t.send(b"echo hi\n");
         for _ in 0..40 {
             t.feed();
@@ -793,7 +830,7 @@ mod tests {
     /// The bytes a key becomes: control letters are their control bytes, and the pty gets them.
     #[test]
     fn the_pty_receives_the_control_bytes() {
-        let t = Tab::open(Path::new("/tmp"), 40, 6).expect("a pty");
+        let t = Tab::open(Path::new("/tmp"), 40, 6, 200).expect("a pty");
         use crate::term::{KeyCode, Mods};
         for (code, mods, want) in [
             (KeyCode::Tab, Mods::NONE, vec![0x09]),
@@ -811,7 +848,7 @@ mod tests {
     /// SGR sets a foreground per cell, and reset clears it.
     #[test]
     fn sgr_colours_are_kept_per_cell() {
-        let mut p = Vt::new(10, 2);
+        let mut p = Vt::new(10, 2, 200);
         p.process(b"\x1b[31mR\x1b[0mX");
         println!("fg={:?} cur={:?}", p.fg[0], p.cur_fg);
         assert_eq!(p.fg[0], Some(rgb(1)), "red at cell 0");
@@ -821,7 +858,7 @@ mod tests {
     /// What scrolled off the top is in the scrollback, and PgUp reads it.
     #[test]
     fn a_scrolled_back_line_is_in_history() {
-        let mut p = Vt::new(10, 2);
+        let mut p = Vt::new(10, 2, 200);
         p.process(b"one\ntwo\nthree\n");
         assert_eq!(p.history.len(), 2, "both scrolled-off lines are scrollback");
         p.scroll = 1;
@@ -831,7 +868,7 @@ mod tests {
     /// Backspace erases as well as moves, and the caret is drawn where the next character lands.
     #[test]
     fn backspace_erases_and_the_caret_is_drawn() {
-        let mut p = Vt::new(10, 2);
+        let mut p = Vt::new(10, 2, 200);
         p.process(b"ab");
         p.process(b"\x08");
         let row: String = (0..10).map(|x| p.cells[x]).collect();
@@ -849,7 +886,7 @@ mod tests {
     /// The emulator is not a byte pipe: a carriage return moves the cursor, it does not type one.
     #[test]
     fn a_carriage_return_is_not_a_character() {
-        let mut p = Vt::new(10, 3);
+        let mut p = Vt::new(10, 3, 200);
         p.process(b"ab\rX");
         let text: String = (0..10).map(|x| p.cells[x]).collect();
         assert_eq!(text.trim_end(), "Xb");

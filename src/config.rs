@@ -181,6 +181,11 @@ fn parse_config(text: &str) -> Config {
             None => value.split('#').next().unwrap_or("").trim(),
         };
         match key {
+            "terminal_scrollback" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    cfg.terminal_scrollback = n;
+                }
+            }
             "tab_width" => {
                 if let Ok(n) = value.parse::<usize>() {
                     cfg.tab_width = n.clamp(1, 16);

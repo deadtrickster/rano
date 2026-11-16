@@ -442,14 +442,21 @@ impl BottomTerm {
         self.lines_for(w, cwd, false)
     }
 
+    /// The pty masters of the LIVE tabs: a shell's output must wake the host's poll the way a
+    /// keystroke does, or every echo waits out the idle interval instead of being read at once.
+    /// A tab whose shell has exited is not polled: its master would answer HUP forever, and
+    /// the loop would never sleep.
+    pub fn master_fds(&self) -> Vec<std::os::unix::io::RawFd> {
+        self.tabs
+            .iter()
+            .filter(|t| t.exited.is_none())
+            .map(|t| t.master)
+            .collect()
+    }
+
     /// The strip's rows: the SHELL's rows only, the tabs living on the rule above them (see
     /// [`BottomTerm::tab_rule`]). With the active tab's caret painted in the theme's faint
     /// role reversed unless the strip has the keyboard (then the frame places the real one).
-    /// The pty masters of the open tabs: a shell's output must wake the host's poll the way a
-    /// keystroke does, or every echo waits out the idle interval instead of being read at once.
-    pub fn master_fds(&self) -> Vec<std::os::unix::io::RawFd> {
-        self.tabs.iter().map(|t| t.master).collect()
-    }
 
     pub fn lines_for(&self, w: usize, cwd: &Path, focused: bool) -> Vec<Line> {
         let mut out = Vec::new();

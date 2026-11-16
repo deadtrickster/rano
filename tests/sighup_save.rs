@@ -93,9 +93,18 @@ fn run_to_signal(dir: &PathBuf, file: Option<&PathBuf>, sig: i32) -> Option<Exit
     let mut out = String::new();
     // The WHOLE first frame before the typing: the status row is its last part, and raw mode
     // is fully on by then. Typing on the first escape bytes raced the enter sequence and the
-    // line discipline flushed the keystrokes away.
+    // line discipline flushed the keystrokes away. And with a file, until its CONTENT is
+    // drawn: the loader is async, so typing on the status row alone could land while the
+    // buffer is still empty, and the recovery would hold only the typed text (the flake).
     let start = Instant::now();
-    while !out.contains("Ln 1, Col 1") && start.elapsed() < Duration::from_secs(30) {
+    let ready = |out: &str| {
+        if file.is_some() {
+            out.contains("base")
+        } else {
+            out.contains("Ln 1, Col 1")
+        }
+    };
+    while !ready(&out) && start.elapsed() < Duration::from_secs(30) {
         drain(master, &mut out, Duration::from_millis(50));
     }
     unsafe {

@@ -457,7 +457,6 @@ impl BottomTerm {
     /// The strip's rows: the SHELL's rows only, the tabs living on the rule above them (see
     /// [`BottomTerm::tab_rule`]). With the active tab's caret painted in the theme's faint
     /// role reversed unless the strip has the keyboard (then the frame places the real one).
-
     pub fn lines_for(&self, w: usize, cwd: &Path, focused: bool) -> Vec<Line> {
         let mut out = Vec::new();
         if self.tabs.is_empty() {

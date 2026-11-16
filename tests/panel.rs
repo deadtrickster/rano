@@ -350,20 +350,16 @@ fn the_panel_opens_streams_crosses_and_zooms() {
     // re-attach the session it is already on (that used to churn it to Connecting and replay
     // over the operator's pending message).
     let frames = heard.lock().expect("the transcript").clone();
-    let attaches = frames
-        .iter()
-        .filter(|f| f["frame"] == "attach" && f["session_id"] == "s-1")
-        .count();
+    // The ABSENCE is the assertion: after the bare attach (whose session_id is empty), no
+    // frame may name s-1 — a switch to it would be the redundant re-attach that used to churn
+    // the panel to Connecting. The title-drawn and prompt/reply assertions below already
+    // carry the positive "ends up on the session" evidence.
     assert!(
-        attaches <= 1,
-        "no redundant attach to the session already shown: {frames:?}"
-    );
-    assert!(
-        frames
+        !frames
             .iter()
-            .any(|f| f["frame"] == "switch" && f["session_id"] == "s-1")
-            || attaches == 0,
-        "either a switch to the picked session, or it was already current: {frames:?}"
+            .any(|f| (f["frame"] == "switch" || f["frame"] == "attach")
+                && f["session_id"] == "s-1"),
+        "no switch or attach to the session already shown: {frames:?}"
     );
 
     // ---- typing in the composer sends, and the reply streams into the rows ----

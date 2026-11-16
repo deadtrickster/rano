@@ -543,7 +543,10 @@ fn pad_to_width(l: Line, w: usize) -> Line {
 fn openpty(cols: u16, rows: u16) -> std::io::Result<(RawFd, RawFd)> {
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
-    let size = libc::winsize {
+    // **`*mut winsize`, because libc 0.2.189 unified it across platforms**: macOS's own
+    // declaration is `const struct winsize *`, Linux's is not, and the crate chose the
+    // mutable form for both. `&mut` is what compiles on every target this builds for.
+    let mut size = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
@@ -555,7 +558,7 @@ fn openpty(cols: u16, rows: u16) -> std::io::Result<(RawFd, RawFd)> {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &size,
+            &mut size,
         )
     };
     if rc != 0 {

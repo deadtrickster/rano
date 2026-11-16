@@ -470,7 +470,12 @@ fn run(
         // A shell's echo must wake the loop exactly as a keystroke does: polling only the
         // terminal's own fd left the pty's output unread until the 200 ms idle wait ran out,
         // which is the input lag. The terminal and every pty master are one poll set.
-        if !poll_inputs(terminal.raw_fd(), &ed) {
+        let wake = poll_inputs(terminal.raw_fd(), &ed);
+        // A pty that woke the poll has output to draw on the next tick, with or without a key.
+        dirty |= wake.pty;
+        if !wake.terminal {
+            // Only a pty woke (or the idle wait ran out): there is no key to read, and the
+            // read would block for its own 100 ms. The pty is fed at the next tick's top.
             continue;
         }
         for ev in terminal.events() {
@@ -509,7 +514,15 @@ fn run(
 
 /// True when the terminal or any of the bottom terminal's pty masters has input: the wait is
 /// the editor's own next_wakeup, and the first readable fd ends it.
-fn poll_inputs(term_fd: std::os::unix::io::RawFd, ed: &Editor) -> bool {
+/// What woke the poll. A pty-only wake must NOT read stdin: in raw mode the read's own 100 ms
+/// timeout would be paid on every echo, which is most of the lag this exists to remove.
+#[derive(Default)]
+struct Wake {
+    terminal: bool,
+    pty: bool,
+}
+
+fn poll_inputs(term_fd: std::os::unix::io::RawFd, ed: &Editor) -> Wake {
     let mut fds = vec![libc::pollfd {
         fd: term_fd,
         events: libc::POLLIN,
@@ -525,9 +538,16 @@ fn poll_inputs(term_fd: std::os::unix::io::RawFd, ed: &Editor) -> bool {
     let ms = ed.next_wakeup().as_millis().min(i32::MAX as u128) as i32;
     let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
     if n <= 0 {
-        return false;
+        return Wake::default();
     }
-    fds.iter().any(|f| f.revents & libc::POLLIN != 0)
+    Wake {
+        terminal: fds[0].revents & libc::POLLIN != 0,
+        // A pty whose shell has gone away answers HUP, not IN: it must still wake the loop so
+        // the tab's exit is noticed. Dead tabs are not in the set at all (master_fds skips them).
+        pty: fds[1..]
+            .iter()
+            .any(|f| f.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0),
+    }
 }
 
 /// The narrowest the panel is worth drawing beside the text.
@@ -1907,7 +1927,8 @@ mod panel_tests {
         let start = Instant::now();
         let mut woke = false;
         while start.elapsed() < std::time::Duration::from_secs(10) {
-            if poll_inputs(term_fd, &ed) {
+            let wake = poll_inputs(term_fd, &ed);
+            if wake.terminal || wake.pty {
                 woke = true;
                 break;
             }
@@ -1917,6 +1938,24 @@ mod panel_tests {
             libc::close(pipe[1]);
         }
         assert!(woke, "the pty's output woke the poll, not the idle wait");
+    }
+
+    /// A dead shell's master answers HUP forever; polling it would spin the loop instead of
+    /// sleeping. Once the tab's exit is noticed, its master leaves the set.
+    #[test]
+    fn a_dead_tabs_pty_is_not_polled() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        assert_eq!(ed.bottom.master_fds().len(), 1, "a live tab is polled");
+        ed.bottom.tabs[0].exited = Some(0);
+        assert!(
+            ed.bottom.master_fds().is_empty(),
+            "a dead tab's pty is not polled"
+        );
     }
 
     /// docs/keys.md and the keymaps agree, in BOTH directions: every chord the doc claims

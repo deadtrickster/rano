@@ -6,3 +6,5 @@ examples/*/target
 examples/*/.zig-cache
 examples/*/zig-out
 sdks/*/target
+.config/
+.rano-version

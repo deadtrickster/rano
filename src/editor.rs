@@ -4097,6 +4097,60 @@ pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+impl Editor {
+    /// nano's recovery on a fatal signal: every modified buffer goes to its `name.save`, in
+    /// its own encoding and through the same atomic door a save takes — a recovery file that
+    /// is half-written is the loss it exists to prevent. An internal view (a listing, the
+    /// manual) has no file to recover to, and an unmodified buffer is not written again.
+    /// Returns the paths written, for the line the operator reads on the restored terminal.
+    pub fn save_recovery(&mut self) -> Vec<PathBuf> {
+        let mut written = Vec::new();
+        for bs in &mut self.buffers {
+            if !bs.buf.modified {
+                continue;
+            }
+            let internal = bs
+                .buf
+                .name
+                .as_deref()
+                .is_some_and(|n| n.to_string_lossy().starts_with("rano:"));
+            if internal {
+                continue;
+            }
+            // nano's name.save; an unnamed buffer recovers to rano.save in the cwd.
+            let base = match &bs.buf.name {
+                Some(name) => PathBuf::from(format!("{}.save", name.display())),
+                None => std::env::current_dir()
+                    .unwrap_or_default()
+                    .join("rano.save"),
+            };
+            let path = free_recovery_name(&base);
+            let Ok(bytes) = bs.buf.file_bytes() else {
+                continue;
+            };
+            if write_atomic(&path, &bytes).is_ok() {
+                written.push(path);
+            }
+        }
+        written
+    }
+}
+
+/// The first of `base`, `base.1`, `base.2`… that does not exist: a recovery file never
+/// overwrites an earlier recovery, which is nano's own rule for a second crash.
+fn free_recovery_name(base: &Path) -> PathBuf {
+    if !base.exists() {
+        return base.to_path_buf();
+    }
+    for n in 1..1000 {
+        let candidate = PathBuf::from(format!("{}.{}", base.display(), n));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base.to_path_buf()
+}
+
 /// Write `bytes` over `path` whole or not at all: a temp file beside it, synced and
 /// renamed over it, so a crash or a full disk cannot truncate what was there.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

@@ -467,7 +467,10 @@ fn run(
         }
         // The idle wait is the long one: a keystroke ends it; `next_wakeup` shortens
         // it while a file streams in or a prefix's card is due.
-        if !terminal.poll(ed.next_wakeup()) {
+        // A shell's echo must wake the loop exactly as a keystroke does: polling only the
+        // terminal's own fd left the pty's output unread until the 200 ms idle wait ran out,
+        // which is the input lag. The terminal and every pty master are one poll set.
+        if !poll_inputs(terminal.raw_fd(), &ed) {
             continue;
         }
         for ev in terminal.events() {
@@ -502,6 +505,29 @@ fn run(
         println!("{}", u.message());
     }
     Ok(())
+}
+
+/// True when the terminal or any of the bottom terminal's pty masters has input: the wait is
+/// the editor's own next_wakeup, and the first readable fd ends it.
+fn poll_inputs(term_fd: std::os::unix::io::RawFd, ed: &Editor) -> bool {
+    let mut fds = vec![libc::pollfd {
+        fd: term_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    for fd in ed.bottom.master_fds() {
+        fds.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    let ms = ed.next_wakeup().as_millis().min(i32::MAX as u128) as i32;
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+    if n <= 0 {
+        return false;
+    }
+    fds.iter().any(|f| f.revents & libc::POLLIN != 0)
 }
 
 /// The narrowest the panel is worth drawing beside the text.
@@ -1857,6 +1883,40 @@ mod panel_tests {
             rano::host::key(&mut ed, cross());
             assert_eq!(ed.focus, want, "the zoomed layout cycles the same");
         }
+    }
+
+    /// A shell's output must wake the poll exactly as a keystroke does: the old poll watched
+    /// only the terminal's own fd, so an echo waited out the 200 ms idle wait. The dummy
+    /// terminal here is a pipe nobody writes to, so ONLY the pty can wake it.
+    #[test]
+    fn a_shells_output_wakes_the_poll_not_the_idle_wait() {
+        let mut ed = editor();
+        ed.bottom.open = true;
+        ed.bottom.height = 12;
+        ed.bottom
+            .new_tab(std::path::Path::new("/tmp"), 40, 6, 200)
+            .expect("a shell");
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let term_fd = pipe[0];
+        // The shell writes without any keystroke at all: the pty alone must answer the poll.
+        ed.bottom.tabs[0].send(
+            b"printf 'ZZZZZZ\n'
+",
+        );
+        let start = Instant::now();
+        let mut woke = false;
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if poll_inputs(term_fd, &ed) {
+                woke = true;
+                break;
+            }
+        }
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        assert!(woke, "the pty's output woke the poll, not the idle wait");
     }
 
     /// docs/keys.md and the keymaps agree, in BOTH directions: every chord the doc claims

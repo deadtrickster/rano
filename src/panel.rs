@@ -281,6 +281,10 @@ pub struct Panel {
     /// The card the head is waiting on: its request id, so another head's answer clears exactly
     /// this ask, and the one phrase the status line names.
     pending_ask: Option<(String, String)>,
+    /// A new turn's first text delta opens a NEW reply row: without this, two turns' replies
+    /// merged into one row whenever nothing else was filed between them, and a replayed
+    /// conversation made that visible.
+    fresh_turn: bool,
     /// The conversation's tool fold (`M-t` in the panel): with false, a run of settled calls
     /// collapses to one line and only the newest and the failed stay open.
     pub tools_open: bool,
@@ -325,6 +329,7 @@ impl Default for Panel {
             seen_name: None,
             acts: Vec::new(),
             turn_started: None,
+            fresh_turn: false,
             shown_second: 0,
             last_output: None,
             pending_ask: None,
@@ -479,6 +484,9 @@ impl Panel {
                 self.state = PanelState::Idle;
                 self.said.clear();
                 self.follow = true;
+                if let Some(snapshot) = &hello.snapshot {
+                    self.replay(snapshot);
+                }
                 self.remember();
                 self.flush();
             }
@@ -626,6 +634,125 @@ impl Panel {
         self.touch();
     }
 
+    /// A snapshot attach: the conversation as of the snapshot's seq, drawn at once rather than
+    /// an empty pane until the next event. The rows are REPLACED — whatever a live event drew
+    /// between the attach and this hello is in the snapshot already.
+    fn replay(&mut self, snapshot: &crate::letibot::Snapshot) {
+        use crate::letibot::TranscriptItem as Item;
+        self.rows.clear();
+        self.running.clear();
+        self.call_markup.clear();
+        for row in &snapshot.items {
+            match &row.item {
+                Some(Item::User { text, speaker }) => {
+                    // Only the operator's own words are the User row: a job's completion is a
+                    // note, and a peer's message names the peer rather than reading as the
+                    // person's instruction.
+                    match speaker.as_str() {
+                        "" | "operator" => self.rows.push(Row::User(text.clone())),
+                        "agent" => self.rows.push(Row::Note(text.clone())),
+                        peer => self.rows.push(Row::User(format!("{peer}: {text}"))),
+                    }
+                }
+                Some(Item::Assistant { text }) => {
+                    self.rows.push(Row::Reply(Box::default()));
+                    if let Some(Row::Reply(reply)) = self.rows.last_mut() {
+                        reply.push(text);
+                    }
+                }
+                Some(Item::ToolResult {
+                    call_id,
+                    name,
+                    outcome,
+                    why,
+                    payload,
+                    edits,
+                }) => {
+                    // A replayed row HAS its payload: the folded line count is real. No
+                    // inline/full byte counts exist on it, so `bytes` stays unset rather
+                    // than claiming full == inline.
+                    let payload: Vec<Line> = payload.lines().map(Line::raw).collect();
+                    let mut t = crate::agent::tool_row::ToolRow::new(
+                        name,
+                        call_id,
+                        settled_outcome(outcome, why),
+                        payload,
+                    );
+                    t.fold = if matches!(
+                        t.outcome,
+                        crate::agent::outcome::Outcome::Failed(_)
+                            | crate::agent::outcome::Outcome::Denied(_)
+                    ) {
+                        crate::agent::Fold::Open
+                    } else {
+                        crate::agent::Fold::Folded
+                    };
+                    self.rows.push(Row::Tool(Box::new(t)));
+                    self.edits(call_id, edits);
+                }
+                Some(Item::Notice { text }) => self.rows.push(Row::Note(text.clone())),
+                // Reasoning folds, offers are for the model, a row with no reconciled content
+                // is skipped rather than drawn empty.
+                Some(Item::Other { .. }) | None => {}
+            }
+        }
+        // The turn in flight: its streaming text is no transcript row yet, so it follows the
+        // rows. Its SETTLED calls already have tool_result rows above — only the proposed and
+        // running ones get a note, registered so a late finish replaces the note in place.
+        if let Some(turn) = &snapshot.turn {
+            for call in turn.calls.iter().filter(|c| c.running) {
+                // The daemon measured the start: the duration the settled row will print is
+                // real, not the time since this attach.
+                let started = if call.started_ts > 0 {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    std::time::Instant::now()
+                        - std::time::Duration::from_millis(now_ms.saturating_sub(call.started_ts))
+                } else {
+                    std::time::Instant::now()
+                };
+                self.running.push((
+                    call.call_id.clone(),
+                    self.rows.len(),
+                    call.name.clone(),
+                    started,
+                    // No streamed markup survives a restart: a replayed call that settles
+                    // draws its verb alone rather than a target nobody has.
+                    String::new(),
+                ));
+                self.rows.push(Row::Note(format!("{} …", call.name)));
+            }
+            if turn.running && !turn.text.is_empty() {
+                self.rows.push(Row::Reply(Box::default()));
+                if let Some(Row::Reply(reply)) = self.rows.last_mut() {
+                    reply.push(&turn.text);
+                }
+            }
+            if turn.running {
+                self.state = PanelState::Thinking;
+                // The snapshot has no start time: the status line's "started before this head
+                // attached" is the honest clock. Nothing is known about its silence either,
+                // so the row is not the slow colour.
+                self.turn_started = None;
+                self.last_output = None;
+            }
+        }
+        // A card still open is named exactly as if it had just been asked, and answered on
+        // whichever head can decide.
+        if let Some(card) = snapshot.open_decisions.last() {
+            self.pending_ask = Some((
+                card.req_id.clone(),
+                format!("{} · {}", card.kind, card.summary),
+            ));
+            self.state = PanelState::Waiting;
+        }
+        // The next delta continues the snapshot's streaming reply; a NEW turn opens a new one.
+        self.fresh_turn = false;
+        self.follow = true;
+    }
+
     fn event(&mut self, event: &Event) {
         match event {
             Event::TurnStarted { .. } => {
@@ -634,6 +761,7 @@ impl Panel {
                 self.turn_started = Some(now);
                 self.last_output = Some(now);
                 self.pending_ask = None;
+                self.fresh_turn = true;
                 self.state = PanelState::Thinking;
             }
             Event::Delta {
@@ -642,9 +770,10 @@ impl Panel {
                 ..
             } => {
                 self.last_output = Some(std::time::Instant::now());
-                if !matches!(self.rows.last(), Some(Row::Reply(_))) {
+                if self.fresh_turn || !matches!(self.rows.last(), Some(Row::Reply(_))) {
                     self.rows.push(Row::Reply(Box::default()));
                 }
+                self.fresh_turn = false;
                 if let Some(Row::Reply(reply)) = self.rows.last_mut() {
                     reply.push(text);
                 }
@@ -1796,6 +1925,7 @@ mod tests {
                 created_ms: 0,
                 live: true,
             }],
+            snapshot: None,
         })
     }
 
@@ -1917,6 +2047,203 @@ mod tests {
     }
 
     /// A streamed reply is one row, folded out of the deltas in the order they arrived; thinking
+    /// A snapshot attach draws the conversation at once: the operator's prompt, the reply as
+    /// markdown, a settled tool row with its REAL line count — not an empty pane until the
+    /// next event. Reasoning stays folded, as it is live.
+    #[test]
+    fn attaching_replays_the_conversation() {
+        let mut panel = opened();
+        let frame = crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":41,"dropped":0,"items_dropped":0,
+                  "items":[
+                    {"item_id":"i-1","kind":"user","ledger_head":"l","ts":1,
+                     "item":{"type":"user","speaker":"operator",
+                             "parts":[{"kind":"text","text":"fix the parser"}]}},
+                    {"item_id":"i-2","kind":"assistant","ledger_head":"l","ts":2,
+                     "item":{"type":"assistant","text":"Start with **the tokenizer**."}},
+                    {"item_id":"i-3","kind":"tool_result","ledger_head":"l","ts":3,
+                     "item":{"type":"tool_result","call_id":"c-1","name":"bash",
+                             "outcome":{"outcome":"ok"},"payload":"line one\nline two",
+                             "edits":[]}},
+                    {"item_id":"i-4","kind":"reasoning","ledger_head":"l","ts":4,
+                     "item":{"type":"reasoning","text":"a draft nobody replays","field":"full"}},
+                    {"item_id":"i-5","kind":"user","ledger_head":"l","ts":5,"item":null}
+                  ],
+                  "open_decisions":[],"turn":null}}"#,
+        );
+        panel.apply(&frame);
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            panel.rows.len(),
+            3,
+            "prompt, reply, tool row — and an unreconciled row is not drawn empty"
+        );
+        assert!(text.contains("fix the parser"), "the prompt: {text}");
+        assert!(text.contains("the tokenizer"), "the reply: {text}");
+        assert!(!text.contains("a draft nobody replays"), "reasoning folds");
+        let tools = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Tool(_)))
+            .count();
+        assert_eq!(tools, 1, "one settled tool row");
+        let Some(Row::Tool(t)) = panel.rows.iter().find(|r| matches!(r, Row::Tool(_))) else {
+            unreachable!()
+        };
+        assert_eq!(t.payload.len(), 2, "the replayed payload is really there");
+        assert!(text.contains("2 lines"), "and its count is drawn: {text}");
+        // A new turn after the replay opens a NEW reply rather than extending the old one.
+        panel.apply(&Frame::Event {
+            seq: 42,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 43,
+            event: Event::Delta {
+                turn_id: "t".to_string(),
+                target: DeltaTarget::Text,
+                text: "the next answer".to_string(),
+            },
+        });
+        let replies = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Reply(_)))
+            .count();
+        assert_eq!(replies, 2, "one reply per turn, the replayed one included");
+    }
+
+    /// The snapshot's open card is named, and a turn in flight says the honest clock: the
+    /// snapshot has no start time, so "started before this head attached". A call still
+    /// running is a note its late finish replaces, never a second row.
+    #[test]
+    fn the_snapshot_names_the_card_and_the_live_turn() {
+        let mut waiting = opened();
+        waiting.apply(&crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":9,"dropped":0,"items_dropped":0,
+                  "items":[],
+                  "open_decisions":[{"req_id":"r-1","kind":"permission",
+                    "summary":"bash would run rm -rf build","options":[],"choices":[],
+                    "because":"","deadline":null}],
+                  "turn":null}}"#,
+        ));
+        let line = waiting.turn_line(60).expect("the card is named");
+        assert!(
+            line.plain().contains("waiting") && line.plain().contains("rm -rf build"),
+            "{:?}",
+            line.plain()
+        );
+        assert_eq!(waiting.state, PanelState::Waiting);
+
+        let mut panel = opened();
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":9,"dropped":0,"items_dropped":0,
+                  "items":[],
+                  "open_decisions":[],
+                  "turn":{"turn_id":"t","model":"m","ledger_head":"l",
+                    "text":"the half-written answer","reasoning":"","raw_calls":"",
+                    "calls":[{"call_id":"c-9","name":"bash","args_digest":"d",
+                              "target":"make all","started_ts":1000,
+                              "state":{"state":"running"}}],
+                    "appended":[],"progress":null,"tokens":0,
+                    "state":{"state":"running"}}}}"#,
+        ));
+        assert_eq!(panel.state, PanelState::Thinking);
+        let line = panel.turn_line(60).expect("a turn is running");
+        assert!(
+            line.plain().contains("started before this head attached"),
+            "no clock is invented: {:?}",
+            line.plain()
+        );
+        panel.build(80);
+        let text = panel
+            .lines()
+            .iter()
+            .map(|l| l.plain())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("the half-written answer"),
+            "the live text: {text}"
+        );
+        assert!(
+            text.contains("bash …"),
+            "the running call is a note: {text}"
+        );
+        // Its finish arrives after the attach: the note becomes the row, in place.
+        panel.apply(&Frame::Event {
+            seq: 10,
+            event: Event::ToolFinished {
+                turn_id: "t".to_string(),
+                call_id: "c-9".to_string(),
+                outcome: "ok".to_string(),
+                why: String::new(),
+                edits: Vec::new(),
+                bytes: None,
+            },
+        });
+        let tools = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Tool(_)))
+            .count();
+        assert_eq!(tools, 1, "the note became the row");
+        assert!(
+            !panel
+                .rows
+                .iter()
+                .any(|r| matches!(r, Row::Note(n) if n.contains("bash …"))),
+            "and no second row for the same call"
+        );
+    }
+
+    /// A replayed user row says who spoke: a job's completion is a note, a peer's message names
+    /// the peer — neither reads as the operator's own words.
+    #[test]
+    fn a_replayed_prompt_says_who_spoke() {
+        let mut panel = opened();
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":9,"dropped":0,"items_dropped":0,
+                  "items":[
+                    {"item_id":"i-1","kind":"user","ledger_head":"l","ts":1,
+                     "item":{"type":"user","speaker":"agent",
+                             "parts":[{"kind":"text","text":"job j1 finished"}]}},
+                    {"item_id":"i-2","kind":"user","ledger_head":"l","ts":2,
+                     "item":{"type":"user","speaker":{"peer":{"from":"cc@rano"}},
+                             "parts":[{"kind":"text","text":"the gate is red"}]}}
+                  ],
+                  "open_decisions":[],"turn":null}}"#,
+        ));
+        assert_eq!(panel.rows.len(), 2);
+        assert!(
+            matches!(&panel.rows[0], Row::Note(n) if n == "job j1 finished"),
+            "the session's own delivery is a note: {:?}",
+            panel.rows[0]
+        );
+        assert!(
+            matches!(&panel.rows[1], Row::User(t) if t == "cc@rano: the gate is red"),
+            "the peer is named: {:?}",
+            panel.rows[1]
+        );
+    }
+
     /// and a turn's end change the state and never the prose.
     #[test]
     fn a_streamed_reply_is_one_row_and_the_state_follows_the_turn() {

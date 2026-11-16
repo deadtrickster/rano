@@ -206,6 +206,82 @@ pub struct Hello {
     /// The seq the snapshot is true as of, when there was one: the next event is `seq + 1`.
     pub seq: Option<u64>,
     pub sessions: Vec<Session>,
+    /// The conversation itself, on a snapshot attach: the rows, the open cards, the live turn.
+    pub snapshot: Option<Snapshot>,
+}
+
+/// The conversation as an attach handed it over: the recent transcript rows, the cards still
+/// open, and the turn in flight. Absent on a resume served from the scrollback, whose gap
+/// follows as events instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub items: Vec<SnapshotRow>,
+    pub open_decisions: Vec<DecisionRequest>,
+    pub turn: Option<TurnSnapshot>,
+}
+
+/// One transcript row: sessionlog's `SnapshotItem`. `item` is honestly `None` when the daemon
+/// saw the row's event but never reconciled its content — the panel skips such a row rather
+/// than drawing an empty message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SnapshotRow {
+    pub item_id: String,
+    pub kind: String,
+    pub item: Option<TranscriptItem>,
+}
+
+/// As much of a transcript row's content (`TranscriptItem`, tagged by `type`) as the panel
+/// draws. Reasoning, offers and segment marks are `Other`: folded by design, or nothing here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptItem {
+    /// A prompt. `speaker` is `operator`, `agent`, or a peer's handle: a job's completion or a
+    /// peer's words are never drawn as the operator's own.
+    User {
+        text: String,
+        speaker: String,
+    },
+    Assistant {
+        text: String,
+    },
+    /// A settled call. Unlike the live wire, a replayed row CARRIES its payload, so the row's
+    /// line count is real. No inline/full byte counts exist here: `bytes` stays unset.
+    ToolResult {
+        call_id: String,
+        name: String,
+        outcome: String,
+        why: String,
+        payload: String,
+        edits: Vec<ToolEdit>,
+    },
+    Notice {
+        text: String,
+    },
+    Other {
+        kind: String,
+    },
+}
+
+/// The turn in flight, from the snapshot. Its streaming text is not a transcript row until the
+/// turn ends, so a head attaching mid-turn reads it here. The snapshot carries no start
+/// timestamp: the status line's "started before this head attached" is the honest clock.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnSnapshot {
+    pub running: bool,
+    pub text: String,
+    pub calls: Vec<CallSnapshot>,
+}
+
+/// A call the running turn has made. `running` covers proposed and started: neither has a
+/// settled transcript row yet, and drawing it as settled would claim an outcome nobody said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallSnapshot {
+    pub call_id: String,
+    pub name: String,
+    pub target: String,
+    pub running: bool,
+    /// The daemon's own `ToolStarted` timestamp, Unix ms; 0 while only proposed. The settled
+    /// row's duration is measured from this, not from when this head attached.
+    pub started_ts: u64,
 }
 
 /// Which channel a delta belongs to. `ToolCall` carries the model's raw call markup, so it is never
@@ -857,7 +933,7 @@ impl Frame {
 /// One line into a frame: the tolerant half of this module. A tag this build does not know becomes
 /// [`Frame::Unknown`], a missing field reads as its empty value, and a line that is not JSON is
 /// unknown with no tag. Nothing here fails: a refusal mid-turn is worse than a fact we cannot use.
-fn parse(line: &str) -> Frame {
+pub(crate) fn parse(line: &str) -> Frame {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return Frame::Unknown { tag: String::new() };
     };
@@ -871,6 +947,7 @@ fn parse(line: &str) -> Frame {
             resumed_from: number(&v, "resumed_from"),
             seq: number(at(&v, "snapshot"), "seq"),
             sessions: sessions(&v),
+            snapshot: snapshot(at(&v, "snapshot")),
         }),
         "sessions" => Frame::Sessions {
             current: text(&v, "current"),
@@ -905,6 +982,140 @@ fn parse(line: &str) -> Frame {
             reason: text(&v, "reason"),
         },
         _ => Frame::Unknown { tag },
+    }
+}
+
+/// A card, from a `decision_requested` event or from the snapshot's `open_decisions`: the
+/// daemon's `OpenDecision` is the same fields plus its bookkeeping.
+fn decision(v: &Value) -> DecisionRequest {
+    DecisionRequest {
+        req_id: text(v, "req_id"),
+        kind: text(v, "kind"),
+        call_id: non_empty(v, "call_id"),
+        summary: text(v, "summary"),
+        target: text(v, "target"),
+        options: array(v, "options")
+            .iter()
+            .map(|o| DecisionOption {
+                option_id: text(o, "option_id"),
+                label: text(o, "label"),
+            })
+            .collect(),
+        choices: array(v, "choices")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        because: text(v, "because"),
+        deadline: number(v, "deadline"),
+    }
+}
+
+/// The snapshot in a `hello`, when this attach was a snapshot attach rather than a resume.
+fn snapshot(v: &Value) -> Option<Snapshot> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(Snapshot {
+        items: array(v, "items").iter().map(snapshot_row).collect(),
+        open_decisions: array(v, "open_decisions").iter().map(decision).collect(),
+        turn: if at(v, "turn").is_object() {
+            Some(turn_snapshot(at(v, "turn")))
+        } else {
+            None
+        },
+    })
+}
+
+fn snapshot_row(v: &Value) -> SnapshotRow {
+    SnapshotRow {
+        item_id: text(v, "item_id"),
+        kind: text(v, "kind"),
+        item: if at(v, "item").is_object() {
+            Some(transcript_item(at(v, "item")))
+        } else {
+            None
+        },
+    }
+}
+
+fn transcript_item(v: &Value) -> TranscriptItem {
+    let kind = text(v, "type");
+    match kind.as_str() {
+        "user" => {
+            // UserPart is tagged by `kind`: text, an image, or a file reference. The last two
+            // are named in brackets rather than dropped, so the prompt keeps its attachments.
+            let mut texts = Vec::new();
+            for part in array(v, "parts").iter() {
+                match text(part, "kind").as_str() {
+                    "text" => texts.push(text(part, "text")),
+                    "image" => texts.push("[image]".to_string()),
+                    "file_ref" => texts.push(format!("[{}]", text(part, "path"))),
+                    _ => {}
+                }
+            }
+            // Speaker is externally tagged: "operator", "agent", or {"peer":{"from":...}}.
+            let speaker = match at(v, "speaker") {
+                Value::String(s) => s.clone(),
+                Value::Object(o) => text(o.get("peer").unwrap_or(&Value::Null), "from"),
+                _ => String::new(),
+            };
+            TranscriptItem::User {
+                text: texts.join("\n"),
+                speaker,
+            }
+        }
+        "assistant" => TranscriptItem::Assistant {
+            text: text(v, "text"),
+        },
+        "tool_result" => {
+            // ToolOutcome is tagged by `outcome`, one level in, exactly as on the live wire.
+            let outcome = at(v, "outcome");
+            let why = text(outcome, "reason");
+            TranscriptItem::ToolResult {
+                call_id: text(v, "call_id"),
+                name: text(v, "name"),
+                outcome: text(outcome, "outcome"),
+                why: if why.is_empty() {
+                    text(outcome, "why")
+                } else {
+                    why
+                },
+                payload: text(v, "payload"),
+                edits: match at(v, "edits") {
+                    Value::Array(items) => items.iter().map(tool_edit).collect(),
+                    Value::Object(_) => vec![tool_edit(at(v, "edits"))],
+                    _ => Vec::new(),
+                },
+            }
+        }
+        "notice" => TranscriptItem::Notice {
+            text: text(v, "text"),
+        },
+        other => TranscriptItem::Other {
+            kind: other.to_string(),
+        },
+    }
+}
+
+/// `TurnState` and `CallState` are each tagged by `state`, one object in.
+fn turn_snapshot(v: &Value) -> TurnSnapshot {
+    TurnSnapshot {
+        running: text(at(v, "state"), "state") == "running",
+        text: text(v, "text"),
+        calls: array(v, "calls")
+            .iter()
+            .map(|c| CallSnapshot {
+                call_id: text(c, "call_id"),
+                name: text(c, "name"),
+                target: text(c, "target"),
+                running: matches!(
+                    text(at(c, "state"), "state").as_str(),
+                    "running" | "proposed"
+                ),
+                started_ts: number(c, "started_ts").unwrap_or(0),
+            })
+            .collect(),
     }
 }
 
@@ -1004,27 +1215,7 @@ fn event(v: &Value) -> Event {
                 })
                 .collect(),
         },
-        "decision_requested" => Event::DecisionRequested(DecisionRequest {
-            req_id: text(v, "req_id"),
-            kind: text(v, "kind"),
-            call_id: non_empty(v, "call_id"),
-            summary: text(v, "summary"),
-            target: text(v, "target"),
-            options: array(v, "options")
-                .iter()
-                .map(|o| DecisionOption {
-                    option_id: text(o, "option_id"),
-                    label: text(o, "label"),
-                })
-                .collect(),
-            choices: array(v, "choices")
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            because: text(v, "because"),
-            deadline: number(v, "deadline"),
-        }),
+        "decision_requested" => Event::DecisionRequested(decision(v)),
         "decision_answered" => Event::DecisionAnswered {
             req_id: text(v, "req_id"),
         },

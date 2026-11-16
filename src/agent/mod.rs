@@ -20,36 +20,66 @@ use crate::render::{Buffer, Line, Rect, Widget};
 #[allow(unused_imports)]
 use crate::style::Role;
 
+#[cfg(feature = "agent")]
 pub mod asks;
+#[cfg(feature = "agent")]
 pub mod blocks;
+#[cfg(feature = "agent")]
 pub mod card;
+#[cfg(feature = "agent")]
 pub mod composer;
+#[cfg(feature = "agent")]
 pub mod config;
+#[cfg(feature = "agent")]
 pub mod decision;
-mod diffbody;
+#[cfg(feature = "agent")]
+pub mod diffbody;
+#[cfg(feature = "agent")]
 pub mod fit;
+#[cfg(feature = "agent")]
 pub mod header;
+#[cfg(feature = "agent")]
 pub mod help;
+#[cfg(feature = "agent")]
 pub mod hint_bar;
+#[cfg(feature = "agent")]
 pub mod jobs;
 pub mod keys;
+#[cfg(feature = "agent")]
 pub mod loading;
+#[cfg(feature = "agent")]
 pub mod logpane;
+#[cfg(feature = "agent")]
 pub mod monitors;
+#[cfg(feature = "agent")]
 pub mod notes;
+#[cfg(feature = "agent")]
 pub mod outcome;
+#[cfg(feature = "agent")]
 pub mod pane;
+#[cfg(feature = "agent")]
 pub mod panel;
+#[cfg(feature = "agent")]
 pub mod picker;
+#[cfg(feature = "agent")]
 pub mod queue;
+#[cfg(feature = "agent")]
 pub mod quit;
+#[cfg(feature = "agent")]
 pub mod screens;
+#[cfg(feature = "agent")]
 pub mod status;
+#[cfg(feature = "agent")]
 pub mod subagents;
+#[cfg(feature = "agent")]
 pub mod text;
+#[cfg(feature = "agent")]
 pub mod todos;
+#[cfg(feature = "agent")]
 pub mod tool_row;
+#[cfg(feature = "agent")]
 pub mod tree_list;
+#[cfg(feature = "agent")]
 pub mod turn_status;
 
 /// Whether a block shows its body. Letibot's `Fold`: the conversation-wide tool fold

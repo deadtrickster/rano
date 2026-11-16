@@ -905,6 +905,8 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
             buf.set_line(area.x, y, if is_thumb { &thumb } else { &track }, 1);
         }
     }
+    // No agent feature: no conversation pane is ever laid out, so there is nothing to draw.
+    #[cfg(feature = "agent")]
     if let Some(area) = lay.panel {
         ed.panel.build(area.width as usize);
         // The frame's key bar already shows the focused surface's keys when the editor is drawn;
@@ -993,6 +995,7 @@ fn draw_frame(buf: &mut render::Buffer, ed: &mut Editor, lay: &Layout) -> Option
     }
     cursor
 }
+#[cfg(feature = "agent")]
 fn panel_view<'a>(
     ed: &'a Editor,
     hints: &'a [(String, String)],

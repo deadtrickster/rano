@@ -34,6 +34,13 @@ pub mod letibot;
 pub mod markdown;
 // The panel beside the text: one conversation, the session it is attached to, and the acts a host
 // turns into frames. Drawing is `agent::panel`.
+pub mod conversation;
+#[cfg(feature = "agent")]
+pub mod panel;
+/// Without the agent feature the panel is this shell: the same vocabulary, and a surface
+/// that says by name that this build has no letibot panel rather than pretending one opened.
+#[cfg(not(feature = "agent"))]
+#[path = "panel_stub.rs"]
 pub mod panel;
 // Unified diffs read back in: a patch parsed into files and hunks (the editor's M-P view of a
 // .diff/.patch buffer).

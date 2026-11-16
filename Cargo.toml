@@ -75,3 +75,10 @@ codegen-units = 1
 
 [dev-dependencies]
 wat = "1.262.0"
+
+[features]
+default = ["agent"]
+# The letibot surface: the agent/ widgets, the daemon client, and the conversation panel.
+# With it off, rano is the editor alone — no panel, no daemon, no agent panes an embedder
+# did not ask for.
+agent = []

@@ -3,7 +3,9 @@
 A nano clone for the terminal, in Rust. nano's keys and nano's immediacy, with tree-sitter
 syntax highlighting, a minimal LSP client, a shell strip with tabs under the text, a letibot
 conversation beside it, and a tail that opens a 2 GiB log without reading it. It is also a
-library, so a host can show the editor as a pane.
+library, so a host can show the editor as a pane. The `agent` cargo feature (on by default) is
+the letibot panel and the agent widgets; `cargo build --no-default-features` builds the editor
+alone, where the panel's commands answer by name that the build has none.
 
 Why: nano is the editor people reach for when they do not want to learn one. rano keeps that
 and adds what a programmer misses in nano - highlighting, diagnostics, jump to definition, logs

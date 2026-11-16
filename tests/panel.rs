@@ -345,16 +345,25 @@ fn the_panel_opens_streams_crosses_and_zooms() {
         "a panel that draws no card must not say it can answer one"
     );
     // And the connection ends up on the session: a bare attach lands on the daemon's current one,
-    // and moving to the picked session is a `switch` after it, not a second attach.
+    // and moving to the picked session is a `switch` after it, not a second attach. When the
+    // picked session IS the current one there is nothing to switch to: the panel must not
+    // re-attach the session it is already on (that used to churn it to Connecting and replay
+    // over the operator's pending message).
+    let frames = heard.lock().expect("the transcript").clone();
+    let attaches = frames
+        .iter()
+        .filter(|f| f["frame"] == "attach" && f["session_id"] == "s-1")
+        .count();
     assert!(
-        heard
-            .lock()
-            .expect("the transcript")
+        attaches <= 1,
+        "no redundant attach to the session already shown: {frames:?}"
+    );
+    assert!(
+        frames
             .iter()
-            .any(|f| (f["frame"] == "switch" || f["frame"] == "attach")
-                && f["session_id"] == "s-1"),
-        "the panel ends up on the session: {:?}",
-        heard.lock().expect("the transcript").iter().collect::<Vec<_>>()
+            .any(|f| f["frame"] == "switch" && f["session_id"] == "s-1")
+            || attaches == 0,
+        "either a switch to the picked session, or it was already current: {frames:?}"
     );
 
     // ---- typing in the composer sends, and the reply streams into the rows ----

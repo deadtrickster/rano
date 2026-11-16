@@ -359,6 +359,19 @@ impl Panel {
         if session.is_empty() {
             return;
         }
+        // Already on exactly this session: a second attach would churn the state to Connecting
+        // and replay the snapshot over whatever is on screen — including the operator's
+        // pending message. A `Sessions` frame after the first `Hello` takes this path. After
+        // a `Bye` or before anything was attached, a real (re)attach still happens.
+        if self.session == session
+            && matches!(
+                self.state,
+                PanelState::Idle | PanelState::Thinking | PanelState::Waiting
+            )
+        {
+            self.picked = true;
+            return;
+        }
         self.session = session.to_string();
         self.picked = true;
         self.state = PanelState::Connecting;
@@ -571,6 +584,12 @@ impl Panel {
                 format!("{} · {}", card.kind, card.summary),
             ));
             self.state = PanelState::Waiting;
+        }
+        // What the operator typed while we were still connecting is in NO snapshot: those
+        // prompts are held in `waiting` and go out on the flush that follows this hello, so
+        // their User rows must survive the replay that replaced everything older.
+        for pending in &self.waiting {
+            self.rows.push(Row::User(pending.text.clone()));
         }
         // The next delta continues the snapshot's streaming reply; a NEW turn opens a new one.
         self.fresh_turn = false;
@@ -1749,16 +1768,55 @@ mod tests {
             state: PanelState::Picking,
             ..Panel::default()
         };
-        for query in ["s-2", "other", "2"] {
+        // The first pick attaches; picking the SAME session again does not re-attach, since a
+        // redundant attach would churn the state to Connecting and replay over the screen.
+        panel.pick_query = "s-2".to_string();
+        panel.pick_now();
+        assert_eq!(
+            panel.take_acts(),
+            vec![Act::Attach("s-2".to_string())],
+            "the first pick attaches"
+        );
+        // The hello settles the attach; now the state is Idle, and a repeat pick of the same
+        // session is the redundant case the guard exists for. The list still holds both
+        // sessions (the hello's own list would have replaced it with only the current one).
+        panel.apply(&hello("s-2", "the other"));
+        panel.apply(&Frame::Sessions {
+            current: "s-2".to_string(),
+            created: None,
+            sessions: vec![
+                Session {
+                    id: "s-1".into(),
+                    title: "the script".into(),
+                    created_ms: 0,
+                    live: true,
+                },
+                Session {
+                    id: "s-2".into(),
+                    title: "the other".into(),
+                    created_ms: 0,
+                    live: true,
+                },
+            ],
+        });
+        for query in ["other", "2"] {
             panel.pick_query = query.to_string();
             assert_eq!(panel.picked_sessions().len(), 1, "{query} narrows to one");
             panel.pick_now();
-            assert_eq!(
-                panel.take_acts(),
-                vec![Act::Attach("s-2".to_string())],
-                "{query} picked it"
+            assert!(
+                panel.take_acts().is_empty(),
+                "settled, the same session is not re-attached ({query})"
             );
         }
+        // Once the attach has SETTLED (the hello is in), picking the same session again is
+        // the redundant case and stays a no-op; a different session still attaches.
+        panel.pick_query = "s-1".to_string();
+        panel.pick_now();
+        assert_eq!(
+            panel.take_acts(),
+            vec![Act::Attach("s-1".to_string())],
+            "a different session attaches"
+        );
     }
 
     /// A folder with no session of its own asks the one ABOVE it: the operator's session usually
@@ -2007,6 +2065,95 @@ mod tests {
             "the peer is named: {:?}",
             panel.rows[1]
         );
+    }
+
+    /// A `Sessions` frame after the first `Hello` must not re-attach the session already on
+    /// screen: a second attach churns the state to Connecting and replays the snapshot over
+    /// the operator's pending message. This is the "history drawn, status connecting, my
+    /// message never sent" report.
+    #[test]
+    fn an_attach_to_the_session_already_shown_does_not_reconnect() {
+        let mut panel = opened();
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":9,"dropped":0,"items_dropped":0,
+                  "items":[
+                    {"item_id":"i-1","kind":"assistant","ledger_head":"l","ts":1,
+                     "item":{"type":"assistant","text":"the older reply"}}
+                  ],
+                  "open_decisions":[],"turn":null}}"#,
+        ));
+        assert_eq!(panel.state, PanelState::Idle);
+        panel.take_acts();
+        // The daemon's session list arrives AFTER the hello: the panel must not re-attach.
+        panel.apply(&Frame::Sessions {
+            current: "s-1".to_string(),
+            created: None,
+            sessions: vec![Session {
+                id: "s-1".to_string(),
+                title: "the one".to_string(),
+                created_ms: 0,
+                live: true,
+            }],
+        });
+        let acts = panel.take_acts();
+        assert!(
+            !acts.iter().any(|a| matches!(a, Act::Attach(_))),
+            "no second attach for the session already shown: {acts:?}"
+        );
+        assert_eq!(panel.state, PanelState::Idle, "and no churn to Connecting");
+        // And a prompt typed now goes straight out, not into the held set.
+        panel.input = "hello there".to_string();
+        panel.send();
+        assert!(
+            panel
+                .take_acts()
+                .iter()
+                .any(|a| matches!(a, Act::Prompt { text, .. } if text == "hello there")),
+            "the message is sent, not held"
+        );
+    }
+
+    /// A prompt typed while the panel is still connecting is in no snapshot: its User row must
+    /// survive the replay, and the flush after the hello must send it.
+    #[test]
+    fn a_replay_keeps_the_prompts_typed_while_connecting() {
+        let mut panel = opened();
+        assert_eq!(panel.state, PanelState::Connecting);
+        panel.input = "typed before the hello".to_string();
+        panel.send();
+        assert_eq!(panel.waiting.len(), 1, "held while connecting");
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"hello","protocol_version":70,"session_id":"s-1","head_id":"h",
+                "dropped":0,"resumed_from":null,
+                "snapshot":{"session_id":"s-1","seq":9,"dropped":0,"items_dropped":0,
+                  "items":[
+                    {"item_id":"i-1","kind":"assistant","ledger_head":"l","ts":1,
+                     "item":{"type":"assistant","text":"the older reply"}}
+                  ],
+                  "open_decisions":[],"turn":null}}"#,
+        ));
+        let users: Vec<&str> = panel
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::User(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            users.contains(&"typed before the hello"),
+            "the pending message is still on screen: {users:?}"
+        );
+        assert!(
+            panel
+                .take_acts()
+                .iter()
+                .any(|a| matches!(a, Act::Prompt { text, .. } if text == "typed before the hello")),
+            "and the flush sent it"
+        );
+        assert!(panel.waiting.is_empty(), "nothing held after the flush");
     }
 
     /// and a turn's end change the state and never the prose.

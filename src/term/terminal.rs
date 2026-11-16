@@ -314,6 +314,11 @@ impl Terminal {
 
     /// Wait up to `timeout` for input, and say whether any is there to read: a host with a
     /// deadline shorter than [`Terminal::events`]'s ~100 ms polls here instead.
+    /// The descriptor the poll watches: the host's own terminal input.
+    pub fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.fd
+    }
+
     pub fn poll(&self, timeout: std::time::Duration) -> bool {
         let mut fds = libc::pollfd {
             fd: self.fd,

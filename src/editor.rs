@@ -11,6 +11,7 @@ use crate::term::{MouseButton, MouseEvent, MouseKind, Picture, Pictures, Proto};
 
 use crate::BufferState;
 use crate::RowWrap;
+use crate::atomic_write::write_atomic;
 use crate::buffer::{Buffer, DiskStamp, Pos};
 use crate::config;
 use crate::diffview::DiffAct;
@@ -4149,48 +4150,6 @@ fn free_recovery_name(base: &Path) -> PathBuf {
         }
     }
     base.to_path_buf()
-}
-
-/// Write `bytes` over `path` whole or not at all: a temp file beside it, synced and
-/// renamed over it, so a crash or a full disk cannot truncate what was there.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    // A symlink stays a link: the bytes go through it to the file it names.
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let dir = match target.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "rano".to_string());
-    let tmp = dir.join(format!(".{name}.{}.rano-tmp", std::process::id()));
-    // The mode the file had: a rename must not change how it opens.
-    let mode = fs::metadata(&target).ok().map(|m| m.permissions().mode());
-    // A writable file in a directory we cannot write: no temp file is possible, so
-    // write in place as nano does rather than refuse a save that used to work.
-    let mut f = match fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return fs::write(&target, bytes);
-        }
-        Err(e) => return Err(e),
-    };
-    let mut write = || -> std::io::Result<()> {
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        if let Some(mode) = mode {
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-        }
-        fs::rename(&tmp, &target)
-    };
-    let done = write();
-    if done.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    done
 }
 
 /// `path` made absolute and symlink-free when it exists, so an unsaved buffer still

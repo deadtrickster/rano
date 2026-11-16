@@ -5869,3 +5869,41 @@ fn the_exit_key_reaches_inside_a_view() {
             .unwrap_or_default()
     );
 }
+
+/// nano's recovery: a modified buffer goes to name.save in its own encoding, a second recovery
+/// never overwrites the first, and an unmodified buffer or an internal view is not written.
+#[test]
+fn the_recovery_write_names_and_keeps_every_version() {
+    let dir = temp_dir("recovery");
+    let file = dir.0.join("note.txt");
+    fs::write(&file, "base\n").unwrap();
+    let mut ed = test_ed("base\nRECOVERYZZZ");
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.bs_mut().buf.modified = true;
+    let written = ed.save_recovery();
+    let save = dir.0.join("note.txt.save");
+    assert_eq!(written, vec![save.clone()]);
+    let text = fs::read_to_string(&save).unwrap();
+    assert!(
+        text.starts_with("base\nRECOVERYZZZ"),
+        "the buffer's own text, not the file's: {text:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "base\n",
+        "the original is untouched: a recovery is not a save"
+    );
+    // A second crash does not overwrite the first recovery: name.save.1.
+    let written = ed.save_recovery();
+    assert_eq!(written, vec![dir.0.join("note.txt.save.1")]);
+    // An internal view has no file to recover to.
+    ed.bs_mut().buf.name = Some(PathBuf::from("rano:manual"));
+    assert!(ed.save_recovery().is_empty(), "an internal view is skipped");
+    // And an unmodified buffer is not written again.
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.bs_mut().buf.modified = false;
+    assert!(
+        ed.save_recovery().is_empty(),
+        "clean means nothing to recover"
+    );
+}

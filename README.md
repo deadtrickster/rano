@@ -86,6 +86,10 @@ A `.log` opens as a read-only tail that follows the file ([docs/logs.md](docs/lo
 `TODO.md` checkboxes are live ([docs/keys.md](docs/keys.md)), and a `.wasm` plugin can
 transform text on open and save ([docs/plugins.md](docs/plugins.md)).
 
+On `SIGHUP` or `SIGTERM` rano writes every modified buffer to `name.save` — nano's recovery
+rule, with `.1`, `.2`… on a collision and an unnamed buffer to `rano.save` — and restores the
+terminal before exiting with the signal's status.
+
 ## What it does not do
 
 - It does not watch files. Saving over a file something else wrote since rano read it asks

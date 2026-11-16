@@ -261,6 +261,14 @@ fn export_to_stdout(path: Option<String>, fmt: export::Format) -> io::Result<()>
     Ok(())
 }
 
+/// The fatal signal that arrived, if any. The handler only RECORDS it: file I/O and terminal
+/// ioctls are not async-signal-safe, so the loop below does the saving and the restoring.
+static FATAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn fatal_signal(sig: i32) {
+    FATAL.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn run(
     buf: Buffer,
     load: Option<PathBuf>,
@@ -270,6 +278,13 @@ fn run(
     edit: bool,
     cfg: config::Config,
 ) -> io::Result<()> {
+    // nano's recovery: SIGHUP or SIGTERM writes every modified buffer to its name.save
+    // before the exit, rather than costing the operator every unsaved buffer and a raw
+    // terminal. The flag is all the handler touches.
+    unsafe {
+        libc::signal(libc::SIGHUP, fatal_signal as extern "C" fn(i32) as usize);
+        libc::signal(libc::SIGTERM, fatal_signal as extern "C" fn(i32) as usize);
+    }
     // Raw mode, the alternate screen, bracketed paste and mouse buttons; `Drop`
     // restores the terminal on every other way out.
     let terminal = Terminal::enter_with(term::Options {
@@ -434,6 +449,18 @@ fn run(
                 open.ack_due = false;
                 let _ = open.client.ack(ed.panel.rows.len() as u64, 0);
             }
+        }
+        let sig = FATAL.swap(0, std::sync::atomic::Ordering::SeqCst);
+        if sig != 0 {
+            // The recovery write first, then the terminal back, then out with the signal's
+            // own status. The poll's 200 ms is the most this can lag, and a signal
+            // interrupts the wait itself.
+            let saved = ed.save_recovery();
+            drop(terminal);
+            for path in &saved {
+                eprintln!("rano: recovered {}", path.display());
+            }
+            std::process::exit(128 + sig);
         }
         if ed.wants_quit() {
             break;

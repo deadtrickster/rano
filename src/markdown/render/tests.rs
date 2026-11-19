@@ -372,6 +372,17 @@ mod tables {
         ] {
             assert!(screen.contains(want), "{want} missing:\n{screen}");
         }
+        // The frame is a box: a top rule with corners, a bar at each edge of every
+        // row, a rule under the header, and a bottom rule. A table reads as a table.
+        assert!(
+            out[0].starts_with('┌') && out[0].contains('┬') && out[0].ends_with('┐'),
+            "no top rule:\n{screen}"
+        );
+        assert!(
+            out.last()
+                .is_some_and(|l| l.starts_with('└') && l.ends_with('┘')),
+            "no bottom rule:\n{screen}"
+        );
         // The separator column sits at the same place on the header and on the
         // first body row — which is the whole claim a table makes.
         let bar = |l: &str| {
@@ -380,10 +391,16 @@ mod tables {
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>()
         };
-        assert!(!bar(&out[0]).is_empty(), "no column separators:\n{screen}");
+        let header = &out[1];
+        let first_row = &out[3];
+        assert!(header.starts_with('│') && header.ends_with('│'), "{screen}");
+        assert!(
+            first_row.starts_with('│') && first_row.ends_with('│'),
+            "{screen}"
+        );
         assert_eq!(
-            bar(&out[0]),
-            bar(&out[2]),
+            bar(header),
+            bar(first_row),
             "header and first row disagree:\n{screen}"
         );
         for l in &lines {
@@ -392,6 +409,19 @@ mod tables {
         // The header is strong and the frame is faint.
         assert_eq!(span_of(&lines, "branch")[0].style.top(), Role::Strong);
         assert_eq!(span_of(&lines, " │ ")[0].style.top(), Role::Faint);
+        // The header's bottom border carries the weight: strong where the box is faint.
+        assert_eq!(
+            lines[2].spans[0].style.top(),
+            Role::Strong,
+            "the header rule: {}",
+            lines[2].plain()
+        );
+        assert_eq!(
+            lines[0].spans[0].style.top(),
+            Role::Faint,
+            "the top rule: {}",
+            lines[0].plain()
+        );
     }
 
     #[test]
@@ -427,9 +457,10 @@ mod tables {
         );
         let out = super::tables::rows(src, 40);
         // Right-aligned `n`: the digit sits at the column's right edge, under
-        // the header's own right edge.
-        let col = |l: &str| l.find('│').unwrap_or(0);
-        assert_eq!(col(&out[0]), col(&out[2]), "{out:#?}");
+        // the header's own right edge. With the box, the first bar is the edge
+        // and the second is the first inner separator.
+        let col = |l: &str| l.match_indices('│').nth(1).map(|(i, _)| i).unwrap_or(0);
+        assert_eq!(col(&out[1]), col(&out[3]), "{out:#?}");
     }
 
     #[test]

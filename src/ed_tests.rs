@@ -5907,3 +5907,46 @@ fn the_recovery_write_names_and_keeps_every_version() {
         "clean means nothing to recover"
     );
 }
+
+/// C-r in a preview reads the file it shows again and redraws it: the file changed on disk
+/// after the preview opened, and both the view and the buffer follow rather than showing
+/// stale prose.
+#[test]
+fn a_preview_rereads_the_file_it_shows() {
+    let dir = temp_dir("reload");
+    let file = dir.0.join("doc.md");
+    fs::write(&file, "# First\n\nold words\n").unwrap();
+    let mut ed = test_ed("# First\n\nold words\n");
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.toggle_rendered_view();
+    let shown = |ed: &Editor| -> String {
+        let v = ed.diff_view.as_ref().expect("a view");
+        (0..40)
+            .map(|i| v.line_text(i))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        shown(&ed).contains("old words"),
+        "the preview drew the file: {}",
+        shown(&ed)
+    );
+    // The file changes out from under the preview — the usual reason to reread.
+    fs::write(&file, "# Second\n\nnew words\n").unwrap();
+    ed.reload_view();
+    assert!(
+        shown(&ed).contains("new words"),
+        "the reread file is drawn: {}",
+        shown(&ed)
+    );
+    assert!(
+        !shown(&ed).contains("old words"),
+        "and the stale prose is gone: {}",
+        shown(&ed)
+    );
+    assert!(
+        ed.bs().buf.text().contains("new words"),
+        "the buffer followed the file: {}",
+        ed.bs().buf.text()
+    );
+}

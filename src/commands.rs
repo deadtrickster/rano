@@ -492,6 +492,13 @@ pub fn commands() -> &'static [Command] {
                 |e| e.toggle_rendered_view(),
             ),
             cmd(
+                "reload-preview",
+                "Reload",
+                View,
+                "In a preview: read the file it shows again and draw it fresh — the file may have changed on disk since the preview opened.",
+                |e| e.reload_view(),
+            ),
+            cmd(
                 "next-buffer",
                 "Next Buffer",
                 Buffers,
@@ -1184,15 +1191,20 @@ impl Keymaps {
         let mut patch = Keymap::new("patch");
         patch.bind("M-p", "diff-close");
         let mut markdown = Keymap::new("markdown");
-        markdown.bind("M-p", "diff-close");
+        markdown
+            .bind("M-p", "diff-close")
+            .bind("C-r", "reload-preview");
         let mut picture = Keymap::new("picture");
-        picture.bind("M-p", "diff-close");
+        picture
+            .bind("M-p", "diff-close")
+            .bind("C-r", "reload-preview");
         let mut view = Keymap::new("view");
         view.bind("<f8>", "open-file")
             .bind("M-w", "close-buffer")
             .bind("M-x", "execute-extended-command")
             .bind("M-<", "prev-buffer")
-            .bind("M->", "next-buffer");
+            .bind("M->", "next-buffer")
+            .bind("C-r", "reload-preview");
         let mut dir = Keymap::new("folders");
         dir.bind("RET", "dir-enter")
             .bind("-", "dir-parent")

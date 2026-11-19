@@ -222,6 +222,7 @@ Previews, diffs, pictures, reviews and the conflict view replace the text's keys
 |---|---|
 | `s` / `TAB` | Switch between two panels and one. The choice sticks for the session |
 | `<up>` / `<down>`, `C-p` / `C-n`, `<pgup>` / `<pgdn>`, `SPC`, `<home>` / `<end>` | Scroll |
+| `C-r` | Read the file the preview shows again and redraw it — it may have changed on disk since the preview opened |
 | `ESC`, `q`, `RET`, `C-g`, `C-c`, `M-p` | Back to the text |
 
 A markdown view and a picture are one column, so `s` says there is nothing to split.

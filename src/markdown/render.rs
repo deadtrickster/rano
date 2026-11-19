@@ -468,10 +468,11 @@ fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
     v.into_iter().map(Line::new).collect()
 }
 
-/// A pipe table, at the width the terminal actually has. Columns are as
-/// wide as their content wants until they do not fit, then the wide ones
-/// give way first; a cell too narrow wraps rather than getting cut; and
-/// there is no outer box — one faint rule and a faint `│` between columns.
+/// A pipe table, at the width the terminal actually has. Columns are as wide as their
+/// content wants until they do not fit, then the wide ones give way first; a cell too
+/// narrow wraps rather than getting cut. The frame is faint throughout: an outer box
+/// (┌ ┬ ┐ / ├ ┼ ┤ / └ ┴ ┘), a `│` at each edge and a faint ` │ ` between columns, so a
+/// table reads as a table — the header rule alone, as it was, read as a stray line.
 fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to
@@ -506,10 +507,27 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
         })
         .collect();
 
-    // Three columns per gap: `" │ "`.
-    let gaps = 3 * cols.saturating_sub(1);
-    let available = w.saturating_sub(gaps).max(cols);
+    // The frame is `│ c1 │ c2 │`: a bar and a space either side of every cell, which is
+    // 3*cols + 1 columns of chrome before the first content column.
+    let chrome = 3 * cols + 1;
+    let available = w.saturating_sub(chrome).max(cols);
     let widths = fit_columns(&natural, available);
+
+    let rule = |left: &str, join: &str, right: &str, strong: bool| -> Line {
+        let mut s = String::from(left);
+        for (i, wd) in widths.iter().enumerate() {
+            if i > 0 {
+                s.push_str(join);
+            }
+            s.push_str(&"─".repeat(*wd));
+        }
+        s.push_str(right);
+        if strong {
+            Line::new(vec![Span::role(s, Role::Strong)])
+        } else {
+            faint(s)
+        }
+    };
 
     let mut out = Vec::new();
     let push_row = |cells: &[Vec<Span>], out: &mut Vec<Line>| {
@@ -525,7 +543,7 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line in 0..height {
-            let mut row: Vec<Span> = Vec::new();
+            let mut row: Vec<Span> = vec![span("│", Role::Faint)];
             for i in 0..cols {
                 if i > 0 {
                     push_span(&mut row, span(" │ ", Role::Faint));
@@ -538,24 +556,22 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
                     align.get(i).copied().unwrap_or(Align::Left),
                 );
             }
-            // The last column's padding is trailing whitespace on the screen and
-            // in a copy-paste; the columns are already established by the ones
-            // before it.
-            trim_end(&mut row);
+            // The closing bar: the last column's padding is not trailing whitespace
+            // anymore, and a copy-paste keeps the frame.
+            push_span(&mut row, span(" │", Role::Faint));
             out.push(Line::new(row));
         }
     };
 
+    out.push(rule("┌", "┬", "┐", false));
     push_row(&head_s, &mut out);
-    let rule: String = widths
-        .iter()
-        .map(|wd| "─".repeat(*wd))
-        .collect::<Vec<_>>()
-        .join("─┼─");
-    out.push(faint(rule));
+    // The header's own bottom border is the one rule that carries weight: the frame is
+    // faint, and the header separates from the body by more than the box does.
+    out.push(rule("├", "┼", "┤", true));
     for r in &rows_s {
         push_row(r, &mut out);
     }
+    out.push(rule("└", "┴", "┘", false));
     out
 }
 
@@ -621,19 +637,6 @@ fn pad(row: &mut Vec<Span>, text: Vec<Span>, width: usize, align: Align) {
         push_span(row, s);
     }
     push_span(row, Span::raw(" ".repeat(right)));
-}
-
-/// Drop trailing whitespace, across spans.
-fn trim_end(row: &mut Vec<Span>) {
-    while let Some(last) = row.last_mut() {
-        let t = last.content.trim_end().len();
-        last.content.truncate(t);
-        if last.content.is_empty() {
-            row.pop();
-        } else {
-            break;
-        }
-    }
 }
 
 /// Inline runs as spans inside a container drawn as `container`. Nothing to

@@ -626,6 +626,69 @@ impl Editor {
         self.open_view(Source::Markdown { name, text, images });
     }
 
+    /// C-r in a rendered view: read the file it shows again and draw it fresh. A preview is
+    /// a view over its buffer, so the SOURCE is the buffer's own file — and the disk is read
+    /// rather than the buffer redrawn, because the usual reason to reread is that the file
+    /// changed out from under the preview. A view with no file behind it says so rather than
+    /// redrawing stale text.
+    pub(crate) fn reload_view(&mut self) {
+        if self.diff_view.is_none() {
+            self.flash("not a preview: C-r rereads a file into a view");
+            return;
+        }
+        let Some(path) = self.bs().buf.name.clone() else {
+            self.flash("this view has no file to reread");
+            return;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.flash(&format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        // The buffer follows the file too: closing the view must not return to stale text.
+        // Unsaved edits are never silently replaced — that is the operator's call.
+        if self.bs().buf.modified {
+            self.flash("the buffer has unsaved edits: save or undo before rereading");
+            return;
+        }
+        let mut buf = crate::buffer::Buffer::from_text(
+            &text,
+            Some(path.clone()),
+            crate::encoding::Encoding::Utf8,
+        );
+        buf.disk = crate::buffer::DiskStamp::of(&path);
+        self.bs_mut().buf = buf;
+        self.highlight_dirty = true;
+        let name = path.display().to_string();
+        let first = text.lines().next().map(str::to_string);
+        // The same routing M-p takes, on the reread text: whatever the file is now, the
+        // view shows that.
+        if crate::image::kind(Some(&path)).is_some() {
+            self.open_picture(name);
+        } else if crate::conflict::has_conflicts(&text) {
+            self.open_view(Source::Conflict {
+                name,
+                text,
+                current: 0,
+                compare: Compare::OursTheirs,
+                sections: Vec::new(),
+            });
+        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref()) == Some(Lang::Diff)
+            || looks_like_a_patch(&text)
+        {
+            self.open_view(Source::Patch { name, text });
+        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref())
+            == Some(Lang::Markdown)
+            || looks_like_markdown(&text)
+        {
+            self.open_markdown_view(name, text);
+        } else {
+            self.flash("nothing to render in the reread file");
+        }
+    }
+
     pub(crate) fn refresh_diff_view(&mut self) -> bool {
         let w = self.text_w;
         match self.diff_view.as_mut() {

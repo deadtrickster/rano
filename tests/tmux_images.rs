@@ -65,7 +65,11 @@ fn a_picture_reaches_a_recording_tmux_client() {
         .stderr(Stdio::null())
         .spawn()
         .expect("script");
-    let up = until(Duration::from_secs(20), || {
+    // 60 s, not 20: the gate runs this beside a whole parallel test step, and on that
+    // load a private tmux server can take past 20 s to answer — the tip went red twice
+    // on exactly that deadline. The test's own frame wait below says the same thing:
+    // "on a loaded machine it starts slower than any fixed sleep".
+    let up = until(Duration::from_secs(60), || {
         Command::new("tmux")
             .args(["-L", &sock, "list-sessions"])
             .stdout(Stdio::null())
@@ -81,7 +85,7 @@ fn a_picture_reaches_a_recording_tmux_client() {
     }
     // Wait until rano has drawn its frame before sending a key: on a loaded machine it starts
     // slower than any fixed sleep, and a chord sent into a starting editor is a chord lost.
-    let drawn = until(Duration::from_secs(20), || {
+    let drawn = until(Duration::from_secs(60), || {
         std::fs::read(&raw)
             // rano's own status row: contiguous bytes, where the key bar's text is split by the
             // reverse-video sequences around each key.

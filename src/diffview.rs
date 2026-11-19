@@ -632,8 +632,14 @@ impl Editor {
     /// changed out from under the preview. A view with no file behind it says so rather than
     /// redrawing stale text.
     pub(crate) fn reload_view(&mut self) {
-        if self.diff_view.is_none() {
+        let Some(view) = self.diff_view.as_ref() else {
             self.flash("not a preview: C-r rereads a file into a view");
+            return;
+        };
+        if matches!(view.source, Source::Review { .. }) {
+            // A review is the host's answer about THIS text; rereading the file under it
+            // would throw the review away for a key that looks like a refresh.
+            self.flash("a review is not a file preview");
             return;
         }
         let Some(path) = self.bs().buf.name.clone() else {
@@ -647,45 +653,73 @@ impl Editor {
                 return;
             }
         };
-        // The buffer follows the file too: closing the view must not return to stale text.
         // Unsaved edits are never silently replaced — that is the operator's call.
         if self.bs().buf.modified {
             self.flash("the buffer has unsaved edits: save or undo before rereading");
             return;
         }
+        // Route FIRST: unless the reread file renders as one of the preview kinds,
+        // nothing is replaced and the flash says why.
+        let name = path.display().to_string();
+        let first = text.lines().next().map(str::to_string);
+        enum Routed {
+            Picture,
+            Conflict,
+            Patch,
+            Markdown,
+        }
+        let routed = if crate::image::kind(Some(&path)).is_some() {
+            Routed::Picture
+        } else if crate::conflict::has_conflicts(&text) {
+            Routed::Conflict
+        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref()) == Some(Lang::Diff)
+            || looks_like_a_patch(&text)
+        {
+            Routed::Patch
+        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref())
+            == Some(Lang::Markdown)
+            || looks_like_markdown(&text)
+        {
+            Routed::Markdown
+        } else {
+            self.flash("nothing to render in the reread file");
+            return;
+        };
+        // The buffer follows the file the way the editor's own reads do: cursor and
+        // scroll reset, the loader's bookkeeping cleared, the generation bumped, the
+        // highlighter, the diagnostics and the language server all told — closing the
+        // view must not return to stale text or a stale gutter count.
         let mut buf = crate::buffer::Buffer::from_text(
             &text,
             Some(path.clone()),
             crate::encoding::Encoding::Utf8,
         );
         buf.disk = crate::buffer::DiskStamp::of(&path);
-        self.bs_mut().buf = buf;
+        let bs = self.bs_mut();
+        bs.buf = buf;
+        bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
+        bs.scroll = 0;
+        bs.load = None;
+        bs.partial = false;
+        bs.tail = None;
+        bs.lines_before = Some(0);
+        bs.line_count = None;
+        bs.edit_gen = bs.edit_gen.wrapping_add(1);
+        bs.wrap_extend_from = None;
         self.highlight_dirty = true;
-        let name = path.display().to_string();
-        let first = text.lines().next().map(str::to_string);
-        // The same routing M-p takes, on the reread text: whatever the file is now, the
-        // view shows that.
-        if crate::image::kind(Some(&path)).is_some() {
-            self.open_picture(name);
-        } else if crate::conflict::has_conflicts(&text) {
-            self.open_view(Source::Conflict {
+        self.diag_dirty = true;
+        self.lsp_sync();
+        match routed {
+            Routed::Picture => self.open_picture(name),
+            Routed::Conflict => self.open_view(Source::Conflict {
                 name,
                 text,
                 current: 0,
                 compare: Compare::OursTheirs,
                 sections: Vec::new(),
-            });
-        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref()) == Some(Lang::Diff)
-            || looks_like_a_patch(&text)
-        {
-            self.open_view(Source::Patch { name, text });
-        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref())
-            == Some(Lang::Markdown)
-            || looks_like_markdown(&text)
-        {
-            self.open_markdown_view(name, text);
-        } else {
-            self.flash("nothing to render in the reread file");
+            }),
+            Routed::Patch => self.open_view(Source::Patch { name, text }),
+            Routed::Markdown => self.open_markdown_view(name, text),
         }
     }
 

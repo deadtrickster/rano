@@ -514,12 +514,15 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     let widths = fit_columns(&natural, available);
 
     let rule = |left: &str, join: &str, right: &str, strong: bool| -> Line {
+        // A rule's segments are as wide as the CELLS including their padding spaces
+        // (`─`*(w+2)), joined by one glyph: the join then sits exactly on the bar
+        // beside it, and the rule is exactly as wide as the rows it frames.
         let mut s = String::from(left);
         for (i, wd) in widths.iter().enumerate() {
             if i > 0 {
                 s.push_str(join);
             }
-            s.push_str(&"─".repeat(*wd));
+            s.push_str(&"─".repeat(wd + 2));
         }
         s.push_str(right);
         if strong {
@@ -532,7 +535,9 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     let mut out = Vec::new();
     let push_row = |cells: &[Vec<Span>], out: &mut Vec<Line>| {
         // Wrap every cell to its column, then emit one screen line per wrapped
-        // line, padding the cells that ran out.
+        // line, padding the cells that ran out. Every cell sits in ` width `
+        // — a space either side — so a row is `│ w1 │ w2 │` and each bar has
+        // its matching join in the rules above and below.
         let wrapped: Vec<Vec<Vec<Span>>> = cells
             .iter()
             .zip(&widths)
@@ -545,9 +550,7 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
         for line in 0..height {
             let mut row: Vec<Span> = vec![span("│", Role::Faint)];
             for i in 0..cols {
-                if i > 0 {
-                    push_span(&mut row, span(" │ ", Role::Faint));
-                }
+                push_span(&mut row, span(" ", Role::Faint));
                 let text = wrapped[i].get(line).cloned().unwrap_or_default();
                 pad(
                     &mut row,
@@ -555,10 +558,8 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
                     widths[i],
                     align.get(i).copied().unwrap_or(Align::Left),
                 );
+                push_span(&mut row, span(" │", Role::Faint));
             }
-            // The closing bar: the last column's padding is not trailing whitespace
-            // anymore, and a copy-paste keeps the frame.
-            push_span(&mut row, span(" │", Role::Faint));
             out.push(Line::new(row));
         }
     };

@@ -383,6 +383,33 @@ mod tables {
                 .is_some_and(|l| l.starts_with('└') && l.ends_with('┘')),
             "no bottom rule:\n{screen}"
         );
+        // The rules are exactly as wide as the rows, and every join sits on the bar
+        // it joins: a rule narrower than its rows is a line floating over the body.
+        let width_of = |l: &str| l.chars().count();
+        let row_width = width_of(&out[1]);
+        for r in [&out[0], &out[2], out.last().unwrap()] {
+            assert_eq!(
+                width_of(r),
+                row_width,
+                "a rule is as wide as the rows it frames:\n{screen}"
+            );
+        }
+        let glyph_at = |l: &str, want: &[char]| {
+            l.chars()
+                .enumerate()
+                .filter(|(_, c)| want.contains(c))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        };
+        let bars = glyph_at(&out[1], &['│']);
+        for (rule, join) in [(&out[0], '┬'), (&out[2], '┼')] {
+            let joins = glyph_at(rule, &[join]);
+            let inner = bars[1..bars.len() - 1].to_vec();
+            assert_eq!(
+                joins, inner,
+                "every join sits on the bar beside it:\n{screen}"
+            );
+        }
         // The separator column sits at the same place on the header and on the
         // first body row — which is the whole claim a table makes.
         let bar = |l: &str| {

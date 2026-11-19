@@ -5950,3 +5950,31 @@ fn a_preview_rereads_the_file_it_shows() {
         ed.bs().buf.text()
     );
 }
+
+/// C-r reloads through the editor's own reader, not a UTF-8-only read: a windows-1252
+/// file that opened decodes again on the reread instead of erroring as invalid UTF-8.
+#[test]
+fn a_preview_rereads_a_non_utf8_file_through_the_editors_reader() {
+    let dir = temp_dir("reload_l1");
+    let file = dir.0.join("doc.md");
+    // `caf\xe9` — café in windows-1252, invalid as UTF-8.
+    fs::write(&file, b"# Caf\xe9\n").unwrap();
+    let mut ed = test_ed("");
+    ed.bs_mut().buf = crate::buffer::Buffer::from_file(&file).unwrap();
+    ed.toggle_rendered_view();
+    assert!(
+        ed.diff_view.is_some(),
+        "the preview opened the latin-1 file"
+    );
+    fs::write(&file, b"# Th\xe9\n").unwrap();
+    ed.reload_view();
+    let v = ed.diff_view.as_ref().expect("the view survived the reread");
+    let shown: String = (0..40)
+        .map(|i| v.line_text(i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        shown.contains("Thé"),
+        "the reread latin-1 file decoded: {shown}"
+    );
+}

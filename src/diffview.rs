@@ -646,31 +646,37 @@ impl Editor {
             self.flash("this view has no file to reread");
             return;
         };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) => {
-                self.flash(&format!("Cannot read {}: {e}", path.display()));
-                return;
-            }
-        };
         // Unsaved edits are never silently replaced — that is the operator's call.
         if self.bs().buf.modified {
             self.flash("the buffer has unsaved edits: save or undo before rereading");
             return;
         }
+        let name = path.display().to_string();
+        // A picture is routed by NAME before any read: a PNG is not text, and the picture
+        // path re-reads the file itself — a UTF-8 read here would only ever error.
+        if crate::image::kind(Some(&path)).is_some() {
+            self.open_picture(name);
+            return;
+        }
+        // The editor's own reader — encoding detection, the BOM strip, the binary flag —
+        // not a UTF-8-only read: a latin-1 or UTF-16 file opens, so it reloads.
+        let buf = match crate::buffer::Buffer::from_file(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.flash(&format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        let text = buf.text();
         // Route FIRST: unless the reread file renders as one of the preview kinds,
         // nothing is replaced and the flash says why.
-        let name = path.display().to_string();
         let first = text.lines().next().map(str::to_string);
         enum Routed {
-            Picture,
             Conflict,
             Patch,
             Markdown,
         }
-        let routed = if crate::image::kind(Some(&path)).is_some() {
-            Routed::Picture
-        } else if crate::conflict::has_conflicts(&text) {
+        let routed = if crate::conflict::has_conflicts(&text) {
             Routed::Conflict
         } else if crate::syntax::detect(Some(path.as_path()), first.as_deref()) == Some(Lang::Diff)
             || looks_like_a_patch(&text)
@@ -689,12 +695,6 @@ impl Editor {
         // scroll reset, the loader's bookkeeping cleared, the generation bumped, the
         // highlighter, the diagnostics and the language server all told — closing the
         // view must not return to stale text or a stale gutter count.
-        let mut buf = crate::buffer::Buffer::from_text(
-            &text,
-            Some(path.clone()),
-            crate::encoding::Encoding::Utf8,
-        );
-        buf.disk = crate::buffer::DiskStamp::of(&path);
         let bs = self.bs_mut();
         bs.buf = buf;
         bs.cursor = crate::buffer::Pos { row: 0, col: 0 };
@@ -702,6 +702,7 @@ impl Editor {
         bs.load = None;
         bs.partial = false;
         bs.tail = None;
+        bs.read_only = false;
         bs.lines_before = Some(0);
         bs.line_count = None;
         bs.edit_gen = bs.edit_gen.wrapping_add(1);
@@ -710,7 +711,6 @@ impl Editor {
         self.diag_dirty = true;
         self.lsp_sync();
         match routed {
-            Routed::Picture => self.open_picture(name),
             Routed::Conflict => self.open_view(Source::Conflict {
                 name,
                 text,

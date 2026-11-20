@@ -596,12 +596,10 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
         // With a split rule beside the text, the rule carries the scrollbar: a bar of its own
         // in the last text column would read as a second rule.
         if !ed.scrollbar_in_border {
-            // The bar belongs beside the column it scrolls, not at the pane's far edge - and
-            // inside the pane when the column fills it, so nothing lands on a host's rectangle.
-            let bar_x = (tx as usize + ed.text_w).min(width.saturating_sub(1) as usize) as u16;
-            let column = Rect::new(area.x + bar_x, area.y, 1, area.height);
+            // Beside the text, one column, the same cell the click maps to.
+            let bar = Rect::new(area.x + ed.scrollbar_x() as u16, area.y, 1, area.height);
             scrollbar(
-                column,
+                bar,
                 buf,
                 t0,
                 text_h,
@@ -711,7 +709,8 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
         if let Some(v) = &ed.diff_view {
             let area_text = at(0, t0, width, text_h as u16);
             buf.fill(area_text, &Style::new());
-            band(buf, at(0, t0, width, 1), Line::from(v.header()), head());
+            // **No header row**: the title above already names the file, and this view adds its
+            // mode word to it instead of taking a row from the prose.
             let rows = crate::diffview::body_rows(text_h);
             for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
                 // **The selection is drawn where it was made**: over the rendered line, in the theme's
@@ -720,10 +719,10 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                 match v.selection_on(line) {
                     Some((from, to)) => put(
                         buf,
-                        at(0, t0 + 1 + k as u16, width, 1),
+                        at(0, t0 + k as u16, width, 1),
                         &crate::diffview::highlight_selection(l, from, to),
                     ),
-                    None => put(buf, at(0, t0 + 1 + k as u16, width, 1), l),
+                    None => put(buf, at(0, t0 + k as u16, width, 1), l),
                 }
             }
             // With the panel open the split rule is the bar — the preview's place in its
@@ -2005,7 +2004,9 @@ mod tests {
     fn set_area_sizes_the_text_viewport() {
         let mut e = ed("x");
         assert!(e.set_area(PANE.into()));
-        assert_eq!((e.text_w, e.text_h), (40, 16));
+        // `text_w` is the gutter plus the text grid: the grid is the column, and the gutter sits
+        // in the margin beside it.
+        assert_eq!((e.text_w, e.text_h), (40 + e.gutter_w(), 16));
         assert!(!e.set_area(PANE.into()), "the same area is not a change");
     }
 }

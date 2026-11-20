@@ -1662,6 +1662,14 @@ impl Editor {
     /// in. Not `text_w`: that is the capped column, and handing it to a preview would leave the
     /// prose flush left at exactly the cap, centred by nobody. A host that has not set an area
     /// yet (tests) gets `text_w`, which is the same number there.
+    /// **The scrollbar's column**: one cell, right against the text grid, never outside the
+    /// pane. One answer for the draw and for the click, so the bar cannot be in one place and
+    /// its hit area in another.
+    pub fn scrollbar_x(&self) -> usize {
+        let pane = self.pane_w();
+        (self.text_x as usize + self.text_w).min(pane.saturating_sub(1))
+    }
+
     pub fn pane_w(&self) -> usize {
         if self.area.w > 0 {
             self.area.w as usize
@@ -1670,6 +1678,12 @@ impl Editor {
         }
     }
 
+    /// **The text grid**, and where it starts. `text_max` columns of TEXT - the same number a
+    /// preview gives its prose, so switching between the text and `M-P` does not move a single
+    /// column. The gutter sits in the margin left of it (and is dropped when the margin has no
+    /// room), the scrollbar keeps the pane's own right edge, and neither takes a column from the
+    /// text: `text_w` stays "gutter + text" so every width below it - wrap, clicks, segments -
+    /// is unchanged.
     pub(crate) fn recolumn(&mut self) {
         let pane = self.area.w as usize;
         let col = match self.text_max {
@@ -1677,8 +1691,11 @@ impl Editor {
             _ => pane,
         }
         .max(1);
-        self.text_w = col;
-        self.text_x = (pane.saturating_sub(col) / 2) as u16;
+        let g = self.gutter_w();
+        self.text_w = col + g;
+        // The margin the TEXT gets, less the gutter: the text then starts at `(pane - col)/2`,
+        // wherever the gutter is drawn.
+        self.text_x = ((pane.saturating_sub(col)) / 2).saturating_sub(g) as u16;
     }
 
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
@@ -1901,8 +1918,8 @@ impl Editor {
             return None;
         }
         let top = self.chrome.top();
-        // The header row is not selectable text, and the body starts under it.
-        let body_row = (pane_row as usize).checked_sub(top as usize + 1)?;
+        // **No header row**: the view's first line is the text area's first row.
+        let body_row = (pane_row as usize).checked_sub(top as usize)?;
         let line = v.top + body_row;
         if line >= v.lines.len() {
             return None;
@@ -1975,7 +1992,7 @@ impl Editor {
     /// knowing where you are. With the panel open the bar is the split rule, one column right
     /// of the text: the host routes its presses, and the text's own last column is text.
     fn scrollbar_jump(&mut self, pane_row: u16, pane_col: u16) -> bool {
-        if pane_col + 1 != self.text_x + self.text_w as u16
+        if pane_col as usize != self.scrollbar_x()
             || self.diff_view.is_some()
             || self.scrollbar_in_border
         {
@@ -4326,6 +4343,12 @@ impl Editor {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        // **A view names itself in the title**: the file is already here, so the mode word goes
+        // in front of it rather than in a header row of its own.
+        let name = match self.diff_view.as_ref() {
+            Some(v) => format!("{} · {name}", v.mode_word()),
+            None => name,
+        };
         if self.buffers.len() > 1 {
             format!("[{}/{}] {}", self.cur + 1, self.buffers.len(), name)
         } else {

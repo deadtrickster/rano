@@ -113,6 +113,8 @@ pub struct DiffView {
     pub split: bool,
     pub top: usize,
     width: usize,
+    /// The widest the prose column gets: the editor's text column, so both grids match.
+    cap: usize,
     pub lines: Vec<Line>,
     /// **A selection over the RENDERED lines**, not over the buffer: a preview's rows are what the
     /// renderer made of the text (wrapped, folded, bulleted), so its seventh row is not the file's
@@ -130,12 +132,13 @@ pub struct ViewPos {
 }
 
 impl DiffView {
-    fn new(source: Source, split: bool, width: usize) -> Self {
+    fn new(source: Source, split: bool, width: usize, cap: usize) -> Self {
         let mut v = DiffView {
             source,
             split,
             top: 0,
             width: 0,
+            cap,
             lines: Vec::new(),
             sel: None,
         };
@@ -163,7 +166,7 @@ impl DiffView {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             Source::Markdown { text, images, .. } => {
-                let (column, margin) = prose_column(width);
+                let (column, margin) = prose_column(width, self.cap);
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
                     column,
@@ -216,6 +219,19 @@ impl DiffView {
         edit_view(self.split)
     }
 
+    /// **What this view is, in a word** - the title row's prefix, where the file's own name
+    /// already says which file.
+    pub fn mode_word(&self) -> &'static str {
+        match &self.source {
+            Source::Save { .. } => "Save conflict",
+            Source::Patch { .. } => "Patch",
+            Source::Markdown { .. } => "Markdown",
+            Source::Picture { .. } => "Picture",
+            Source::Conflict { .. } => "Conflicts",
+            Source::Review { .. } => "Review",
+        }
+    }
+
     pub fn header(&self) -> String {
         let view = match self.view() {
             EditView::Split => "split",
@@ -266,8 +282,11 @@ impl DiffView {
 
 /// Rows of the text area the diff lines get: all of it but the header. Public because the
 /// host's frame draws the split rule's thumb for a preview from the same number.
+/// **Every row the text area has is the view's**: a preview draws no header of its own - the
+/// title row says what it is and which file, and `Esc` is in the key bar like every other mode's
+/// key. One row more of prose is worth more than a row saying "Markdown NAME".
 pub fn body_rows(text_h: usize) -> usize {
-    text_h.saturating_sub(1).max(1)
+    text_h.max(1)
 }
 
 impl DiffView {
@@ -392,12 +411,14 @@ fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
     )
 }
 
-/// Prose wider than this reads worse than the source it came from.
-const PROSE_MAX: usize = 100;
+/// Prose wider than this reads worse than the source it came from. The editor's own text column
+/// defaults to the same number, so a preview and the text share one grid.
+pub(crate) const PROSE_MAX: usize = 100;
 
-/// The column a preview wraps prose to, and the margin that centres it.
-fn prose_column(width: usize) -> (usize, usize) {
-    let column = width.min(PROSE_MAX);
+/// The column a preview wraps prose to, and the margin that centres it. `cap` is the editor's
+/// text column, so switching between the text and `M-P` does not move a column.
+pub(crate) fn prose_column(width: usize, cap: usize) -> (usize, usize) {
+    let column = width.min(cap.max(1));
     (column, (width - column) / 2)
 }
 
@@ -488,7 +509,8 @@ impl Editor {
 
     pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
-        self.diff_view = Some(DiffView::new(source, self.diff_split, self.pane_w()));
+        let cap = self.text_max.unwrap_or(crate::diffview::PROSE_MAX);
+        self.diff_view = Some(DiffView::new(source, self.diff_split, self.pane_w(), cap));
         self.sync_image();
     }
 

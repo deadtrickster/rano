@@ -384,8 +384,12 @@ fn d_shows_the_diff_and_esc_comes_back_to_the_question() {
     ed.text_h = 8;
     let buf = ui::Screen::of(&ed, 60, 12);
     let row = |y: u16| -> String { (0..60).map(|x| buf[(x, y)].symbol.clone()).collect() };
-    assert!(row(1).contains("Saving would change"), "{}", row(1));
-    assert!((2..9).any(|y| row(y).contains("Xone")));
+    assert!(
+        row(0).contains("Save conflict"),
+        "the title names the mode: {}",
+        row(0)
+    );
+    assert!((1..9).any(|y| row(y).contains("Xone")));
     press(&mut ed, KeyCode::Esc, Mods::NONE);
     assert!(ed.diff_view.is_none());
     assert_eq!(prompt_kind(&ed), Some(PromptKind::ConfirmExternal));
@@ -2034,7 +2038,7 @@ fn a_mouse_drag_in_a_markdown_preview_copies_the_rendered_text() {
         .position(|r| r.contains("Some prose here."))
         .unwrap_or_else(|| panic!("{rows:?}"));
     // The view draws a header on the text area's first row, then one rendered line per row.
-    let pane_row = (crate::editor::Chrome::default().top() as usize + 1 + line) as u16;
+    let pane_row = (crate::editor::Chrome::default().top() as usize + line) as u16;
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), pane_row, 0)));
     assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), pane_row, 4)));
     ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), pane_row, 4));
@@ -2072,7 +2076,7 @@ fn a_preview_selection_is_painted() {
     let rect = crate::render::Rect::new(0, 0, 60, 26);
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
-    let pane_row = (crate::editor::Chrome::default().top() as usize + 1 + line) as u16;
+    let pane_row = (crate::editor::Chrome::default().top() as usize + line) as u16;
     let sel = crate::render::Style::of(crate::style::Role::Selection);
     let inside = buf.cell(7, pane_row).expect("a cell").style.clone();
     assert_eq!(inside, sel, "the selected cell wears the selection style");
@@ -6027,17 +6031,22 @@ fn a_preview_reread_refuses_unsaved_edits() {
 fn a_wide_pane_centres_the_text_column() {
     let mut ed = test_ed("fn main() {\n    body();\n}\n");
     ed.set_area(crate::editor::Area::new(0, 0, 200, 20));
-    assert_eq!(ed.text_w, 100, "the column is capped");
-    assert_eq!(ed.text_x, 50, "and centred in what is left");
+    // The TEXT grid is capped; `text_w` is that grid plus the gutter, which sits in the margin
+    // left of it, so the text itself starts at column 50.
+    let g = ed.gutter_w();
+    assert_eq!(ed.text_w, 100 + g, "the text grid is capped");
+    assert_eq!(
+        ed.text_x as usize + g,
+        50,
+        "and the text starts at the centre"
+    );
     // The draw puts the gutter at the column's left edge and the cursor inside it.
     let rect = crate::render::Rect::new(0, 0, 200, 20);
     let mut buf = crate::render::Buffer::empty(rect);
     let cursor = crate::ui::draw_in(&mut buf, rect, &ed).expect("a cursor");
-    let g = ed.gutter_w();
     assert_eq!(
-        cursor.0 as usize,
-        50 + g,
-        "the cursor starts after the gutter: {cursor:?}"
+        cursor.0 as usize, 50,
+        "the cursor is in the text grid's first column, after the gutter: {cursor:?}"
     );
     // A click in the left margin lands on column 0; inside the column it maps through the
     // gutter; and the same click in a narrow pane is a different column, because the pane is
@@ -6045,17 +6054,37 @@ fn a_wide_pane_centres_the_text_column() {
     ed.bs_mut().cursor = Pos { row: 0, col: 0 };
     assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 5)));
     assert_eq!(ed.bs().cursor.col, 0, "the margin is column 0");
-    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 50 + 3 + 4)));
-    assert_eq!(ed.bs().cursor.col, 4, "four cells into the text");
+    // The column's text starts at 50 (gutter included), so four cells into the text is 50 + 3 + 4.
+    let col = 50 + g + 4;
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, col as u16)));
+    assert_eq!(
+        ed.bs().cursor.col,
+        4 + g,
+        "four cells into the text, past the gutter"
+    );
     // Nothing changes when nothing has to: a pane narrower than the cap keeps every column.
     let mut narrow = test_ed("x\n");
     narrow.set_area(crate::editor::Area::new(0, 0, 80, 20));
-    assert_eq!((narrow.text_w, narrow.text_x), (80, 0));
+    let g = narrow.gutter_w();
+    assert_eq!(
+        (narrow.text_w, narrow.text_x),
+        (
+            80 + g,
+            (80usize.saturating_sub(80) / 2).saturating_sub(g) as u16
+        )
+    );
     // And `text_width = 0` is "as wide as the pane".
     let mut full = test_ed("x\n");
     full.text_max = None;
     full.set_area(crate::editor::Area::new(0, 0, 200, 20));
-    assert_eq!((full.text_w, full.text_x), (200, 0));
+    let g = full.gutter_w();
+    assert_eq!(
+        (full.text_w, full.text_x),
+        (
+            200 + g,
+            (200usize.saturating_sub(200) / 2).saturating_sub(g) as u16
+        )
+    );
 }
 
 /// **Soft wrap follows the column**: a line wraps at the column's width, not the pane's.

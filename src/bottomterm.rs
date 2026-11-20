@@ -787,16 +787,19 @@ mod tests {
     #[test]
     fn a_flooding_shell_leaves_data_for_the_next_tick() {
         let (mut t, slave) = pipe_tab();
-        // 301 + 517 + 433 = 1251 bytes, against a budget of 1000.
-        for n in [301usize, 517, 433] {
+        // **Under the pty's own queue**: macOS holds about 1 KiB, so a writer that outruns it
+        // blocks before the first read ever happens - 1251 bytes against a 1000-byte budget hung
+        // this test for ten minutes. The flood is what the BUDGET has to be small against.
+        for n in [250usize, 250, 250] {
             write_all(slave, &vec![b'x'; n]);
         }
-        assert!(t.feed_budget(1000), "the first pass read something");
+        assert!(t.feed_budget(250), "the first pass read something");
         assert!(
-            t.feed_budget(1000),
+            t.feed_budget(250),
             "data was left for the next call: the first pass stopped at its budget"
         );
-        assert!(!t.feed_budget(1000), "now the pty is drained");
+        assert!(t.feed_budget(250), "and the third pass still had its own");
+        assert!(!t.feed_budget(250), "now the pty is drained");
         unsafe {
             libc::close(slave);
         }

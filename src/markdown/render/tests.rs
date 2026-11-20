@@ -433,10 +433,15 @@ mod tables {
         for l in &lines {
             assert!(l.width() <= 120, "{} columns: {:?}", l.width(), l.plain());
         }
-        // The header is strong and the frame is faint.
+        // The header text is strong, and the box has two weights: the frame's edges and
+        // the rule under the header are bold, the separators between cells are plain.
         assert_eq!(span_of(&lines, "branch")[0].style.top(), Role::Strong);
-        assert_eq!(span_of(&lines, " │ ")[0].style.top(), Role::Faint);
-        // The header's bottom border carries the weight: strong where the box is faint.
+        assert_eq!(
+            lines[0].spans[0].style.top(),
+            Role::Strong,
+            "the top rule is the frame's edge: {}",
+            lines[0].plain()
+        );
         assert_eq!(
             lines[2].spans[0].style.top(),
             Role::Strong,
@@ -444,10 +449,37 @@ mod tables {
             lines[2].plain()
         );
         assert_eq!(
-            lines[0].spans[0].style.top(),
-            Role::Faint,
-            "the top rule: {}",
-            lines[0].plain()
+            lines.last().unwrap().spans[0].style.top(),
+            Role::Strong,
+            "the bottom rule is the frame's edge"
+        );
+        // A body row: the first span is the left edge (bold), the last is the right edge
+        // (bold), and the separators between cells are plain.
+        let body = &lines[3];
+        assert_eq!(body.spans[0].content.as_ref() as &str, "│");
+        assert_eq!(body.spans[0].style.top(), Role::Strong, "left edge");
+        assert_eq!(body.spans.last().unwrap().content.as_ref() as &str, " │");
+        assert_eq!(
+            body.spans.last().unwrap().style.top(),
+            Role::Strong,
+            "right edge"
+        );
+        // Every separator but the last: the last one is the frame's right edge, and it
+        // carries the same ` │` text.
+        let inner: Vec<Role> = body
+            .spans
+            .iter()
+            .take(body.spans.len() - 1)
+            .filter(|sp| sp.content.as_ref() as &str == " │")
+            .map(|sp| sp.style.top())
+            .collect();
+        assert!(
+            !inner.is_empty(),
+            "the table has inner separators: {body:?}"
+        );
+        assert!(
+            inner.iter().all(|r| *r == Role::Plain),
+            "inner separators are plain: {inner:?}"
         );
     }
 

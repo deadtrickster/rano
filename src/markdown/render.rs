@@ -470,9 +470,12 @@ fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
 
 /// A pipe table, at the width the terminal actually has. Columns are as wide as their
 /// content wants until they do not fit, then the wide ones give way first; a cell too
-/// narrow wraps rather than getting cut. The frame is faint throughout: an outer box
-/// (┌ ┬ ┐ / ├ ┼ ┤ / └ ┴ ┘), a `│` at each edge and a faint ` │ ` between columns, so a
-/// table reads as a table — the header rule alone, as it was, read as a stray line.
+/// narrow wraps rather than getting cut.
+///
+/// **The box has two weights**: its outer edges are bold (the top and bottom rules, the
+/// two end bars of every row), the rule under the header is bold too, and the separators
+/// between cells are plain - so the frame says "this is one table" and the grid inside it
+/// says only where the columns are.
 fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to
@@ -513,7 +516,7 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     let available = w.saturating_sub(chrome).max(cols);
     let widths = fit_columns(&natural, available);
 
-    let rule = |left: &str, join: &str, right: &str, strong: bool| -> Line {
+    let rule = |left: &str, join: &str, right: &str, role: Role| -> Line {
         // A rule's segments are as wide as the CELLS including their padding spaces
         // (`─`*(w+2)), joined by one glyph: the join then sits exactly on the bar
         // beside it, and the rule is exactly as wide as the rows it frames.
@@ -525,11 +528,7 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
             s.push_str(&"─".repeat(wd + 2));
         }
         s.push_str(right);
-        if strong {
-            Line::new(vec![Span::role(s, Role::Strong)])
-        } else {
-            faint(s)
-        }
+        Line::new(vec![Span::role(s, role)])
     };
 
     let mut out = Vec::new();
@@ -548,7 +547,7 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line in 0..height {
-            let mut row: Vec<Span> = vec![span("│", Role::Faint)];
+            let mut row: Vec<Span> = vec![span("│", Role::Strong)];
             for i in 0..cols {
                 push_span(&mut row, span(" ", Role::Faint));
                 let text = wrapped[i].get(line).cloned().unwrap_or_default();
@@ -558,21 +557,26 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
                     widths[i],
                     align.get(i).copied().unwrap_or(Align::Left),
                 );
-                push_span(&mut row, span(" │", Role::Faint));
+                // The last bar is the frame's right edge; the ones before it are the grid.
+                let bar = if i + 1 == cols {
+                    Role::Strong
+                } else {
+                    Role::Plain
+                };
+                push_span(&mut row, span(" │", bar));
             }
             out.push(Line::new(row));
         }
     };
 
-    out.push(rule("┌", "┬", "┐", false));
+    // The frame's edges carry the weight, and so does the rule under the header.
+    out.push(rule("┌", "┬", "┐", Role::Strong));
     push_row(&head_s, &mut out);
-    // The header's own bottom border is the one rule that carries weight: the frame is
-    // faint, and the header separates from the body by more than the box does.
-    out.push(rule("├", "┼", "┤", true));
+    out.push(rule("├", "┼", "┤", Role::Strong));
     for r in &rows_s {
         push_row(r, &mut out);
     }
-    out.push(rule("└", "┴", "┘", false));
+    out.push(rule("└", "┴", "┘", Role::Strong));
     out
 }
 

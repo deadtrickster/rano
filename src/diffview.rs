@@ -170,13 +170,14 @@ impl DiffView {
             }
             Source::Markdown { text, images, .. } => {
                 let (column, margin) = (self.column, self.margin);
+                let start = margin;
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
                     column,
                     &crate::markdown::RenderOptions::default(),
                 );
                 splice_pictures(&mut rows, images, column);
-                indent(&mut rows, margin, width);
+                indent(&mut rows, margin, width, start);
                 rows
             }
             Source::Picture {
@@ -416,7 +417,7 @@ fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
 
 /// Code is not wrapped, so a frame wider than the column gives up as much of
 /// the margin as it needs to stay on screen, and moves as one block.
-fn indent(rows: &mut [Line], margin: usize, width: usize) {
+fn indent(rows: &mut [Line], margin: usize, width: usize, start: usize) {
     if margin == 0 {
         return;
     }
@@ -433,7 +434,10 @@ fn indent(rows: &mut [Line], margin: usize, width: usize) {
             .map(|r| crate::width::text::width(&r.plain()))
             .max()
             .unwrap_or(0);
-        let pad = margin.min(width.saturating_sub(widest));
+        // **Never left of where the text starts**: a block wider than the prose column may give
+        // up margin to stay on screen, but it may not step left of the editor's text - the column
+        // is what is aligned, and an over-wide frame is clipped on the right instead.
+        let pad = margin.min(width.saturating_sub(widest)).max(start);
         for row in rows[i..end].iter_mut().filter(|r| !r.spans.is_empty()) {
             row.spans.insert(0, Span::raw(" ".repeat(pad)));
         }

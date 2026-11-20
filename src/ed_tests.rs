@@ -891,7 +891,13 @@ fn a_wide_code_block_gives_up_margin_to_stay_on_screen() {
         r.len() - r.trim_start().len()
     };
     assert_eq!(margin("Prose."), 70, "{rows:?}");
-    assert_eq!(margin("yyyy"), 240 - 202, "fits the frame: {rows:?}");
+    // **Left-anchored at the text's column**: a block wider than the column is clipped on the
+    // right, not moved left - switching modes must not move a column.
+    assert_eq!(
+        margin("yyyy"),
+        70,
+        "an over-wide block stays at the text's start: {rows:?}"
+    );
     assert_eq!(margin("xxxx"), margin("yyyy"), "one block: {rows:?}");
     assert_eq!(
         margin("short"),
@@ -6122,7 +6128,7 @@ fn wrap_follows_the_centred_column() {
 /// where the gutter's padding is folded in, the ones at the cap, and the wide ones.
 #[test]
 fn edit_and_preview_agree_on_the_text_column() {
-    let md = "# Title\n\nword word word word word word word word word word word word word\n";
+    let md = "# Title\n\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| OrioleDB 16 / 17 / 18 | 97 / 101 / 116 | 175 / 190 / 196 | 875 |\n";
     for w in [40u16, 57, 80, 101, 105, 200, 241] {
         let mut ed = named_ed(md, "x.md");
         ed.set_area(crate::editor::Area::new(0, 0, w, 20));
@@ -6143,10 +6149,52 @@ fn edit_and_preview_agree_on_the_text_column() {
         press(&mut ed, KeyCode::Char('p'), Mods::ALT);
         let mut buf = crate::render::Buffer::empty(rect);
         crate::ui::draw_in(&mut buf, rect, &ed);
+        // The first row of the frame, wherever its rules start: that is the column a reader
+        // compares with the text's.
         let preview = first(&buf, 1, 0).expect("the prose is drawn");
         assert_eq!(
             preview, edit,
             "at {w} columns the preview starts at {preview} and the text at {edit}"
         );
+    }
+}
+
+/// Throwaway: a table in a preview at 200 columns, with the text at 50.
+#[test]
+#[ignore]
+fn dump_table_at_200() {
+    let md = "### Version comparison\n\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| `REL_17_7` | 157 | 285 | 442 |\n| `REL_17_10` | 125 | 205 | 330 |\n| OrioleDB 16 / 17 / 18 | 97 / 101 / 116 | 175 / 190 / 196 | 875 |\n";
+    let mut ed = named_ed(md, "x.md");
+    ed.set_area(crate::editor::Area::new(0, 0, 200, 24));
+    let rect = crate::render::Rect::new(0, 0, 200, 24);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let row_at = |buf: &crate::render::Buffer, y: u16| -> (usize, usize) {
+        let (mut a, mut b) = (200usize, 0usize);
+        for x in 0..200 {
+            let non = buf
+                .cell(x as u16, y)
+                .map(|c| !c.symbol.trim().is_empty())
+                .unwrap_or(false);
+            if non {
+                a = a.min(x);
+                b = b.max(x);
+            }
+        }
+        (a, b)
+    };
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    for y in 1..14 {
+        let (a, b) = row_at(&buf, y);
+        let line: String = (a..=b)
+            .map(|x| {
+                buf.cell(x as u16, y)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        eprintln!("{y:02} x={a}..{b} |{line}|");
     }
 }

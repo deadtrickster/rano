@@ -5978,3 +5978,45 @@ fn a_preview_rereads_a_non_utf8_file_through_the_editors_reader() {
         "the reread latin-1 file decoded: {shown}"
     );
 }
+
+/// C-r refuses a buffer with unsaved edits, says so, and replaces nothing: this is the
+/// one path where a reload could lose the operator's work. Implemented and reviewed
+/// twice; pinned here because untested is unpinned.
+#[test]
+fn a_preview_reread_refuses_unsaved_edits() {
+    let dir = temp_dir("reload_dirty");
+    let file = dir.0.join("doc.md");
+    fs::write(&file, "# On disk\n\nold words\n").unwrap();
+    let mut ed = test_ed("# On disk\n\nold words\n");
+    ed.bs_mut().buf.name = Some(file.clone());
+    ed.toggle_rendered_view();
+    // The operator edits the buffer after the preview opened.
+    ed.bs_mut().buf.modified = true;
+    // And the file changes on disk too — the tempting case.
+    fs::write(&file, "# Changed\n\nnew words\n").unwrap();
+    ed.reload_view();
+    let flash = ed
+        .status
+        .as_ref()
+        .map(|f| f.text.clone())
+        .unwrap_or_default();
+    assert!(
+        flash.contains("unsaved edits"),
+        "the refusal says why: {flash}"
+    );
+    assert!(
+        ed.bs().buf.text().contains("old words"),
+        "the buffer is untouched: {}",
+        ed.bs().buf.text()
+    );
+    assert!(ed.diff_view.is_some(), "the view stays open");
+    let v = ed.diff_view.as_ref().expect("the view");
+    let shown: String = (0..20)
+        .map(|i| v.line_text(i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !shown.contains("new words"),
+        "the reread file never reached the glass: {shown}"
+    );
+}

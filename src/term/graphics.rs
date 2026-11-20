@@ -33,6 +33,18 @@ pub fn image_id(item_id: &str) -> u32 {
     (h & 0x00ff_ffff).max(1)
 }
 
+/// A file-backed picture's id: the path AND the bytes, so a reload whose content changed is a
+/// new image to the terminal even at the same cell box. The old id, path alone, meant
+/// `sync_image` saw "same id, same cells" and kept the stale bitmap on the glass — the
+/// reviewer's gap. The png is already decoded at both call sites, so hashing it is free.
+pub fn content_id(path: &str, png: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in path.bytes().chain(png.iter().copied()) {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    (h & 0x00ff_ffff).max(1)
+}
+
 /// Cells an image takes in a box `box_cols` wide, from its aspect — a cell is ~2× taller than
 /// wide — capped and narrowed to keep its shape.
 pub fn image_cells(width: Option<u32>, height: Option<u32>, box_cols: u32) -> (u32, u32) {
@@ -187,6 +199,24 @@ mod tests {
         let up = String::from_utf8(image_upload(9, &"A".repeat(9000))).unwrap();
         assert_eq!(up.matches("\x1b_G").count(), 3, "three chunks");
         assert!(up.contains("m=1;") && up.contains("\x1b_Gm=0;"));
+        // The content id: the same path with different bytes is a different image, and
+        // the same bytes at the same path are the same image — the reload case.
+        assert_ne!(
+            content_id("/a.png", b"one"),
+            content_id("/a.png", b"two"),
+            "changed bytes are a new image"
+        );
+        assert_eq!(
+            content_id("/a.png", b"same"),
+            content_id("/a.png", b"same"),
+            "unchanged content keeps its id"
+        );
+        assert_ne!(
+            content_id("/a.png", b"x"),
+            content_id("/b.png", b"x"),
+            "a different path is a different image"
+        );
+        assert!(content_id("", b"") > 0, "never zero: it rides a colour");
         assert_eq!(
             String::from_utf8(image_place(9, 40, 5)).unwrap(),
             "\x1b_Ga=d,d=i,i=9,q=2\x1b\\\x1b_Ga=p,U=1,i=9,p=1,c=40,r=5,q=2\x1b\\",

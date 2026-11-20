@@ -53,6 +53,37 @@ pub enum Source {
     },
 }
 
+/// What a text renders as — the one decision `M-p` and `C-r` share, extracted so the
+/// reload cannot route a file differently than the preview that opened it did.
+enum Rendered {
+    Picture,
+    Conflict,
+    Patch,
+    Markdown,
+    Nothing,
+}
+
+fn rendered_kind(named: Option<&std::path::Path>, text: &str, first: Option<&str>) -> Rendered {
+    // A picture file is asked about by name, not bytes: the buffer holds a lossy
+    // decode the conflict and patch questions cannot use.
+    if crate::image::kind(named).is_some() {
+        return Rendered::Picture;
+    }
+    // Conflicts first: a patch with markers in it is mid-merge too.
+    if crate::conflict::has_conflicts(text) {
+        return Rendered::Conflict;
+    }
+    if crate::syntax::detect(named, first) == Some(Lang::Diff) || looks_like_a_patch(text) {
+        return Rendered::Patch;
+    }
+    // The text is asked about too, not just the name: an answer named after a
+    // non-markdown file opens with a heading `detect` passes over.
+    if crate::syntax::detect(named, first) == Some(Lang::Markdown) || looks_like_markdown(text) {
+        return Rendered::Markdown;
+    }
+    Rendered::Nothing
+}
+
 /// A picture named by a rendered document; `alt` and `target` find its row.
 #[derive(Debug, Clone)]
 pub struct Img {
@@ -438,6 +469,14 @@ fn picture_anchor(rows: &[String], from: usize, alt: &str, target: &str) -> Opti
         })
 }
 
+/// The reload's route: the shared decision minus the picture (taken by name) and
+/// Nothing (refused before anything is replaced).
+enum Routed {
+    Conflict,
+    Patch,
+    Markdown,
+}
+
 impl Editor {
     pub(crate) fn open_diff_view(&mut self, path: &std::path::Path, disk: String, mine: String) {
         self.open_view(Source::Save {
@@ -489,14 +528,16 @@ impl Editor {
             self.flash("This buffer has no file to read a picture from");
             return;
         };
-        let id = crate::term::graphics::image_id(&name);
         let max_px = crate::image::box_px(self.text_w);
         match crate::image::read(&path.to_string_lossy(), None, max_px) {
             Ok(pic) => self.open_view(Source::Picture {
+                // The id carries the bytes: a reread picture at the same path and cell box is
+                // still a new image to the terminal, not the stale bitmap the old path-only id
+                // kept on the glass.
+                id: crate::term::graphics::content_id(&name, &pic.png),
                 cells: cells_for((pic.width, pic.height), self.text_w),
                 intrinsic: (pic.width, pic.height),
                 png: crate::term::terminal::base64(&pic.png),
-                id,
                 name,
             }),
             Err(e) => self.flash(&e),
@@ -528,7 +569,9 @@ impl Editor {
             };
             let path = crate::image::resolve(&target, dir);
             out.push(Img {
-                id: crate::term::graphics::image_id(&path.to_string_lossy()),
+                // The bytes ride the id: a document whose picture changed at the same path
+                // re-renders as a new image rather than the old bitmap.
+                id: crate::term::graphics::content_id(&path.to_string_lossy(), &pic.png),
                 cells: (0, 0),
                 alt,
                 target,
@@ -589,34 +632,24 @@ impl Editor {
             .buf
             .row_opt(0)
             .map(|l| l.iter().collect::<String>());
-        // A picture file is asked about by name, not bytes: the buffer holds a lossy
-        // decode the conflict and patch questions cannot use.
-        if crate::image::kind(named).is_some() {
-            return self.open_picture(name);
-        }
-        // Conflicts first: a patch with markers in it is mid-merge too.
-        if crate::conflict::has_conflicts(&text) {
-            self.open_view(Source::Conflict {
+        match rendered_kind(named, &text, first.as_deref()) {
+            Rendered::Picture => self.open_picture(name),
+            Rendered::Conflict => self.open_view(Source::Conflict {
                 name,
                 text,
                 current: 0,
                 compare: Compare::OursTheirs,
                 sections: Vec::new(),
-            });
-        } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Diff)
-            || looks_like_a_patch(&text)
-        {
-            self.open_view(Source::Patch { name, text });
-        } else if crate::syntax::detect(named, first.as_deref()) == Some(Lang::Markdown)
-            // The text is asked about too, not just the name: an answer named after a
-            // non-markdown file opens with a heading `detect` passes over.
-            || looks_like_markdown(&text)
-        {
-            self.open_markdown_view(name, text);
-        } else if !self.show_review() {
-            self.flash(
-                "Nothing to render: not a diff or patch, not markdown or a picture, and no merge conflicts",
-            );
+            }),
+            Rendered::Patch => self.open_view(Source::Patch { name, text }),
+            Rendered::Markdown => self.open_markdown_view(name, text),
+            Rendered::Nothing => {
+                if !self.show_review() {
+                    self.flash(
+                        "Nothing to render: not a diff or patch, not markdown or a picture, and no merge conflicts",
+                    );
+                }
+            }
         }
     }
 
@@ -671,25 +704,16 @@ impl Editor {
         // Route FIRST: unless the reread file renders as one of the preview kinds,
         // nothing is replaced and the flash says why.
         let first = text.lines().next().map(str::to_string);
-        enum Routed {
-            Conflict,
-            Patch,
-            Markdown,
-        }
-        let routed = if crate::conflict::has_conflicts(&text) {
-            Routed::Conflict
-        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref()) == Some(Lang::Diff)
-            || looks_like_a_patch(&text)
-        {
-            Routed::Patch
-        } else if crate::syntax::detect(Some(path.as_path()), first.as_deref())
-            == Some(Lang::Markdown)
-            || looks_like_markdown(&text)
-        {
-            Routed::Markdown
-        } else {
-            self.flash("nothing to render in the reread file");
-            return;
+        let routed = match rendered_kind(Some(path.as_path()), &text, first.as_deref()) {
+            Rendered::Conflict => Routed::Conflict,
+            Rendered::Patch => Routed::Patch,
+            Rendered::Markdown => Routed::Markdown,
+            // The shared decision never answers Picture here — the name check above took
+            // it — and Nothing means exactly what it says.
+            _ => {
+                self.flash("nothing to render in the reread file");
+                return;
+            }
         };
         // The buffer follows the file the way the editor's own reads do: cursor and
         // scroll reset, the loader's bookkeeping cleared, the generation bumped, the

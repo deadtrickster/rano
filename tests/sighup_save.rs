@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 fn openpty() -> Option<(RawFd, RawFd)> {
     let mut master = 0;
     let mut slave = 0;
-    let ws = libc::winsize {
+    let mut ws = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -22,8 +22,8 @@ fn openpty() -> Option<(RawFd, RawFd)> {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            &mut ws,
         )
     };
     (ok == 0).then_some((master, slave))

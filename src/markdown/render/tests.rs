@@ -390,12 +390,12 @@ mod tables {
         // The frame is a box: a top rule with corners, a bar at each edge of every
         // row, a rule under the header, and a bottom rule. A table reads as a table.
         assert!(
-            out[0].starts_with('┌') && out[0].contains('┬') && out[0].ends_with('┐'),
+            out[0].starts_with('╔') && out[0].contains('╤') && out[0].ends_with('╗'),
             "no top rule:\n{screen}"
         );
         assert!(
             out.last()
-                .is_some_and(|l| l.starts_with('└') && l.ends_with('┘')),
+                .is_some_and(|l| l.starts_with('╚') && l.ends_with('╝')),
             "no bottom rule:\n{screen}"
         );
         // The rules are exactly as wide as the rows, and every join sits on the bar
@@ -416,8 +416,8 @@ mod tables {
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>()
         };
-        let bars = glyph_at(&out[1], &['│']);
-        for (rule, join) in [(&out[0], '┬'), (&out[2], '┼')] {
+        let bars = glyph_at(&out[1], &['│', '║']);
+        for (rule, join) in [(&out[0], '╤'), (&out[2], '╪')] {
             let joins = glyph_at(rule, &[join]);
             let inner = bars[1..bars.len() - 1].to_vec();
             assert_eq!(
@@ -429,15 +429,15 @@ mod tables {
         // first body row — which is the whole claim a table makes.
         let bar = |l: &str| {
             l.char_indices()
-                .filter(|(_, c)| *c == '│')
+                .filter(|(_, c)| *c == '│' || *c == '║')
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>()
         };
         let header = &out[1];
         let first_row = &out[3];
-        assert!(header.starts_with('│') && header.ends_with('│'), "{screen}");
+        assert!(header.starts_with('║') && header.ends_with('║'), "{screen}");
         assert!(
-            first_row.starts_with('│') && first_row.ends_with('│'),
+            first_row.starts_with('║') && first_row.ends_with('║'),
             "{screen}"
         );
         assert_eq!(
@@ -471,7 +471,7 @@ mod tables {
         // A rule between two body rows is plain: the grid, not the frame.
         let inner_rule = &lines[4];
         assert!(
-            inner_rule.plain().starts_with('├') && inner_rule.plain().contains('┼'),
+            inner_rule.plain().starts_with('╟') && inner_rule.plain().contains('┼'),
             "a body row's rule: {:?}",
             inner_rule.plain()
         );
@@ -483,9 +483,9 @@ mod tables {
         // A body row: the first span is the left edge (bold), the last is the right edge
         // (bold), and the separators between cells are plain.
         let body = &lines[3];
-        assert_eq!(body.spans[0].content.as_ref() as &str, "│");
+        assert_eq!(body.spans[0].content.as_ref() as &str, "║");
         assert_eq!(body.spans[0].style.top(), Role::Strong, "left edge");
-        assert_eq!(body.spans.last().unwrap().content.as_ref() as &str, " │");
+        assert_eq!(body.spans.last().unwrap().content.as_ref() as &str, " ║");
         assert_eq!(
             body.spans.last().unwrap().style.top(),
             Role::Strong,

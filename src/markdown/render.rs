@@ -516,16 +516,22 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     let available = w.saturating_sub(chrome).max(cols);
     let widths = fit_columns(&natural, available);
 
-    let rule = |left: &str, join: &str, right: &str, role: Role| -> Line {
+    let rule = |left: &str, join: &str, right: &str, heavy: bool| -> Line {
         // A rule's segments are as wide as the CELLS including their padding spaces
         // (`─`*(w+2)), joined by one glyph: the join then sits exactly on the bar
         // beside it, and the rule is exactly as wide as the rows it frames.
+        // **Weight is a glyph, not an attribute**: a monospace font has no bold face for box
+        // drawing, so a `─` is the same stroke however it is styled. The frame and the header
+        // rule therefore use Unicode's DOUBLE lines, and everything inside the frame the single
+        // ones - which reads as heavy and light in every font, with no colour involved.
+        let seg = if heavy { '═' } else { '─' };
+        let role = if heavy { Role::Strong } else { Role::Plain };
         let mut s = String::from(left);
         for (i, wd) in widths.iter().enumerate() {
             if i > 0 {
                 s.push_str(join);
             }
-            s.push_str(&"─".repeat(wd + 2));
+            s.push_str(&seg.to_string().repeat(wd + 2));
         }
         s.push_str(right);
         Line::new(vec![Span::role(s, role)])
@@ -547,7 +553,8 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line in 0..height {
-            let mut row: Vec<Span> = vec![span("│", Role::Strong)];
+            // Double vertical for the frame's edges, single for the grid between cells.
+            let mut row: Vec<Span> = vec![span("║", Role::Strong)];
             for i in 0..cols {
                 push_span(&mut row, span(" ", Role::Faint));
                 let text = wrapped[i].get(line).cloned().unwrap_or_default();
@@ -558,31 +565,33 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
                     align.get(i).copied().unwrap_or(Align::Left),
                 );
                 // The last bar is the frame's right edge; the ones before it are the grid.
-                let bar = if i + 1 == cols {
-                    Role::Strong
+                let edge = i + 1 == cols;
+                let bar = if edge {
+                    span(" ║", Role::Strong)
                 } else {
-                    Role::Plain
+                    span(" │", Role::Plain)
                 };
-                push_span(&mut row, span(" │", bar));
+                push_span(&mut row, bar);
             }
             out.push(Line::new(row));
         }
     };
 
-    // The frame's edges carry the weight, and so does the rule under the header.
-    out.push(rule("┌", "┬", "┐", Role::Strong));
+    // The frame's edges carry the weight, and so does the rule under the header. The joins are
+    // the mixed glyphs: double where the frame runs, single where a grid line meets it.
+    out.push(rule("╔", "╤", "╗", true));
     push_row(&head_s, &mut out);
-    out.push(rule("├", "┼", "┤", Role::Strong));
+    out.push(rule("╠", "╪", "╣", true));
     for (i, r) in rows_s.iter().enumerate() {
         push_row(r, &mut out);
         // **A rule between body rows**, plain: the grid a spreadsheet has, so a wide cell does
         // not run its row into the next one. Not after the last row - the frame's own bottom
         // rule closes it.
         if i + 1 < rows_s.len() {
-            out.push(rule("├", "┼", "┤", Role::Plain));
+            out.push(rule("╟", "┼", "╢", false));
         }
     }
-    out.push(rule("└", "┴", "┘", Role::Strong));
+    out.push(rule("╚", "╧", "╝", true));
     out
 }
 

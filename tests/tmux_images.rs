@@ -49,6 +49,41 @@ fn a_picture_reaches_a_recording_tmux_client() {
     let raw = dir.join("raw.log");
     let sock = format!("rano-t{}", std::process::id());
     let bin = env!("CARGO_BIN_EXE_rano");
+    // tmux checks TERM against terminfo when it starts, and the gate reded for hours on
+    // "missing or unsuitable terminal: xterm-ghostty": the entry is on some boxes and not
+    // others. The test carries its own: a copy of xterm-256color under the name the recipe
+    // uses, compiled into the test's temp dir, with TERMINFO pointed at it. Whatever the
+    // host has installed, the private server starts.
+    let terminfo = dir.join("terminfo");
+    let src = dir.join("ghostty.src");
+    let _ = std::fs::write(
+        &src,
+        String::from_utf8_lossy(
+            &Command::new("sh")
+                .arg("-c")
+                .arg("infocmp -x tmux-direct 2>/dev/null || infocmp -x xterm-direct 2>/dev/null || infocmp -x xterm-256color")
+                .output()
+                .expect("infocmp")
+                .stdout,
+        )
+        .into_owned(),
+    );
+    // Rename whatever source answered to the name the recipe uses. tmux-direct carries
+    // Smulx/Setulc — styled underlines — without which the placement's 24-bit underline
+    // is silently dropped no matter what the colours say.
+    let src_text = std::fs::read_to_string(&src).unwrap_or_default();
+    let _ = std::fs::write(
+        &src,
+        src_text
+            .replace("tmux-direct", "xterm-ghostty")
+            .replace("xterm-direct", "xterm-ghostty")
+            .replace("xterm-256color", "xterm-ghostty"),
+    );
+    let _ = Command::new("tic")
+        .args(["-x", "-o"])
+        .arg(&terminfo)
+        .arg(&src)
+        .status();
     // The recipe cc@rano used: a private server whose client is recorded by `script`.
     let inner = format!(
         "stty rows 40 cols 120; tmux -L {sock} -f {} new-session -s x '{bin} README.md'",
@@ -57,6 +92,9 @@ fn a_picture_reaches_a_recording_tmux_client() {
     let mut child = Command::new("script")
         .args(["-qfc", &inner, raw.to_str().expect("a path")])
         .env_remove("TMUX")
+        // The terminfo the test compiled itself: the recipe's terminal name works on every
+        // box, without depending on the host having ghostty's entry installed.
+        .env("TERMINFO", terminfo.display().to_string())
         .env("TERM", "xterm-ghostty")
         // Nothing of the private server's tree may hold this process's stdout: a surviving
         // tmux or rano would keep `cargo test`'s pipe open and hang the run after the test ends.

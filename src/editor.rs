@@ -1670,6 +1670,19 @@ impl Editor {
         (self.text_x as usize + self.text_w).min(pane.saturating_sub(1))
     }
 
+    /// **The text grid, and the column it starts in** - what a preview renders prose at, so the
+    /// two modes share one grid instead of each computing its own margin.
+    pub(crate) fn text_grid(&self) -> (usize, usize) {
+        let g = self.gutter_w();
+        match self.area.w {
+            0 => self.grid_in(self.text_w, g),
+            pane => {
+                let (col, start) = self.grid_in(pane as usize, g);
+                (col, start)
+            }
+        }
+    }
+
     pub fn pane_w(&self) -> usize {
         if self.area.w > 0 {
             self.area.w as usize
@@ -1685,17 +1698,26 @@ impl Editor {
     /// text: `text_w` stays "gutter + text" so every width below it - wrap, clicks, segments -
     /// is unchanged.
     pub(crate) fn recolumn(&mut self) {
-        let pane = self.area.w as usize;
-        let col = match self.text_max {
-            Some(max) if max > 0 => pane.min(max),
-            _ => pane,
-        }
-        .max(1);
         let g = self.gutter_w();
+        let (col, start) = self.grid_in(self.area.w as usize, g);
         self.text_w = col + g;
-        // The margin the TEXT gets, less the gutter: the text then starts at `(pane - col)/2`,
-        // wherever the gutter is drawn.
-        self.text_x = ((pane.saturating_sub(col)) / 2).saturating_sub(g) as u16;
+        // `text_x` is the GUTTER's column: the text starts at `start`, and the gutter is drawn in
+        // the margin just left of it - or at 0 when the margin is too narrow to hold it.
+        self.text_x = start.saturating_sub(g) as u16;
+    }
+
+    /// **One rule for the text grid and where it starts.** `col` columns of TEXT, never more than
+    /// `text_max` and never wider than the pane leaves after the gutter; `start` is the column the
+    /// text begins in - centred, but never left of where the gutter has to be drawn. The editor and
+    /// a preview both ask this, which is what keeps switching modes from moving a column.
+    fn grid_in(&self, pane: usize, g: usize) -> (usize, usize) {
+        let cap = match self.text_max {
+            Some(max) if max > 0 => max,
+            _ => usize::MAX,
+        };
+        let col = pane.saturating_sub(g).min(cap).max(1);
+        let margin = pane.saturating_sub(col);
+        (col, (margin / 2).max(g.min(margin)))
     }
 
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {

@@ -113,8 +113,10 @@ pub struct DiffView {
     pub split: bool,
     pub top: usize,
     width: usize,
-    /// The widest the prose column gets: the editor's text column, so both grids match.
-    cap: usize,
+    /// The editor's own text grid and where it starts: prose is rendered at exactly these, so
+    /// switching between the text and a preview cannot move a column.
+    column: usize,
+    margin: usize,
     pub lines: Vec<Line>,
     /// **A selection over the RENDERED lines**, not over the buffer: a preview's rows are what the
     /// renderer made of the text (wrapped, folded, bulleted), so its seventh row is not the file's
@@ -132,13 +134,14 @@ pub struct ViewPos {
 }
 
 impl DiffView {
-    fn new(source: Source, split: bool, width: usize, cap: usize) -> Self {
+    fn new(source: Source, split: bool, width: usize, column: usize, margin: usize) -> Self {
         let mut v = DiffView {
             source,
             split,
             top: 0,
             width: 0,
-            cap,
+            column,
+            margin,
             lines: Vec::new(),
             sel: None,
         };
@@ -166,7 +169,7 @@ impl DiffView {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             Source::Markdown { text, images, .. } => {
-                let (column, margin) = prose_column(width, self.cap);
+                let (column, margin) = (self.column, self.margin);
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
                     column,
@@ -411,17 +414,6 @@ fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
     )
 }
 
-/// Prose wider than this reads worse than the source it came from. The editor's own text column
-/// defaults to the same number, so a preview and the text share one grid.
-pub(crate) const PROSE_MAX: usize = 100;
-
-/// The column a preview wraps prose to, and the margin that centres it. `cap` is the editor's
-/// text column, so switching between the text and `M-P` does not move a column.
-pub(crate) fn prose_column(width: usize, cap: usize) -> (usize, usize) {
-    let column = width.min(cap.max(1));
-    (column, (width - column) / 2)
-}
-
 /// Code is not wrapped, so a frame wider than the column gives up as much of
 /// the margin as it needs to stay on screen, and moves as one block.
 fn indent(rows: &mut [Line], margin: usize, width: usize) {
@@ -509,8 +501,14 @@ impl Editor {
 
     pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
-        let cap = self.text_max.unwrap_or(crate::diffview::PROSE_MAX);
-        self.diff_view = Some(DiffView::new(source, self.diff_split, self.pane_w(), cap));
+        let (column, margin) = self.text_grid();
+        self.diff_view = Some(DiffView::new(
+            source,
+            self.diff_split,
+            self.pane_w(),
+            column,
+            margin,
+        ));
         self.sync_image();
     }
 
@@ -550,14 +548,15 @@ impl Editor {
             self.flash("This buffer has no file to read a picture from");
             return;
         };
-        let max_px = crate::image::box_px(self.pane_w());
+        let column = self.text_grid().0;
+        let max_px = crate::image::box_px(column);
         match crate::image::read(&path.to_string_lossy(), None, max_px) {
             Ok(pic) => self.open_view(Source::Picture {
                 // The id carries the bytes: a reread picture at the same path and cell box is
                 // still a new image to the terminal, not the stale bitmap the old path-only id
                 // kept on the glass.
                 id: crate::term::graphics::content_id(&name, &pic.png),
-                cells: cells_for((pic.width, pic.height), self.pane_w()),
+                cells: cells_for((pic.width, pic.height), column),
                 intrinsic: (pic.width, pic.height),
                 png: crate::term::terminal::base64(&pic.png),
                 name,
@@ -577,7 +576,8 @@ impl Editor {
             .name
             .as_deref()
             .and_then(std::path::Path::parent);
-        let max_px = crate::image::box_px(self.pane_w());
+        let column = self.text_grid().0;
+        let max_px = crate::image::box_px(column);
         // One conversion budget for the whole document, not one per picture; a reference past it draws nothing.
         let started = std::time::Instant::now();
         let mut out = Vec::new();
@@ -771,8 +771,14 @@ impl Editor {
 
     pub(crate) fn refresh_diff_view(&mut self) -> bool {
         let w = self.pane_w();
+        let (column, margin) = self.text_grid();
         match self.diff_view.as_mut() {
-            Some(v) if v.width != w => {
+            // **The grid is part of the geometry**: a pane that did not change can still have
+            // moved its text column (the gutter, `text_width`), and a view drawn at the old one
+            // would be the one mode that jumped.
+            Some(v) if v.width != w || v.column != column || v.margin != margin => {
+                v.column = column;
+                v.margin = margin;
                 v.render(w);
                 self.sync_image();
                 true

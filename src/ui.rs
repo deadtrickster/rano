@@ -2006,7 +2006,9 @@ mod tests {
         assert!(e.set_area(PANE.into()));
         // `text_w` is the gutter plus the text grid: the grid is the column, and the gutter sits
         // in the margin beside it.
-        assert_eq!((e.text_w, e.text_h), (40 + e.gutter_w(), 16));
+        // A 40-column pane: the grid is what is left after the gutter, and `text_w` is grid plus
+        // gutter - which is the pane, because the pane's columns are all there are.
+        assert_eq!((e.text_w, e.text_h), (40, 16));
         assert!(!e.set_area(PANE.into()), "the same area is not a change");
     }
 }

@@ -439,7 +439,12 @@ fn m_p_previews_a_markdown_buffer_as_prose() {
     ed.text_w = 100;
     ed.text_h = 20;
     press(&mut ed, KeyCode::Char('p'), Mods::ALT);
-    let rows = diff_view_text(&ed);
+    // The prose sits in the text grid, so its rows carry the column's margin: the content is
+    // what these assertions are about.
+    let rows: Vec<String> = diff_view_text(&ed)
+        .into_iter()
+        .map(|r| r.trim_start().to_string())
+        .collect();
     assert_eq!(rows[0], "# Title", "{rows:?}");
     assert!(
         rows.contains(&"some bold text and code".to_string()),
@@ -2037,11 +2042,13 @@ fn a_mouse_drag_in_a_markdown_preview_copies_the_rendered_text() {
         .iter()
         .position(|r| r.contains("Some prose here."))
         .unwrap_or_else(|| panic!("{rows:?}"));
-    // The view draws a header on the text area's first row, then one rendered line per row.
+    // The view's first row is the text area's first row, and the prose starts at the grid's
+    // margin.
+    let m = ed.text_grid().1 as u16;
     let pane_row = (crate::editor::Chrome::default().top() as usize + line) as u16;
-    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), pane_row, 0)));
-    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), pane_row, 4)));
-    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), pane_row, 4));
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), pane_row, m)));
+    assert!(ed.handle_mouse(me(MouseKind::Drag(MouseButton::Left), pane_row, m + 4)));
+    ed.handle_mouse(me(MouseKind::Release(MouseButton::Left), pane_row, m + 4));
     assert_eq!(
         ed.take_clipboard().as_deref(),
         Some("Some"),
@@ -2068,19 +2075,31 @@ fn a_preview_selection_is_painted() {
         .iter()
         .position(|r| r.contains("prose"))
         .expect("the prose line");
+    let m = ed.text_grid().1;
     let v = ed.diff_view.as_mut().unwrap();
+    // The prose is indented by the grid's margin; the selection is in the view's own coordinates.
     v.sel = Some((
-        crate::diffview::ViewPos { line, col: 5 },
-        crate::diffview::ViewPos { line, col: 10 },
+        crate::diffview::ViewPos { line, col: m + 5 },
+        crate::diffview::ViewPos { line, col: m + 10 },
     ));
     let rect = crate::render::Rect::new(0, 0, 60, 26);
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
     let pane_row = (crate::editor::Chrome::default().top() as usize + line) as u16;
     let sel = crate::render::Style::of(crate::style::Role::Selection);
-    let inside = buf.cell(7, pane_row).expect("a cell").style.clone();
+    // The selected chars are at `m + 5 .. m + 10` in the rendered line, and the line is drawn
+    // from the pane's first column, so the cell is at that x.
+    let inside = buf
+        .cell(m as u16 + 6, pane_row)
+        .expect("a cell")
+        .style
+        .clone();
     assert_eq!(inside, sel, "the selected cell wears the selection style");
-    let outside = buf.cell(1, pane_row).expect("a cell").style.clone();
+    let outside = buf
+        .cell(m as u16 + 1, pane_row)
+        .expect("a cell")
+        .style
+        .clone();
     assert_ne!(outside, sel, "the rest of the line does not");
 }
 
@@ -2104,10 +2123,11 @@ fn m_six_copies_a_preview_selection() {
         .iter()
         .position(|r| r.contains("prose"))
         .expect("the prose line");
+    let m = ed.text_grid().1;
     let v = ed.diff_view.as_mut().unwrap();
     v.sel = Some((
-        crate::diffview::ViewPos { line, col: 0 },
-        crate::diffview::ViewPos { line, col: 4 },
+        crate::diffview::ViewPos { line, col: m },
+        crate::diffview::ViewPos { line, col: m + 4 },
     ));
     press(&mut ed, KeyCode::Char('6'), Mods::ALT);
     assert_eq!(ed.take_clipboard().as_deref(), Some("Some"));
@@ -6065,25 +6085,19 @@ fn a_wide_pane_centres_the_text_column() {
     // Nothing changes when nothing has to: a pane narrower than the cap keeps every column.
     let mut narrow = test_ed("x\n");
     narrow.set_area(crate::editor::Area::new(0, 0, 80, 20));
-    let g = narrow.gutter_w();
     assert_eq!(
         (narrow.text_w, narrow.text_x),
-        (
-            80 + g,
-            (80usize.saturating_sub(80) / 2).saturating_sub(g) as u16
-        )
+        (80, 0),
+        "a pane at the cap keeps every column"
     );
     // And `text_width = 0` is "as wide as the pane".
     let mut full = test_ed("x\n");
     full.text_max = None;
     full.set_area(crate::editor::Area::new(0, 0, 200, 20));
-    let g = full.gutter_w();
     assert_eq!(
         (full.text_w, full.text_x),
-        (
-            200 + g,
-            (200usize.saturating_sub(200) / 2).saturating_sub(g) as u16
-        )
+        (200, 0),
+        "text_width = 0 is as wide as the pane"
     );
 }
 
@@ -6102,4 +6116,37 @@ fn wrap_follows_the_centred_column() {
         "180 columns wrapped at the column's {} fit in {total} rows",
         100 - g
     );
+}
+
+/// **Edit and preview put the text in the same column**, at every pane width: the narrow ones
+/// where the gutter's padding is folded in, the ones at the cap, and the wide ones.
+#[test]
+fn edit_and_preview_agree_on_the_text_column() {
+    let md = "# Title\n\nword word word word word word word word word word word word word\n";
+    for w in [40u16, 57, 80, 101, 105, 200, 241] {
+        let mut ed = named_ed(md, "x.md");
+        ed.set_area(crate::editor::Area::new(0, 0, w, 20));
+        let rect = crate::render::Rect::new(0, 0, w, 20);
+        // The first cell of a row that is not the gutter's, in each mode.
+        let first = |buf: &crate::render::Buffer, y: u16, skip: usize| {
+            (skip..w as usize).find(|x| {
+                buf.cell(*x as u16, y)
+                    .map(|c| !c.symbol.trim().is_empty())
+                    .unwrap_or(false)
+            })
+        };
+        let mut buf = crate::render::Buffer::empty(rect);
+        crate::ui::draw_in(&mut buf, rect, &ed);
+        let g = ed.gutter_w();
+        // Past the gutter AND the margin: the gutter's own columns hold line numbers.
+        let edit = first(&buf, 1, ed.text_x as usize + g).expect("the text is drawn");
+        press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+        let mut buf = crate::render::Buffer::empty(rect);
+        crate::ui::draw_in(&mut buf, rect, &ed);
+        let preview = first(&buf, 1, 0).expect("the prose is drawn");
+        assert_eq!(
+            preview, edit,
+            "at {w} columns the preview starts at {preview} and the text at {edit}"
+        );
+    }
 }

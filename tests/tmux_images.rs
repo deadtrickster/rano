@@ -81,7 +81,28 @@ fn a_picture_reaches_a_recording_tmux_client() {
     if !up {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("the private tmux server never came up");
+        // The refusal said only "never came up"; the gate reded three times on it without
+        // a word of WHY. tmux's own stderr is the diagnosis — a socket problem, a config
+        // problem, a permissions problem each read differently — so it rides the panic.
+        let said = Command::new("tmux")
+            .args(["-L", &sock, "list-sessions"])
+            .stderr(Stdio::piped())
+            .output();
+        let why = match said {
+            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            Err(e) => format!("tmux would not even run: {e}"),
+        };
+        let recorded = std::fs::read(&raw)
+            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+            .unwrap_or_default();
+        panic!(
+            "the private tmux server never came up: {why}{}",
+            if recorded.is_empty() {
+                String::new()
+            } else {
+                format!("; the recording holds: {}", &recorded[..recorded.len().min(400)])
+            }
+        );
     }
     // Wait until rano has drawn its frame before sending a key: on a loaded machine it starts
     // slower than any fixed sleep, and a chord sent into a starting editor is a chord lost.

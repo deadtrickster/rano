@@ -317,6 +317,8 @@ fn run(
     // The callbacks cannot reach the panel or the socket, so what a key hands them leaves through the
     // outbox and the pass after this one picks it up.
     let outbox: Outbox = std::rc::Rc::default();
+    // The text column's cap: 0 in the config is "as wide as the pane".
+    ed.text_max = (ed.config.text_width > 0).then_some(ed.config.text_width);
     if let Some(cmd) = ed.config.send_command.clone() {
         ed.on_send = Some(send_ctrl::command_sender(cmd));
     } else {
@@ -2175,19 +2177,29 @@ mod panel_tests {
         // Panel away: the editor's own scrollbar is back in its own column.
         ed.panel.open = false;
         let lay = layout(120, 40, &ed, None);
+        // The frame's own step: the editor is told the rect it will be drawn into, which is
+        // what centres the text column inside it.
+        if let Some(rect) = lay.editor {
+            ed.set_area(rect.into());
+        }
         let mut buf = rano::render::Buffer::empty(Rect::new(0, 0, 120, 40));
         draw_frame(&mut buf, &mut ed, &lay);
         let er = lay.editor.expect("the whole frame");
+        // **Beside the column, not at the frame's edge**: the text is 100 columns wide and
+        // centred, so the bar is at the column's last cell, not the pane's.
+        let bar_x = (ed.text_x as usize + ed.text_w).min(er.width as usize - 1);
+        // The second buffer, not the closure's: `cell` borrows the frame drawn before the
+        // panel was closed.
         let own: Vec<char> = (1..er.height as usize)
             .map(|y| {
-                buf.cell(er.width - 1, y as u16)
+                buf.cell(bar_x as u16, y as u16)
                     .map(|c| c.symbol.chars().next().unwrap_or(' '))
                     .unwrap_or(' ')
             })
             .collect();
         assert!(
             own.contains(&'\u{2502}'),
-            "the editor's own bar is back: {own:?}"
+            "the editor's own bar is back beside the column at {bar_x}: {own:?}"
         );
     }
 

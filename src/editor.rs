@@ -259,6 +259,12 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
+    /// **The text column's left margin** in the pane: wide monitors get a centred column the
+    /// width of `text_max`, the way a markdown preview centres its prose, instead of lines that
+    /// run the whole screen. 0 when the pane is no wider than the column.
+    pub text_x: u16,
+    /// The widest the text column gets, `None` for as wide as the pane. `config.text_width`.
+    pub text_max: Option<usize>,
     pub chrome: Chrome,
     pub(crate) area: Area,
     pub tab_width: usize,
@@ -394,6 +400,8 @@ impl Editor {
             replace_count: 0,
             text_w: 80,
             text_h: 24,
+            text_x: 0,
+            text_max: Some(100),
             chrome: Chrome::default(),
             area: Area::default(),
             tab_width,
@@ -1583,7 +1591,7 @@ impl Editor {
             return false;
         }
         self.area = area;
-        self.text_w = area.w as usize;
+        self.recolumn();
         self.text_h = (area.h as usize).saturating_sub(self.chrome_rows());
         // A picture's box follows the frame, as a PNG's view does in
         // `refresh_diff_view`.
@@ -1646,6 +1654,20 @@ impl Editor {
 
     /// Map a pane cell to a buffer position: only clicks inside the text area
     /// land; the gutter or past EOL goes to the line start/end.
+    /// **The text column** for the pane the host gave: `text_max` wide at most, centred, with
+    /// the margin kept in `text_x`. One place, so the draw, the click mapping, the wrap width
+    /// and the scrollbar cannot disagree about where the text starts.
+    pub(crate) fn recolumn(&mut self) {
+        let pane = self.area.w as usize;
+        let col = match self.text_max {
+            Some(max) if max > 0 => pane.min(max),
+            _ => pane,
+        }
+        .max(1);
+        self.text_w = col;
+        self.text_x = (pane.saturating_sub(col) / 2) as u16;
+    }
+
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
         let top = self.chrome.top();
         if self.prompt.is_some() || pane_row < top || (pane_row - top) as usize >= self.text_h {
@@ -1669,7 +1691,8 @@ impl Editor {
             return None;
         }
         let g = self.gutter_w();
-        let x = pane_col as usize;
+        // A click in the margin left of the column lands on the column's first cell.
+        let x = (pane_col as usize).saturating_sub(self.text_x as usize);
         if x < g {
             return Some(Pos { row, col: 0 });
         }
@@ -1939,7 +1962,7 @@ impl Editor {
     /// knowing where you are. With the panel open the bar is the split rule, one column right
     /// of the text: the host routes its presses, and the text's own last column is text.
     fn scrollbar_jump(&mut self, pane_row: u16, pane_col: u16) -> bool {
-        if pane_col + 1 != self.text_w as u16
+        if pane_col + 1 != self.text_x + self.text_w as u16
             || self.diff_view.is_some()
             || self.scrollbar_in_border
         {

@@ -449,7 +449,10 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
     // The gutter shrinks the text viewport; both widths come from the editor, so
     // the draw, the click mapping and the wrap width cannot disagree.
     let g = ed.gutter_w();
-    let view_w = (width as usize).saturating_sub(g);
+    // **The column, not the pane**: on a wide monitor the text sits in a centred column and
+    // the margins either side are empty, so every width below comes from the editor.
+    let view_w = (ed.text_w).saturating_sub(g);
+    let tx = ed.text_x;
 
     // Merged diagnostics, computed once per frame: a per-cell run made scrolling
     // cost scale with the count.
@@ -541,7 +544,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                 nums.push(Line::styled(s, role));
             }
             for (i, l) in nums.iter().enumerate() {
-                put(buf, at(0, t0 + i as u16, g as u16, 1), l);
+                put(buf, at(tx, t0 + i as u16, g as u16, 1), l);
             }
         }
 
@@ -588,13 +591,17 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
             }
         }
         for (i, l) in lines.iter().enumerate() {
-            put(buf, at(g as u16, t0 + i as u16, view_w as u16, 1), l);
+            put(buf, at(tx + g as u16, t0 + i as u16, view_w as u16, 1), l);
         }
         // With a split rule beside the text, the rule carries the scrollbar: a bar of its own
         // in the last text column would read as a second rule.
         if !ed.scrollbar_in_border {
+            // The bar belongs beside the column it scrolls, not at the pane's far edge - and
+            // inside the pane when the column fills it, so nothing lands on a host's rectangle.
+            let bar_x = (tx as usize + ed.text_w).min(width.saturating_sub(1) as usize) as u16;
+            let column = Rect::new(area.x + bar_x, area.y, 1, area.height);
             scrollbar(
-                area,
+                column,
                 buf,
                 t0,
                 text_h,
@@ -894,7 +901,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                     } else {
                         (g + disp.saturating_sub(bs.scroll_x)) as u16
                     };
-                    cursor_at(cx.min(width.saturating_sub(1)), cy as u16 + t0);
+                    cursor_at((tx + cx).min(width.saturating_sub(1)), cy as u16 + t0);
                 }
             }
         }

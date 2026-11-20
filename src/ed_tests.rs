@@ -6021,22 +6021,56 @@ fn a_preview_reread_refuses_unsaved_edits() {
     );
 }
 
-/// Throwaway: the exact table from `~/Projects/fuzz-findings/README.md`, as the preview draws it.
+/// **A wide pane gets a centred column**, the preview's own 100 columns, and everything that
+/// has to agree about where the text starts does: the wrap width, the click mapping, the cursor.
 #[test]
-#[ignore]
-fn dump_fuzz_table_frame() {
-    let md = "### The version comparison\n\nIdentical treatment: same 9 rounds.\n\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| `REL_17_7` | 157 | 285 | 442 |\n| `REL_17_10` | 125 | 205 | 330 |\n| `REL_19_STABLE` | 9 | 8 | 17 |\n| OrioleDB 16 / 17 / 18 | 97 / 101 / 116 | 175 / 190 / 196 | 875 |\n";
-    let mut ed = named_ed(md, "x.md");
-    ed.show_line_numbers = false;
-    ed.set_area(crate::editor::Area::new(0, 0, 100, 20));
-    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
-    let rect = crate::render::Rect::new(0, 0, 100, 20);
+fn a_wide_pane_centres_the_text_column() {
+    let mut ed = test_ed("fn main() {\n    body();\n}\n");
+    ed.set_area(crate::editor::Area::new(0, 0, 200, 20));
+    assert_eq!(ed.text_w, 100, "the column is capped");
+    assert_eq!(ed.text_x, 50, "and centred in what is left");
+    // The draw puts the gutter at the column's left edge and the cursor inside it.
+    let rect = crate::render::Rect::new(0, 0, 200, 20);
     let mut buf = crate::render::Buffer::empty(rect);
-    crate::ui::draw_in(&mut buf, rect, &ed);
-    for y in 0..14 {
-        let row: String = (0..100)
-            .map(|x| buf.cell(x, y).map(|c| c.symbol.clone()).unwrap_or_default())
-            .collect();
-        eprintln!("{y:02}|{}|", row.trim_end());
-    }
+    let cursor = crate::ui::draw_in(&mut buf, rect, &ed).expect("a cursor");
+    let g = ed.gutter_w();
+    assert_eq!(
+        cursor.0 as usize,
+        50 + g,
+        "the cursor starts after the gutter: {cursor:?}"
+    );
+    // A click in the left margin lands on column 0; inside the column it maps through the
+    // gutter; and the same click in a narrow pane is a different column, because the pane is
+    // the column there.
+    ed.bs_mut().cursor = Pos { row: 0, col: 0 };
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 5)));
+    assert_eq!(ed.bs().cursor.col, 0, "the margin is column 0");
+    assert!(ed.handle_mouse(me(MouseKind::Press(MouseButton::Left), 2, 50 + 3 + 4)));
+    assert_eq!(ed.bs().cursor.col, 4, "four cells into the text");
+    // Nothing changes when nothing has to: a pane narrower than the cap keeps every column.
+    let mut narrow = test_ed("x\n");
+    narrow.set_area(crate::editor::Area::new(0, 0, 80, 20));
+    assert_eq!((narrow.text_w, narrow.text_x), (80, 0));
+    // And `text_width = 0` is "as wide as the pane".
+    let mut full = test_ed("x\n");
+    full.text_max = None;
+    full.set_area(crate::editor::Area::new(0, 0, 200, 20));
+    assert_eq!((full.text_w, full.text_x), (200, 0));
+}
+
+/// **Soft wrap follows the column**: a line wraps at the column's width, not the pane's.
+#[test]
+fn wrap_follows_the_centred_column() {
+    let long = "x".repeat(180);
+    let mut ed = test_ed(&format!("{long}\n"));
+    ed.set_area(crate::editor::Area::new(0, 0, 200, 20));
+    ed.wrap = true;
+    ed.ensure_wrap_prefix();
+    let total = ed.scroll_total(10);
+    let g = ed.gutter_w();
+    assert!(
+        total >= (180 / (100 - g)).max(2),
+        "180 columns wrapped at the column's {} fit in {total} rows",
+        100 - g
+    );
 }

@@ -15,6 +15,10 @@ pub struct Config {
     pub line_numbers: bool,
     pub multibuffer: bool,
     pub wrap: bool,
+    /// **The widest the text column gets**, centred in a wider pane the way a markdown
+    /// preview centres its prose. `0` is as wide as the pane; the default is the preview's
+    /// own 100 columns, because a line longer than that is read by turning the head.
+    pub text_width: usize,
     /// Check GitHub for a newer release at startup: `None` leaves it to
     /// `RANO_AUTOUPDATE`. See `crate::update`.
     pub autoupdate: Option<bool>,
@@ -136,6 +140,7 @@ impl Default for Config {
             line_numbers: true,
             multibuffer: false,
             wrap: true,
+            text_width: 100,
             autoupdate: None,
             send_command: None,
             notation: crate::keymap::Notation::default(),
@@ -264,6 +269,11 @@ pub(crate) fn parse_config(text: &str) -> Config {
             "multibuffer" => {
                 if let Some(b) = parse_bool(value) {
                     cfg.multibuffer = b;
+                }
+            }
+            "text_width" => {
+                if let Ok(n) = value.trim().parse::<usize>() {
+                    cfg.text_width = n;
                 }
             }
             "wrap" => {

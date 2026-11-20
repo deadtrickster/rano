@@ -472,10 +472,10 @@ fn rows(v: Vec<Vec<Span>>) -> Vec<Line> {
 /// content wants until they do not fit, then the wide ones give way first; a cell too
 /// narrow wraps rather than getting cut.
 ///
-/// **The box has two weights**: its outer edges are bold (the top and bottom rules, the
-/// two end bars of every row), the rule under the header is bold too, and the separators
-/// between cells are plain - so the frame says "this is one table" and the grid inside it
-/// says only where the columns are.
+/// **The box has two weights**: its outer edges are bold (the top and bottom rules, the two
+/// end bars of every row), the rule under the header is bold too, and everything inside the
+/// frame - the separators between cells and the rule between two body rows - is plain, so the
+/// frame says "this is one table" and the grid says only where the rows and columns are.
 fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: usize) -> Vec<Line> {
     // The column count is the header's; a row with more cells than the header
     // has is showing something the header does not name, so the table widens to
@@ -573,8 +573,14 @@ fn table_lines(head: &[Vec<Run>], align: &[Align], rows: &[Vec<Vec<Run>>], w: us
     out.push(rule("┌", "┬", "┐", Role::Strong));
     push_row(&head_s, &mut out);
     out.push(rule("├", "┼", "┤", Role::Strong));
-    for r in &rows_s {
+    for (i, r) in rows_s.iter().enumerate() {
         push_row(r, &mut out);
+        // **A rule between body rows**, plain: the grid a spreadsheet has, so a wide cell does
+        // not run its row into the next one. Not after the last row - the frame's own bottom
+        // rule closes it.
+        if i + 1 < rows_s.len() {
+            out.push(rule("├", "┼", "┤", Role::Plain));
+        }
     }
     out.push(rule("└", "┴", "┘", Role::Strong));
     out

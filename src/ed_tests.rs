@@ -6020,3 +6020,23 @@ fn a_preview_reread_refuses_unsaved_edits() {
         "the reread file never reached the glass: {shown}"
     );
 }
+
+/// Throwaway: the exact table from `~/Projects/fuzz-findings/README.md`, as the preview draws it.
+#[test]
+#[ignore]
+fn dump_fuzz_table_frame() {
+    let md = "### The version comparison\n\nIdentical treatment: same 9 rounds.\n\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| `REL_17_7` | 157 | 285 | 442 |\n| `REL_17_10` | 125 | 205 | 330 |\n| `REL_19_STABLE` | 9 | 8 | 17 |\n| OrioleDB 16 / 17 / 18 | 97 / 101 / 116 | 175 / 190 / 196 | 875 |\n";
+    let mut ed = named_ed(md, "x.md");
+    ed.show_line_numbers = false;
+    ed.set_area(crate::editor::Area::new(0, 0, 100, 20));
+    press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+    let rect = crate::render::Rect::new(0, 0, 100, 20);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    for y in 0..14 {
+        let row: String = (0..100)
+            .map(|x| buf.cell(x, y).map(|c| c.symbol.clone()).unwrap_or_default())
+            .collect();
+        eprintln!("{y:02}|{}|", row.trim_end());
+    }
+}

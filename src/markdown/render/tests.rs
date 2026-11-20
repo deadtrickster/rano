@@ -356,6 +356,21 @@ mod tables {
         );
     }
 
+    /// Throwaway: print the table as characters and as spans, to see what it really holds.
+    #[test]
+    #[ignore]
+    fn dump_table() {
+        let lines = render(BOARD, 120);
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("{i:02}|{}|", l.plain());
+            if i < 4 {
+                for sp in &l.spans {
+                    eprintln!("     {:?} {:?}", sp.content, sp.style.top());
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_columns_line_up_and_nothing_is_lost() {
         let lines = render(BOARD, 120);
@@ -452,6 +467,18 @@ mod tables {
             lines.last().unwrap().spans[0].style.top(),
             Role::Strong,
             "the bottom rule is the frame's edge"
+        );
+        // A rule between two body rows is plain: the grid, not the frame.
+        let inner_rule = &lines[4];
+        assert!(
+            inner_rule.plain().starts_with('├') && inner_rule.plain().contains('┼'),
+            "a body row's rule: {:?}",
+            inner_rule.plain()
+        );
+        assert_eq!(
+            inner_rule.spans[0].style.top(),
+            Role::Plain,
+            "the rule between body rows is the grid's weight"
         );
         // A body row: the first span is the left edge (bold), the last is the right edge
         // (bold), and the separators between cells are plain.

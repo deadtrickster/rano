@@ -265,6 +265,7 @@ pub struct Editor {
     pub text_x: u16,
     /// The widest the text column gets, `None` for as wide as the pane. `config.text_width`.
     pub text_max: Option<usize>,
+
     pub chrome: Chrome,
     pub(crate) area: Area,
     pub tab_width: usize,
@@ -1657,6 +1658,18 @@ impl Editor {
     /// **The text column** for the pane the host gave: `text_max` wide at most, centred, with
     /// the margin kept in `text_x`. One place, so the draw, the click mapping, the wrap width
     /// and the scrollbar cannot disagree about where the text starts.
+    /// **The pane's width** - what a VIEW renders at, and the width a preview centres its prose
+    /// in. Not `text_w`: that is the capped column, and handing it to a preview would leave the
+    /// prose flush left at exactly the cap, centred by nobody. A host that has not set an area
+    /// yet (tests) gets `text_w`, which is the same number there.
+    pub fn pane_w(&self) -> usize {
+        if self.area.w > 0 {
+            self.area.w as usize
+        } else {
+            self.text_w
+        }
+    }
+
     pub(crate) fn recolumn(&mut self) {
         let pane = self.area.w as usize;
         let col = match self.text_max {

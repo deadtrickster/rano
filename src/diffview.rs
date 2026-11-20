@@ -488,7 +488,7 @@ impl Editor {
 
     pub(crate) fn open_view(&mut self, source: Source) {
         self.completion_close();
-        self.diff_view = Some(DiffView::new(source, self.diff_split, self.text_w));
+        self.diff_view = Some(DiffView::new(source, self.diff_split, self.pane_w()));
         self.sync_image();
     }
 
@@ -528,14 +528,14 @@ impl Editor {
             self.flash("This buffer has no file to read a picture from");
             return;
         };
-        let max_px = crate::image::box_px(self.text_w);
+        let max_px = crate::image::box_px(self.pane_w());
         match crate::image::read(&path.to_string_lossy(), None, max_px) {
             Ok(pic) => self.open_view(Source::Picture {
                 // The id carries the bytes: a reread picture at the same path and cell box is
                 // still a new image to the terminal, not the stale bitmap the old path-only id
                 // kept on the glass.
                 id: crate::term::graphics::content_id(&name, &pic.png),
-                cells: cells_for((pic.width, pic.height), self.text_w),
+                cells: cells_for((pic.width, pic.height), self.pane_w()),
                 intrinsic: (pic.width, pic.height),
                 png: crate::term::terminal::base64(&pic.png),
                 name,
@@ -555,7 +555,7 @@ impl Editor {
             .name
             .as_deref()
             .and_then(std::path::Path::parent);
-        let max_px = crate::image::box_px(self.text_w);
+        let max_px = crate::image::box_px(self.pane_w());
         // One conversion budget for the whole document, not one per picture; a reference past it draws nothing.
         let started = std::time::Instant::now();
         let mut out = Vec::new();
@@ -748,7 +748,7 @@ impl Editor {
     }
 
     pub(crate) fn refresh_diff_view(&mut self) -> bool {
-        let w = self.text_w;
+        let w = self.pane_w();
         match self.diff_view.as_mut() {
             Some(v) if v.width != w => {
                 v.render(w);
@@ -801,7 +801,7 @@ impl Editor {
                 v.split = !v.split;
                 self.diff_split = v.split;
                 v.top = 0;
-                v.render(self.text_w);
+                v.render(self.pane_w());
             }
             DiffAct::Scroll(d) => v.top = (v.top as isize + d).max(0) as usize,
             DiffAct::Page(d) => v.top = (v.top as isize + d * page as isize).max(0) as usize,
@@ -859,7 +859,7 @@ pub(crate) enum ConflictAct {
 
 impl Editor {
     fn conflict_act(&mut self, mut v: DiffView, act: ConflictAct) {
-        let width = self.text_w;
+        let width = self.pane_w();
         match act {
             ConflictAct::Move(d) => {
                 if let Source::Conflict {
@@ -950,7 +950,7 @@ impl Editor {
             // The same index is now the conflict that followed.
             *current = k.min(left - 1);
         }
-        v.render(self.text_w);
+        v.render(self.pane_w());
         v.jump_to_current();
         self.clamp_top(&mut v);
         let plural = if left == 1 { "" } else { "s" };

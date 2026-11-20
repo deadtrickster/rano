@@ -100,7 +100,10 @@ fn a_picture_reaches_a_recording_tmux_client() {
             if recorded.is_empty() {
                 String::new()
             } else {
-                format!("; the recording holds: {}", &recorded[..recorded.len().min(400)])
+                format!(
+                    "; the recording holds: {}",
+                    &recorded[..recorded.len().min(400)]
+                )
             }
         );
     }

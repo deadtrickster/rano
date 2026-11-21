@@ -7,7 +7,7 @@
 //! end is non-blocking, and a quiet shell costs a frame nothing.
 
 use std::os::fd::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::render::{Line, Span};
 use crate::style::Role;
@@ -35,6 +35,18 @@ impl Tab {
     /// close-on-exec, and the spawn is a `Command`: the argv, the cwd and the environment are
     /// built before the fork, not in the child.
     pub fn open(cwd: &Path, cols: u16, rows: u16, scrollback: usize) -> std::io::Result<Tab> {
+        Tab::open_with(cwd, cols, rows, scrollback, None)
+    }
+
+    /// [`Self::open`], with the environment a shell in rano's strip runs under - the `rano`
+    /// shim first on PATH, and the FIFO it writes.
+    pub fn open_with(
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
+        open_env: Option<&std::collections::HashMap<String, String>>,
+    ) -> std::io::Result<Tab> {
         let (master, slave) = openpty(cols, rows)?;
         unsafe {
             libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
@@ -49,7 +61,7 @@ impl Tab {
         }
         // The slave is the Command's Stdio: it is closed when that Command is dropped, on either
         // path. Closing it here too would be a double close, and a reused fd number is fatal.
-        match spawn_shell(cwd, slave) {
+        match spawn_shell_with(cwd, slave, open_env) {
             Ok(pid) => Ok(Tab {
                 cwd: cwd.to_path_buf(),
                 parser: new_parser(cols, rows, scrollback),
@@ -350,6 +362,10 @@ impl Drop for Tab {
 /// The bottom terminal: a row of tabs, the active one drawn, and which of them has the keyboard.
 pub struct BottomTerm {
     pub open: bool,
+    /// **The open pipe**: the FIFO a `rano <path>` typed in a shell writes to, and the editor
+    /// reads. The read end (non-blocking) and the partial line last seen, plus the shim
+    /// directory whose `rano` writes the FIFO - kept alive as long as any tab might use it.
+    pub open_pipe: Option<OpenPipe>,
     /// **Hidden**: the strip is not drawn but the shells keep running. `M-0` hides (focused) and
     /// shows it again; `M-w` CLOSES a tab, which stops its processes - hiding and closing are
     /// different things and live under different keys.
@@ -364,15 +380,144 @@ pub struct BottomTerm {
     pub dragging: bool,
 }
 
+/// The FIFO a shell's `rano` writes and the editor reads, with its shim directory.
+pub struct OpenPipe {
+    fifo: PathBuf,
+    dir: PathBuf,
+    fd: RawFd,
+    buf: String,
+}
+
+impl Drop for OpenPipe {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+        let _ = std::fs::remove_file(&self.fifo);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+impl OpenPipe {
+    /// The FIFO, its read end, and the shim the shell's PATH sees first. The shim hands its
+    /// arguments to the editor through the FIFO and exits: the rano that owns the strip opens
+    /// the file, and no second editor starts inside the pane.
+    fn new() -> std::io::Result<OpenPipe> {
+        let base = std::env::temp_dir().join(format!("rano-term-{}", std::process::id()));
+        std::fs::create_dir_all(&base)?;
+        let dir = base.join("shim");
+        let fifo = base.join("open.fifo");
+        std::fs::create_dir_all(&dir)?;
+        let _ = std::fs::remove_file(&fifo);
+        libc_ok(unsafe {
+            libc::mkfifo(
+                fifo.as_os_str().as_encoded_bytes().as_ptr() as *const _,
+                0o600,
+            )
+        })?;
+        // A writer may arrive before the reader opens; opening the read end non-blocking (and
+        // keeping it open for the editor's life) means the writer's open never blocks either.
+        let fd = libc_ok(unsafe {
+            libc::open(
+                fifo.as_os_str().as_encoded_bytes().as_ptr() as *const _,
+                libc::O_RDONLY | libc::O_NONBLOCK,
+            )
+        })?;
+        let real = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("rano"))
+            .display()
+            .to_string();
+        let shim = format!(
+            "#!/bin/sh\nif [ -n \"$RANO_TERM\" ]; then printf '%s\\n' \"$*\" > \"$RANO_OPEN_PIPE\"; exit 0; fi\nexec \"{real}\" \"$@\"\n"
+        );
+        let shim_path = dir.join("rano");
+        std::fs::write(&shim_path, shim)?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755));
+        Ok(OpenPipe {
+            fifo,
+            dir,
+            fd,
+            buf: String::new(),
+        })
+    }
+
+    /// The environment the shell needs: the shim first on its PATH, the FIFO's path, and the
+    /// marker the shim and any nested tool can ask for.
+    fn env(&self) -> std::collections::HashMap<String, String> {
+        let path = format!(
+            "{}:{}",
+            self.dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("PATH".to_string(), path);
+        env.insert("RANO_TERM".to_string(), "1".to_string());
+        env.insert(
+            "RANO_OPEN_PIPE".to_string(),
+            self.fifo.display().to_string(),
+        );
+        env
+    }
+
+    /// The paths waiting in the FIFO: one line each, the partial line kept for its rest.
+    fn drain(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        loop {
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            self.buf
+                .push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+        }
+        while let Some(i) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=i).collect();
+            let path = line.trim();
+            if !path.is_empty() {
+                out.push(path.to_string());
+            }
+        }
+        out
+    }
+}
+
+fn libc_ok(r: libc::c_int) -> std::io::Result<libc::c_int> {
+    if r == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(r)
+    }
+}
+
 impl BottomTerm {
     pub fn new() -> BottomTerm {
         BottomTerm {
+            open_pipe: None,
             hidden: false,
             open: false,
             tabs: Vec::new(),
             active: 0,
             height: 12,
             dragging: false,
+        }
+    }
+
+    /// The open pipe, made on first use: the FIFO the shell's `rano` writes and the editor
+    /// drains. Every shell after gets the same pipe, so any tab's `rano <path>` reaches the
+    /// editor.
+    fn ensure_open_pipe(&mut self) {
+        if self.open_pipe.is_none() {
+            self.open_pipe = OpenPipe::new().ok();
+        }
+    }
+
+    /// The paths a shell has handed over since the last look.
+    pub fn drain_open_pipe(&mut self) -> Vec<String> {
+        match &mut self.open_pipe {
+            Some(p) => p.drain(),
+            None => Vec::new(),
         }
     }
 
@@ -386,7 +531,10 @@ impl BottomTerm {
     ) -> std::io::Result<()> {
         self.open = !self.open;
         if self.open && self.tabs.is_empty() {
-            self.tabs.push(Tab::open(cwd, cols, rows, scrollback)?);
+            self.ensure_open_pipe();
+            let env = self.open_pipe.as_ref().map(|p| p.env());
+            self.tabs
+                .push(Tab::open_with(cwd, cols, rows, scrollback, env.as_ref())?);
         }
         Ok(())
     }
@@ -628,7 +776,16 @@ fn shell() -> String {
 
 /// The shell on the slave end of the pty, in the editor's folder. `Command` builds the argv and
 /// the environment before the fork; the child's own work is only async-signal-safe calls.
-fn spawn_shell(cwd: &Path, slave: RawFd) -> std::io::Result<libc::pid_t> {
+///
+/// The shell, with the **open pipe** when there is one: `RANO_TERM` names the strip the shell is
+/// in, and the `rano` first on its PATH is a shim that hands a path to the editor instead of
+/// starting a second editor inside the pane - `rano notes.md` in the strip opens `notes.md` in
+/// the rano that owns it.
+fn spawn_shell_with(
+    cwd: &Path,
+    slave: RawFd,
+    open_env: Option<&std::collections::HashMap<String, String>>,
+) -> std::io::Result<libc::pid_t> {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -636,6 +793,9 @@ fn spawn_shell(cwd: &Path, slave: RawFd) -> std::io::Result<libc::pid_t> {
     cmd.current_dir(cwd)
         // What the parser implements well: 256 colours, the alternate screen, cursor addressing.
         .env("TERM", "xterm-256color");
+    if let Some(env) = open_env {
+        cmd.envs(env);
+    }
     unsafe {
         // Each Stdio owns its own descriptor, so nothing is closed twice.
         cmd.stdin(Stdio::from_raw_fd(slave))
@@ -1450,5 +1610,41 @@ mod picker_tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(gone, "closed, the shell is reaped");
+    }
+}
+
+#[cfg(test)]
+mod open_pipe_tests {
+    use super::*;
+
+    /// The shim the shell's PATH sees: it hands its arguments to the FIFO and exits, and a
+    /// `rano` outside rano's strip still runs the real thing.
+    #[test]
+    fn the_shim_hands_the_path_to_the_editor() {
+        let mut pipe = OpenPipe::new().expect("a pipe");
+        let shim = pipe.dir.join("rano");
+        assert!(shim.is_file(), "the shim exists");
+        // What the shell would run: `rano notes.md` with the pipe's env.
+        let out = std::process::Command::new(&shim)
+            .arg("notes.md")
+            .env_clear()
+            .env("RANO_TERM", "1")
+            .env("RANO_OPEN_PIPE", pipe.fifo.display().to_string())
+            .output()
+            .expect("the shim runs");
+        assert!(out.status.success(), "it exits well: {out:?}");
+        // The editor's side of the pipe sees the path.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(pipe.drain(), vec!["notes.md".to_string()]);
+        // And without the marker nothing reaches the editor: the real binary's business. (In a
+        // test `current_exe` is the test binary, so what it answers is not asserted - only that
+        // the pipe stays empty.)
+        let _ = std::process::Command::new(&shim)
+            .arg("--version")
+            .env_clear()
+            .output()
+            .expect("the shim runs");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(pipe.drain().is_empty(), "no path was handed over");
     }
 }

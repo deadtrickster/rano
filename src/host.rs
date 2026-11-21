@@ -42,6 +42,18 @@ impl Editor {
         // The bottom terminal's ptys: drained on every tick, so `ls` answers even when the operator
         // is not pressing keys. Feeding only on a draw is what made it look hung.
         dirty |= self.bottom.feed();
+        // **A `rano <path>` typed in a shell**: the shim wrote the path to the open pipe, and
+        // here is where it becomes a buffer - the file opens in the rano that owns the strip,
+        // and the shell goes on.
+        for path in self.bottom.drain_open_pipe() {
+            let said = path.clone();
+            if self.open_file(&said) {
+                self.flash(&format!("Opened {said}"));
+                dirty = true;
+            } else {
+                self.flash(&format!("cannot open {said}"));
+            }
+        }
         // A file from the command line whose buffer just became current.
         dirty |= self.start_pending_load();
         dirty |= self.refresh_path_hints();

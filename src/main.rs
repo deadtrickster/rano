@@ -831,7 +831,7 @@ fn layout(w: u16, h: u16, ed: &Editor, want: Option<u16>) -> Layout {
     // without the panel the editor owns the whole frame and draws its own, with the strip
     // painted over the rows above them and spanning the frame.
     let status = ed.status_rows() as u16;
-    let strip = if ed.bottom.open && h > 6 {
+    let strip = if ed.bottom.open && !ed.bottom.hidden && h > 6 {
         ed.bottom.height.min((h / 3) as usize) as u16
     } else {
         0

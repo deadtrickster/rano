@@ -33,6 +33,10 @@ pub struct Style {
 pub struct Raw {
     /// A 24-bit foreground, `38;2;r;g;b`.
     pub fg_rgb: Option<[u8; 3]>,
+    /// **A palette foreground, `31..37`/`90..97`**: the index the program asked for, untranslated,
+    /// so the terminal's own theme answers it. A terminal pane's colours come through here - an
+    /// `ls` red is the reader's red, not a red rano picked.
+    pub fg_idx: Option<u8>,
     /// An underline colour as 24-bit RGB, `58;2;r;g;b`: a placement id rides it, and tmux
     /// rewrites a palette index to RGB of its own choosing, which loses the id.
     pub underline: Option<[u8; 3]>,
@@ -131,6 +135,9 @@ impl Style {
         if over.raw.fg_rgb.is_some() {
             s.raw.fg_rgb = over.raw.fg_rgb;
         }
+        if over.raw.fg_idx.is_some() {
+            s.raw.fg_idx = over.raw.fg_idx;
+        }
         if over.raw.underline.is_some() {
             s.raw.underline = over.raw.underline;
         }
@@ -191,6 +198,7 @@ mod tests {
             .bold()
             .link("https://x.org")
             .raw(Raw {
+                fg_idx: None,
                 fg_rgb: Some([1, 2, 3]),
                 underline: Some([0, 0, 1]),
             });

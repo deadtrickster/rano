@@ -92,6 +92,7 @@ pub fn image_rows(id: u32, cols: u32, rows: u32) -> Vec<String> {
 pub fn placeholder_style(id: u32) -> Style {
     Style::new().raw(Raw {
         fg_rgb: Some([(id >> 16) as u8, (id >> 8) as u8, id as u8]),
+        fg_idx: None,
         underline: Some([
             (PLACEMENT >> 16) as u8,
             (PLACEMENT >> 8) as u8,

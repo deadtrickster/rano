@@ -1549,13 +1549,21 @@ impl Editor {
     }
 
     /// Run a command by name, and remember it for `M-x`'s ordering.
-    /// The strip's keyboard, and its open/shut: an open strip is FOCUSED by `M-0`, and only a
-    /// focused one is hidden by it — one command, so there is no state from which the strip
-    /// cannot be reached.
+    /// The strip's keyboard, and its open/hidden/shut. `M-0` is one command through all three:
+    /// **hidden** when the strip holds the keyboard (the shells keep running - hiding is hiding),
+    /// **shown** when it is hidden, **opened** when it was never open. Closing - stopping the
+    /// processes - is `M-w`'s own thing, and the two are never confused.
     pub(crate) fn terminal_toggle(&mut self) {
+        if self.bottom.hidden {
+            self.bottom.hidden = false;
+            self.focus = crate::editor::Focus::Terminal;
+            return;
+        }
         match (self.bottom.open, self.focus) {
-            // Focused: the keyboard goes back to the text and the shell keeps running.
+            // Focused: HIDE the strip. The shells keep running in their tabs; the text has the
+            // frame back, and M-0 brings the strip - and the shells - right back.
             (true, crate::editor::Focus::Terminal) => {
+                self.bottom.hidden = true;
                 self.focus = crate::editor::Focus::Text;
             }
             // Open and not focused (a click in the text, Esc): the keyboard comes back to it.

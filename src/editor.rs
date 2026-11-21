@@ -1809,6 +1809,34 @@ impl Editor {
     /// active tab's scrollback, and dragging the rule above it resizes the strip. Nothing here
     /// reaches the document.
     pub fn bottom_mouse(&mut self, m: MouseEvent, strip_y: u16, strip_h: u16) -> bool {
+        // **A release that is not a drag opens the word under it, when it names a file**: the
+        // terminal is where paths scroll past, and "open that in rano" is the natural ask. The
+        // word is the run of non-space cells around the cell; it opens when it exists relative to
+        // the shell's own directory (the tab remembers it) or to rano's.
+        if let MouseKind::Release(MouseButton::Left) = m.kind
+            && let Some(path) = self.bottom.word_at(
+                self.bottom.active,
+                (m.y as usize).saturating_sub(strip_y as usize + 1),
+                m.x as usize,
+            )
+            && let Some(resolved) = self
+                .bottom
+                .tabs
+                .get(self.bottom.active)
+                .map(|t| t.cwd.join(&path))
+                .filter(|p| p.is_file())
+                .or_else(|| {
+                    std::path::PathBuf::from(&path)
+                        .is_file()
+                        .then(|| std::path::PathBuf::from(&path))
+                })
+        {
+            let said = resolved.display().to_string();
+            if self.open_file(&said) {
+                self.flash(&format!("Opened {said}"));
+                return true;
+            }
+        }
         // A click anywhere in the strip takes the keyboard there: the pane the pointer is in is
         // the pane being typed into.
         if matches!(

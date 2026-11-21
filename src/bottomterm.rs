@@ -25,6 +25,9 @@ pub struct Tab {
     /// The shell's exit status, once its end of the pty is gone and waitpid has reaped it.
     /// A dead shell takes no more keys.
     pub exited: Option<i32>,
+    /// Where the shell was started - the directory a relative path in its output is relative
+    /// to, for the click that opens one in rano.
+    pub cwd: std::path::PathBuf,
 }
 
 impl Tab {
@@ -48,6 +51,7 @@ impl Tab {
         // path. Closing it here too would be a double close, and a reused fd number is fatal.
         match spawn_shell(cwd, slave) {
             Ok(pid) => Ok(Tab {
+                cwd: cwd.to_path_buf(),
                 parser: new_parser(cols, rows, scrollback),
                 master,
                 pid,
@@ -346,6 +350,10 @@ impl Drop for Tab {
 /// The bottom terminal: a row of tabs, the active one drawn, and which of them has the keyboard.
 pub struct BottomTerm {
     pub open: bool,
+    /// **Hidden**: the strip is not drawn but the shells keep running. `M-0` hides (focused) and
+    /// shows it again; `M-w` CLOSES a tab, which stops its processes - hiding and closing are
+    /// different things and live under different keys.
+    pub hidden: bool,
     pub tabs: Vec<Tab>,
     pub active: usize,
     /// The strip's height in rows, remembered across toggles: a terminal the operator has resized
@@ -359,6 +367,7 @@ pub struct BottomTerm {
 impl BottomTerm {
     pub fn new() -> BottomTerm {
         BottomTerm {
+            hidden: false,
             open: false,
             tabs: Vec::new(),
             active: 0,
@@ -438,6 +447,34 @@ impl BottomTerm {
     }
 
     /// The active tab's screen, or the empty state with the tab strip.
+    /// **The word at `(row, col)` on the active tab's screen**, as the run of non-space cells
+    /// around it: what a click names. `None` when the cell is a space or out of the screen.
+    pub fn word_at(&self, tab: usize, row: usize, col: usize) -> Option<String> {
+        let t = self.tabs.get(tab)?;
+        let screen = t.parser.screen();
+        let cols = screen.size().1.get() as usize;
+        if col >= cols {
+            return None;
+        }
+        let at = |x: usize| -> Option<char> {
+            screen
+                .cell(row as u16, x as u16)
+                .map(|c| c.contents().chars().next().unwrap_or(' '))
+        };
+        if at(col)?.is_whitespace() {
+            return None;
+        }
+        let mut lo = col;
+        while lo > 0 && at(lo - 1).is_some_and(|c| !c.is_whitespace()) {
+            lo -= 1;
+        }
+        let mut hi = col + 1;
+        while hi < cols && at(hi).is_some_and(|c| !c.is_whitespace()) {
+            hi += 1;
+        }
+        Some((lo..hi).filter_map(at).collect())
+    }
+
     pub fn lines(&self, w: usize, cwd: &Path) -> Vec<Line> {
         self.lines_for(w, cwd, false)
     }
@@ -637,11 +674,22 @@ fn row_line(screen: &vt100::Screen, y: usize, cols: usize, focused: bool) -> Lin
             break;
         };
         let mut st = crate::render::Style::new();
-        if let Some(rgb) = colour_rgb(cell.fgcolor()) {
-            st = st.raw(crate::render::Raw {
-                fg_rgb: Some(rgb),
-                ..crate::render::Raw::default()
-            });
+        // **The shell's colours are palette indices, passed through**: `ls` red is the terminal
+        // theme's red, not an RGB rano guessed at. True-colour programs (24-bit) keep their RGB.
+        match cell.fgcolor() {
+            vt100::Color::Default => {}
+            vt100::Color::Idx(i) => {
+                st = st.raw(crate::render::Raw {
+                    fg_idx: Some(i),
+                    ..crate::render::Raw::default()
+                });
+            }
+            vt100::Color::Rgb(r, g, b) => {
+                st = st.raw(crate::render::Raw {
+                    fg_rgb: Some([r, g, b]),
+                    ..crate::render::Raw::default()
+                });
+            }
         }
         if cell.bold() {
             st = st.bold();
@@ -684,54 +732,6 @@ fn row_line(screen: &vt100::Screen, y: usize, cols: usize, focused: bool) -> Lin
     Line::new(spans)
 }
 
-/// A vt100 colour as RGB: the sixteen the theme names, then the 6×6×6 cube and the grey ramp, so
-/// a program asking for 256 colours keeps the one it chose.
-fn colour_rgb(c: vt100::Color) -> Option<[u8; 3]> {
-    match c {
-        vt100::Color::Default => None,
-        vt100::Color::Rgb(r, g, b) => Some([r, g, b]),
-        vt100::Color::Idx(i) => Some(index_rgb(i)),
-    }
-}
-
-fn index_rgb(i: u8) -> [u8; 3] {
-    let n = i as usize;
-    if n < 16 {
-        return rgb(n);
-    }
-    if n < 232 {
-        let n = n - 16;
-        const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-        return [STEPS[n / 36], STEPS[(n / 6) % 6], STEPS[n % 6]];
-    }
-    let v = 8 + 10 * (i - 232);
-    [v, v, v]
-}
-
-/// The sixteen colours SGR names, as RGB: exact colours, since a palette's nearest is not the
-/// same colour the shell chose.
-fn rgb(n: usize) -> [u8; 3] {
-    const C: &[[u8; 3]] = &[
-        [0, 0, 0],
-        [205, 49, 49],
-        [49, 205, 49],
-        [205, 205, 49],
-        [49, 49, 205],
-        [205, 49, 205],
-        [49, 205, 205],
-        [229, 229, 229],
-        [127, 127, 127],
-        [255, 85, 85],
-        [85, 255, 85],
-        [255, 255, 85],
-        [85, 85, 255],
-        [255, 85, 255],
-        [85, 255, 255],
-        [255, 255, 255],
-    ];
-    C[n.min(15)]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,6 +756,7 @@ mod tests {
                 pid,
                 title: "t".to_string(),
                 exited: None,
+                cwd: std::path::PathBuf::from("."),
             },
             slave,
         )
@@ -818,6 +819,7 @@ mod tests {
         let pid = child.id() as libc::pid_t;
         std::mem::forget(child);
         let t = Tab {
+            cwd: std::path::PathBuf::from("."),
             parser: new_parser(40, 6, 200),
             master,
             pid,
@@ -1105,10 +1107,14 @@ mod tests {
         let line = &t.lines()[0];
         let first = line.spans.first().expect("a span");
         assert_eq!(first.content, "R");
-        assert_eq!(first.style.raw.fg_rgb, Some(rgb(1)), "red at cell 0");
+        assert_eq!(
+            first.style.raw.fg_idx,
+            Some(1),
+            "red at cell 0, as an index"
+        );
         let rest: String = line.spans[1..].iter().map(|s| s.content.clone()).collect();
         assert!(rest.starts_with('X'), "{rest:?}");
-        assert_eq!(line.spans[1].style.raw.fg_rgb, None, "reset after it");
+        assert_eq!(line.spans[1].style.raw.fg_idx, None, "reset after it");
         unsafe {
             libc::close(slave);
         }
@@ -1288,14 +1294,13 @@ mod tests {
             .find(|s| s.content.contains('X'))
             .expect("the X's span");
         assert_eq!(
-            span.style.raw.fg_rgb,
-            Some([255, 0, 0]),
-            "196 is the cube's red"
+            span.style.raw.fg_idx,
+            Some(196),
+            "196 is the cube's red, as an index"
         );
         assert_eq!(
-            span.style.raw.fg_rgb,
-            Some([255, 0, 0]),
-            "colour 196 as RGB"
+            span.style.raw.fg_rgb, None,
+            "colour 196 is not translated to RGB"
         );
         unsafe {
             libc::close(slave);
@@ -1356,5 +1361,89 @@ mod tests {
         unsafe {
             libc::close(slave);
         }
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    /// A pty pair and a tab whose screen the test writes to: `word_at` reads what was written.
+    fn tab_with(text: &str) -> BottomTerm {
+        let (master, slave) = openpty(40, 6).expect("a pty");
+        unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let mut parser = new_parser(40, 6, 200);
+        parser.process(text.as_bytes());
+        let child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        std::mem::forget(child);
+        let tab = Tab {
+            parser,
+            master,
+            pid,
+            title: "t".to_string(),
+            exited: None,
+            cwd: std::path::PathBuf::from("/tmp"),
+        };
+        let _ = slave;
+        let mut bt = BottomTerm {
+            open: true,
+            ..BottomTerm::default()
+        };
+        bt.tabs.push(tab);
+        bt
+    }
+
+    #[test]
+    fn a_word_at_the_click_is_the_run_around_it() {
+        let bt = tab_with("\r\ncat src/main.rs OK");
+        // After `\r\n` the line sits on row 1 (row 0 held the pre-newline cursor).
+        assert_eq!(bt.word_at(0, 1, 6).as_deref(), Some("src/main.rs"));
+        assert_eq!(bt.word_at(0, 1, 0).as_deref(), Some("cat"));
+        assert_eq!(bt.word_at(0, 1, 17).as_deref(), Some("OK"));
+        assert_eq!(bt.word_at(0, 0, 4), None, "a space names nothing");
+        assert_eq!(bt.word_at(0, 9, 0), None, "past the screen's rows");
+    }
+
+    #[test]
+    fn a_palette_index_is_passed_through_not_translated() {
+        // 31 is the shell's own red: the cell carries the index, and the emitter writes `31`, so
+        // the terminal theme - not an RGB table - names the colour.
+        let bt = tab_with("\x1b[31mred\x1b[0m plain\r\n");
+        let lines = bt.lines_for(40, Path::new("."), true);
+        let red = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.trim() == "red")
+            .expect("the red span");
+        assert_eq!(red.style.raw.fg_idx, Some(1), "index 1, the SGR red");
+        assert_eq!(red.style.raw.fg_rgb, None, "not translated to RGB");
+    }
+
+    #[test]
+    fn hiding_keeps_the_shells_and_closing_does_not() {
+        let mut bt = tab_with("");
+        let pid = bt.tabs[0].pid;
+        bt.hidden = true;
+        assert!(!bt.tabs.is_empty(), "hidden, the tab is still there");
+        unsafe {
+            assert_eq!(libc::kill(pid, 0), 0, "hidden, the shell still runs");
+        }
+        bt.close_active();
+        let mut gone = false;
+        for _ in 0..3000 {
+            let r = unsafe { libc::kill(pid, 0) };
+            if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone, "closed, the shell is reaped");
     }
 }

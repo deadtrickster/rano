@@ -17,6 +17,8 @@ const LINK_CLOSE: &str = "\x1b]8;;\x1b\\";
 enum Ink {
     Hue(Hue),
     Rgb([u8; 3]),
+    /// A palette index, passed through: the terminal's theme names it, not rano.
+    Idx(u8),
 }
 
 impl Ink {
@@ -25,6 +27,19 @@ impl Ink {
             Ink::Hue(h) => h.sgr(bg, out),
             Ink::Rgb([r, g, b]) => {
                 out.push_str(&format!("{};2;{r};{g};{b}", if bg { 48 } else { 38 }))
+            }
+            Ink::Idx(i) => {
+                // The 16 SGR names: 30+i for the first eight, 90+i-8 for the bright eight, and
+                // 38;5;i for the rest of the palette.
+                let code = match (bg, i) {
+                    (false, 0..=7) => 30 + i as u32,
+                    (false, 8..=15) => 90 + (i - 8) as u32,
+                    (false, _) => return out.push_str(&format!("38;5;{i}")),
+                    (true, 0..=7) => 40 + i as u32,
+                    (true, 8..=15) => 100 + (i - 8) as u32,
+                    (true, _) => return out.push_str(&format!("48;5;{i}")),
+                };
+                out.push_str(&code.to_string());
             }
         }
     }
@@ -47,9 +62,10 @@ impl Pen {
         let l = s.look(p);
         Pen {
             attrs: l.attrs,
-            fg: match s.raw.fg_rgb {
-                Some(rgb) => Some(Ink::Rgb(rgb)),
-                None => l.fg.map(Ink::Hue),
+            fg: match (s.raw.fg_rgb, s.raw.fg_idx) {
+                (Some(rgb), _) => Some(Ink::Rgb(rgb)),
+                (None, Some(i)) => Some(Ink::Idx(i)),
+                (None, None) => l.fg.map(Ink::Hue),
             },
             bg: l.bg.map(Ink::Hue),
             underline: s.raw.underline,
@@ -305,6 +321,7 @@ mod tests {
             Span::styled(
                 "\u{10EEEE}",
                 Style::new().raw(Raw {
+                    fg_idx: None,
                     fg_rgb: Some([0, 0, 7]),
                     underline: Some([0, 0, 1]),
                 }),
@@ -364,6 +381,7 @@ mod tests {
     #[test]
     fn a_graphics_placeholder_row_survives_intact() {
         let raw = Raw {
+            fg_idx: None,
             fg_rgb: Some([0x12, 0x34, 0x56]),
             underline: Some([0, 0, 1]),
         };

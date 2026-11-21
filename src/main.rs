@@ -28,6 +28,10 @@ struct Args {
     edit: bool,
     help: bool,
     version: bool,
+    /// **Listen as this machine's rano**: `rano <path>` from another terminal opens here. Off by
+    /// default - the terminal strip's own `rano` needs no switch, it reaches the editor through
+    /// the FIFO its shell was given.
+    server: bool,
 }
 
 fn split_eq(a: &str) -> (&str, Option<&str>) {
@@ -76,6 +80,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             }
             "-f" | "--follow" => out.follow = true,
             "--edit" => out.edit = true,
+            "--server" => out.server = true,
             "--export" => {
                 let v = value("--export")?;
                 out.export = Some(export::Format::parse(&v).ok_or_else(|| {
@@ -127,6 +132,9 @@ usage: rano [options] [file...]
   -c, --column N    put the cursor on column N (1-based)
   -f, --follow      open at the tail: the last few screens, read-only
   --edit            open a .log as an ordinary file (a .log IS one by default)
+  --server          listen as this machine's rano: `rano <path>` from another
+                    terminal opens here (off by default - the terminal strip's
+                    own `rano` needs no switch)
                     (all of these apply to the first file)
   file:LINE[:COL]   open that file at that position
   +LINE[,COL] file  the same, for the file after it
@@ -147,9 +155,10 @@ fn main() {
             std::process::exit(2);
         }
     };
-    // **A running rano takes the arguments**: `rano src/main.rs:120` with one already listening
-    // hands the file over instead of starting a second editor - emacsclient's shape. The socket
-    // only answers when a rano is live, so `rano` on a machine without one starts normally.
+    // **A running `--server` rano takes the arguments**: `rano src/main.rs:120` with one
+    // listening hands the file over instead of starting a second editor - emacsclient's shape.
+    // Without `--server` nobody is listening and this rano starts normally, so the default
+    // behaviour - two ranos are two editors - is unchanged.
     if !args.files.is_empty()
         && let Some(answer) = server::send(&args.files)
     {
@@ -220,7 +229,12 @@ fn main() {
     if !rest.is_empty() {
         cfg.multibuffer = true;
     }
-    if let Err(e) = run(buf, load, rest, pos, args.follow, args.edit, cfg) {
+    let opts = RunOpts {
+        follow: args.follow,
+        edit: args.edit,
+        server: args.server,
+    };
+    if let Err(e) = run(buf, load, rest, pos, opts, cfg) {
         eprintln!("rano: {}", e);
         std::process::exit(1);
     }
@@ -280,13 +294,21 @@ extern "C" fn fatal_signal(sig: i32) {
     FATAL.store(sig, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// The flags `run` needs, gathered so its signature stays honest.
+#[derive(Default)]
+struct RunOpts {
+    follow: bool,
+    edit: bool,
+    /// `--server`: this rano is the one `rano <path>` from another terminal reaches.
+    server: bool,
+}
+
 fn run(
     buf: Buffer,
     load: Option<PathBuf>,
     rest: Vec<(PathBuf, Option<Pos>)>,
     pos: Option<Pos>,
-    follow: bool,
-    edit: bool,
+    opts: RunOpts,
     cfg: config::Config,
 ) -> io::Result<()> {
     // nano's recovery: SIGHUP or SIGTERM writes every modified buffer to its name.save
@@ -296,12 +318,21 @@ fn run(
         libc::signal(libc::SIGHUP, fatal_signal as extern "C" fn(i32) as usize);
         libc::signal(libc::SIGTERM, fatal_signal as extern "C" fn(i32) as usize);
     }
-    // **The server**: this rano is the one `rano <path>` from any other terminal reaches. A
-    // failure to bind is a flash, not an exit - the editor is an editor first.
-    let server = server::Server::start();
-    if let Err(e) = &server {
-        eprintln!("rano: no server socket ({e}) - `rano <path>` will start a second editor");
-    }
+    // **The server is opt-in** (`--server`): this rano becomes the one `rano <path>` from any
+    // terminal reaches. Without the flag there is no socket and no takeover - the mandatory
+    // behaviour is the terminal strip's own `rano`, which reaches the editor through the FIFO
+    // its shell was given and needs no switch.
+    let server = if opts.server {
+        match server::Server::start() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("rano: no server socket ({e})");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Raw mode, the alternate screen, bracketed paste and mouse buttons; `Drop`
     // restores the terminal on every other way out.
     let terminal = Terminal::enter_with(term::Options {
@@ -327,7 +358,7 @@ fn run(
     ed.tmux_passthrough_off = terminal.features().tmux_passthrough_off;
     // `--edit`: the escape from the mode a `.log` name puts it in, set before any
     // load.
-    ed.edit_override = edit;
+    ed.edit_override = opts.edit;
     // One request at startup, off the main thread, here rather than in
     // `Editor::new` so no test makes a network call by constructing an editor.
     ed.start_update_check();
@@ -386,12 +417,12 @@ fn run(
         th.min(u16::MAX as usize) as u16,
     ));
     if let Some(path) = load {
-        if !follow && path.is_dir() {
+        if !opts.follow && path.is_dir() {
             ed.open_dir(&path);
         } else {
             // `-f` forces the tail; without it the name decides, through the one door
             // every door uses.
-            let started = if follow {
+            let started = if opts.follow {
                 ed.start_tail(&path)
             } else {
                 ed.open_named(&path)
@@ -442,7 +473,7 @@ fn run(
         dirty |= ed.tick(Instant::now());
         // **The server's requests**: `rano <path>` from another terminal, applied on the same
         // pass as any other event - the file opens, the line lands, the reader sees it.
-        if let Ok(server) = &server {
+        if let Some(server) = &server {
             while let Ok(req) = server.rx.try_recv() {
                 match req {
                     server::Request::Open { path, line, col } => {

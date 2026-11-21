@@ -209,15 +209,40 @@ impl Editor {
                     PromptKind::ReadName => self.do_read(p.text),
                     PromptKind::DirName => self.do_dir(p.text),
                     PromptKind::OpenName => {
-                        // `name:line[:col]` jumps there, as on the command line. A
-                        // failed read keeps the prompt open for editing.
-                        let opened =
-                            match crate::send_ctrl::split_position(&expand_tilde(p.text.trim())) {
+                        // **The picker's Enter.** An empty filter opens the folder itself as a
+                        // listing ("open ." without typing it); a Tab-selected entry opens that
+                        // entry, built from the filter's directory part; anything else is the
+                        // typed path, `name:line[:col]` jumping as on the command line. A failed
+                        // read keeps the prompt open for editing.
+                        let picked = self.path_hints.as_ref().and_then(|(k, t, e, sel)| {
+                            (k == &p.kind && t == &p.text).then(|| e.get(*sel).cloned())?
+                        });
+                        let text = p.text.trim().to_string();
+                        let opened = if text.is_empty() {
+                            let dir = self
+                                .bs()
+                                .buf
+                                .name
+                                .as_deref()
+                                .and_then(std::path::Path::parent)
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_else(|| std::path::PathBuf::from("."));
+                            self.open_dir(&dir)
+                        } else if let Some(hint) = picked
+                            && let Some((d, _)) =
+                                text.rfind('/').map(|i| (&text[..=i], &text[i + 1..]))
+                        {
+                            let mut full = String::from(d);
+                            full.push_str(&hint.name);
+                            self.open_file(&full)
+                        } else {
+                            match crate::send_ctrl::split_position(&expand_tilde(&text)) {
                                 Some((name, line, col)) => {
                                     self.open_at(std::path::Path::new(&name), line, col).is_ok()
                                 }
-                                None => self.open_file(&p.text),
-                            };
+                                None => self.open_file(&text),
+                            }
+                        };
                         if !opened {
                             self.prompt = Some(p);
                         }
@@ -339,16 +364,28 @@ impl Editor {
                         | PromptKind::FilterCmd
                 ) =>
             {
-                match complete_path(&p.text) {
-                    Some((common, _)) => {
-                        if common.chars().count() > p.text.chars().count() {
-                            p.text = common;
-                        }
-                        p.cursor = p.text.chars().count();
-                    }
-                    None => self.flash("No match"),
+                // **Tab completes, then selects.** The first press takes the common prefix the
+                // entries share; when there is nothing left to complete, Tab walks the picker's
+                // list, so `*.md` + Tab + Tab + Enter is the whole gesture.
+                let completes = complete_path(&p.text)
+                    .filter(|(common, _)| common.chars().count() > p.text.chars().count());
+                let completed = completes.is_some();
+                if let Some((common, _)) = completes {
+                    p.text = common;
+                    p.cursor = p.text.chars().count();
                 }
                 self.prompt = Some(p);
+                // With the prompt back in place (the refresh reads it), keep the picker's list
+                // fresh, and walk it: Tab completes first, and when there is nothing left to
+                // complete it selects, so `*.md` + Tab + Tab + Enter is the whole gesture.
+                self.refresh_path_hints();
+                if !completed && let Some((_, _, e, sel)) = &mut self.path_hints {
+                    if e.len() > 1 {
+                        *sel = (*sel + 1) % e.len();
+                    } else if e.is_empty() {
+                        self.flash("No match");
+                    }
+                }
             }
             KeyCode::Backspace if p.cursor > 0 => {
                 prompt_backspace(&mut p);
@@ -470,6 +507,123 @@ pub fn expand_tilde(p: &str) -> String {
 /// Complete a file-path prefix against the filesystem: split at the last '/', read
 /// that directory, collect matching entries (hidden ones only when the typed part
 /// starts with '.'), and return the common prefix with the candidates.
+/// One entry of the file picker's list: a name, and whether it is a folder to descend into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathHint {
+    pub name: String,
+    pub dir: bool,
+}
+
+/// Does `name` match a fuzzy filter: every character of `filter`, in order, case-insensitively,
+/// somewhere in `name`? A prefix match is the same walk from the start, so it ranks first by
+/// construction (the caller sorts prefix matches before the rest).
+fn fuzzy(name: &str, filter: &str) -> bool {
+    let lower = name.to_lowercase();
+    let mut it = lower.chars();
+    'f: for want in filter.to_lowercase().chars() {
+        for got in it.by_ref() {
+            if got == want {
+                continue 'f;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Does `name` match a glob filter (`*.md`, `?.txt`)? `*` is any run, `?` one character,
+/// case-insensitively; everything else matches itself.
+fn glob(name: &str, filter: &str) -> bool {
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    let f: Vec<char> = filter.to_lowercase().chars().collect();
+    // The classic two-pointer walk: `*` may eat nothing, and on failure the last star retries
+    // with one more character eaten.
+    let (mut ni, mut fi) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while ni < n.len() {
+        if fi < f.len() && (f[fi] == '?' || f[fi] == n[ni]) {
+            ni += 1;
+            fi += 1;
+        } else if fi < f.len() && f[fi] == '*' {
+            star = Some(fi);
+            mark = ni;
+            fi += 1;
+        } else if let Some(s) = star {
+            fi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    while fi < f.len() && f[fi] == '*' {
+        fi += 1;
+    }
+    fi == f.len()
+}
+
+/// **The file picker's list** for the filter as typed: the entries of the directory the filter
+/// names (the current one when it does not), matched by glob when it has a wildcard and fuzzily
+/// otherwise. Folders always match - they are how the picker moves - and sort first, the way the
+/// dired lists them.
+pub(crate) fn pick_path(filter: &str) -> Option<(String, Vec<PathHint>)> {
+    let (dir, file) = match filter.rfind('/') {
+        Some(i) => (&filter[..=i], &filter[i + 1..]),
+        None => ("", filter),
+    };
+    let rd = fs::read_dir(if dir.is_empty() {
+        ".".to_string()
+    } else {
+        expand_tilde(dir)
+    })
+    .ok()?;
+    let mut out: Vec<PathHint> = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !file.is_empty() || !name.starts_with('.') {
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let wildcard = file.contains('*') || file.contains('?');
+            let hit = is_dir
+                || if wildcard {
+                    glob(&name, file)
+                } else {
+                    fuzzy(&name, file)
+                };
+            if hit {
+                out.push(PathHint {
+                    name: if is_dir { format!("{name}/") } else { name },
+                    dir: is_dir,
+                });
+            }
+        }
+    }
+    // Folders first, then names: the dired's order, so a picker and a listing read the same.
+    out.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| fuzzy_rank(&b.name, file).cmp(&fuzzy_rank(&a.name, file)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    if out.is_empty() {
+        return None;
+    }
+    let mut common = out[0].name.clone();
+    for n in &out[1..] {
+        let len = common
+            .chars()
+            .zip(n.name.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        common = common.chars().take(len).collect();
+    }
+    Some((format!("{dir}{common}"), out))
+}
+
+/// A prefix match ranks before a scattered one: 0 for "the filter starts the name", 1 otherwise.
+fn fuzzy_rank(name: &str, filter: &str) -> u8 {
+    u8::from(!name.to_lowercase().starts_with(&filter.to_lowercase()))
+}
+
 pub(crate) fn complete_path(prefix: &str) -> Option<(String, Vec<String>)> {
     let (dir, file) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),

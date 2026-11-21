@@ -315,6 +315,9 @@ fn line_to_spans(
 
 /// Most rows the live path suggestions take above a file-name prompt.
 const HINT_ROWS: usize = 4;
+/// The file picker's pane is taller than a hint strip: it is a listing, and a listing in columns
+/// wants the rows to be worth scanning.
+const PICKER_ROWS: usize = 6;
 
 /// Lay path suggestions out in rows of `width`, at most `max` rows; a row that
 /// cannot hold the rest ends with how many were left out.
@@ -330,6 +333,57 @@ pub(crate) fn titled_hints(title: &str, hints: &[&str], w: usize) -> String {
         out.push_str(h);
     }
     out
+}
+
+/// **The file picker's pane**: the entries in as many columns as the width holds, folders bold
+/// with their `/`, files plain, the Tab-selected one reversed - on the pane's own background, so
+/// the terminal's colour scheme shows through the way it does behind the text. Rows of plain
+/// text, the last one naming how many did not fit.
+pub(crate) fn picker_rows(
+    entries: &[crate::prompt::PathHint],
+    sel: usize,
+    width: usize,
+    max: usize,
+) -> Vec<Line> {
+    let mut rows: Vec<Line> = Vec::new();
+    let mut spans: Vec<crate::render::Span> = Vec::new();
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for (i, e) in entries.iter().enumerate() {
+        let cell = format!(" {} ", e.name);
+        let w = cell.chars().count();
+        if used + w > width && !spans.is_empty() {
+            rows.push(Line::new(std::mem::take(&mut spans)));
+            if rows.len() == max {
+                break;
+            }
+            used = 0;
+        }
+        if w > width {
+            break; // a name wider than the pane is not started
+        }
+        let style = if i == sel {
+            rev()
+        } else if e.dir {
+            Style::of(Role::Strong)
+        } else {
+            Style::new()
+        };
+        spans.push(crate::render::Span::styled(cell, style));
+        used += w;
+        shown += 1;
+    }
+    if !spans.is_empty() && rows.len() < max {
+        rows.push(Line::new(spans));
+    }
+    let left = entries.len().saturating_sub(shown);
+    if left > 0 && rows.len() < max {
+        rows.push(Line::styled(
+            format!(" … {left} more"),
+            Style::of(Role::Faint),
+        ));
+    }
+    rows
 }
 
 pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<String> {
@@ -763,20 +817,37 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
                 .as_ref()
                 .filter(|fl| fl.until > std::time::Instant::now())
                 .map(|fl| vec![format!(" {}", fl.text)]);
-            let hints = ed
-                .prompt_hints
+            // **The file picker's pane** for the path prompts: the scheme's own background,
+            // folders bold, the selected entry reversed - not the reversed strip the other
+            // prompts' hints use.
+            let picker = ed
+                .path_hints
                 .as_ref()
-                .filter(|(k, t, n)| *k == p.kind && *t == p.text && !n.is_empty())
-                .map(|(_, _, n)| hint_rows(n, width as usize, text_h.min(HINT_ROWS)));
-            if let Some(rows) = flash.or(hints) {
+                .filter(|(k, t, e, _)| *k == p.kind && *t == p.text && !e.is_empty())
+                .map(|(_, _, e, sel)| {
+                    picker_rows(e, *sel, width as usize, text_h.min(PICKER_ROWS))
+                });
+            if let Some(rows) = picker {
                 let top = status_row - rows.len() as u16;
                 for (k, r) in rows.iter().enumerate() {
-                    band(
-                        buf,
-                        at(0, top + k as u16, width, 1),
-                        Line::from(r.as_str()),
-                        strip.clone(),
-                    );
+                    put(buf, at(0, top + k as u16, width, 1), r);
+                }
+            } else {
+                let hints = ed
+                    .prompt_hints
+                    .as_ref()
+                    .filter(|(k, t, n)| *k == p.kind && *t == p.text && !n.is_empty())
+                    .map(|(_, _, n)| hint_rows(n, width as usize, text_h.min(HINT_ROWS)));
+                if let Some(rows) = flash.or(hints) {
+                    let top = status_row - rows.len() as u16;
+                    for (k, r) in rows.iter().enumerate() {
+                        band(
+                            buf,
+                            at(0, top + k as u16, width, 1),
+                            Line::from(r.as_str()),
+                            strip.clone(),
+                        );
+                    }
                 }
             }
             let (text, _) = prompt_text(p, width as usize);

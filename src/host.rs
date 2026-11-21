@@ -44,6 +44,7 @@ impl Editor {
         dirty |= self.bottom.feed();
         // A file from the command line whose buffer just became current.
         dirty |= self.start_pending_load();
+        dirty |= self.refresh_path_hints();
         dirty |= self.refresh_prompt_hints();
         dirty |= self.refresh_diff_view();
         dirty |= self.refresh_info_view();

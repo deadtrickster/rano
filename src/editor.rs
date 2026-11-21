@@ -195,6 +195,10 @@ pub struct Editor {
     pub search_regex: bool,
     pub prompt: Option<Prompt>,
     pub prompt_hints: Option<(PromptKind, String, Vec<String>)>,
+    /// **The file picker's list** (the path prompts' fuzzy pane): the entries the filter matches,
+    /// with their dir-ness for colour, and which one Tab has the keyboard on. Cleared with the
+    /// prompt; the selection resets whenever the filter changes under it.
+    pub path_hints: Option<(PromptKind, String, Vec<crate::prompt::PathHint>, usize)>,
     pub keymaps: crate::commands::Keymaps,
     pub(crate) host_keymaps: Vec<crate::keymap::Keymap>,
     pub pending: crate::commands::Pending,
@@ -363,6 +367,7 @@ impl Editor {
             search_regex: false,
             prompt: None,
             prompt_hints: None,
+            path_hints: None,
             keymaps: crate::commands::Keymaps::standard(),
             host_keymaps: Vec::new(),
             pending: Default::default(),
@@ -470,6 +475,37 @@ impl Editor {
     fn clamp_cursor(&mut self) {
         let bs = self.bs_mut();
         bs.cursor = bs.buf.clamp(bs.cursor);
+    }
+
+    /// The picker's list for the filter as typed: recomputed when the text moved, the selection
+    /// back to the first entry. True when the pane changed.
+    pub(crate) fn refresh_path_hints(&mut self) -> bool {
+        let want = self.prompt.as_ref().filter(|p| {
+            matches!(
+                p.kind,
+                PromptKind::WriteName
+                    | PromptKind::ReadName
+                    | PromptKind::OpenName
+                    | PromptKind::BackupName
+                    | PromptKind::DirName
+            )
+        });
+        match want {
+            None => self.path_hints.take().is_some(),
+            Some(p) => {
+                if let Some((k, t, _, _)) = &self.path_hints
+                    && *k == p.kind
+                    && *t == p.text
+                {
+                    return false;
+                }
+                let entries = crate::prompt::pick_path(&p.text)
+                    .map(|(_, n)| n)
+                    .unwrap_or_default();
+                self.path_hints = Some((p.kind, p.text.clone(), entries, 0));
+                true
+            }
+        }
     }
 
     pub(crate) fn refresh_prompt_hints(&mut self) -> bool {

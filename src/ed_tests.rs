@@ -6158,3 +6158,152 @@ fn edit_and_preview_agree_on_the_text_column() {
         );
     }
 }
+
+/// **The file picker**: fuzzy and glob matching, folders first and always there, Tab selecting
+/// through the list, and an empty Enter opening the folder itself.
+#[test]
+fn the_file_picker_matches_selects_and_opens() {
+    let d = temp_dir("picker");
+    std::fs::create_dir_all(d.0.join("src")).unwrap();
+    for n in ["README.md", "notes.md", "main.rs", "Cargo.toml"] {
+        fs::write(d.0.join(n), "x").unwrap();
+    }
+    let mut ed = test_ed("");
+    ed.bs_mut().buf.name = Some(d.0.join("main.rs"));
+
+    // Fuzzy: `<the folder>/md` finds the markdown files by subsequence, and the folders stay
+    // for descending.
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    let mut filter = format!("{}/", d.0.display());
+    filter.push_str("md");
+    for ch in filter.chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    ed.tick(std::time::Instant::now());
+    let (_, _, entries, sel) = ed.path_hints.as_ref().expect("the pane");
+    assert_eq!(*sel, 0);
+    assert!(
+        entries.iter().all(|e| e.dir || e.name.ends_with(".md")),
+        "{entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .position(|e| e.name == "src/")
+            .is_some_and(|i| entries[..i].iter().all(|e| e.dir)),
+        "folders first"
+    );
+
+    // Glob: `*.rs` finds the Rust files only (and the folders).
+    let p = ed.prompt.take();
+    let mut p = p.unwrap();
+    p.text = format!("{}/", d.0.display());
+    p.cursor = p.text.chars().count();
+    for ch in "*.rs".chars() {
+        p.text.push(ch);
+        p.cursor += 1;
+    }
+    ed.prompt = Some(p);
+    ed.tick(std::time::Instant::now());
+    let names: Vec<String> = ed
+        .path_hints
+        .as_ref()
+        .map(|(_, _, e, _)| e.iter().map(|h| h.name.clone()).collect())
+        .unwrap_or_default();
+    assert!(names.iter().any(|n| n == "main.rs"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "README.md"), "{names:?}");
+
+    // Tab walks the list; Enter opens what it lands on.
+    press(&mut ed, KeyCode::Tab, Mods::NONE); // completes to "" (nothing common): selects
+    let target = ed
+        .path_hints
+        .as_ref()
+        .and_then(|(_, _, e, sel)| e.get(*sel))
+        .map(|h| h.name.clone())
+        .unwrap_or_default();
+    let dir_part = format!("{}/", d.0.display());
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(ed.bs().buf.name.is_some(), "something opened");
+    assert_eq!(
+        ed.bs().buf.name.as_deref().unwrap().display().to_string(),
+        format!("{dir_part}{target}")
+    );
+
+    // An empty Enter opens the folder itself, as a listing: "open ." without typing it. The
+    // prompt's Enter closes it first, so ask for a fresh one.
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    assert_eq!(
+        ed.prompt.as_ref().map(|p| p.kind),
+        Some(PromptKind::OpenName),
+        "the prompt is open"
+    );
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    assert!(
+        ed.bs().dir.is_some(),
+        "the buffer's folder opened as a listing"
+    );
+    assert_eq!(ed.bs().buf.name.as_deref(), Some(d.0.as_path()));
+}
+
+/// **The picker's pane**: multiple columns, folders bold, the selected entry reversed - and on
+/// the pane's own background, so the terminal's colour scheme shows through.
+#[test]
+fn the_picker_pane_paints_columns_and_the_selection() {
+    let d = temp_dir("picker_pane");
+    std::fs::create_dir_all(d.0.join("src")).unwrap();
+    for n in ["README.md", "main.rs", "Cargo.toml"] {
+        fs::write(d.0.join(n), "x").unwrap();
+    }
+    let mut ed = test_ed("");
+    ed.bs_mut().buf.name = Some(d.0.join("main.rs"));
+    ed.set_area(crate::editor::Area::new(0, 0, 100, 24));
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    let mut filter = format!("{}/", d.0.display());
+    filter.push_str("*.rs");
+    for ch in filter.chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    ed.tick(std::time::Instant::now());
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    // Draw and look: two entries (src/ and main.rs) side by side in one row above the prompt,
+    // the folder bold, the selected one reversed.
+    let rect = crate::render::Rect::new(0, 0, 100, 24);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    // The pane is the row above the prompt: find it by its content, not by guessing the row.
+    let mut pane_row = None;
+    for y in (0..24).rev() {
+        let r: String = (0..100)
+            .map(|x| buf.cell(x, y).map(|c| c.symbol.clone()).unwrap_or_default())
+            .collect();
+        if r.contains("src/") && r.contains("main.rs") {
+            pane_row = Some((y, r));
+            break;
+        }
+    }
+    let (y, row) = pane_row.expect("the pane row");
+    let sel_x = row.find("main.rs").expect("the file is placed");
+    let sel_style = buf.cell(sel_x as u16, y).expect("a cell").style.clone();
+    // `rev()` here is Role::Bar, which every theme renders as reversed video.
+    assert_eq!(
+        sel_style.top(),
+        crate::style::Role::Bar,
+        "the selected entry is reversed: {sel_style:?}"
+    );
+    let dir_x = row.find("src/").expect("the folder is placed");
+    let dir_style = buf.cell(dir_x as u16, y).expect("a cell").style.clone();
+    assert!(
+        dir_style.top() == crate::style::Role::Strong,
+        "the folder is bold: {dir_style:?}"
+    );
+    // And the pane is not the reversed strip: its background is the theme's own.
+    let plain = buf
+        .cell((sel_x - 1) as u16, y)
+        .expect("a cell")
+        .style
+        .clone();
+    assert!(
+        !plain.attrs.contains(crate::style::Attrs::REVERSE),
+        "the separator is not reversed: {plain:?}"
+    );
+}

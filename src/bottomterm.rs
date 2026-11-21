@@ -601,6 +601,11 @@ fn openpty(cols: u16, rows: u16) -> std::io::Result<(RawFd, RawFd)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // Linux's signature takes `*const winsize`, so on that target `&mut` is a borrow the
+    // call does not need — but macOS's takes `*mut`, where `&size` would not compile. The
+    // allow is the portable form of a signature that differs per target; without it the
+    // gate reds on the Linux lint (and without the `mut`, the macOS build reds).
+    #[allow(clippy::unnecessary_mut_passed)]
     let rc = unsafe {
         libc::openpty(
             &mut master,

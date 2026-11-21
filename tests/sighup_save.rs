@@ -17,6 +17,9 @@ fn openpty() -> Option<(RawFd, RawFd)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // Linux's openpty takes `*const winsize` (the `mut` is unneeded there) and macOS's
+    // takes `*mut` (where `&ws` would not compile); the allow is the portable form.
+    #[allow(clippy::unnecessary_mut_passed)]
     let ok = unsafe {
         libc::openpty(
             &mut master,

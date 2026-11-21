@@ -265,6 +265,10 @@ pub struct Editor {
     pub text_x: u16,
     /// The widest the text column gets, `None` for as wide as the pane. `config.text_width`.
     pub text_max: Option<usize>,
+    /// The gutter width `text_x`/`text_w` were gridded against: a file still loading grows its
+    /// line numbers (9 -> 99 -> 240), and a grid laid out for a narrower gutter leaves the text
+    /// a column right of where a view puts its prose.
+    pub(crate) recol_g: usize,
 
     pub chrome: Chrome,
     pub(crate) area: Area,
@@ -403,6 +407,7 @@ impl Editor {
             text_h: 24,
             text_x: 0,
             text_max: Some(100),
+            recol_g: 0,
             chrome: Chrome::default(),
             area: Area::default(),
             tab_width,
@@ -1699,6 +1704,7 @@ impl Editor {
     /// is unchanged.
     pub(crate) fn recolumn(&mut self) {
         let g = self.gutter_w();
+        self.recol_g = g;
         let (col, start) = self.grid_in(self.area.w as usize, g);
         self.text_w = col + g;
         // `text_x` is the GUTTER's column: the text starts at `start`, and the gutter is drawn in

@@ -6198,3 +6198,50 @@ fn dump_table_at_200() {
         eprintln!("{y:02} x={a}..{b} |{line}|");
     }
 }
+
+/// Their exact case: a 240-line file (gutter 4), wrap on, multibuffer on.
+#[test]
+#[ignore]
+fn dump_their_case() {
+    let mut body = String::new();
+    for i in 0..240 {
+        body.push_str(&format!("line {i} of the file\n"));
+    }
+    body.push_str(
+        "\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| REL_17_7 | 157 | 285 | 442 |\n",
+    );
+    let mut cfg = config::Config::default();
+    cfg.multibuffer = true;
+    let mut buf = Buffer::new();
+    buf.set_rows(body.lines().map(|l| l.chars().collect()).collect());
+    let mut ed = Editor::new(buf, cfg);
+    ed.bs_mut().buf.name = Some(PathBuf::from("/tmp/x.md"));
+    for w in [176u16, 190, 200, 208, 214, 220] {
+        ed.set_area(crate::editor::Area::new(0, 0, w, 30));
+        let rect = crate::render::Rect::new(0, 0, w, 30);
+        let mut buf2 = crate::render::Buffer::empty(rect);
+        crate::ui::draw_in(&mut buf2, rect, &ed);
+        let g = ed.gutter_w();
+        let tx = ed.text_x;
+        // the editor's text column: first non-space at or right of tx+g on row 1
+        let edit = (tx as usize + g..w as usize).find(|x| {
+            buf2.cell(*x as u16, 1)
+                .map(|c| !c.symbol.trim().is_empty())
+                .unwrap_or(false)
+        });
+        press(&mut ed, KeyCode::Char('p'), Mods::ALT);
+        let mut buf3 = crate::render::Buffer::empty(rect);
+        crate::ui::draw_in(&mut buf3, rect, &ed);
+        let prev = (0..w as usize).find(|x| {
+            buf3.cell(*x as u16, 1)
+                .map(|c| !c.symbol.trim().is_empty())
+                .unwrap_or(false)
+        });
+        eprintln!(
+            "w={w:>3} g={g} tx={tx} text_at={tx}+{g}={:+} edit={edit:?} prev={prev:?} diff={:?}",
+            tx as isize + g as isize,
+            prev.zip(edit).map(|(p, e)| p as isize - e as isize)
+        );
+        press(&mut ed, KeyCode::Esc, Mods::NONE);
+    }
+}

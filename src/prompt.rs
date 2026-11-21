@@ -228,13 +228,11 @@ impl Editor {
                                 .map(|p| p.to_path_buf())
                                 .unwrap_or_else(|| std::path::PathBuf::from("."));
                             self.open_dir(&dir)
-                        } else if let Some(hint) = picked
-                            && let Some((d, _)) =
-                                text.rfind('/').map(|i| (&text[..=i], &text[i + 1..]))
-                        {
-                            let mut full = String::from(d);
-                            full.push_str(&hint.name);
-                            self.open_file(&full)
+                        } else if let Some(hint) = picked {
+                            // The filter's directory part, or "" when none was typed: the picker
+                            // lists "." then, so the entry's own name is the path.
+                            let d = text.rfind('/').map(|i| &text[..=i]).unwrap_or("");
+                            self.open_file(&format!("{d}{}", hint.name))
                         } else {
                             match crate::send_ctrl::split_position(&expand_tilde(&text)) {
                                 Some((name, line, col)) => {

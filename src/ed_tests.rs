@@ -6340,3 +6340,51 @@ fn the_picker_pane_paints_columns_and_the_selection() {
         "the separator is not reversed: {plain:?}"
     );
 }
+
+/// **Enter opens the Tab-selected entry with no directory typed**: the picker lists "." then,
+/// so the entry's own name is the path - the case where the filter had no `/` and Enter used to
+/// fall through to opening the literal filter.
+#[test]
+fn enter_opens_the_selected_entry_with_no_directory_typed() {
+    let d = temp_dir("picker_nodir");
+    for n in ["alpha.md", "beta.md", "gamma.rs"] {
+        fs::write(d.0.join(n), "x").unwrap();
+    }
+    // The picker lists "." when no directory is typed, so the test stands in the temp folder
+    // for the moment (restored on the way out; nothing else in the suite reads a relative path).
+    struct BackIn(std::path::PathBuf);
+    impl Drop for BackIn {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+    let back = BackIn(std::env::current_dir().unwrap());
+    std::env::set_current_dir(&d.0).unwrap();
+    let mut ed = test_ed("x");
+    ed.bs_mut().buf.name = Some(d.0.join("alpha.md"));
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    for ch in "*.md".chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    ed.tick(std::time::Instant::now());
+    // Two markdown files match; Tab completes nothing (nothing common past the filter) and
+    // selects the second.
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    let target = ed
+        .path_hints
+        .as_ref()
+        .and_then(|(_, _, e, sel)| e.get(*sel))
+        .map(|h| h.name.clone())
+        .unwrap_or_default();
+    assert_eq!(target, "beta.md", "the second of the two matches");
+    press(&mut ed, KeyCode::Enter, Mods::NONE);
+    // The path as built is the directory part ("" here) plus the entry's name, so it is
+    // relative - correct, since "." is where the picker listed.
+    assert_eq!(
+        ed.bs().buf.name.as_deref(),
+        Some(std::path::Path::new("beta.md")),
+        "the selected file opened"
+    );
+    assert!(ed.prompt.is_none(), "the prompt closed");
+    drop(back);
+}

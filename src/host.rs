@@ -107,6 +107,13 @@ impl Editor {
         self.quit
     }
 
+    /// **Ask for the exit**: the same path `^X` takes - the modified buffers are offered for
+    /// saving, and the editor decides. The server's `quit` and any host that wants a graceful
+    /// end both come through here.
+    pub fn request_quit(&mut self) {
+        self.run_command("exit");
+    }
+
     /// How long a host may wait for input before ticking again: zero while the
     /// loader is saturated, never past a prefix card's due moment.
     pub fn next_wakeup(&self) -> Duration {

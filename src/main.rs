@@ -10,6 +10,7 @@ use rano::expand_tilde;
 use rano::panel::Act;
 use rano::render::{self, Line, Palette, Rect, Style};
 use rano::send_ctrl::split_position;
+use rano::server;
 use rano::style::Role;
 use rano::term::{self, Event, MouseButton, MouseKind, Terminal};
 use rano::{config, export, send_ctrl, syntax, ui};
@@ -146,6 +147,16 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // **A running rano takes the arguments**: `rano src/main.rs:120` with one already listening
+    // hands the file over instead of starting a second editor - emacsclient's shape. The socket
+    // only answers when a rano is live, so `rano` on a machine without one starts normally.
+    if !args.files.is_empty()
+        && let Some(answer) = server::send(&args.files)
+    {
+        println!("{answer}");
+        return;
+    }
+
     if args.help {
         println!("{USAGE}");
         return;
@@ -285,6 +296,12 @@ fn run(
         libc::signal(libc::SIGHUP, fatal_signal as extern "C" fn(i32) as usize);
         libc::signal(libc::SIGTERM, fatal_signal as extern "C" fn(i32) as usize);
     }
+    // **The server**: this rano is the one `rano <path>` from any other terminal reaches. A
+    // failure to bind is a flash, not an exit - the editor is an editor first.
+    let server = server::Server::start();
+    if let Err(e) = &server {
+        eprintln!("rano: no server socket ({e}) - `rano <path>` will start a second editor");
+    }
     // Raw mode, the alternate screen, bracketed paste and mouse buttons; `Drop`
     // restores the terminal on every other way out.
     let terminal = Terminal::enter_with(term::Options {
@@ -423,6 +440,60 @@ fn run(
         // The pollers, the overlays' refreshes, the scroll and the highlight:
         // everything between two events, the same call a host makes.
         dirty |= ed.tick(Instant::now());
+        // **The server's requests**: `rano <path>` from another terminal, applied on the same
+        // pass as any other event - the file opens, the line lands, the reader sees it.
+        if let Ok(server) = &server {
+            while let Ok(req) = server.rx.try_recv() {
+                match req {
+                    server::Request::Open { path, line, col } => {
+                        let p = rano::expand_tilde(&path);
+                        let opened = match (line, col) {
+                            (Some(l), Some(c)) => {
+                                ed.open_at(std::path::Path::new(&p), l, Some(c)).is_ok()
+                            }
+                            (Some(l), None) => {
+                                ed.open_at(std::path::Path::new(&p), l, None).is_ok()
+                            }
+                            _ => ed.open_at(std::path::Path::new(&p), 1, None).is_ok(),
+                        };
+                        if !opened {
+                            eprintln!("rano: server: cannot open {path}");
+                        }
+                        dirty = true;
+                    }
+                    server::Request::Line(n) => {
+                        // The wire's line is 1-based; the position goes where `--line`'s does,
+                        // applied by the same late path.
+                        ed.bs_mut().goto = Some(rano::buffer::Pos {
+                            row: n.saturating_sub(1),
+                            col: 0,
+                        });
+                        dirty = true;
+                    }
+                    server::Request::Status => {
+                        // The status is the wire's own shape: `path:line:col`, the unit of
+                        // exchange in both directions. eprintln: the alternate screen would
+                        // eat a println, and the asking terminal sees its own stderr.
+                        let p = ed.send_event();
+                        let said = format!(
+                            "{}:{}",
+                            p.path
+                                .as_deref()
+                                .map(|x| x.display().to_string())
+                                .unwrap_or_default(),
+                            p.cursor.line
+                        );
+                        eprintln!("rano: {said}");
+                        dirty = true;
+                    }
+                    server::Request::Quit => {
+                        // What `^X` does: the quit path asks about unsaved buffers on its own
+                        // way out, and that question is rano's, not the server's.
+                        ed.request_quit();
+                    }
+                }
+            }
+        }
         // The clipboard is not the screen: drained on every pass, so a copy does not
         // wait for the next keystroke.
         if let Some(text) = ed.take_clipboard() {

@@ -583,12 +583,14 @@ pub(crate) fn pick_path(filter: &str) -> Option<(String, Vec<PathHint>)> {
         if !file.is_empty() || !name.starts_with('.') {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let wildcard = file.contains('*') || file.contains('?');
-            let hit = is_dir
-                || if wildcard {
-                    glob(&name, file)
-                } else {
-                    fuzzy(&name, file)
-                };
+            // **Folders obey the filter too**: the picker is a match list, not matches mixed
+            // with furniture - `*.md` shows markdown files and folders whose own names match,
+            // and descending is what an empty filter is for.
+            let hit = if wildcard {
+                glob(&name, file)
+            } else {
+                fuzzy(&name, file)
+            };
             if hit {
                 out.push(PathHint {
                     name: if is_dir { format!("{name}/") } else { name },

@@ -345,23 +345,26 @@ pub(crate) fn picker_rows(
     width: usize,
     max: usize,
 ) -> Vec<Line> {
-    let mut rows: Vec<Line> = Vec::new();
-    let mut spans: Vec<crate::render::Span> = Vec::new();
-    let mut used = 0usize;
-    let mut shown = 0usize;
+    // **Column-major, the way a dired reads**: down the first column, then the next, so the eye
+    // scans one alphabet and the columns are the width of the longest name. Row-major flow (the
+    // hint strip's shape) wraps mid-alphabet and reads as "no columns".
+    let cellw = entries
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2; // a space either side of every name, so bold folders keep their air
+    let cols = (width / cellw.max(1)).max(1);
+    let rows_n = entries.len().div_ceil(cols).min(max);
+    let mut rows: Vec<Vec<crate::render::Span>> = vec![Vec::new(); rows_n];
     for (i, e) in entries.iter().enumerate() {
-        let cell = format!(" {} ", e.name);
-        let w = cell.chars().count();
-        if used + w > width && !spans.is_empty() {
-            rows.push(Line::new(std::mem::take(&mut spans)));
-            if rows.len() == max {
-                break;
-            }
-            used = 0;
+        let col = i / rows_n;
+        let row = i % rows_n;
+        if col >= cols || row >= rows_n {
+            break; // the pane's rows ran out: what is left is said below
         }
-        if w > width {
-            break; // a name wider than the pane is not started
-        }
+        let pad = cellw.saturating_sub(e.name.chars().count() + 2);
+        let cell = format!(" {}{}", e.name, " ".repeat(pad));
         let style = if i == sel {
             rev()
         } else if e.dir {
@@ -369,21 +372,17 @@ pub(crate) fn picker_rows(
         } else {
             Style::new()
         };
-        spans.push(crate::render::Span::styled(cell, style));
-        used += w;
-        shown += 1;
+        rows[row].push(crate::render::Span::styled(cell, style));
     }
-    if !spans.is_empty() && rows.len() < max {
-        rows.push(Line::new(spans));
-    }
-    let left = entries.len().saturating_sub(shown);
-    if left > 0 && rows.len() < max {
-        rows.push(Line::styled(
+    let mut out: Vec<Line> = rows.into_iter().map(Line::new).collect();
+    let left = entries.len().saturating_sub(rows_n * cols);
+    if left > 0 {
+        out.push(Line::styled(
             format!(" … {left} more"),
             Style::of(Role::Faint),
         ));
     }
-    rows
+    out
 }
 
 pub(crate) fn hint_rows(names: &[String], width: usize, max: usize) -> Vec<String> {

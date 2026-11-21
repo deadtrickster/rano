@@ -6183,15 +6183,12 @@ fn the_file_picker_matches_selects_and_opens() {
     let (_, _, entries, sel) = ed.path_hints.as_ref().expect("the pane");
     assert_eq!(*sel, 0);
     assert!(
-        entries.iter().all(|e| e.dir || e.name.ends_with(".md")),
-        "{entries:?}"
+        entries.iter().all(|e| e.name.ends_with(".md")),
+        "everything on the list matched, folders included: {entries:?}"
     );
     assert!(
-        entries
-            .iter()
-            .position(|e| e.name == "src/")
-            .is_some_and(|i| entries[..i].iter().all(|e| e.dir)),
-        "folders first"
+        !entries.iter().any(|e| e.name == "src/"),
+        "src/ did not match `md`"
     );
 
     // Glob: `*.rs` finds the Rust files only (and the folders).
@@ -6265,23 +6262,26 @@ fn the_picker_pane_paints_columns_and_the_selection() {
     }
     ed.tick(std::time::Instant::now());
     press(&mut ed, KeyCode::Tab, Mods::NONE);
-    // Draw and look: two entries (src/ and main.rs) side by side in one row above the prompt,
-    // the folder bold, the selected one reversed.
+    // Draw and look: with `*.rs` the folder is gone too (it obeys the filter), so the pane is
+    // main.rs alone, selected.
     let rect = crate::render::Rect::new(0, 0, 100, 24);
     let mut buf = crate::render::Buffer::empty(rect);
     crate::ui::draw_in(&mut buf, rect, &ed);
-    // The pane is the row above the prompt: find it by its content, not by guessing the row.
     let mut pane_row = None;
     for y in (0..24).rev() {
         let r: String = (0..100)
             .map(|x| buf.cell(x, y).map(|c| c.symbol.clone()).unwrap_or_default())
             .collect();
-        if r.contains("src/") && r.contains("main.rs") {
+        if r.contains("main.rs") {
             pane_row = Some((y, r));
             break;
         }
     }
     let (y, row) = pane_row.expect("the pane row");
+    assert!(
+        !row.contains("src/"),
+        "the folder obeyed the filter: {row:?}"
+    );
     let sel_x = row.find("main.rs").expect("the file is placed");
     let sel_style = buf.cell(sel_x as u16, y).expect("a cell").style.clone();
     // `rev()` here is Role::Bar, which every theme renders as reversed video.
@@ -6290,12 +6290,45 @@ fn the_picker_pane_paints_columns_and_the_selection() {
         crate::style::Role::Bar,
         "the selected entry is reversed: {sel_style:?}"
     );
-    let dir_x = row.find("src/").expect("the folder is placed");
-    let dir_style = buf.cell(dir_x as u16, y).expect("a cell").style.clone();
+    // The folder's bold is checked on the EMPTY filter, where folders match by being folders:
+    // one row above, a fresh F8 shows them first and strong.
+    press(&mut ed, KeyCode::Esc, Mods::NONE);
+    press(&mut ed, KeyCode::F(8), Mods::NONE);
+    let mut filter = format!("{}/", d.0.display());
+    filter.push('*');
+    for ch in filter.chars() {
+        press(&mut ed, KeyCode::Char(ch), Mods::NONE);
+    }
+    ed.tick(std::time::Instant::now());
+    // Select past the folder, so the folder's own style (bold, not the selection's reverse)
+    // is what the cell carries.
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    press(&mut ed, KeyCode::Tab, Mods::NONE);
+    let mut buf = crate::render::Buffer::empty(rect);
+    crate::ui::draw_in(&mut buf, rect, &ed);
+    let mut dir_row = None;
+    for yy in (0..24).rev() {
+        let r: String = (0..100)
+            .map(|x| {
+                buf.cell(x, yy)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if r.contains("src/") {
+            dir_row = Some((yy, r));
+            break;
+        }
+    }
+    let (dy, drow) = dir_row.expect("the folder is placed, matching *");
+    let dx = drow.find("src/").expect("placed");
+    let dir_style = buf.cell(dx as u16, dy).expect("a cell").style.clone();
     assert!(
         dir_style.top() == crate::style::Role::Strong,
         "the folder is bold: {dir_style:?}"
     );
+    let y = dy;
+    let sel_x = dx; // silence unused when the block above moved them
     // And the pane is not the reversed strip: its background is the theme's own.
     let plain = buf
         .cell((sel_x - 1) as u16, y)

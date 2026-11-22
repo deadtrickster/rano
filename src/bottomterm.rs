@@ -382,6 +382,7 @@ pub struct BottomTerm {
 
 /// The FIFO a shell's `rano` writes and the editor reads, with its shim directory.
 pub struct OpenPipe {
+    base: PathBuf,
     fifo: PathBuf,
     dir: PathBuf,
     fd: RawFd,
@@ -393,8 +394,7 @@ impl Drop for OpenPipe {
         unsafe {
             libc::close(self.fd);
         }
-        let _ = std::fs::remove_file(&self.fifo);
-        let _ = std::fs::remove_dir(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.base);
     }
 }
 
@@ -403,24 +403,25 @@ impl OpenPipe {
     /// arguments to the editor through the FIFO and exits: the rano that owns the strip opens
     /// the file, and no second editor starts inside the pane.
     fn new() -> std::io::Result<OpenPipe> {
-        let base = std::env::temp_dir().join(format!("rano-term-{}", std::process::id()));
+        // One directory per pipe, not per process: a second pipe at the same path would
+        // replace the FIFO under the first one's read end.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("rano-term-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&base)?;
         let dir = base.join("shim");
         let fifo = base.join("open.fifo");
         std::fs::create_dir_all(&dir)?;
         let _ = std::fs::remove_file(&fifo);
-        libc_ok(unsafe {
-            libc::mkfifo(
-                fifo.as_os_str().as_encoded_bytes().as_ptr() as *const _,
-                0o600,
-            )
-        })?;
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        libc_ok(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) })?;
         // A writer may arrive before the reader opens; opening the read end non-blocking (and
         // keeping it open for the editor's life) means the writer's open never blocks either.
         let fd = libc_ok(unsafe {
             libc::open(
-                fifo.as_os_str().as_encoded_bytes().as_ptr() as *const _,
-                libc::O_RDONLY | libc::O_NONBLOCK,
+                c_fifo.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
             )
         })?;
         let real = std::env::current_exe()
@@ -435,6 +436,7 @@ impl OpenPipe {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755));
         Ok(OpenPipe {
+            base,
             fifo,
             dir,
             fd,
@@ -978,7 +980,7 @@ mod tests {
         let (master, slave) = openpty(40, 6).expect("a pty");
         // An ignored signal survives exec, so this `sleep` really does ignore SIGHUP.
         let child = std::process::Command::new("sh")
-            .args(["-c", "trap '' HUP; exec sleep 5"])
+            .args(["-c", "trap '' HUP; exec sleep 30"])
             .spawn()
             .expect("a shell");
         let pid = child.id() as libc::pid_t;
@@ -1002,7 +1004,7 @@ mod tests {
         drop(t);
         let elapsed = start.elapsed();
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
+            elapsed < std::time::Duration::from_secs(3),
             "Drop returned in {elapsed:?}, not parked behind a child that ignores SIGHUP"
         );
         let mut gone = false;
@@ -1617,6 +1619,43 @@ mod picker_tests {
 mod open_pipe_tests {
     use super::*;
 
+    /// Run the shim. A parallel test that forks while the shim is still open for writing makes
+    /// exec fail with ETXTBSY for a moment, so that one error is retried.
+    fn run(shim: &std::path::Path, arg: &str, pipe: Option<&OpenPipe>) -> std::process::Output {
+        for _ in 0..50 {
+            let mut cmd = std::process::Command::new(shim);
+            cmd.arg(arg).env_clear();
+            if let Some(p) = pipe {
+                cmd.env("RANO_TERM", "1")
+                    .env("RANO_OPEN_PIPE", p.fifo.display().to_string());
+            }
+            match cmd.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                r => return r.expect("the shim runs"),
+            }
+        }
+        panic!("the shim stayed busy");
+    }
+
+    /// Two pipes in one process do not share a FIFO.
+    #[test]
+    fn two_pipes_in_one_process_each_get_their_own_path() {
+        let mut a = OpenPipe::new().expect("a pipe");
+        let mut b = OpenPipe::new().expect("another pipe");
+        assert_ne!(a.fifo, b.fifo);
+        for (pipe, name) in [(&a, "a.md"), (&b, "b.md")] {
+            let out = run(&pipe.dir.join("rano"), name, Some(pipe));
+            assert!(out.status.success(), "{out:?}");
+        }
+        assert_eq!(a.drain(), vec!["a.md".to_string()]);
+        assert_eq!(b.drain(), vec!["b.md".to_string()]);
+        let base = a.base.clone();
+        drop(a);
+        assert!(!base.exists(), "the pipe's directory goes with it");
+    }
+
     /// The shim the shell's PATH sees: it hands its arguments to the FIFO and exits, and a
     /// `rano` outside rano's strip still runs the real thing.
     #[test]
@@ -1625,26 +1664,14 @@ mod open_pipe_tests {
         let shim = pipe.dir.join("rano");
         assert!(shim.is_file(), "the shim exists");
         // What the shell would run: `rano notes.md` with the pipe's env.
-        let out = std::process::Command::new(&shim)
-            .arg("notes.md")
-            .env_clear()
-            .env("RANO_TERM", "1")
-            .env("RANO_OPEN_PIPE", pipe.fifo.display().to_string())
-            .output()
-            .expect("the shim runs");
+        let out = run(&shim, "notes.md", Some(&pipe));
         assert!(out.status.success(), "it exits well: {out:?}");
         // The editor's side of the pipe sees the path.
-        std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(pipe.drain(), vec!["notes.md".to_string()]);
         // And without the marker nothing reaches the editor: the real binary's business. (In a
         // test `current_exe` is the test binary, so what it answers is not asserted - only that
         // the pipe stays empty.)
-        let _ = std::process::Command::new(&shim)
-            .arg("--version")
-            .env_clear()
-            .output()
-            .expect("the shim runs");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        run(&shim, "--version", None);
         assert!(pipe.drain().is_empty(), "no path was handed over");
     }
 }

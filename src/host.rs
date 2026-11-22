@@ -21,9 +21,7 @@ impl Editor {
         // The pollers first: what they adopt is what the refreshes and the scroll
         // below must see.
         let mut dirty = self.load_poll();
-        // **A file that arrived grew the gutter**: the grid was laid out for the narrower line
-        // numbers, and a stale grid is the one mode whose text sits a column off its view's
-        // prose. Re-grid when the gutter moved, and say the screen changed when it did.
+        // A load can grow the gutter, and the grid has to follow it.
         if self.area.w > 0 && self.gutter_w() != self.recol_g {
             self.recolumn();
             dirty = true;

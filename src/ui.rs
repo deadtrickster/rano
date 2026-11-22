@@ -502,8 +502,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
     // The gutter shrinks the text viewport; both widths come from the editor, so
     // the draw, the click mapping and the wrap width cannot disagree.
     let g = ed.gutter_w();
-    // **The column, not the pane**: on a wide monitor the text sits in a centred column and
-    // the margins either side are empty, so every width below comes from the editor.
+    // The text column, not the pane: on a wide pane the margins stay empty.
     let view_w = (ed.text_w).saturating_sub(g);
     let tx = ed.text_x;
 
@@ -762,8 +761,7 @@ fn draw_in_alone(buf: &mut Buffer, area: Rect, ed: &Editor, foot_only: bool) -> 
         if let Some(v) = &ed.diff_view {
             let area_text = at(0, t0, width, text_h as u16);
             buf.fill(area_text, &Style::new());
-            // **No header row**: the title above already names the file, and this view adds its
-            // mode word to it instead of taking a row from the prose.
+            // No header row: the title carries the mode word.
             let rows = crate::diffview::body_rows(text_h);
             for (k, l) in v.lines.iter().skip(v.top).take(rows).enumerate() {
                 // **The selection is drawn where it was made**: over the rendered line, in the theme's
@@ -2074,10 +2072,7 @@ mod tests {
     fn set_area_sizes_the_text_viewport() {
         let mut e = ed("x");
         assert!(e.set_area(PANE.into()));
-        // `text_w` is the gutter plus the text grid: the grid is the column, and the gutter sits
-        // in the margin beside it.
-        // A 40-column pane: the grid is what is left after the gutter, and `text_w` is grid plus
-        // gutter - which is the pane, because the pane's columns are all there are.
+        // A 40-column pane: `text_w` is grid plus gutter, which is the whole pane.
         assert_eq!((e.text_w, e.text_h), (40, 16));
         assert!(!e.set_area(PANE.into()), "the same area is not a change");
     }

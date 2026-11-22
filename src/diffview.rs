@@ -113,8 +113,7 @@ pub struct DiffView {
     pub split: bool,
     pub top: usize,
     width: usize,
-    /// The editor's own text grid and where it starts: prose is rendered at exactly these, so
-    /// switching between the text and a preview cannot move a column.
+    /// The editor's text grid, so switching to a preview moves no column.
     column: usize,
     margin: usize,
     pub lines: Vec<Line>,
@@ -169,15 +168,13 @@ impl DiffView {
                 crate::patch::render(&crate::patch::parse(text), &cfg, view)
             }
             Source::Markdown { text, images, .. } => {
-                let (column, margin) = (self.column, self.margin);
-                let start = margin;
                 let mut rows = crate::markdown::render_blocks(
                     &crate::markdown::lex(text),
-                    column,
+                    self.column,
                     &crate::markdown::RenderOptions::default(),
                 );
-                splice_pictures(&mut rows, images, column);
-                indent(&mut rows, margin, width, start);
+                splice_pictures(&mut rows, images, self.column);
+                indent(&mut rows, self.margin);
                 rows
             }
             Source::Picture {
@@ -223,8 +220,7 @@ impl DiffView {
         edit_view(self.split)
     }
 
-    /// **What this view is, in a word** - the title row's prefix, where the file's own name
-    /// already says which file.
+    /// The title row's prefix; the file name follows it.
     pub fn mode_word(&self) -> &'static str {
         match &self.source {
             Source::Save { .. } => "Save conflict",
@@ -284,11 +280,8 @@ impl DiffView {
     }
 }
 
-/// Rows of the text area the diff lines get: all of it but the header. Public because the
-/// host's frame draws the split rule's thumb for a preview from the same number.
-/// **Every row the text area has is the view's**: a preview draws no header of its own - the
-/// title row says what it is and which file, and `Esc` is in the key bar like every other mode's
-/// key. One row more of prose is worth more than a row saying "Markdown NAME".
+/// Rows a view gets: the whole text area, since the title names the mode. Public because the
+/// host draws the split rule's thumb from the same number.
 pub fn body_rows(text_h: usize) -> usize {
     text_h.max(1)
 }
@@ -415,33 +408,14 @@ fn cells_for(intrinsic: (u32, u32), width: usize) -> (u32, u32) {
     )
 }
 
-/// Code is not wrapped, so a frame wider than the column gives up as much of
-/// the margin as it needs to stay on screen, and moves as one block.
-fn indent(rows: &mut [Line], margin: usize, width: usize, start: usize) {
+/// Every row starts at the editor's text column. A block wider than the column is clipped on
+/// the right, not moved left, so switching modes moves nothing.
+fn indent(rows: &mut [Line], margin: usize) {
     if margin == 0 {
         return;
     }
-    let mut i = 0;
-    while i < rows.len() {
-        let mut end = i + 1;
-        if rows[i].plain().starts_with("┌─") {
-            while end < rows.len() && !rows[end - 1].plain().starts_with("└─") {
-                end += 1;
-            }
-        }
-        let widest = rows[i..end]
-            .iter()
-            .map(|r| crate::width::text::width(&r.plain()))
-            .max()
-            .unwrap_or(0);
-        // **Never left of where the text starts**: a block wider than the prose column may give
-        // up margin to stay on screen, but it may not step left of the editor's text - the column
-        // is what is aligned, and an over-wide frame is clipped on the right instead.
-        let pad = margin.min(width.saturating_sub(widest)).max(start);
-        for row in rows[i..end].iter_mut().filter(|r| !r.spans.is_empty()) {
-            row.spans.insert(0, Span::raw(" ".repeat(pad)));
-        }
-        i = end;
+    for row in rows.iter_mut().filter(|r| !r.spans.is_empty()) {
+        row.spans.insert(0, Span::raw(" ".repeat(margin)));
     }
 }
 
@@ -777,9 +751,7 @@ impl Editor {
         let w = self.pane_w();
         let (column, margin) = self.text_grid();
         match self.diff_view.as_mut() {
-            // **The grid is part of the geometry**: a pane that did not change can still have
-            // moved its text column (the gutter, `text_width`), and a view drawn at the old one
-            // would be the one mode that jumped.
+            // The grid moves without the pane when the gutter or `text_width` changes.
             Some(v) if v.width != w || v.column != column || v.margin != margin => {
                 v.column = column;
                 v.margin = margin;

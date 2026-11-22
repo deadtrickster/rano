@@ -356,21 +356,6 @@ mod tables {
         );
     }
 
-    /// Throwaway: print the table as characters and as spans, to see what it really holds.
-    #[test]
-    #[ignore]
-    fn dump_table() {
-        let lines = render(BOARD, 120);
-        for (i, l) in lines.iter().enumerate() {
-            eprintln!("{i:02}|{}|", l.plain());
-            if i < 4 {
-                for sp in &l.spans {
-                    eprintln!("     {:?} {:?}", sp.content, sp.style.top());
-                }
-            }
-        }
-    }
-
     #[test]
     fn the_columns_line_up_and_nothing_is_lost() {
         let lines = render(BOARD, 120);

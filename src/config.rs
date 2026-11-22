@@ -15,9 +15,7 @@ pub struct Config {
     pub line_numbers: bool,
     pub multibuffer: bool,
     pub wrap: bool,
-    /// **The widest the text column gets**, centred in a wider pane the way a markdown
-    /// preview centres its prose. `0` is as wide as the pane; the default is the preview's
-    /// own 100 columns, because a line longer than that is read by turning the head.
+    /// Widest text column, centred in a wider pane; `0` is the whole pane.
     pub text_width: usize,
     /// Check GitHub for a newer release at startup: `None` leaves it to
     /// `RANO_AUTOUPDATE`. See `crate::update`.

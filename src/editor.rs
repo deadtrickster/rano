@@ -263,15 +263,12 @@ pub struct Editor {
     pub replace_count: usize,
     pub text_w: usize,
     pub text_h: usize,
-    /// **The text column's left margin** in the pane: wide monitors get a centred column the
-    /// width of `text_max`, the way a markdown preview centres its prose, instead of lines that
-    /// run the whole screen. 0 when the pane is no wider than the column.
+    /// The gutter's column in the pane: the left margin of the centred text column.
     pub text_x: u16,
     /// The widest the text column gets, `None` for as wide as the pane. `config.text_width`.
     pub text_max: Option<usize>,
-    /// The gutter width `text_x`/`text_w` were gridded against: a file still loading grows its
-    /// line numbers (9 -> 99 -> 240), and a grid laid out for a narrower gutter leaves the text
-    /// a column right of where a view puts its prose.
+    /// The gutter width the grid was laid out for. A loading file grows its gutter, and a stale
+    /// grid puts the text a column off its preview.
     pub(crate) recol_g: usize,
 
     pub chrome: Chrome,
@@ -1694,36 +1691,19 @@ impl Editor {
         self.bar_items()
     }
 
-    /// Map a pane cell to a buffer position: only clicks inside the text area
-    /// land; the gutter or past EOL goes to the line start/end.
-    /// **The text column** for the pane the host gave: `text_max` wide at most, centred, with
-    /// the margin kept in `text_x`. One place, so the draw, the click mapping, the wrap width
-    /// and the scrollbar cannot disagree about where the text starts.
-    /// **The pane's width** - what a VIEW renders at, and the width a preview centres its prose
-    /// in. Not `text_w`: that is the capped column, and handing it to a preview would leave the
-    /// prose flush left at exactly the cap, centred by nobody. A host that has not set an area
-    /// yet (tests) gets `text_w`, which is the same number there.
-    /// **The scrollbar's column**: one cell, right against the text grid, never outside the
-    /// pane. One answer for the draw and for the click, so the bar cannot be in one place and
-    /// its hit area in another.
+    /// The scrollbar's column, against the text grid. The draw and the click both use it.
     pub fn scrollbar_x(&self) -> usize {
         let pane = self.pane_w();
         (self.text_x as usize + self.text_w).min(pane.saturating_sub(1))
     }
 
-    /// **The text grid, and the column it starts in** - what a preview renders prose at, so the
-    /// two modes share one grid instead of each computing its own margin.
+    /// The text grid and the column it starts in, which a preview renders its prose at.
     pub(crate) fn text_grid(&self) -> (usize, usize) {
-        let g = self.gutter_w();
-        match self.area.w {
-            0 => self.grid_in(self.text_w, g),
-            pane => {
-                let (col, start) = self.grid_in(pane as usize, g);
-                (col, start)
-            }
-        }
+        self.grid_in(self.pane_w(), self.gutter_w())
     }
 
+    /// The width a view renders at. Not `text_w`, which is the capped column. Before the host
+    /// sets an area (tests) it is `text_w`.
     pub fn pane_w(&self) -> usize {
         if self.area.w > 0 {
             self.area.w as usize
@@ -1732,26 +1712,19 @@ impl Editor {
         }
     }
 
-    /// **The text grid**, and where it starts. `text_max` columns of TEXT - the same number a
-    /// preview gives its prose, so switching between the text and `M-P` does not move a single
-    /// column. The gutter sits in the margin left of it (and is dropped when the margin has no
-    /// room), the scrollbar keeps the pane's own right edge, and neither takes a column from the
-    /// text: `text_w` stays "gutter + text" so every width below it - wrap, clicks, segments -
-    /// is unchanged.
+    /// Lay out the text grid for the pane. `text_w` stays gutter plus text, so wrap, clicks and
+    /// segments need no change; the gutter sits in the margin left of the text.
     pub(crate) fn recolumn(&mut self) {
         let g = self.gutter_w();
         self.recol_g = g;
         let (col, start) = self.grid_in(self.area.w as usize, g);
         self.text_w = col + g;
-        // `text_x` is the GUTTER's column: the text starts at `start`, and the gutter is drawn in
-        // the margin just left of it - or at 0 when the margin is too narrow to hold it.
+        // At 0 when the margin is too narrow to hold the gutter.
         self.text_x = start.saturating_sub(g) as u16;
     }
 
-    /// **One rule for the text grid and where it starts.** `col` columns of TEXT, never more than
-    /// `text_max` and never wider than the pane leaves after the gutter; `start` is the column the
-    /// text begins in - centred, but never left of where the gutter has to be drawn. The editor and
-    /// a preview both ask this, which is what keeps switching modes from moving a column.
+    /// `(col, start)`: at most `text_max` columns of text, centred, never left of the gutter.
+    /// The editor and a preview share it, so switching modes moves no column.
     fn grid_in(&self, pane: usize, g: usize) -> (usize, usize) {
         let cap = match self.text_max {
             Some(max) if max > 0 => max,
@@ -1762,6 +1735,8 @@ impl Editor {
         (col, (margin / 2).max(g.min(margin)))
     }
 
+    /// Map a pane cell to a buffer position: only clicks inside the text area
+    /// land; the gutter or past EOL goes to the line start/end.
     fn mouse_pos(&self, pane_row: u16, pane_col: u16) -> Option<Pos> {
         let top = self.chrome.top();
         if self.prompt.is_some() || pane_row < top || (pane_row - top) as usize >= self.text_h {
@@ -2010,7 +1985,7 @@ impl Editor {
             return None;
         }
         let top = self.chrome.top();
-        // **No header row**: the view's first line is the text area's first row.
+        // The view's first line is the text area's first row.
         let body_row = (pane_row as usize).checked_sub(top as usize)?;
         let line = v.top + body_row;
         if line >= v.lines.len() {
@@ -4435,8 +4410,7 @@ impl Editor {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        // **A view names itself in the title**: the file is already here, so the mode word goes
-        // in front of it rather than in a header row of its own.
+        // A view's mode word goes in the title, not in a header row.
         let name = match self.diff_view.as_ref() {
             Some(v) => format!("{} · {name}", v.mode_word()),
             None => name,

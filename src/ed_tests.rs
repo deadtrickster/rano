@@ -891,8 +891,7 @@ fn a_wide_code_block_gives_up_margin_to_stay_on_screen() {
         r.len() - r.trim_start().len()
     };
     assert_eq!(margin("Prose."), 70, "{rows:?}");
-    // **Left-anchored at the text's column**: a block wider than the column is clipped on the
-    // right, not moved left - switching modes must not move a column.
+    // A block wider than the column is clipped on the right, not moved left.
     assert_eq!(
         margin("yyyy"),
         70,
@@ -6051,8 +6050,7 @@ fn a_preview_reread_refuses_unsaved_edits() {
     );
 }
 
-/// **A wide pane gets a centred column**, the preview's own 100 columns, and everything that
-/// has to agree about where the text starts does: the wrap width, the click mapping, the cursor.
+/// A wide pane centres a 100-column text column, and wrap, clicks and the cursor agree on it.
 #[test]
 fn a_wide_pane_centres_the_text_column() {
     let mut ed = test_ed("fn main() {\n    body();\n}\n");
@@ -6107,7 +6105,7 @@ fn a_wide_pane_centres_the_text_column() {
     );
 }
 
-/// **Soft wrap follows the column**: a line wraps at the column's width, not the pane's.
+/// Soft wrap is at the column's width, not the pane's.
 #[test]
 fn wrap_follows_the_centred_column() {
     let long = "x".repeat(180);
@@ -6124,8 +6122,7 @@ fn wrap_follows_the_centred_column() {
     );
 }
 
-/// **Edit and preview put the text in the same column**, at every pane width: the narrow ones
-/// where the gutter's padding is folded in, the ones at the cap, and the wide ones.
+/// Edit and preview put the text in the same column at every pane width.
 #[test]
 fn edit_and_preview_agree_on_the_text_column() {
     let md = "# Title\n\n| ref | ASan | UBSan | total |\n|---|---:|---:|---:|\n| OrioleDB 16 / 17 / 18 | 97 / 101 / 116 | 175 / 190 / 196 | 875 |\n";

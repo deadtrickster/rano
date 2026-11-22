@@ -17,6 +17,40 @@ fn have(prog: &str, arg: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The recording's printable text with escape sequences dropped, its tail only: what a failure
+/// needs to say is whether the preview opened.
+fn visible(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']' | '_' | 'P') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' || (n == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if !c.is_control() || c == ' ' {
+            out.push(c);
+        }
+    }
+    let squeezed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tail = squeezed.chars().count().saturating_sub(600);
+    squeezed.chars().skip(tail).collect()
+}
+
 /// Poll until `ok()` or the deadline; true when it answered.
 fn until(deadline: Duration, mut ok: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
@@ -155,10 +189,10 @@ fn a_picture_reaches_a_recording_tmux_client() {
             .unwrap_or(false)
     });
     assert!(drawn, "rano drew its frame before the key was sent");
-    // M-p, which is Escape then p.
+    // M-p as one key: `Escape` and `p` are two writes, and a lone ESC read between them is Esc.
     std::thread::sleep(Duration::from_millis(500));
     let _ = Command::new("tmux")
-        .args(["-L", &sock, "send-keys", "-t", "x", "Escape", "p"])
+        .args(["-L", &sock, "send-keys", "-t", "x", "M-p"])
         .status();
     // Wait for the client's stream to carry the picture, then stop the server.
     // Best effort: the recording is flushed when `script` exits, so the read below is what
@@ -190,8 +224,9 @@ fn a_picture_reaches_a_recording_tmux_client() {
     let text = String::from_utf8_lossy(&log);
     assert!(
         text.contains("\x1b_Ga=t"),
-        "the upload reached the client; {} bytes recorded",
-        log.len()
+        "the upload reached the client; {} bytes recorded, the screen read: {}",
+        log.len(),
+        visible(&text)
     );
     assert!(text.contains("\x1b_Ga=p,U=1"), "the placement reached it");
     assert!(

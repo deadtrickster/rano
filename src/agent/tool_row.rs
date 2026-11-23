@@ -392,10 +392,11 @@ impl ToolRow {
             line.style = faint.patch(&line.style);
             line
         };
-        // Rows, each with the payload line it shows and whether it ends that line. The open window
-        // wraps, so a line wider than the screen is read whole there; elsewhere a line is one row,
-        // cut at the edge.
-        let rows: Vec<(usize, Line, bool)> = if window {
+        // Rows, each with the payload line it shows and whether it ends that line. A line wider
+        // than the screen wraps so it reads whole; the folded row's two-row budget is why it is
+        // the one that cuts.
+        let wrap_wide = window || self.fold.is_open();
+        let rows: Vec<(usize, Line, bool)> = if wrap_wide {
             (0..lines.len())
                 .flat_map(|n| {
                     let mut parts = wrap(&styled(n), w.saturating_sub(2));
@@ -704,10 +705,23 @@ mod tests {
         assert!(long.len() >= 400);
         let text = format!("first\n{long}\nlast\n");
         let mut r = ToolRow::new("bash", "c1", Outcome::Ok, payload_lines(&text));
+        // Unfolded: the long line wraps whole, tail included.
         r.fold = Fold::Open;
+        let unfolded = plain(&r.lines(80));
+        assert!(
+            unfolded.iter().all(|l| visible_width(l) <= 80),
+            "{unfolded:?}"
+        );
+        assert!(
+            unfolded.join(" ").contains("word0044"),
+            "the unfolded row wraps the tail in: {unfolded:?}"
+        );
+        // Folded: one row per line, cut at the edge.
+        r.fold = Fold::Folded;
         let folded = plain(&r.lines(80));
         assert!(folded.iter().all(|l| visible_width(l) <= 80), "{folded:?}");
         assert!(!folded.join("").contains("word0044"), "{folded:?}");
+        r.fold = Fold::Open;
 
         r.window = Some(0);
         let open = plain(&r.lines(80));
@@ -833,6 +847,37 @@ mod tests {
         assert!(!out.join("\n").contains("replacement"), "{out:?}");
         r.fold = Fold::Open;
         assert_eq!(r.lines(120).len(), 1 + 12);
+    }
+
+    /// An unfolded row wraps a line wider than the screen so both ends read; the folded row
+    /// keeps one cut row, since two rows are all its budget has.
+    #[test]
+    fn an_unfolded_row_wraps_wide_lines_and_a_folded_one_cuts_them() {
+        let long = format!("start {} end", "word ".repeat(40));
+        let mut r = ToolRow::new("bash", "c1", Outcome::Ok, payload_lines(&long));
+        let folded = plain(&r.lines(40));
+        assert!(
+            folded.iter().any(|l| l.contains("start")),
+            "the folded row keeps its first row: {folded:?}"
+        );
+        assert!(
+            !folded.join("\n").contains("end"),
+            "the folded row cuts at the edge: {folded:?}"
+        );
+        r.fold = Fold::Open;
+        let out = plain(&r.lines(40));
+        let joined = out.join("\n");
+        assert!(joined.contains("start"), "{out:?}");
+        assert!(
+            joined.contains("end"),
+            "the unfolded row shows the whole line, tail included: {out:?}"
+        );
+        for l in &out {
+            assert!(
+                crate::width::text::width(l) <= 40,
+                "no row past the screen edge: {l:?}"
+            );
+        }
     }
 
     #[test]

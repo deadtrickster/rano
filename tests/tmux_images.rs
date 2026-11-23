@@ -51,6 +51,22 @@ fn visible(raw: &str) -> String {
     squeezed.chars().skip(tail).collect()
 }
 
+/// tmux confined to this test's own server: a private socket, `TMUX_TMPDIR` at the test's
+/// directory and the inherited `TMUX` stripped, so no call here can reach a server that is
+/// not the test's.
+fn tmux_in(dir: &std::path::Path, sock: &str, args: &[&str]) -> std::process::Output {
+    Command::new("tmux")
+        .args(["-L", sock])
+        .args(args)
+        .env_remove("TMUX")
+        .env("TMUX_TMPDIR", dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tmux")
+}
+
 /// Poll until `ok()` or the deadline; true when it answered.
 fn until(deadline: Duration, mut ok: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
@@ -126,6 +142,9 @@ fn a_picture_reaches_a_recording_tmux_client() {
     let mut child = Command::new("script")
         .args(["-qfc", &inner, raw.to_str().expect("a path")])
         .env_remove("TMUX")
+        // The inner tmux gets the same private tmpdir, so the whole tree lives in the test's
+        // directory.
+        .env("TMUX_TMPDIR", &dir)
         // The terminfo the test compiled itself: the recipe's terminal name works on every
         // box, without depending on the host having ghostty's entry installed.
         .env("TERMINFO", terminfo.display().to_string())
@@ -142,13 +161,7 @@ fn a_picture_reaches_a_recording_tmux_client() {
     // on exactly that deadline. The test's own frame wait below says the same thing:
     // "on a loaded machine it starts slower than any fixed sleep".
     let up = until(Duration::from_secs(60), || {
-        Command::new("tmux")
-            .args(["-L", &sock, "list-sessions"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        tmux_in(&dir, &sock, &["list-sessions"]).status.success()
     });
     if !up {
         let _ = child.kill();
@@ -156,14 +169,9 @@ fn a_picture_reaches_a_recording_tmux_client() {
         // The refusal said only "never came up"; the gate reded three times on it without
         // a word of WHY. tmux's own stderr is the diagnosis — a socket problem, a config
         // problem, a permissions problem each read differently — so it rides the panic.
-        let said = Command::new("tmux")
-            .args(["-L", &sock, "list-sessions"])
-            .stderr(Stdio::piped())
-            .output();
-        let why = match said {
-            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            Err(e) => format!("tmux would not even run: {e}"),
-        };
+        let why = String::from_utf8_lossy(&tmux_in(&dir, &sock, &["list-sessions"]).stderr)
+            .trim()
+            .to_string();
         let recorded = std::fs::read(&raw)
             .map(|b| String::from_utf8_lossy(&b).trim().to_string())
             .unwrap_or_default();
@@ -191,9 +199,7 @@ fn a_picture_reaches_a_recording_tmux_client() {
     assert!(drawn, "rano drew its frame before the key was sent");
     // M-p as one key: `Escape` and `p` are two writes, and a lone ESC read between them is Esc.
     std::thread::sleep(Duration::from_millis(500));
-    let _ = Command::new("tmux")
-        .args(["-L", &sock, "send-keys", "-t", "x", "M-p"])
-        .status();
+    let _ = tmux_in(&dir, &sock, &["send-keys", "-t", "x", "M-p"]);
     // Wait for the client's stream to carry the picture, then stop the server.
     // Best effort: the recording is flushed when `script` exits, so the read below is what
     // decides; this only shortens the wait when the stream does arrive early.
@@ -205,9 +211,7 @@ fn a_picture_reaches_a_recording_tmux_client() {
             })
             .unwrap_or(false)
     });
-    let _ = Command::new("tmux")
-        .args(["-L", &sock, "kill-server"])
-        .status();
+    let _ = tmux_in(&dir, &sock, &["kill-server"]);
     // `script` ends when the pty it records closes; rano holds that pty, so give it a moment and
     // then end the recorder rather than waiting on a server that may already be gone.
     let ended = until(Duration::from_secs(5), || {

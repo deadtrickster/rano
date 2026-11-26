@@ -879,7 +879,12 @@ fn send_frame(
         return;
     };
     if let Err(e) = send(open, folder) {
-        ed.panel.said = format!("cannot reach the daemon: {e}");
+        // A refusal by name is the daemon answering: said as itself, not as a dead socket.
+        ed.panel.said = if e.kind() == std::io::ErrorKind::Unsupported {
+            e.to_string()
+        } else {
+            format!("cannot reach the daemon: {e}")
+        };
     }
 }
 

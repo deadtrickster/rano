@@ -112,6 +112,13 @@ pub struct Panel {
     /// merged into one row whenever nothing else was filed between them, and a replayed
     /// conversation made that visible.
     fresh_turn: bool,
+    /// The queue lane as the daemon answered it: `None` until its `features` frame (or its
+    /// `hello`, for a daemon too old to send one) says, `Some(true)` when the lane is open. A
+    /// queued prompt is held while this is unknown and refused plainly when it is `Some(false)`.
+    queue_lane: Option<bool>,
+    /// The daemon's protocol version from its `hello`: below [`QUEUE_PROMPT_SINCE`] no `features`
+    /// frame is ever coming.
+    daemon_protocol: u32,
     /// The conversation's tool fold (`M-t` in the panel): with false, a run of settled calls
     /// collapses to one line and only the newest and the failed stay open.
     pub tools_open: bool,
@@ -157,6 +164,8 @@ impl Default for Panel {
             acts: Vec::new(),
             turn_started: None,
             fresh_turn: false,
+            queue_lane: None,
+            daemon_protocol: 0,
             shown_second: 0,
             last_output: None,
             pending_ask: None,
@@ -215,6 +224,9 @@ impl Panel {
     /// previous session's ask, or clocking its turn, is the failure this row exists to remove.
     /// `connect` and `new_session` both start one, and `follow` goes through `connect`.
     fn drop_turn_state(&mut self) {
+        // The lane is the daemon's promise about this connection: a new one promises nothing.
+        self.queue_lane = None;
+        self.daemon_protocol = 0;
         self.turn_started = None;
         self.shown_second = 0;
         self.last_output = None;
@@ -286,9 +298,7 @@ impl Panel {
         // A page of rows is the head's to draw, and a frame or event this build does not know is
         // the pump's to count: neither changes a row here.
         match frame {
-            Frame::RowsFetched { .. } | Frame::Unknown { .. } | Frame::Features { .. } => {
-                return false;
-            }
+            Frame::RowsFetched { .. } | Frame::Unknown { .. } => return false,
             Frame::Event {
                 event: Event::Unknown { .. },
                 ..
@@ -313,11 +323,28 @@ impl Panel {
                 self.state = PanelState::Idle;
                 self.said.clear();
                 self.follow = true;
+                self.daemon_protocol = hello.protocol_version;
+                if hello.protocol_version < crate::letibot::QUEUE_PROMPT_SINCE {
+                    self.queue_lane = Some(false);
+                }
                 if let Some(snapshot) = &hello.snapshot {
                     self.replay(snapshot);
                 }
                 self.remember();
+                // Steers go now; queued words wait for the echo, which this frame says is
+                // coming — or is not.
                 self.flush();
+                self.flush_queued();
+            }
+            // The daemon's echo: what it accepted of this head's features, the queue lane
+            // among them. Held queued words go out on the answer.
+            Frame::Features { accepted } => {
+                self.queue_lane = Some(
+                    accepted
+                        .iter()
+                        .any(|f| f == crate::letibot::FEATURE_QUEUE_PROMPT),
+                );
+                self.flush_queued();
             }
             Frame::Sessions {
                 created, sessions, ..
@@ -354,9 +381,7 @@ impl Panel {
             }
             Frame::Event { event, .. } => self.event(event),
             // Answered before the match, and here only because the compiler asks for every arm.
-            Frame::RowsFetched { .. } | Frame::Unknown { .. } | Frame::Features { .. } => {
-                return false;
-            }
+            Frame::RowsFetched { .. } | Frame::Unknown { .. } => return false,
         }
         true
     }
@@ -711,6 +736,13 @@ impl Panel {
                 }
                 self.edits(call_id, edits);
             }
+            Event::TurnEnded { .. } => {
+                // The prompt's end, once more after the last round: the same settling the
+                // round's own `ends_turn` did, so a daemon that says both is heard either way.
+                self.turn_started = None;
+                self.last_output = None;
+                self.state = PanelState::Idle;
+            }
             Event::TurnFinished { ends_turn, .. } => {
                 // A round that is not the end of the prompt leaves the panel thinking, which is
                 // what only the daemon can tell.
@@ -913,19 +945,65 @@ impl Panel {
 
     /// The `Hello` landed: the prompts asked for while the panel was connecting go out now.
     fn flush(&mut self) {
-        for pending in std::mem::take(&mut self.waiting) {
-            self.acts.push(if pending.queued {
-                Act::PromptQueued {
-                    text: pending.text,
-                    context: pending.context,
-                }
-            } else {
-                Act::Prompt {
-                    text: pending.text,
-                    context: pending.context,
-                }
+        self.waiting.retain(|pending| {
+            if pending.queued {
+                return true;
+            }
+            self.acts.push(Act::Prompt {
+                text: pending.text.clone(),
+                context: pending.context.clone(),
             });
+            false
+        });
+    }
+
+    /// The queued words held through the attach, once the lane is known: sent queued where the
+    /// daemon has the lane, refused plainly where it does not — the words back in the composer,
+    /// the row that showed them gone, since nothing was sent.
+    fn flush_queued(&mut self) {
+        if self.queue_lane.is_none() {
+            return;
         }
+        let mut refused = Vec::new();
+        self.waiting.retain(|pending| {
+            if !pending.queued {
+                return true;
+            }
+            if self.queue_lane == Some(true) {
+                self.acts.push(Act::PromptQueued {
+                    text: pending.text.clone(),
+                    context: pending.context.clone(),
+                });
+                return false;
+            }
+            refused.push(pending.text.clone());
+            false
+        });
+        if refused.is_empty() {
+            return;
+        }
+        for text in &refused {
+            if let Some(at) = self
+                .rows
+                .iter()
+                .rposition(|r| matches!(r, Row::User(t) if t == text))
+            {
+                self.rows.remove(at);
+            }
+        }
+        if self.input.is_empty() {
+            self.input.clone_from(refused.last().unwrap());
+            self.cursor = self.input.chars().count();
+        }
+        self.said = if refused.len() == 1 {
+            "this daemon has no queue lane: every prompt steers — the words are back in the composer".to_string()
+        } else {
+            format!(
+                "this daemon has no queue lane: every prompt steers — {} prompts not sent, the last is back in the composer",
+                refused.len()
+            )
+        };
+        self.touch();
     }
 
     /// `tab`: the composer's words on the queue lane, to run after the running turn ends. The
@@ -945,10 +1023,30 @@ impl Panel {
         if text.is_empty() {
             return;
         }
+        // The lane is checked before a word leaves the composer: on a daemon without it the
+        // words stay, and the panel says why rather than the host's "cannot reach".
+        if self.queue_lane == Some(false) {
+            self.said = "this daemon has no queue lane: every prompt steers".to_string();
+            self.touch();
+            return;
+        }
         self.input.clear();
         self.cursor = 0;
         let context = self.context();
         self.submit_in_lane(text, context, Lane::Queue);
+        // Unknown yet (the echo is a frame behind the hello): held, and the echo decides.
+        // Only the act this key just pushed is taken back — an act pushed beside it in the same
+        // pass stays on the queue.
+        if self.queue_lane.is_none()
+            && matches!(self.acts.last(), Some(Act::PromptQueued { .. }))
+            && let Some(Act::PromptQueued { text, context }) = self.acts.pop()
+        {
+            self.waiting.push(Pending {
+                text,
+                context,
+                queued: true,
+            });
+        }
     }
 
     /// What the next prompt carries: the chips as references, and the decisions taken since the last
@@ -2217,17 +2315,26 @@ mod tests {
         assert!(panel.waiting.is_empty(), "nothing held after the flush");
     }
 
+    /// The frames a real letibot daemon (protocol 81) wrote for a rano head attaching at 81:
+    /// the hello with its snapshot (a turn running, a prompt in it), then the echo. Recorded
+    /// verbatim from `serve_registry` on a private socket, replayed here so the order and the
+    /// shapes are the daemon's, not this test's.
+    const REAL_HELLO_81: &str = r#"{"frame":"hello","protocol_version":81,"session_id":"s-rano-record","head_id":"h1","dropped":0,"snapshot":{"session_id":"s-rano-record","seq":3,"dropped":0,"items_dropped":0,"items_lead":0,"items":[],"turn":{"turn_id":"t-1","model":"qwen3-next-80b","ledger_head":"0000","text":"","reasoning":"","raw_calls":"","calls":[],"appended":[],"progress":null,"tokens":0,"state":{"state":"running"}},"open_decisions":[],"settled_decisions":[],"warnings":[],"heads":[{"head_id":"h1","kind":"editor","identity":"rano"}],"subagents":[],"activity":"quiet"},"resumed_from":null,"scrubbed":{"prompt_progress":0,"tokens_generated":0,"tool_progress":0,"settled_decisions":0,"job_output":0},"wiring":{"model":"","dialect":"","endpoint":"","workspace":""},"sessions":[{"session_id":"s-rano-record","title":"","created_ms":1795681052466,"status":{"session_id":"s-rano-record","seq":3,"items":0,"heads":1,"running":true,"model":"qwen3-next-80b","last_ms":1795681052487,"held_rooms":0},"wiring":{"model":"","dialect":"","endpoint":"","workspace":""},"live":true,"stored_items":0,"parent_session_id":null,"context_tokens":null,"context_cached":null,"stored_end":null,"nags_paused":null,"waits_on_operator":0,"slug":"","origin":"operator","moved_ms":1795681052466,"role":""}]}"#;
+    const REAL_FEATURES: &str = r#"{"frame":"features","accepted":["queue_prompt_v1"]}"#;
+
     /// Tab queues: the words go out as the queued act, the row shows them, and the state stays
     /// what the running turn is doing — a queued prompt is the next turn's, not this one's.
-    /// Typed while still attaching, the lane is held with the prompt and goes out on the hello.
+    /// Enter is still the steer, and nothing typed sends nothing.
     #[test]
     fn tab_queues_the_words_for_after_the_turn() {
         let mut panel = opened();
-        panel.apply(&hello("s-1", "the one"));
+        panel.apply(&crate::letibot::parse(REAL_HELLO_81));
         let _ = panel.take_acts();
+        panel.apply(&crate::letibot::parse(REAL_FEATURES));
+        assert_eq!(panel.queue_lane, Some(true), "the echo opened the lane");
         // A turn is running, so a steer would be read at the next step: the queue is the point.
         panel.apply(&Frame::Event {
-            seq: 1,
+            seq: 4,
             event: Event::TurnStarted {
                 turn_id: "t".to_string(),
                 model: "m".to_string(),
@@ -2235,13 +2342,12 @@ mod tests {
         });
         panel.input = "and then land it".to_string();
         panel.send_queued();
-        let acts = panel.take_acts();
         assert!(
             matches!(
-                acts.as_slice(),
+                panel.take_acts().as_slice(),
                 [Act::PromptQueued { text, .. }] if text == "and then land it"
             ),
-            "the queued act: {acts:?}"
+            "the queued act"
         );
         assert_eq!(panel.state, PanelState::Thinking, "this turn's state stays");
         assert!(panel.input.is_empty(), "the words left the composer");
@@ -2252,28 +2358,147 @@ mod tests {
             matches!(panel.take_acts().as_slice(), [Act::Prompt { text, .. }] if text == "right now"),
             "Enter steers"
         );
-        // Typed while attaching: held on its lane, and the hello sends it queued.
+        // Nothing typed: nothing sent, and nothing crashes.
+        panel.send_queued();
+        assert!(panel.take_acts().is_empty(), "no words, no prompt");
+    }
+
+    /// The daemon's own order — hello, then its backlog, then the echo — with words typed
+    /// before any of it: the steers leave on the hello, the queued words wait through the
+    /// backlog for the echo and go out queued on it. All three frames are the daemon's.
+    #[test]
+    fn a_held_queued_prompt_waits_for_the_echo_and_goes_out_on_it() {
         let mut panel = opened();
         panel.input = "after you finish".to_string();
         panel.send_queued();
-        assert!(
-            matches!(panel.waiting.as_slice(), [Pending { queued: true, text, .. }] if text == "after you finish"),
-            "held on the lane: {:?}",
-            panel.waiting
-        );
-        panel.apply(&hello("s-1", "the one"));
+        panel.input = "right now".to_string();
+        panel.send();
+        panel.apply(&crate::letibot::parse(REAL_HELLO_81));
         let acts = panel.take_acts();
         assert!(
             acts.iter()
-                .any(|a| matches!(a, Act::PromptQueued { text, .. } if text == "after you finish")),
-            "the hello sends it on the lane it was asked on: {acts:?}"
+                .any(|a| matches!(a, Act::Prompt { text, .. } if text == "right now")),
+            "the steer left on the hello: {acts:?}"
         );
-        // Nothing typed: nothing sent, and nothing crashes.
+        assert!(
+            !acts.iter().any(|a| matches!(a, Act::PromptQueued { .. })),
+            "the queued words did not leave before the echo: {acts:?}"
+        );
+        assert_eq!(panel.queue_lane, None, "the hello alone promises nothing");
+        // A backlog event lands between the hello and the echo: nothing queued moves.
+        panel.apply(&Frame::Event {
+            seq: 4,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        let _ = panel.take_acts();
+        assert!(
+            panel.waiting.iter().any(|p| p.queued),
+            "still held through the backlog"
+        );
+        panel.apply(&crate::letibot::parse(REAL_FEATURES));
+        assert!(
+            matches!(
+                panel.take_acts().as_slice(),
+                [Act::PromptQueued { text, .. }] if text == "after you finish"
+            ),
+            "the echo sends it queued"
+        );
+        assert!(panel.waiting.is_empty());
+    }
+
+    /// A daemon too old for the lane says so in its hello and never sends the echo: Tab keeps
+    /// the words and says why; words typed before the hello come back rather than being steered
+    /// (the opposite of what was asked) or lost.
+    #[test]
+    fn a_daemon_without_the_lane_keeps_the_words_and_says_why() {
         let mut panel = opened();
         panel.apply(&hello("s-1", "the one"));
         let _ = panel.take_acts();
+        assert_eq!(
+            panel.queue_lane,
+            Some(false),
+            "a protocol-70 daemon has no lane"
+        );
+        panel.input = "after you finish".to_string();
         panel.send_queued();
-        assert!(panel.take_acts().is_empty(), "no words, no prompt");
+        assert!(
+            panel.input == "after you finish",
+            "the words never left the composer"
+        );
+        assert!(panel.take_acts().is_empty(), "nothing was sent");
+        assert!(
+            panel.said.contains("no queue lane"),
+            "and the panel says why: {}",
+            panel.said
+        );
+        // Typed before the hello: held, then handed back the same way, its row gone.
+        let mut panel = opened();
+        panel.input = "after you finish".to_string();
+        panel.send_queued();
+        panel.apply(&hello("s-1", "the one"));
+        let _ = panel.take_acts();
+        assert!(
+            panel.input == "after you finish" && panel.said.contains("no queue lane"),
+            "handed back with the reason: {:?} {:?}",
+            panel.input,
+            panel.said
+        );
+        assert!(
+            !panel
+                .rows
+                .iter()
+                .any(|r| matches!(r, Row::User(t) if t == "after you finish")),
+            "the row that showed unsent words is gone: {:?}",
+            panel.rows
+        );
+    }
+
+    /// `turn_ended`, the prompt's end a daemon at 76+ sends after the last round, settles the
+    /// panel exactly as the round's own `ends_turn` does: idle, no clock — and a pending ask
+    /// still outlives it.
+    #[test]
+    fn a_turn_ended_settles_the_panel_and_the_ask_outlives_it() {
+        let mut panel = opened();
+        panel.apply(&crate::letibot::parse(REAL_HELLO_81));
+        let _ = panel.take_acts();
+        panel.apply(&crate::letibot::parse(REAL_FEATURES));
+        let _ = panel.take_acts();
+        panel.apply(&Frame::Event {
+            seq: 4,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        panel.apply(&Frame::Event {
+            seq: 5,
+            event: Event::DecisionRequested(DecisionRequest {
+                req_id: "r-1".to_string(),
+                kind: "permission".to_string(),
+                summary: "bash would run rm -rf build".to_string(),
+                ..DecisionRequest::default()
+            }),
+        });
+        panel.apply(&Frame::Event {
+            seq: 6,
+            event: Event::TurnFinished {
+                turn_id: "t".to_string(),
+                ends_turn: true,
+            },
+        });
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"event","seq":7,"event":"turn_ended","turn_id":"t"}"#,
+        ));
+        assert_eq!(panel.state, PanelState::Idle, "the prompt is over");
+        assert!(
+            panel
+                .turn_line(60)
+                .is_some_and(|l| l.plain().contains("waiting")),
+            "the ask is still named: it waits on a person, not the turn"
+        );
     }
 
     /// and a turn's end change the state and never the prose.

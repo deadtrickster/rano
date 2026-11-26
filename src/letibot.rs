@@ -22,8 +22,17 @@ use serde_json::Value;
 /// the daemon logs a difference and serves anyway, so this is a fact to state, not a gate to pass.
 ///
 /// 71 added `Prompt.context`, 72 `Citation.kind` and `body`; both are defaulted on the wire, and
-/// this build reads and writes both, so it speaks the newer one.
-pub const PROTOCOL_VERSION: u32 = 72;
+/// this build reads and writes both. 79 is the version whose heads are sent `Features` — the
+/// queue lane's echo — and everything the daemon stops translating at 79 is read raw here:
+/// `TurnEnded` (76) ends a prompt, `Speaker::Peer` (75) on a user row names its sender,
+/// `TurnState::Parked` (75) is a turn that is not running, a peer's todo author (77) is skipped.
+/// 81 is what the daemon spoke when this was written; a newer daemon warns about the skew and
+/// serves anyway.
+pub const PROTOCOL_VERSION: u32 = 81;
+
+/// The first version whose heads are sent [`Frame::Features`]. A `Hello` from a daemon below it
+/// means the echo is never coming: a held queued prompt is refused then, not waited on.
+pub const QUEUE_PROMPT_SINCE: u32 = 79;
 
 /// The head kind a panel attaches as.
 pub const KIND_EDITOR: &str = "editor";
@@ -534,6 +543,10 @@ pub enum Event {
     TurnFinished {
         turn_id: String,
         ends_turn: bool,
+    },
+    /// The prompt's end, after its last round. Interrupts and failures keep their own events.
+    TurnEnded {
+        turn_id: String,
     },
     TurnInterrupted {
         turn_id: String,
@@ -1272,6 +1285,11 @@ fn event(v: &Value) -> Event {
             turn_id: text(v, "turn_id"),
             ends_turn: v.get("ends_turn").and_then(Value::as_bool).unwrap_or(true),
         },
+        // The prompt's end, once, after its last round's `turn_finished` (a daemon at 79+ sends
+        // both; the round's own `ends_turn` still says it, and this says it once more).
+        "turn_ended" => Event::TurnEnded {
+            turn_id: text(v, "turn_id"),
+        },
         "turn_interrupted" => Event::TurnInterrupted {
             turn_id: text(v, "turn_id"),
             reason: text(v, "reason"),
@@ -1836,6 +1854,23 @@ mod tests {
         );
     }
 
+    /// A daemon at 76+ ends every prompt with `turn_ended`, after the last round's own
+    /// `turn_finished`. Unparsed it would count as a frame this build skipped — every prompt
+    /// would end with "N frames skipped" on the panel — so it is a frame this build knows.
+    #[test]
+    fn a_turn_ended_is_a_frame_this_build_knows() {
+        let frame = parse(r#"{"frame":"event","seq":7,"event":"turn_ended","turn_id":"t"}"#);
+        assert!(!frame.is_unknown(), "{frame:?}");
+        let Frame::Event {
+            event: Event::TurnEnded { turn_id },
+            ..
+        } = frame
+        else {
+            panic!("a turn_ended is one");
+        };
+        assert_eq!(turn_id, "t");
+    }
+
     #[test]
     fn a_card_carries_both_its_ladder_and_its_choices() {
         let frame = parse(
@@ -2016,7 +2051,7 @@ mod tests {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\necho '{{\"workspace\":\"{}\",\"socket\":\"{}/s.sock\",\"up\":true,\"protocol\":72}}'\n",
+                "#!/bin/sh\necho '{{\"workspace\":\"{}\",\"socket\":\"{}/s.sock\",\"up\":true,\"protocol\":{PROTOCOL_VERSION}}}'\n",
                 dir.display(),
                 dir.display()
             ),

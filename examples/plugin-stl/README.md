@@ -50,6 +50,7 @@ Zig 0.16.0, target `wasm32-freestanding`, no entry point, `ReleaseSmall`, `-rdyn
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/plugin.wasm, ~32 KB
 cp zig-out/bin/plugin.wasm plugin.wasm
+zig build test                        # native, Debug: the largest viewport renders in bounds
 ```
 
 `plugin.wasm` beside this file is the built artifact, committed the way

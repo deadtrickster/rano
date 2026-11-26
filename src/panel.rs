@@ -99,6 +99,8 @@ pub struct Panel {
     /// When the running turn started: the status line's clock, and what makes a spinner move
     /// without a token arriving.
     turn_started: Option<std::time::Instant>,
+    /// The running turn's id: a late end for an OLDER turn must not settle a newer one.
+    running_turn: Option<String>,
     /// The second the status line last said, so the host redraws once a second and not more.
     shown_second: u64,
     /// When the turn last emitted anything — a delta, a call starting or settling. `slow` on the
@@ -163,6 +165,7 @@ impl Default for Panel {
             seen_name: None,
             acts: Vec::new(),
             turn_started: None,
+            running_turn: None,
             fresh_turn: false,
             queue_lane: None,
             daemon_protocol: 0,
@@ -228,6 +231,7 @@ impl Panel {
         self.queue_lane = None;
         self.daemon_protocol = 0;
         self.turn_started = None;
+        self.running_turn = None;
         self.shown_second = 0;
         self.last_output = None;
         self.pending_ask = None;
@@ -606,6 +610,7 @@ impl Panel {
                 // so the row is not the slow colour.
                 self.turn_started = None;
                 self.last_output = None;
+                self.running_turn = Some(turn.turn_id.clone());
             }
         }
         // A card still open is named exactly as if it had just been asked, and answered on
@@ -630,9 +635,10 @@ impl Panel {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::TurnStarted { .. } => {
+            Event::TurnStarted { turn_id, .. } => {
                 // The clock the status line reads, and no ask is pending in a fresh turn.
                 let now = std::time::Instant::now();
+                self.running_turn = Some(turn_id.clone());
                 self.turn_started = Some(now);
                 self.last_output = Some(now);
                 self.pending_ask = None;
@@ -736,30 +742,37 @@ impl Panel {
                 }
                 self.edits(call_id, edits);
             }
-            Event::TurnEnded { .. } => {
+            // A late end for an older turn settles nothing: the prompt it ended is over, and
+            // a newer one may be running. Every ending goes through the same door.
+            Event::TurnEnded { turn_id }
+            | Event::TurnFinished { turn_id, .. }
+            | Event::TurnInterrupted { turn_id, .. }
+            | Event::TurnFailed { turn_id, .. }
+                if self.ends_a_past_turn(turn_id) =>
+            {
+                return;
+            }
+            Event::TurnEnded { turn_id } => {
                 // The prompt's end, once more after the last round: the same settling the
                 // round's own `ends_turn` did, so a daemon that says both is heard either way.
-                self.turn_started = None;
-                self.last_output = None;
+                self.settle_turn(turn_id);
                 self.state = PanelState::Idle;
             }
-            Event::TurnFinished { ends_turn, .. } => {
+            Event::TurnFinished { ends_turn, turn_id } => {
                 // A round that is not the end of the prompt leaves the panel thinking, which is
                 // what only the daemon can tell.
                 self.state = if *ends_turn {
-                    self.turn_started = None;
-                    self.last_output = None;
+                    self.settle_turn(turn_id);
                     PanelState::Idle
                 } else {
                     PanelState::Thinking
                 };
             }
-            Event::TurnInterrupted { reason, .. } => {
+            Event::TurnInterrupted { turn_id, reason } => {
                 // A call in flight when the turn ended never gets its finish: its note says so
                 // rather than standing as a call that will never settle.
                 self.call_markup.clear();
-                self.turn_started = None;
-                self.last_output = None;
+                self.settle_turn(turn_id);
                 self.pending_ask = None;
                 self.settle_running("interrupted");
                 self.rows.push(Row::Note(if reason.is_empty() {
@@ -769,10 +782,9 @@ impl Panel {
                 }));
                 self.state = PanelState::Idle;
             }
-            Event::TurnFailed { error, .. } => {
+            Event::TurnFailed { error, turn_id } => {
                 self.call_markup.clear();
-                self.turn_started = None;
-                self.last_output = None;
+                self.settle_turn(turn_id);
                 self.pending_ask = None;
                 self.settle_running("not run");
                 self.rows.push(Row::Note(format!("failed: {error}")));
@@ -982,13 +994,20 @@ impl Panel {
         if refused.is_empty() {
             return;
         }
+        // Every word stays visible with its verdict: the row it was typed into stands, with a
+        // note under it saying it was not sent — so the conversation reads as what happened.
+        // The composer is one line, so only the last returns to it for retyping.
         for text in &refused {
-            if let Some(at) = self
+            let note = Row::Note("not sent: this daemon has no queue lane".to_string());
+            match self
                 .rows
                 .iter()
                 .rposition(|r| matches!(r, Row::User(t) if t == text))
             {
-                self.rows.remove(at);
+                Some(at) => {
+                    self.rows.insert(at + 1, note);
+                }
+                None => self.rows.push(note),
             }
         }
         if self.input.is_empty() {
@@ -1200,6 +1219,25 @@ impl Panel {
                 *note = format!("{name} · {word}");
             }
         }
+    }
+
+    /// Whether `turn_id` names a turn that is not the running one — an end arriving after a
+    /// newer turn started, which must not settle the newer turn's state.
+    fn ends_a_past_turn(&self, turn_id: &str) -> bool {
+        match &self.running_turn {
+            Some(running) => running != turn_id,
+            None => false,
+        }
+    }
+
+    /// A turn is over: its clock and its silence are forgotten. An ask it raised stays named,
+    /// since it waits on a person and not on the turn.
+    fn settle_turn(&mut self, turn_id: &str) {
+        if self.running_turn.as_deref() == Some(turn_id) {
+            self.running_turn = None;
+        }
+        self.turn_started = None;
+        self.last_output = None;
     }
 
     /// A path as the daemon named it: absolute, or relative to the workspace the conversation is in.
@@ -2446,13 +2484,94 @@ mod tests {
             panel.input,
             panel.said
         );
+        // The word stays visible with its verdict: its row, a note saying it was not sent.
         assert!(
-            !panel
-                .rows
-                .iter()
-                .any(|r| matches!(r, Row::User(t) if t == "after you finish")),
-            "the row that showed unsent words is gone: {:?}",
+            matches!(
+                panel.rows.as_slice(),
+                [Row::User(t), Row::Note(n)] if t == "after you finish" && n.contains("not sent")
+            ),
+            "the word and its verdict, in that order: {:?}",
             panel.rows
+        );
+    }
+
+    /// A late end for an OLDER turn settles nothing: with a newer turn running, the old turn's
+    /// `turn_ended` — or a finished round, interrupt or failure — leaves the clock and the
+    /// state alone, and the running turn's own end settles it.
+    #[test]
+    fn a_late_end_for_an_older_turn_settles_nothing() {
+        let mut panel = opened();
+        panel.apply(&crate::letibot::parse(REAL_HELLO_81));
+        let _ = panel.take_acts();
+        panel.apply(&crate::letibot::parse(REAL_FEATURES));
+        let _ = panel.take_acts();
+        let started = |id: &str| {
+            crate::letibot::parse(&format!(
+                r#"{{"frame":"event","seq":4,"event":"turn_started","turn_id":"{id}","model":"m"}}"#
+            ))
+        };
+        panel.apply(&started("t-old"));
+        panel.apply(&started("t-new"));
+        assert_eq!(panel.state, PanelState::Thinking);
+        let before = panel.turn_line(60);
+        // The older turn's end arrives after the newer one started: on every ending shape.
+        for late in [
+            r#"{"frame":"event","seq":5,"event":"turn_ended","turn_id":"t-old"}"#,
+            r#"{"frame":"event","seq":6,"event":"turn_finished","turn_id":"t-old","ends_turn":true}"#,
+            r#"{"frame":"event","seq":7,"event":"turn_interrupted","turn_id":"t-old","reason":""}"#,
+            r#"{"frame":"event","seq":8,"event":"turn_failed","turn_id":"t-old","error":"gone"}"#,
+        ] {
+            panel.apply(&crate::letibot::parse(late));
+            assert_eq!(panel.state, PanelState::Thinking, "{late}");
+            assert!(
+                panel.turn_line(60).is_some(),
+                "the clock still runs: {late}"
+            );
+        }
+        // The running turn's own end settles it.
+        panel.apply(&crate::letibot::parse(
+            r#"{"frame":"event","seq":9,"event":"turn_ended","turn_id":"t-new"}"#,
+        ));
+        assert_eq!(panel.state, PanelState::Idle);
+        assert!(panel.turn_line(60).is_none());
+        assert!(before.is_some(), "and the clock had been on before");
+    }
+
+    /// Two held prompts refused together: every word stays visible with its verdict, and only
+    /// the last returns to the composer, which is one line.
+    #[test]
+    fn every_refused_held_prompt_keeps_its_words() {
+        let mut panel = opened();
+        panel.input = "first ask".to_string();
+        panel.send_queued();
+        panel.input = "second ask".to_string();
+        panel.send_queued();
+        panel.apply(&hello("s-1", "the one"));
+        let _ = panel.take_acts();
+        assert_eq!(
+            panel.input, "second ask",
+            "the last is back in the composer"
+        );
+        let notes = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Note(n) if n.contains("not sent")))
+            .count();
+        assert_eq!(notes, 2, "a verdict under each: {:?}", panel.rows);
+        for want in ["first ask", "second ask"] {
+            assert!(
+                panel
+                    .rows
+                    .iter()
+                    .any(|r| matches!(r, Row::User(t) if t == want)),
+                "{want} stays visible: {:?}",
+                panel.rows
+            );
+        }
+        assert!(
+            panel.said.contains("2 prompts not sent"),
+            "the count is said: {}",
+            panel.said
         );
     }
 

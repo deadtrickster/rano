@@ -306,6 +306,8 @@ pub enum TranscriptItem {
 /// timestamp: the status line's "started before this head attached" is the honest clock.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSnapshot {
+    /// The turn's id, so a late end for it is recognised as the running turn's own.
+    pub turn_id: String,
     pub running: bool,
     pub text: String,
     pub calls: Vec<CallSnapshot>,
@@ -1200,6 +1202,7 @@ fn transcript_item(v: &Value) -> TranscriptItem {
 /// `TurnState` and `CallState` are each tagged by `state`, one object in.
 fn turn_snapshot(v: &Value) -> TurnSnapshot {
     TurnSnapshot {
+        turn_id: text(v, "turn_id"),
         running: text(at(v, "state"), "state") == "running",
         text: text(v, "text"),
         calls: array(v, "calls")

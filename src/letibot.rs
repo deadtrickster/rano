@@ -10,7 +10,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -31,6 +31,31 @@ pub const KIND_EDITOR: &str = "editor";
 /// The feature string that says this head is an editor panel. Free-form and forward compatible on
 /// letibot's side, so a daemon that has never heard of it ignores it.
 pub const FEATURE_EDITOR_V1: &str = "editor_v1";
+
+/// The feature string for the queue lane: this head may send `"delivery":"queue"` on a prompt.
+/// A daemon that did not echo it in `Features.accepted` steers every prompt, so the head must not
+/// promise a queue there — `Client::prompt_queued` refuses by name instead.
+pub const FEATURE_QUEUE_PROMPT: &str = "queue_prompt_v1";
+
+/// Which lane a prompt takes. `Steer` is what every prompt took before the lane existed: the
+/// running turn reads it at its next step. `Queue` waits for the turn to end and opens its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lane {
+    #[default]
+    Steer,
+    Queue,
+}
+
+impl Lane {
+    /// The wire word, where the lane needs one at all: a steer is the frame without the field,
+    /// so a daemon that never heard of `delivery` reads exactly what it always did.
+    fn word(self) -> Option<&'static str> {
+        match self {
+            Lane::Steer => None,
+            Lane::Queue => Some("queue"),
+        }
+    }
+}
 
 /// The variable naming a socket, taken as authoritative when set — the launcher's own rule
 /// (`bridge::daemon::resolve`), and the one way two heads can be pointed at one daemon.
@@ -60,7 +85,10 @@ impl Default for Seat {
             can_decide: true,
             // letibot's own `Caps::default`: a slow head may ask for more, the daemon clamps.
             queue: 1024,
-            features: vec![FEATURE_EDITOR_V1.to_string()],
+            features: vec![
+                FEATURE_EDITOR_V1.to_string(),
+                FEATURE_QUEUE_PROMPT.to_string(),
+            ],
         }
     }
 }
@@ -135,6 +163,9 @@ enum Out<'a> {
         /// Absent rather than empty, so a daemon written before 71 reads exactly what it always did.
         #[serde(skip_serializing_if = "Option::is_none")]
         context: Option<&'a EditorContext>,
+        /// `"queue"` on the queue lane; absent for a steer, which is every prompt before the lane.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delivery: Option<&'static str>,
     },
     Interrupt {
         client_request_id: &'a str,
@@ -575,6 +606,11 @@ pub enum Frame {
     Bye {
         reason: String,
     },
+    /// What the daemon accepted of this head's `Caps.features`, once per attach. A feature
+    /// missing here must not be used: a daemon that predates it drops the field in silence.
+    Features {
+        accepted: Vec<String>,
+    },
     /// A frame whose tag this build does not know, or a line that was not JSON at all — the tag is
     /// empty in that second case. The stream carries on, and [`Client::skipped`] counts these.
     Unknown {
@@ -642,6 +678,10 @@ pub struct Client {
     /// This head's identity, which prefixes its request ids.
     identity: String,
     requests: u64,
+    /// Whether the daemon echoed [`FEATURE_QUEUE_PROMPT`] in `Features.accepted`: the one fact
+    /// that says a prompt may take the queue lane. Written by the reader thread, read when a
+    /// prompt asks for the lane.
+    queue_prompt: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -656,13 +696,15 @@ impl Client {
         let reading = stream.try_clone()?;
         let seq = Arc::new(AtomicU64::new(0));
         let skipped = Arc::new(AtomicU64::new(0));
+        let queue_prompt = Arc::new(AtomicBool::new(false));
         let (tx, frames) = mpsc::channel();
         let reader = std::thread::Builder::new()
             .name("rano-letibot".to_string())
             .spawn({
                 let seq = Arc::clone(&seq);
                 let skipped = Arc::clone(&skipped);
-                move || pump(reading, tx, seq, skipped)
+                let queue_prompt = Arc::clone(&queue_prompt);
+                move || pump(reading, tx, seq, skipped, queue_prompt)
             })?;
         Ok(Client {
             out: stream,
@@ -672,6 +714,7 @@ impl Client {
             skipped,
             identity: Seat::default().identity,
             requests: 0,
+            queue_prompt,
         })
     }
 
@@ -707,6 +750,29 @@ impl Client {
         attachments: &[Attachment],
         context: Option<&EditorContext>,
     ) -> std::io::Result<String> {
+        self.prompt_in_lane(text, attachments, context, Lane::Steer)
+    }
+
+    /// A prompt on a chosen lane. `Queue` waits for the running turn to end and opens its own;
+    /// it is refused by name when this daemon did not echo [`FEATURE_QUEUE_PROMPT`], since a
+    /// daemon that predates the field would steer it — the opposite of what was asked.
+    pub fn prompt_in_lane(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        context: Option<&EditorContext>,
+        lane: Lane,
+    ) -> std::io::Result<String> {
+        let delivery = match lane {
+            Lane::Steer => None,
+            Lane::Queue if self.queue_prompt.load(Ordering::Relaxed) => lane.word(),
+            Lane::Queue => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "this daemon has no queue lane: every prompt steers",
+                ));
+            }
+        };
         let id = self.next_id();
         let context = context.filter(|c| !c.is_empty());
         self.write(&Out::Prompt {
@@ -715,8 +781,14 @@ impl Client {
             text,
             attachments,
             context,
+            delivery,
         })?;
         Ok(id)
+    }
+
+    /// Whether the daemon let this head use the queue lane.
+    pub fn queue_prompt_accepted(&self) -> bool {
+        self.queue_prompt.load(Ordering::Relaxed)
     }
 
     /// Stop the running turn. Idempotent, and issuable by any attached head.
@@ -889,6 +961,7 @@ fn pump(
     frames: mpsc::Sender<Frame>,
     seq: Arc<AtomicU64>,
     skipped: Arc<AtomicU64>,
+    queue_prompt: Arc<AtomicBool>,
 ) {
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
@@ -906,6 +979,12 @@ fn pump(
             continue;
         }
         let frame = parse(line);
+        // The lane is the daemon's own promise, so its echo is read the moment it lands rather
+        // than left for a panel to notice.
+        if let Frame::Features { accepted } = &frame {
+            let yes = accepted.iter().any(|f| f == FEATURE_QUEUE_PROMPT);
+            queue_prompt.store(yes, Ordering::Relaxed);
+        }
         if let Some(seen) = frame.seq() {
             seq.fetch_max(seen, Ordering::Relaxed);
         }
@@ -953,6 +1032,13 @@ pub(crate) fn parse(line: &str) -> Frame {
             current: text(&v, "current"),
             created: non_empty(&v, "created"),
             sessions: sessions(&v),
+        },
+        "features" => Frame::Features {
+            accepted: array(&v, "accepted")
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
         },
         "rows_fetched" => Frame::RowsFetched {
             from: uint(&v, "from") as usize,
@@ -1515,6 +1601,7 @@ mod tests {
             text: "why is it slow?",
             attachments: &[],
             context: None,
+            delivery: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&prompt).unwrap()).unwrap();
         assert_eq!(v["frame"], "prompt");
@@ -1525,6 +1612,10 @@ mod tests {
         assert!(
             v.get("context").is_none(),
             "a prompt that points at nothing says nothing about it"
+        );
+        assert!(
+            v.get("delivery").is_none(),
+            "a steer is the frame without the lane: every prompt before the lane reads the same"
         );
 
         let stop = Out::Interrupt {
@@ -1648,6 +1739,101 @@ mod tests {
             panic!("a turn_finished is one");
         };
         assert!(ends_turn);
+    }
+
+    /// The queue lane, byte for byte as letibot's `queue_lane_wire.rs` proves it from its side:
+    /// `delivery` beside `text`, the exact word, and nothing else on the frame changed.
+    #[test]
+    fn a_queued_prompt_is_the_frame_with_delivery_queue_beside_text() {
+        let prompt = Out::Prompt {
+            client_request_id: "rano-3",
+            expected_seq: 0,
+            text: "and then land it",
+            attachments: &[],
+            context: None,
+            delivery: Lane::Queue.word(),
+        };
+        let json = serde_json::to_string(&prompt).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["delivery"], "queue", "{json}");
+        assert_eq!(v["text"], "and then land it");
+        assert_eq!(v["client_request_id"], "rano-3");
+        assert_eq!(v["expected_seq"], 0);
+        assert_eq!(v["attachments"], serde_json::json!([]));
+        assert!(v.get("context").is_none(), "{json}");
+        assert_eq!(Lane::Steer.word(), None, "a steer adds nothing");
+    }
+
+    /// The daemon's echo is the only promise: the seat asks for the lane, the `features` frame
+    /// is parsed, and the client answers what the daemon accepted.
+    #[test]
+    fn the_seat_asks_for_the_lane_and_the_features_frame_is_read() {
+        let seat = Seat::default();
+        assert!(
+            seat.features.iter().any(|f| f == FEATURE_QUEUE_PROMPT),
+            "the seat advertises the lane: {:?}",
+            seat.features
+        );
+        let Frame::Features { accepted } =
+            parse(r#"{"frame":"features","accepted":["editor_v1","queue_prompt_v1"]}"#)
+        else {
+            panic!("a features frame is one");
+        };
+        assert!(accepted.iter().any(|f| f == FEATURE_QUEUE_PROMPT));
+        let Frame::Features { accepted } = parse(r#"{"frame":"features","accepted":[]}"#) else {
+            unreachable!()
+        };
+        assert!(accepted.is_empty());
+    }
+
+    /// Over a real socket pair: the reader thread reads the daemon's echo and the client's
+    /// prompt door obeys it — refused by name before the echo, `delivery: queue` after it.
+    #[test]
+    fn the_queue_lane_opens_only_after_the_daemon_echoes_it() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let (mine, theirs) = UnixStream::pair().unwrap();
+        let mut client = Client::on(mine).unwrap();
+        assert!(
+            !client.queue_prompt_accepted(),
+            "nothing is promised before the daemon says so"
+        );
+        let err = client
+            .prompt_in_lane("first", &[], None, Lane::Queue)
+            .expect_err("refused by name");
+        assert!(
+            err.to_string().contains("no queue lane"),
+            "the refusal names the lane: {err}"
+        );
+        let mut peer = BufReader::new(theirs);
+        let mut daemon = peer.get_ref().try_clone().unwrap();
+        daemon
+            .write_all(b"{\"frame\":\"features\",\"accepted\":[\"queue_prompt_v1\"]}\n")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !client.queue_prompt_accepted() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(client.queue_prompt_accepted(), "the echo was read");
+        let id = client
+            .prompt_in_lane("and then land it", &[], None, Lane::Queue)
+            .expect("the lane is open");
+        assert!(id.starts_with("rano-"), "the id is the head's own: {id}");
+        let mut line = String::new();
+        peer.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["frame"], "prompt", "{line}");
+        assert_eq!(v["delivery"], "queue", "{line}");
+        assert_eq!(v["text"], "and then land it");
+        // And a steer on the same connection is still the frame without the field.
+        let _ = client.prompt("now").unwrap();
+        let mut line = String::new();
+        peer.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert!(
+            v.get("delivery").is_none(),
+            "a steer carries no lane: {line}"
+        );
     }
 
     #[test]

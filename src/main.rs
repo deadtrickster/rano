@@ -789,6 +789,19 @@ fn pump(ed: &mut Editor, link: &mut Option<Link>, outbox: &Outbox) -> bool {
                         .prompt_with_context(&text, &[], context.as_ref())
                 });
             }
+            Act::PromptQueued { text, context } => {
+                let context = with_open_buffers(ed, context);
+                // A daemon without the lane refuses by name rather than steering: the words
+                // were asked for after the turn, and a steer would run them now.
+                send_frame(ed, link, |open, _| {
+                    open.client.prompt_in_lane(
+                        &text,
+                        &[],
+                        context.as_ref(),
+                        rano::letibot::Lane::Queue,
+                    )
+                });
+            }
             Act::Interrupt => {
                 send_frame(ed, link, |open, _| open.client.interrupt("esc esc"));
             }

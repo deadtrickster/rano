@@ -125,6 +125,13 @@ pub fn commands() -> &'static [Command] {
                 |e| e.panel_send(),
             ),
             cmd(
+                "panel-send-queued",
+                "Queue",
+                Panel,
+                "The panel: queue the composer's line for after the running turn ends, where the daemon has the lane.",
+                |e| e.panel_send_queued(),
+            ),
+            cmd(
                 "panel-new",
                 "New Session",
                 Panel,
@@ -1292,6 +1299,7 @@ impl Keymaps {
         let mut panel = Keymap::new("panel");
         panel
             .bind("RET", "panel-send")
+            .bind("TAB", "panel-send-queued")
             .bind("M-n", "panel-new")
             .bind("<up>", "panel-up")
             .bind("C-p", "panel-up")

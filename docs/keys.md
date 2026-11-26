@@ -168,6 +168,7 @@ doing (`idle`, `thinking`, `waiting on you`), or says why there is no daemon.
 | `C-]` | The keyboard to the other surface, opening the panel when it is shut |
 | `M-m` | The focused surface takes the whole width, and gives it back |
 | `RET` | Send what the composer says; in the session pick, attach the session under the cursor |
+| `TAB` | Queue what the composer says for after the running turn ends, where the daemon has the queue lane |
 | `M-n` | A new session in this folder, and into it |
 | `ESC` | Back to the text. The conversation stays open, and keeps streaming |
 | `C-c` | Stop the running turn |

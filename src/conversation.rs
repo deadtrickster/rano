@@ -72,6 +72,11 @@ pub enum Act {
         text: String,
         context: Option<EditorContext>,
     },
+    /// The same words on the queue lane: the daemon runs them after the running turn ends.
+    PromptQueued {
+        text: String,
+        context: Option<EditorContext>,
+    },
     /// Stop the running turn.
     Interrupt,
 }

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ask::AskEvent;
 use crate::letibot::{
-    AnswerMode, Citation, CitationKind, ContextAsk, DeltaTarget, EditorContext, Event, Frame,
+    AnswerMode, Citation, CitationKind, ContextAsk, DeltaTarget, EditorContext, Event, Frame, Lane,
     MarkOutcome, NoDaemon, Session, ToolEdit,
 };
 use crate::markdown::RenderOptions;
@@ -38,6 +38,9 @@ const ORIGIN: &str = "rano";
 struct Pending {
     text: String,
     context: Option<EditorContext>,
+    /// The lane it was asked on: a queued prompt waits for its turn even when it was typed
+    /// while the panel was still attaching.
+    queued: bool,
 }
 
 /// The panel, and the conversation it is showing.
@@ -283,7 +286,9 @@ impl Panel {
         // A page of rows is the head's to draw, and a frame or event this build does not know is
         // the pump's to count: neither changes a row here.
         match frame {
-            Frame::RowsFetched { .. } | Frame::Unknown { .. } => return false,
+            Frame::RowsFetched { .. } | Frame::Unknown { .. } | Frame::Features { .. } => {
+                return false;
+            }
             Frame::Event {
                 event: Event::Unknown { .. },
                 ..
@@ -349,7 +354,9 @@ impl Panel {
             }
             Frame::Event { event, .. } => self.event(event),
             // Answered before the match, and here only because the compiler asks for every arm.
-            Frame::RowsFetched { .. } | Frame::Unknown { .. } => return false,
+            Frame::RowsFetched { .. } | Frame::Unknown { .. } | Frame::Features { .. } => {
+                return false;
+            }
         }
         true
     }
@@ -858,7 +865,11 @@ impl Panel {
     /// Send a prompt now, or hold it until there is something to send it to. A chip and a preset are
     /// what the operator asked for; losing them because the panel was still attaching would be the
     /// panel's fault, not theirs.
-    fn submit(&mut self, text: String, mut context: EditorContext) {
+    fn submit(&mut self, text: String, context: EditorContext) {
+        self.submit_in_lane(text, context, Lane::Steer);
+    }
+
+    fn submit_in_lane(&mut self, text: String, mut context: EditorContext, lane: Lane) {
         // Read before the state moves: what is being asked is whether there is anything to ask YET.
         let sendable = self.attached()
             && matches!(
@@ -870,16 +881,32 @@ impl Panel {
         self.follow = true;
         context.outcomes.append(&mut self.outcomes);
         let context = (!context.is_empty()).then_some(context);
+        let queued = lane == Lane::Queue;
+        let act = |text, context| {
+            if queued {
+                Act::PromptQueued { text, context }
+            } else {
+                Act::Prompt { text, context }
+            }
+        };
         if sendable {
-            self.state = PanelState::Thinking;
-            self.acts.push(Act::Prompt { text, context });
+            // A steer is the running turn's to read next; a queued prompt is the next turn's
+            // own, so the state stays what this one is doing.
+            if !queued {
+                self.state = PanelState::Thinking;
+            }
+            self.acts.push(act(text, context));
         } else if matches!(self.state, PanelState::Offline { .. }) {
             // Nowhere to send it: said on the panel's own line rather than held in silence.
             self.said = "no daemon to send that to: nothing was sent".to_string();
         } else {
             // The state stays what the connection is doing — a panel still attaching must keep
             // connecting, or the `Hello` that would send this has nowhere to land.
-            self.waiting.push(Pending { text, context });
+            self.waiting.push(Pending {
+                text,
+                context,
+                queued,
+            });
         }
         self.touch();
     }
@@ -887,11 +914,41 @@ impl Panel {
     /// The `Hello` landed: the prompts asked for while the panel was connecting go out now.
     fn flush(&mut self) {
         for pending in std::mem::take(&mut self.waiting) {
-            self.acts.push(Act::Prompt {
-                text: pending.text,
-                context: pending.context,
+            self.acts.push(if pending.queued {
+                Act::PromptQueued {
+                    text: pending.text,
+                    context: pending.context,
+                }
+            } else {
+                Act::Prompt {
+                    text: pending.text,
+                    context: pending.context,
+                }
             });
         }
+    }
+
+    /// `tab`: the composer's words on the queue lane, to run after the running turn ends. The
+    /// same door as Enter otherwise — the words, the chip, nothing else asked — and the daemon's
+    /// answer to the lane is the host's to relay.
+    pub fn send_queued(&mut self) {
+        // Picking, offline and shut are Enter's cases, not this key's; attaching is this
+        // key's, since a prompt typed mid-attach is held and goes out on the hello.
+        if matches!(
+            self.state,
+            PanelState::Picking | PanelState::Offline { .. } | PanelState::Closed
+        ) {
+            self.send();
+            return;
+        }
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.input.clear();
+        self.cursor = 0;
+        let context = self.context();
+        self.submit_in_lane(text, context, Lane::Queue);
     }
 
     /// What the next prompt carries: the chips as references, and the decisions taken since the last
@@ -1557,6 +1614,10 @@ impl crate::editor::Editor {
         self.panel.send();
     }
 
+    pub fn panel_send_queued(&mut self) {
+        self.panel.send_queued();
+    }
+
     pub fn panel_new(&mut self) {
         self.panel.new_session();
     }
@@ -2154,6 +2215,65 @@ mod tests {
             "and the flush sent it"
         );
         assert!(panel.waiting.is_empty(), "nothing held after the flush");
+    }
+
+    /// Tab queues: the words go out as the queued act, the row shows them, and the state stays
+    /// what the running turn is doing — a queued prompt is the next turn's, not this one's.
+    /// Typed while still attaching, the lane is held with the prompt and goes out on the hello.
+    #[test]
+    fn tab_queues_the_words_for_after_the_turn() {
+        let mut panel = opened();
+        panel.apply(&hello("s-1", "the one"));
+        let _ = panel.take_acts();
+        // A turn is running, so a steer would be read at the next step: the queue is the point.
+        panel.apply(&Frame::Event {
+            seq: 1,
+            event: Event::TurnStarted {
+                turn_id: "t".to_string(),
+                model: "m".to_string(),
+            },
+        });
+        panel.input = "and then land it".to_string();
+        panel.send_queued();
+        let acts = panel.take_acts();
+        assert!(
+            matches!(
+                acts.as_slice(),
+                [Act::PromptQueued { text, .. }] if text == "and then land it"
+            ),
+            "the queued act: {acts:?}"
+        );
+        assert_eq!(panel.state, PanelState::Thinking, "this turn's state stays");
+        assert!(panel.input.is_empty(), "the words left the composer");
+        // Enter is still the steer.
+        panel.input = "right now".to_string();
+        panel.send();
+        assert!(
+            matches!(panel.take_acts().as_slice(), [Act::Prompt { text, .. }] if text == "right now"),
+            "Enter steers"
+        );
+        // Typed while attaching: held on its lane, and the hello sends it queued.
+        let mut panel = opened();
+        panel.input = "after you finish".to_string();
+        panel.send_queued();
+        assert!(
+            matches!(panel.waiting.as_slice(), [Pending { queued: true, text, .. }] if text == "after you finish"),
+            "held on the lane: {:?}",
+            panel.waiting
+        );
+        panel.apply(&hello("s-1", "the one"));
+        let acts = panel.take_acts();
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Act::PromptQueued { text, .. } if text == "after you finish")),
+            "the hello sends it on the lane it was asked on: {acts:?}"
+        );
+        // Nothing typed: nothing sent, and nothing crashes.
+        let mut panel = opened();
+        panel.apply(&hello("s-1", "the one"));
+        let _ = panel.take_acts();
+        panel.send_queued();
+        assert!(panel.take_acts().is_empty(), "no words, no prompt");
     }
 
     /// and a turn's end change the state and never the prose.

@@ -54,7 +54,14 @@ const not_mine: u32 = 0xFFFFFFFF;
 
 /// The host's `rano.read_file`: bytes written, `-needed` for a buffer too small, `i32::MIN` when
 /// the host will not answer — which includes a path other than the one this call is about.
-extern "rano" fn read_file(path_ptr: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+const read_file = if (@import("builtin").is_test) struct {
+    // A native test has no host to import from; every read is refused.
+    fn f(_: u32, _: u32, _: u32, _: u32) i32 {
+        return std.math.minInt(i32);
+    }
+}.f else struct {
+    extern "rano" fn read_file(path_ptr: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+}.read_file;
 
 /// The most file bytes this plugin will take. It asks `read_file` for exactly this much, so a
 /// larger model is refused by the host before a byte of it reaches this memory.
@@ -266,4 +273,26 @@ fn answer(at: usize, len: usize) u32 {
     block[0] = @intCast(at);
     block[1] = @intCast(len);
     return @intCast(@intFromPtr(&block));
+}
+
+// Runs natively in Debug, where an out-of-range slice traps: the largest viewport `fits` admits
+// must render inside `picture.rgb`. `zig build test`.
+test "the largest viewport fits admits renders inside the picture buffer" {
+    const cube =
+        \\solid t
+        \\  facet normal 0 0 1
+        \\    outer loop
+        \\      vertex 0 0 0
+        \\      vertex 1 0 0
+        \\      vertex 0 1 0
+        \\    endloop
+        \\  endfacet
+        \\endsolid t
+    ;
+    const mesh = try stl.parse(cube, &tris);
+    for ([_][2]u32{ .{ 300, 100 }, .{ 512, 128 } }) |vp| {
+        try std.testing.expect(fits(vp[0], vp[1]));
+        render(mesh, vp[0], vp[1] * 2);
+    }
+    try std.testing.expect(!fits(513, 128));
 }

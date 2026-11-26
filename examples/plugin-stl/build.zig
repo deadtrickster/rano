@@ -28,6 +28,17 @@ pub fn build(b: *std.Build) void {
     exe.rdynamic = true;
     b.installArtifact(exe);
 
+    // `zig build test` runs the source's tests natively in Debug, where slices are checked.
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(.{}),
+            .optimize = .Debug,
+        }),
+    });
+    const test_step = b.step("test", "Run the plugin's tests natively, with runtime safety on");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+
     // `zig build fixtures` regenerates the binary fixture from the ASCII one, through the
     // plugin's own parser. It runs natively; it is not part of the wasm.
     const make = b.addExecutable(.{
